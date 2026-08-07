@@ -1,0 +1,76 @@
+# WS-00 owns this file. golangci-lint v2 schema.
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - integration
+    - deps
+
+linters:
+  # "standard" is errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+
+  settings:
+    gosec:
+      excludes:
+        # G104 duplicates errcheck.
+        - G104
+      # G204 (subprocess with a variable) and G304 (file path from a variable)
+      # are deliberately left ON. They fire on exactly the code INV-3 and §17
+      # are about — building argv for git and globbing artifact paths — so each
+      # hit is a place a reviewer should look. Suppress with a //nolint comment
+      # carrying a written reason, never by widening this list.
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+            # Grouped enum constants carrying one explanatory comment are
+            # idiomatic Go — net/http and time both do it — and demanding a
+            # doc comment per constant would turn the §21 error table into
+            # twenty lines of restated identifiers.
+            - disableChecksOnConstants
+        - name: package-comments
+        - name: error-strings
+        - name: context-as-argument
+
+    errcheck:
+      check-type-assertions: true
+
+  exclusions:
+    rules:
+      # Test files may shadow, ignore errors on cleanup, and be long.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+      # Doc-comment coverage is enforced strictly on pkg/, which is the only
+      # package anyone outside this module imports and the one place the
+      # trust boundary is described. internal/ still requires package
+      # comments (a separate revive rule) but not a doc comment on every
+      # mechanical interface implementation — the NotImplemented stubs alone
+      # would need fourteen restatements of their own names.
+      - path: ^internal/
+        linters:
+          - revive
+        text: "^exported:"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/Abyssinia-Labs/latem

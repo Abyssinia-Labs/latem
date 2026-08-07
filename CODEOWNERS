@@ -1,0 +1,78 @@
+# Ownership matrix from docs/PLAN.md §7. Every path has exactly one writer.
+#
+# This file encodes rule 1 of the parallel-work arrangement: a workstream
+# writes only its own directories and reads everyone else's. A pull request
+# touching someone else's paths is flagged here rather than discovered in a
+# rebase.
+#
+# SETUP: the team handles below do not exist yet. Create them under the
+# Abyssinia-Labs org, or replace each with an individual @handle, before this
+# file has any effect. GitHub silently ignores rules naming a team it cannot
+# resolve, so an unconfigured CODEOWNERS is worse than none — it looks like
+# protection while providing none.
+
+# ---------------------------------------------------------------------------
+# Wave 0 — frozen contracts. Changes here are amendments: small, reasoned,
+# and rebased onto by everyone.
+# ---------------------------------------------------------------------------
+/go.mod                             @Abyssinia-Labs/ws-00-contracts
+/go.sum                             @Abyssinia-Labs/ws-00-contracts
+/Makefile                           @Abyssinia-Labs/ws-00-contracts
+/LICENSE                            @Abyssinia-Labs/ws-00-contracts
+/CODEOWNERS                         @Abyssinia-Labs/ws-00-contracts
+/.golangci.yml                      @Abyssinia-Labs/ws-00-contracts
+/.github/                           @Abyssinia-Labs/ws-00-contracts
+/pkg/protocol/                      @Abyssinia-Labs/ws-00-contracts
+/internal/deps/                     @Abyssinia-Labs/ws-00-contracts
+
+# Interface-only files. The packages around them belong to other workstreams;
+# these specific files do not.
+/internal/broker/broker.go          @Abyssinia-Labs/ws-00-contracts
+/internal/executor/executor.go      @Abyssinia-Labs/ws-00-contracts
+/internal/secrets/provider.go       @Abyssinia-Labs/ws-00-contracts
+/internal/logstream/registrar.go    @Abyssinia-Labs/ws-00-contracts
+/internal/cache/manager.go          @Abyssinia-Labs/ws-00-contracts
+/internal/store/store.go            @Abyssinia-Labs/ws-00-contracts
+
+# ---------------------------------------------------------------------------
+# Wave 1 — leaf packages, fully parallel
+# ---------------------------------------------------------------------------
+/internal/registry/                 @Abyssinia-Labs/ws-01-registry
+/internal/logstream/                @Abyssinia-Labs/ws-02-logstream
+/internal/secrets/                  @Abyssinia-Labs/ws-03-secrets
+/internal/config/                   @Abyssinia-Labs/ws-04-config
+/internal/store/                    @Abyssinia-Labs/ws-05-store
+/internal/source/                   @Abyssinia-Labs/ws-06-source
+/internal/executor/docker/          @Abyssinia-Labs/ws-07-docker
+/internal/cache/                    @Abyssinia-Labs/ws-08-cache
+/internal/artifact/                 @Abyssinia-Labs/ws-08-cache
+/docs/                              @Abyssinia-Labs/ws-09-mobile
+/examples/                          @Abyssinia-Labs/ws-09-mobile
+
+# ---------------------------------------------------------------------------
+# Wave 2 — integration
+# ---------------------------------------------------------------------------
+/internal/run/                      @Abyssinia-Labs/ws-10-run
+/internal/agent/                    @Abyssinia-Labs/ws-11-agent
+/internal/broker/local/             @Abyssinia-Labs/ws-11-agent
+/cmd/                               @Abyssinia-Labs/ws-12-cli
+/internal/system/                   @Abyssinia-Labs/ws-12-cli
+/internal/metrics/                  @Abyssinia-Labs/ws-12-cli
+/README.md                          @Abyssinia-Labs/ws-12-cli
+/install.sh                         @Abyssinia-Labs/ws-12-cli
+/internal/executor/tart/            @Abyssinia-Labs/ws-13-macos
+/internal/executor/native/          @Abyssinia-Labs/ws-13-macos
+
+# ---------------------------------------------------------------------------
+# Wave 3 — reach
+# ---------------------------------------------------------------------------
+/internal/broker/remote/            @Abyssinia-Labs/ws-14-remote
+/control-plane/                     @Abyssinia-Labs/ws-15-control-plane
+/test/                              @Abyssinia-Labs/ws-16-tests
+
+# ---------------------------------------------------------------------------
+# Steering documents. Not WS-09's, despite living under docs/ — a change to
+# either is an amendment to the plan itself.
+# ---------------------------------------------------------------------------
+/docs/RUNNER_SPEC.md                @Abyssinia-Labs/ws-00-contracts
+/docs/PLAN.md                       @Abyssinia-Labs/ws-00-contracts

@@ -1,0 +1,27 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+
+# Coverage
+coverage.txt
+coverage.html
+
+# Local agent state — never commit anything from a real ~/.latem
+*.db
+*.db-wal
+*.db-shm
+*.sock
+agent.key
+secrets.env
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go workspace files are per-developer
+go.work
+go.work.sum

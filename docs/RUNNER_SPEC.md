@@ -337,9 +337,9 @@ type CancelRequest struct {
 }
 
 type Origin struct {
-    Kind      string    `json:"kind"` // "manual" | "webhook" | "schedule" | "cli"
-    Actor     string    `json:"actor,omitempty"`
-    RequestAt time.Time `json:"requested_at"` // audit/display only — never trusted
+    Kind        string    `json:"kind"` // "manual" | "webhook" | "schedule" | "cli"
+    Actor       string    `json:"actor,omitempty"`
+    RequestedAt time.Time `json:"requested_at"` // audit/display only — never trusted
 }
 ```
 
@@ -357,11 +357,25 @@ package protocol
 type Update struct {
     State      RunState      `json:"state"`
     ExitCode   *int          `json:"exit_code,omitempty"`
-    ErrorCode  string        `json:"error_code,omitempty"`
+    ErrorCode  ErrorCode     `json:"error_code,omitempty"`
     ErrorMsg   string        `json:"error_message,omitempty"` // redacted
     StartedAt  *time.Time    `json:"started_at,omitempty"`
     FinishedAt *time.Time    `json:"finished_at,omitempty"`
     Artifacts  []ArtifactRef `json:"artifacts,omitempty"`     // names+sizes, not content
+}
+
+// Resume is the first frame after a reconnect (§7.4). Without it the agent
+// cannot tell the control plane where its log stream left off, and the
+// sequence numbers below have nothing to resume from.
+type Resume struct {
+    MachineID string      `json:"machine_id"`
+    Runs      []RunResume `json:"runs"`
+}
+
+type RunResume struct {
+    RunID        string   `json:"run_id"`
+    State        RunState `json:"state"`
+    LastAckedSeq uint64   `json:"last_acked_seq"`
 }
 
 // LogFrame is the unit of log transport. Seq is per-run, monotonic
@@ -1384,3 +1398,16 @@ Fourteen findings, all resolved in the text above. Recorded here because several
 | F14 | §8, §13.2 | Tart `concurrency = 1` "see §13.3" | Ceiling is 2 (§13.2); §13.3 is the native executor's separate constraint | Wrong cross-reference on a licence-derived limit |
 
 Two open questions from draft 01 were closed into the body rather than carried: step-level timeouts (§9) and remote log volume (§7.4). Two were added: non-Expo mobile projects, and the control plane licence.
+
+### Amendments since draft 02 was written
+
+Implementing WS-00 surfaced four gaps between the §7 snippets and code that compiles. Each is recorded here rather than silently corrected, because `pkg/protocol` is frozen and the whole value of freezing it is that changes are visible.
+
+| Amendment | Change | Reason |
+|---|---|---|
+| A1 | `Origin.RequestAt` → `Origin.RequestedAt` | Grammatical slip in the Go identifier. The JSON tag `requested_at` was already correct and is unchanged, so this is not a wire change. |
+| A2 | `Update.ErrorCode` typed as `ErrorCode`, not `string` | The §21 table already defines a closed set with a retryability column. Typing the field lets `Retryable()` and `TerminalState()` derive from one table instead of two switch statements that drift. |
+| A3 | `Resume` and `RunResume` added | §7.4 describes the resume frame in prose — "for every non-terminal run it owns, `{run_id, state, last_acked_seq}`" — but no §7.2 type expressed it. It crosses the wire, so per F8 it belongs in `pkg/protocol`. |
+| A4 | `protocol.Version` constant added | The spec calls the protocol independently versionable without giving it a version. Because inbound decoding is strict, even an additive change is visible to an older agent as a decode failure; a version makes that diagnosable rather than mysterious. |
+
+None of these widens the trust boundary. A1 and A4 are not wire changes at all, A2 narrows a field's legal values, and A3 formalises a frame the spec already required.
