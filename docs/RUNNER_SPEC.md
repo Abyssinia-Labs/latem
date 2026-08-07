@@ -1,8 +1,12 @@
 # Latem Runner — Technical Specification
 
-**Status:** Draft 01 · implementation-ready
+**Status:** Draft 02 · implementation-ready
+**Licence:** Apache-2.0 for the runner stack. The patent grant is the reason to prefer it over MIT for a project that ships binaries; the hosted control plane is licensed separately.
+**Module path:** `github.com/Abyssinia-Labs/latem`
 **Scope:** the open-source runner stack only (agent, job registry, executors, cache, mobile pipeline, local trigger)
 **Out of scope:** the hosted control plane (auth, Convex schema, web app). It is referenced here only through the `Broker` interface in §7.
+
+> **Draft 02 resolves fourteen findings from the draft 01 review.** The material changes: source acquisition moved from git worktrees to hardlinked local clones (§12), the broker gained a command channel so cancellation has a path at all (§7), log frames gained sequence numbers (§7, §16), multi-line secret redaction became normative (§16), per-step process semantics are now stated correctly (§9, §13.1), and `awaiting_approval` acquired an exit (§11). §27 lists every change with its rationale.
 
 > **Naming.** The project is `latem` — "metal" reversed — pronounced **LAY-tem**. Use that spelling in the first line of the README, since the name is otherwise ambiguous between LAY-tem and LAT-em and inconsistent pronunciation fragments word of mouth.
 >
@@ -40,6 +44,7 @@
 24. [Testing requirements](#24-testing-requirements)
 25. [Work breakdown](#25-work-breakdown)
 26. [Open questions](#26-open-questions)
+27. [Changes from draft 01](#27-changes-from-draft-01)
 
 ---
 
@@ -80,7 +85,7 @@
 
 ## 3. Technology choices
 
-**Language: Go 1.22+.** Single static binary, trivial cross-compilation to `darwin/arm64` and `linux/amd64`, first-class process and signal handling, mature Docker SDK. No runtime to install on the target machine, which matters for G6.
+**Language: Go 1.25+.** Single static binary, trivial cross-compilation to `darwin/arm64` and `linux/amd64`, first-class process and signal handling, mature Docker SDK. No runtime to install on the target machine, which matters for G6. Pin the toolchain line in `go.mod`: Go supports only the two most recent releases, and shipping the security-critical paths in §5 on an unsupported toolchain is not defensible.
 
 **One binary, subcommands.** `latem agent`, `latem run`, `latem register`, `latem doctor`, `latem cache`, `latem logs`. Ships as `latem`. Avoids a second artifact and keeps the CLI and daemon on identical config-parsing code.
 
@@ -95,6 +100,8 @@
 | Structured logging | `log/slog` (stdlib) |
 | CLI | `github.com/spf13/cobra` |
 | WebSocket | `github.com/coder/websocket` |
+
+**One note on YAML.** `sigs.k8s.io/yaml` routes YAML through JSON, and JSON has no duration type. Every duration field in §8 and §9 (`timeout`, `shutdown_grace`, `log_retention`, `boot_timeout`, `approval_ttl`, retention strings) is a `protocol.Duration` — a wrapper over `time.Duration` with a custom `UnmarshalJSON` accepting Go duration strings. Define it once in `pkg/protocol` and use it in both the TOML and YAML paths. Three independent implementations of this is the predictable failure.
 
 **Explicitly rejected:** any embedded scripting engine, any expression evaluator, any plugin system loading code at runtime. Each is a route around §5.
 
@@ -118,13 +125,14 @@ latem/
 │   │   ├── docker/
 │   │   ├── tart/
 │   │   └── native/
-│   ├── source/                 # mirror clones, worktrees (§12)
+│   ├── source/                 # mirrors, hardlinked run clones (§12)
 │   ├── cache/                  # volume management, locks, prune (§14)
 │   ├── secrets/                # provider chain (§15)
 │   ├── logstream/              # framing, redaction, sinks (§16)
 │   ├── artifact/               # collection, retention (§17)
 │   ├── config/                 # config.toml
 │   ├── store/                  # sqlite; migrations embedded
+│   ├── metrics/                # loopback-only expvar handler (§20)
 │   └── system/                 # platform detection, service install
 ├── pkg/protocol/               # wire types shared with the control plane
 ├── docs/
@@ -137,6 +145,8 @@ latem/
 ```
 
 `pkg/protocol` is the only exported package. Everything else is `internal/`.
+
+**Everything that crosses the wire is defined in `pkg/protocol`** — `Command`, `RunRequest`, `CancelRequest`, `Origin`, `Update`, `MachineHealth`, `RunnerInfo`, `ArtifactRef`, `RunState`, `LogFrame`, `Duration`, and the error-code constants of §21. `internal/broker` defines the *interface* and the two transports; it defines no types that appear on the wire. The control plane imports `pkg/protocol` and nothing else. This is what makes the two halves independently buildable, the protocol independently versionable, and the trust boundary reviewable by reading one package.
 
 ---
 
@@ -152,11 +162,15 @@ The agent MUST NOT bind a TCP listener on any non-loopback interface. The local 
 
 ### INV-2 — The broker supplies names, never definitions
 
-A run request carries `{repo, job, ref, inputs}`. It MUST NOT carry commands, scripts, images, environment definitions, file paths, executor selection, or cache configuration. `RunRequest` (§7) has no field capable of expressing any of those, and adding one is a §5 change.
+The inbound command set is **closed at two kinds**: `run` and `cancel` (§7). A third kind is a §5 change requiring a written threat model, not a feature.
+
+A `run` carries `{id, repo, job, ref, inputs, origin}`. It MUST NOT carry commands, scripts, images, environment definitions, file paths, executor selection, cache configuration, timeouts, or label overrides. `RunRequest` has no field capable of expressing any of those.
+
+A `cancel` carries `{id, actor, reason}` and nothing executable. `reason` is display-only: capped at 200 runes, never interpolated, never passed to a shell, redacted before it is logged or persisted. It exists so a build stopped from a phone says why.
 
 The agent resolves `job` against the registry it read from disk. An unknown name is rejected with `E_UNKNOWN_JOB` before any process starts.
 
-*Test:* fuzz `RunRequest` with hostile values in every field; assert no execution occurs outside the registry-declared command set.
+*Test:* fuzz every field of both command kinds with hostile values; assert no execution occurs outside the registry-declared command set, and assert the JSON decoder rejects any `kind` outside the closed set rather than defaulting.
 
 ### INV-3 — Broker-supplied values are never interpolated into a shell
 
@@ -176,21 +190,40 @@ All git invocations use `--` before user-influenced arguments and `exec.Command`
 
 Secret values MUST NOT appear in any structure sent to a broker, including run metadata and error messages. Every log line passes the redactor (§16) before reaching any sink. The redactor is applied at the point of emission, not at the sink, so a sink cannot be added that bypasses it.
 
-*Test:* run a job that echoes every loaded secret; assert none appears in the broker transcript, the persisted log file, or the run's error field.
+**Multi-line secrets are redacted line by line.** The log pipeline splits into lines before redacting, so registering only the whole value of a multi-line secret redacts nothing but the first line. `APP_STORE_CONNECT_KEY_P8` is a PEM block and is declared in this spec's own example job; leaking its body is losing the App Store Connect key. Registration of a secret whose value contains a newline MUST additionally register every non-empty line of it, and the whitespace-stripped concatenation, as independent redaction targets. See §16 for the exact rule.
+
+*Test:* run a job that echoes every loaded secret, including a fixture secret shaped like a real multi-line PEM (`-----BEGIN PRIVATE KEY-----`, ≥4 base64 body lines, footer). Assert that no line of it appears in the broker transcript, the persisted log file, `inputs_json`, or the run's error field. A test that only exercises single-line secrets does not satisfy INV-4.
 
 ### INV-5 — The registry comes from disk, at the pinned commit
 
-`jobs.yaml` is read from the checked-out worktree after checkout, never fetched from the broker. Jobs are resolved against the registry at the resolved commit, so a run is reproducible from the commit alone.
+`jobs.yaml` is read from the checked-out workspace after checkout, never fetched from the broker. Jobs are resolved against the registry at the resolved commit, so a run is reproducible from the commit alone.
 
 Because a `ref` can point at a branch a contributor controls, config gates which refs may run without approval:
 
 ```toml
 [repos.myapp]
-allowed_refs = ["main", "develop", "release/*"]   # glob, matched after resolution
+allowed_refs = ["main", "develop", "release/*"]
 require_approval_otherwise = true
+approval_ttl = "24h"                              # unapproved → rejected
 ```
 
-Runs on non-matching refs enter `awaiting_approval` and require a local `latem approve <run-id>`. Approval is a local action only; a broker cannot grant it.
+#### Ref normalization, stated exactly
+
+Draft 01 said the glob was "matched after resolution," which is meaningless — resolution produces a SHA, and globbing `release/*` against a SHA matches nothing. The real order is **normalize, match policy, then resolve**:
+
+1. **Validate** the raw `ref` string (INV-3 regex).
+2. **Normalize to a fully-qualified ref name** against the mirror, in this order: if it already begins with `refs/`, take it as-is; otherwise try `refs/heads/<ref>`, then `refs/tags/<ref>`. Exactly one must exist. Zero is `E_INVALID_REF`; more than one is `E_AMBIGUOUS_REF` — never guess.
+3. **Expand each `allowed_refs` entry** the same way: an entry without a `refs/` prefix means `refs/heads/<entry>`. So `main` matches `refs/heads/main` and does **not** match `refs/tags/main`. To allow tags, write `refs/tags/v*` explicitly.
+4. **Match** the expanded globs against the normalized name with path-aware globbing, where `*` does not cross `/`. `release/*` matches `refs/heads/release/1.2` and not `refs/heads/release/1.2/hotfix`; use `release/**` for that.
+5. **Resolve** the normalized name to an immutable SHA, and record both in the run row.
+
+Two consequences worth stating because they are the point of the rule. `refs/heads/main` and `main` are the same ref and get the same policy answer — a fully-qualified spelling cannot smuggle a branch past a short-form allowlist. And `refs/pull/*`, `refs/merge-requests/*`, and every other server-synthesised namespace fail step 3 by construction, so an untrusted pull request cannot execute without an explicit, deliberate config entry.
+
+#### Approval
+
+Runs on non-matching refs enter `awaiting_approval` and require a local `latem approve <run-id>`. Approval is a local action only; a broker cannot grant it, and no inbound command kind can express it (INV-2).
+
+`awaiting_approval` is not terminal, so it needs an exit or it accumulates forever and the partial index in §22 grows without bound. A run unapproved after `approval_ttl` (default 24h) transitions to `rejected` with `E_APPROVAL_EXPIRED`. The same applies to `queued`: `queue_ttl` (default 72h) → `rejected` with `E_QUEUE_EXPIRED`. Both are swept by the daily ticker and at agent startup.
 
 ---
 
@@ -205,7 +238,8 @@ latem agent
   ├─ 4. preflight (§20): docker reachable, tart present, git present,
   │       disk headroom, keychain unlocked (macOS native)
   ├─ 5. reconcile: any run left in a non-terminal state from a crash is
-  │       marked `interrupted`; orphaned containers/VMs/worktrees are reaped
+  │       marked `interrupted`; orphaned containers/VMs/workspaces are reaped
+  │       and expired queued/awaiting_approval runs are swept (§11)
   ├─ 6. start runner pool (one goroutine per runner, bounded by concurrency)
   ├─ 7. connect brokers; local always, remote if configured
   ├─ 8. start heartbeat ticker
@@ -214,7 +248,7 @@ latem agent
 
 **Graceful shutdown.** Stop accepting new runs, mark the machine `draining`, allow in-flight runs to finish up to `shutdown_grace` (default 30m, since an iOS build is long), then send the run's process group SIGTERM, wait 30s, SIGKILL. Always tear down containers and VMs, even on the kill path — leaked Tart VMs consume disk fast. Release the lock last.
 
-**Crash recovery.** Step 5 is not optional. On startup, list containers with label `latem.run-id`, list Tart VMs matching `latem-run-*`, list worktrees under `~/.latem/work/`, and delete anything whose run id is not in a non-terminal state in sqlite.
+**Crash recovery.** Step 5 is not optional. On startup, list containers with label `latem.run-id`, list Tart VMs matching `latem-run-*`, list workspaces under `~/.latem/work/`, and delete anything whose run id is not in a non-terminal state in sqlite. Because §12's workspaces are standalone clones, deleting one is a plain `rm -rf` with no administrative state left behind in the mirror.
 
 ---
 
@@ -222,31 +256,70 @@ latem agent
 
 The single seam between the runner stack and any control plane. Both implementations satisfy it; the agent contains no branch on which is in use.
 
+The interface lives in `internal/broker`. Every type it mentions lives in `pkg/protocol` (§4), because those types are the wire and the wire is the trust boundary.
+
 ```go
 package broker
 
+import "github.com/Abyssinia-Labs/latem/pkg/protocol"
+
 type Broker interface {
-    // Runs yields run requests. It closes only on ctx cancellation.
+    // Commands yields inbound commands. It closes only on ctx cancellation.
     // Implementations reconnect internally; a dropped connection is not
     // an error the caller sees.
-    Runs(ctx context.Context) (<-chan RunRequest, error)
+    Commands(ctx context.Context) (<-chan protocol.Command, error)
 
     // Claim attempts exclusive ownership. Returns ErrAlreadyClaimed if
     // another runner won. MUST be atomic at the broker.
     Claim(ctx context.Context, runID string) error
 
     // Report publishes a state transition. Idempotent by (runID, state).
-    Report(ctx context.Context, runID string, u Update) error
+    Report(ctx context.Context, runID string, u protocol.Update) error
 
-    // Logs returns a writer for streamed output. Batched by the caller.
-    Logs(ctx context.Context, runID string) (io.WriteCloser, error)
+    // Logs returns a sequenced sink for streamed output.
+    Logs(ctx context.Context, runID string) (LogSink, error)
 
     // Heartbeat publishes liveness and capacity.
-    Heartbeat(ctx context.Context, h MachineHealth) error
+    Heartbeat(ctx context.Context, h protocol.MachineHealth) error
+}
+
+// LogSink replaces draft 01's io.WriteCloser. A plain writer cannot
+// express resumption: after a reconnect the agent must know what the
+// far side already has, or it duplicates whatever it re-sends.
+type LogSink interface {
+    // Write submits a batch. Frames carry monotonic sequence numbers.
+    Write(ctx context.Context, frames []protocol.LogFrame) error
+
+    // Acked is the highest sequence durably accepted for this run.
+    // The agent persists it and resumes from Acked()+1.
+    Acked() uint64
+
+    Close(ctx context.Context) error
+}
+```
+
+### 7.1 Inbound — the complete trust boundary
+
+Two command kinds. This is a closed set (INV-2); the decoder rejects anything else rather than zero-valuing it.
+
+```go
+package protocol
+
+type CommandKind string
+
+const (
+    CommandRun    CommandKind = "run"
+    CommandCancel CommandKind = "cancel"
+)
+
+type Command struct {
+    Kind   CommandKind    `json:"kind"`
+    Run    *RunRequest    `json:"run,omitempty"`
+    Cancel *CancelRequest `json:"cancel,omitempty"`
 }
 
 // RunRequest is the complete set of data crossing the trust boundary
-// inbound. Adding a field here is a security review.
+// inbound for an execution. Adding a field here is a security review.
 type RunRequest struct {
     ID     string            `json:"id"`
     Repo   string            `json:"repo"`             // must exist in local config
@@ -256,20 +329,50 @@ type RunRequest struct {
     Origin Origin            `json:"origin"`           // for audit only
 }
 
+// CancelRequest carries an identifier and nothing executable.
+type CancelRequest struct {
+    ID     string `json:"id"`
+    Actor  string `json:"actor,omitempty"`
+    Reason string `json:"reason,omitempty"` // display only, ≤200 runes, redacted
+}
+
 type Origin struct {
     Kind      string    `json:"kind"` // "manual" | "webhook" | "schedule" | "cli"
     Actor     string    `json:"actor,omitempty"`
-    RequestAt time.Time `json:"requested_at"`
+    RequestAt time.Time `json:"requested_at"` // audit/display only — never trusted
 }
+```
+
+**Why cancel is a command and not a hole in INV-2.** Draft 01 defined a `cancelled` state reachable by "operator or broker cancellation" but gave the broker no channel to express it — the product promises a Stop button on a phone that the protocol could not deliver. A cancel carries a run id the broker already knows, and its entire effect is to context-cancel work the agent itself started. It cannot name a job, a ref, a command, or a machine. It is the smallest possible inbound verb.
+
+Cancel semantics: idempotent, and a no-op for an unknown, unclaimed, or already-terminal id. A cancel arriving during `preparing` or `running` cancels the run context, which triggers the §11 teardown path. A cancel arriving during `collecting` is ignored — artifacts and logs from a build that already ran are worth more than a few seconds of teardown latency.
+
+**Inputs are strings on the wire.** `map[string]string` is deliberate: JSON's type system is not the registry's. Values are coerced to the declared type (`string`|`bool`|`int`|`enum`) at gate 9 (§10); a coercion failure is `E_BAD_INPUT`. Nothing downstream of gate 9 ever sees an uncoerced value.
+
+### 7.2 Outbound
+
+```go
+package protocol
 
 type Update struct {
-    State      RunState  `json:"state"`
-    ExitCode   *int      `json:"exit_code,omitempty"`
-    ErrorCode  string    `json:"error_code,omitempty"`
-    ErrorMsg   string    `json:"error_message,omitempty"` // redacted
-    StartedAt  *time.Time `json:"started_at,omitempty"`
-    FinishedAt *time.Time `json:"finished_at,omitempty"`
-    Artifacts  []ArtifactRef `json:"artifacts,omitempty"` // names+sizes, not content
+    State      RunState      `json:"state"`
+    ExitCode   *int          `json:"exit_code,omitempty"`
+    ErrorCode  string        `json:"error_code,omitempty"`
+    ErrorMsg   string        `json:"error_message,omitempty"` // redacted
+    StartedAt  *time.Time    `json:"started_at,omitempty"`
+    FinishedAt *time.Time    `json:"finished_at,omitempty"`
+    Artifacts  []ArtifactRef `json:"artifacts,omitempty"`     // names+sizes, not content
+}
+
+// LogFrame is the unit of log transport. Seq is per-run, monotonic
+// from 1, assigned at the point of emission — after redaction (§16),
+// so a frame that reaches this struct is already safe to send.
+type LogFrame struct {
+    RunID  string    `json:"run_id"`
+    Seq    uint64    `json:"seq"`
+    Stream string    `json:"stream"` // "stdout" | "stderr" | "agent"
+    At     time.Time `json:"at"`
+    Line   string    `json:"line"`
 }
 
 type MachineHealth struct {
@@ -283,18 +386,29 @@ type MachineHealth struct {
 }
 ```
 
-### Local broker
+**Why sequence numbers.** The remote broker buffers logs to disk across a partition and flushes on reconnect, and the agent is required to tolerate replays. State transitions are idempotent by `(runID, state)`, so replaying them is free. Log lines are idempotent by nothing — replaying them duplicates output, and the duplicated region is exactly the interesting part of a build that was happening when the network dropped. `(run_id, seq)` gives the server a dedupe key and the agent a resume point. The server keeps the first frame it sees for a given pair and discards later ones.
 
-Unix socket, newline-delimited JSON, plus a sqlite-backed queue so `latem run` works when the agent is momentarily busy. Claim is a conditional `UPDATE … WHERE state='queued'` and relies on sqlite's write serialization.
+### 7.3 Local broker
 
-### Remote broker
+Unix socket at `~/.latem/agent.sock`, mode `0600`, newline-delimited JSON, backed by the sqlite queue in §22. Claim is a conditional `UPDATE … WHERE state='queued'`, relying on sqlite's write serialization.
+
+The queue is not only a buffer for a busy agent — it is also what `latem run` writes to when **no agent is running at all**. Draft 01 said "momentarily busy," which under-promises. Concretely:
+
+- Agent up → `latem run` connects to the socket, enqueues, and the run starts.
+- Agent down → the socket connect fails; `latem run` enqueues directly into sqlite, prints `queued (agent not running)` and the run id, and exits 0. The agent picks it up at step 6 of §6.
+- `latem run --wait` or `--follow` against a down agent is an error, not a hang: `E_AGENT_DOWN`, exit 3, with the start command in the message.
+
+Cancel arrives on the local broker as the same `protocol.Command`, emitted by `latem cancel`. One code path, both transports.
+
+### 7.4 Remote broker
 
 WebSocket to the control plane. `Authorization: Bearer <machine-token>`.
 
 - Reconnect with exponential backoff: 1s → 2s → 4s … capped at 60s, ±20% jitter.
-- Resume by sending the last acknowledged run id; the server replays anything missed. The agent MUST tolerate replays — every handler is idempotent by run id.
-- Log writes buffer to disk while disconnected and flush on reconnect, bounded at 50 MB per run; beyond that, drop with a marker line.
+- On reconnect the agent sends a resume frame carrying, for every non-terminal run it owns, `{run_id, state, last_acked_seq}`. The server replays commands the agent missed and resumes log ingestion from `last_acked_seq + 1`. Every handler is idempotent by run id.
+- Log frames buffer to disk while disconnected, bounded at 50 MB per run; beyond that, drop and emit one marker frame recording how many lines were lost. Sequence numbers keep incrementing across the gap so the gap is visible rather than silent.
 - If the token is rejected (`401`), stop retrying, log loudly, and continue serving the local broker. A revoked token must never disable local operation.
+- `[agent] remote_logs = "always" | "on_failure"` (default `always`) controls whether frames ship live or are buffered and sent only if the run reaches a failing terminal state. `on_failure` exists for verbose Gradle output; it trades live viewing for bandwidth.
 
 ---
 
@@ -314,6 +428,10 @@ labels = ["macos", "arm64", "xcode-16", "ios"]
 shutdown_grace = "30m"
 work_dir       = "~/.latem/work"
 log_retention  = "14d"
+queue_ttl      = "72h"              # queued longer than this → rejected
+auto_update    = false
+remote_logs    = "always"           # "always" | "on_failure"
+metrics_addr   = "127.0.0.1:9838"   # loopback only; "" disables (INV-1)
 
 [broker.local]
 enabled = true
@@ -327,12 +445,13 @@ token_file = "~/.latem/agent.key"   # 0600, never inline in this file
 # --- repos: the allowlist. A repo absent here cannot be built. ---
 [repos.myapp]
 url          = "git@github.com:me/myapp.git"
-allowed_refs = ["main", "release/*"]
+allowed_refs = ["main", "release/*"]   # expanded to refs/heads/* — INV-5
 require_approval_otherwise = true
+approval_ttl = "24h"
 
 [repos.api]
 url          = "ssh://git@forgejo.internal/me/api.git"
-allowed_refs = ["main"]
+allowed_refs = ["main", "refs/tags/v*"]
 
 # --- runners: execution slots ---
 [[runner]]
@@ -347,6 +466,7 @@ concurrency = 2
   network       = "bridge"
   cpus          = 4.0
   memory        = "8g"
+  min_free_gb   = 40                # refuse new runs below this (§14.4)
 
 [[runner]]
 name        = "gpu"
@@ -363,17 +483,30 @@ concurrency = 1
 name        = "ios"
 executor    = "tart"
 labels      = ["macos", "arm64", "xcode", "ios"]
-concurrency = 1                     # non-negotiable; see §13.3
+concurrency = 1                     # hard ceiling is 2 — Apple's licence, §13.2
 
   [runner.tart]
-  base_image  = "latem-xcode-16"
-  cpus        = 6
-  memory_gb   = 16
-  ssh_user    = "admin"
+  base_image   = "latem-xcode-26"
+  cpus         = 6
+  memory_gb    = 16
+  ssh_user     = "admin"
   boot_timeout = "3m"
+  min_free_gb  = 150                # a base image is ~90 GB; §13.2
+  derived_data = "vm"               # "vm" | "shared" — set by measurement, §13.2
 ```
 
-**Validation at load.** Unknown keys are an error, not a warning (strict decode). `schema_version` mismatch is fatal with a migration hint. Every `[[runner]]` name must be unique. Every `allowed_refs` glob must compile. `token_file` must be `0600` or the agent refuses to start.
+**One agent, several runners.** The example above is one machine — a Mac mini — hosting three execution slots, one of which is a Tart VM and one of which is Docker. That is the model: an agent owns a config directory, a machine id, and a set of labelled runners. "Two roles on one box" does **not** mean two agents; it means two `[[runner]]` blocks with different labels, and Apple work never lands on the container runner because the labels do not match.
+
+Running two agents on one machine is possible and unsupported-by-default: pass `--config-dir` or set `LATEM_CONFIG_DIR`, which relocates the lock, socket, sqlite, work dir, and caches together. Each such agent is a distinct machine to the control plane, with its own token. Reach for it only when the two agents genuinely need different owners, which N4 says they should not.
+
+**Validation at load.** All of these are fatal, not warnings — a runner that starts with a broken config fails later, in a build, where it is expensive to diagnose.
+
+- Unknown keys are an error (strict decode). `schema_version` mismatch is fatal with a migration hint.
+- Every `[[runner]]` name is unique. Every `allowed_refs` glob compiles.
+- `executor = "tart"` requires `concurrency <= 2` (Apple's licence, §13.2). `executor = "native"` requires `concurrency == 1` (§13.3). Both are enforced here rather than discovered at runtime.
+- `token_file` is mode `0600`, and `~/.latem` itself is mode `0700`. A world-readable config directory holding `secrets.env` and a machine token is the whole threat model failing quietly.
+- `metrics_addr`, when non-empty, resolves to a loopback address. A non-loopback value is rejected at load — that is INV-1 enforced in the parser, which is the only place it can be enforced cheaply.
+- `remote_logs` is one of the two declared values; `derived_data` is one of `vm`|`shared`.
 
 ---
 
@@ -408,8 +541,10 @@ jobs:
     steps:
       - name: Install
         run: ./ci/install.sh
+        timeout: 5m
       - name: Test
         run: ./ci/test.sh
+        timeout: 10m
 
   ios-release:
     description: Build and upload an iOS release to TestFlight
@@ -437,10 +572,13 @@ jobs:
     steps:
       - name: Unlock keychain
         run: ./ci/ios/unlock-keychain.sh
+        timeout: 2m
       - name: Sync certificates
         run: ./ci/ios/match.sh
+        timeout: 5m
       - name: Build and upload
         run: ./ci/ios/build.sh
+        timeout: 75m
         env:
           RELEASE_CHANNEL: ${input.channel}
           RELEASE_NOTES: ${input.notes}
@@ -460,6 +598,34 @@ jobs:
 | `artifacts` | list | Glob relative to workspace, plus retention. |
 | `steps[].run` | string | **Literal.** The only place a command may be written. |
 | `steps[].env` | map | May reference `${input.NAME}`. May not reference secrets. |
+| `steps[].timeout` | duration | Optional. Wall clock for one step. Defaults to the remaining job budget. |
+
+### Step execution semantics
+
+Draft 01 claimed that because steps run in one container, "`cd`, `export`, and installed tools persist across steps." Only the last of those is true, and shipping the claim would generate a bug report from the first user who writes `export PATH=…` in one step and reads it in the next.
+
+The accurate contract, identical across all three executors:
+
+- **Each step is a new process.** Docker runs a fresh `exec` into the same container; Tart opens a fresh `ssh` session; native spawns a fresh `bash -lc`. Working directory, exported variables, shell functions, and `trap`s do not survive the end of a step.
+- **The filesystem persists** for the whole run. Tools installed in step 1 are on `PATH` in step 3, files written are still there, and caches mounted at `preparing` stay mounted through `collecting`.
+- **Every step starts in the workspace root** with the same environment: the run environment (§15 secrets, `LATEM_*`, `steps[].env`), regardless of what the previous step did.
+
+This is GitHub Actions' model, so it is already what people expect; it just has to be written down. The consequence for job authors is the obvious one: if two commands must share shell state, they are one step, and the sequencing belongs in the shell script. That is N1 working as intended.
+
+**Passing values between steps.** Because shell state does not survive, there is one sanctioned channel. The agent creates an empty file per run and exports its path as `$LATEM_ENV`. A step may append `KEY=value` lines to it; between steps, the agent reads, truncates, and merges them into the run environment for every subsequent step.
+
+```bash
+echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$LATEM_ENV"
+```
+
+Constrained, because this is a file a job can write and the agent then trusts:
+
+- Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`. Malformed lines are dropped with a warning, not silently.
+- Keys colliding with a declared secret name, or with any `LATEM_*` name, are **ignored** — a job cannot overwrite an injected credential or spoof the agent's own variables.
+- The file is capped at 64 KB per step; values pass through the redactor before appearing in any log.
+- It does not cross the trust boundary in either direction. It is job-authored data affecting the job's own environment, which is a different thing from §5's concern.
+
+**Step timeouts.** Draft 01 tracked wall clock only at the job level, which means a 90-minute iOS job hiding a hung 5-minute step wastes an hour before anyone learns anything. `steps[].timeout` defaults to whatever remains of the job budget, so it is opt-in and never makes a job stricter by accident. Exceeding it kills the step's process group, fails the run with `E_STEP_TIMEOUT`, and still runs `collecting` — a hung step's partial logs are the diagnostic.
 
 ### Interpolation rules
 
@@ -473,41 +639,61 @@ Secrets are never interpolated. They arrive in the environment by name because t
 
 Ordered. Every gate before "execute" must pass, and each failure is a distinct error code (§21).
 
+Two gates from draft 01 are split in two here, because each had a cheap conservative half and an authoritative half that needs I/O. Ref policy cannot be decided without knowing whether the ref is a branch or a tag, and input types are declared in a registry that does not exist until a commit is checked out. Doing the cheap half first keeps a hostile request cheap to reject; doing the authoritative half later keeps the answer correct.
+
 ```
-1.  repo lookup            → E_UNKNOWN_REPO      (map hit in config; no path building)
-2.  ref validation         → E_INVALID_REF       (regex + prefix + ".." checks, INV-3)
-3.  ref policy             → awaiting_approval   (allowed_refs glob; INV-5)
-4.  fetch + resolve ref    → E_SOURCE            (to an immutable SHA)
-5.  worktree checkout      → E_SOURCE
-6.  read .latem/jobs.yaml  → E_NO_REGISTRY / E_BAD_REGISTRY
-7.  job lookup             → E_UNKNOWN_JOB
-8.  label match            → E_NO_RUNNER         (runner ⊇ job.runs_on)
-9.  input validation       → E_BAD_INPUT         (declared, typed, bounded)
-10. secret resolution      → E_MISSING_SECRET    (all declared names resolvable)
-11. concurrency group      → queued              (wait, do not fail)
-12. cache mount prep       → E_CACHE
-13. execute
+                              ─── no I/O, no process, no network ───
+ 1. repo lookup                 → E_UNKNOWN_REPO    map hit in config; no path building
+ 2. ref syntax                  → E_INVALID_REF     regex + prefix + ".." (INV-3)
+ 3. input sanity                → E_BAD_INPUT       ≤64 keys, identifier-shaped, ≤4 KB each
+ 4. ref policy — conservative   → awaiting_approval no expansion of the ref can match
+ 5. disk headroom               → E_DISK            agent floor = min(runner min_free_gb)
+
+                              ─── first contact with the outside world ───
+ 6. mirror fetch                → E_SOURCE          per-repo mutex (§12)
+ 7. ref normalization           → E_INVALID_REF     exactly one of heads/tags must exist
+                                → E_AMBIGUOUS_REF   both exist — never guess
+ 8. ref policy — authoritative  → awaiting_approval glob vs normalized name (INV-5)
+ 9. resolve to SHA              → E_SOURCE          ${REF}^{commit}
+10. workspace clone + checkout  → E_SOURCE          hardlinked local clone (§12)
+11. read .latem/jobs.yaml       → E_NO_REGISTRY / E_BAD_REGISTRY
+12. job lookup                  → E_UNKNOWN_JOB
+13. label match                 → E_NO_RUNNER       runner labels ⊇ job.runs_on
+14. input validation — typed    → E_BAD_INPUT       declared, coerced, bounded
+15. secret resolution           → E_MISSING_SECRET  all declared names resolve non-empty
+16. concurrency group           → queued            wait, do not fail
+17. runner disk headroom        → E_DISK            selected runner's own min_free_gb
+18. cache mount prep            → E_CACHE           volume create + flock (§14.3)
+19. execute
 ```
 
-Gates 1–3 run **before** any network or filesystem activity, so a hostile request is cheap to reject. Gate 4 is the first action that touches the outside world.
+Gates 1–5 run **before** any network or filesystem activity, so a hostile request costs a few microseconds and a rejected row. Gate 6 is the first action that touches the outside world.
+
+**Gate 4, the conservative pre-check.** The ref is not yet known to be a branch or a tag, so expand it both ways — `refs/heads/<ref>` and `refs/tags/<ref>`, plus the literal value if it is already fully qualified — and test all candidates against the policy globs. If *none* can match, no fetch can change that answer, so the run goes to `awaiting_approval` immediately without touching the network. If *any* could match, proceed and let gate 8 decide for real against the one that actually exists. The check is sound in the direction that matters: it never lets something through that gate 8 would reject.
+
+**Gate 5 vs gate 17.** The runner is not selected until gate 13, so gate 5 can only enforce the weakest floor across enabled runners. Gate 17 re-checks the selected runner's own `min_free_gb` — the Tart runner's 150 GB is not a sensible bar for admitting a Docker job. Checking twice costs one `statfs` and prevents both a false rejection and a build that dies at 80% with a full disk.
 
 ---
 
 ## 11. Run state machine
 
 ```
-                    ┌──────────────────┐
-                    │ awaiting_approval│──(latem approve)─┐
-                    └──────────────────┘                  │
-                             ▲                            ▼
-  queued ──claim──▶ claimed ─┴─ preparing ──▶ running ──▶ collecting ──▶ succeeded
-     │                 │           │             │            │              
-     │                 │           │             │            └──▶ failed
-     └──▶ rejected     │           └──▶ failed   ├──▶ failed
-                       │                         ├──▶ timed_out
-                       └──▶ cancelled            ├──▶ cancelled
-                                                 └──▶ interrupted
+                       ┌───────────────────┐
+        gate 4 / 8 ───▶│ awaiting_approval │──── latem approve ────┐
+                       └───────────────────┘                       │
+                                 │                                 │
+                    approval_ttl │                                 │
+                                 ▼                                 ▼
+  queued ── claim ──▶ claimed ──────────────────────▶ preparing ──────▶ running ──▶ collecting ──▶ succeeded
+     │                   │                               │                 │            │
+     │ queue_ttl         │ cancel                        │ fail            │            └──▶ failed
+     ▼                   ▼                               ▼                 ├──▶ failed
+  rejected ◀── gates 1-3,5 ──  cancelled              failed               ├──▶ timed_out
+     ▲                                                                     ├──▶ cancelled
+     └──────────── gates 6-18 reject/fail ─────────────────────────────────┴──▶ interrupted
 ```
+
+Both non-terminal waiting states have an exit. Draft 01's `awaiting_approval` had none: a run nobody approved sat forever, and since §22's partial index deliberately covers only non-terminal states, every abandoned run stayed in the hot index permanently. `approval_ttl` and `queue_ttl` close that.
 
 | State | Terminal | Meaning |
 |---|---|---|
@@ -521,47 +707,80 @@ Gates 1–3 run **before** any network or filesystem activity, so a hostile requ
 | `failed` | yes | A step exited non-zero, or a gate failed |
 | `timed_out` | yes | Wall clock exceeded |
 | `cancelled` | yes | Operator or broker cancellation |
-| `rejected` | yes | Admission gate failure (§10) |
+| `rejected` | yes | Admission gate failure (§10), or an `approval_ttl` / `queue_ttl` expiry |
 | `interrupted` | yes | Agent died mid-run; set during startup reconciliation |
 
 **Rules.**
 
 - Transitions are persisted to sqlite **before** being reported to the broker. A broker failure never loses local truth.
 - `Report` is retried with backoff; the run does not block on it.
-- `collecting` always runs, including after `failed` and `timed_out`, so artifacts and logs from a broken build survive. Only `cancelled` may skip artifact collection.
+- `collecting` always runs, including after `failed`, `timed_out`, and `cancelled`, so artifacts and logs from a broken or stopped build survive. Only a hard agent kill skips it, and that path produces `interrupted`.
 - Teardown is `defer`-registered at resource creation, so no path leaks a container or VM.
+- **Cancellation.** A `cancel` command (§7.1) cancels the run's context. In `queued`, `awaiting_approval`, or `claimed` the effect is immediate — nothing has executed. In `preparing` or `running` it propagates to the executor, which signals the step's process group `SIGTERM`, waits 30s, then `SIGKILL`, then proceeds to `collecting`. In `collecting` it is ignored. Cancelling an unknown or already-terminal run is a no-op that reports success, so a phone tapping Stop twice is not an error.
+- **TTL sweep.** The daily ticker and agent startup both sweep `awaiting_approval` older than `approval_ttl` and `queued` older than `queue_ttl` into `rejected`, with `E_APPROVAL_EXPIRED` and `E_QUEUE_EXPIRED`. Sweeping at startup matters because an agent that was off for a week comes back to a queue full of runs nobody wants any more.
+- **Step timeouts** fail the run with `E_STEP_TIMEOUT` and terminal state `timed_out`, distinct from the job-level `E_TIMEOUT` only by error code. Both run `collecting`.
 
 ---
 
 ## 12. Source acquisition
 
-**Mirror plus worktree.** A persistent bare mirror per repo, a disposable worktree per run. Fetches are incremental; checkouts are clean; parallel runs do not share a working directory.
+**Mirror plus hardlinked clone.** A persistent bare mirror per repo, a disposable *self-contained clone* per run. Fetches are incremental, checkouts are clean, parallel runs share no working directory, and the workspace is a real git repository from any vantage point.
+
+### Why not worktrees
+
+Draft 01 specified `git worktree add`, which is the obvious choice and is wrong here for one specific reason. `git worktree` writes a `.git` **file**, not a directory, containing an absolute path:
+
+```
+gitdir: /Users/me/.latem/mirrors/api.git/worktrees/run_01H...
+```
+
+The executors bind-mount or share **only** the workspace. That path does not exist inside a container or a Tart VM, so every `git` command run by a build script fails with `not a git repository`. Build scripts call `git rev-parse HEAD`, `git describe --tags`, and `git status --porcelain` constantly — version stamping, build numbers, dirty-tree checks. This breaks on the first real repo, and the workarounds (mounting the mirror at an identical absolute path, splitting read-only and read-write mounts across the worktree admin directory) all end up with a different `.git` shape per executor.
+
+A local clone is self-contained, costs almost nothing, and gives all three executors identical behaviour with one code path.
 
 ```
 ~/.latem/
   mirrors/<repo-key>.git/      # bare, persistent, --mirror
-  work/<run-id>/               # worktree, deleted after collecting
+  work/<run-id>/               # full clone, deleted after collecting
 ```
 
 ```bash
-# once
+# once per repo
 git clone --mirror -- "$URL" "$MIRRORS/$KEY.git"
+git -C "$MIRRORS/$KEY.git" config gc.auto 0
 
 # per run
 git -C "$MIRRORS/$KEY.git" fetch --prune --tags -- origin
-SHA=$(git -C "$MIRRORS/$KEY.git" rev-parse --verify "${REF}^{commit}")
-git -C "$MIRRORS/$KEY.git" worktree add --detach "$WORK/$RUN_ID" "$SHA"
+SHA=$(git -C "$MIRRORS/$KEY.git" rev-parse --verify "${NORMALIZED_REF}^{commit}")
+
+git clone --local --no-checkout -- "$MIRRORS/$KEY.git" "$WORK/$RUN_ID"
+git -C "$WORK/$RUN_ID" checkout --detach -- "$SHA"
+git -C "$WORK/$RUN_ID" remote set-url origin -- "$URL"
+git -C "$WORK/$RUN_ID" config gc.auto 0
 ```
 
-Notes:
+### What this costs
 
-- `${REF}^{commit}` fails loudly on annotated tags and non-commit refs rather than checking out something surprising.
-- Every invocation uses `--` before the ref and passes argv as a slice (INV-3).
-- Submodules: `git submodule update --init --recursive --depth 1` inside the worktree, only when `.gitmodules` exists.
-- LFS: `git lfs fetch --all` in the mirror, `git lfs checkout` in the worktree, only when `.gitattributes` mentions LFS.
-- A per-repo mutex serialises fetches into one mirror. Concurrent `fetch` into a bare repo is not reliably safe.
+`git clone --local` hardlinks the object store rather than copying it, so cloning a 2 GB repo writes a few hundred kilobytes of refs and index metadata plus the working tree — which a worktree checkout writes anyway. The saving worktrees offered over this was never the significant number.
+
+Three requirements make the hardlinking safe and keep it fast:
+
+- The mirror and `work/` must be on the **same filesystem**. Enforced at config load and reported by `latem doctor`; if they differ, git silently falls back to copying the whole object store and every run gets slower in a way nobody attributes to the right cause.
+- `--no-checkout` then `checkout --detach` does exactly one checkout. Cloning without it checks out the mirror's default branch first and then the target — doubling I/O on large repos for nothing.
+- Git objects are immutable, so a hardlinked object can be read by many runs at once. A `git gc` inside a run creates new packs and unlinks old paths, which only decrements a link count; the mirror is unaffected.
+
+### Notes
+
+- `${REF}^{commit}` fails loudly on annotated tags and non-commit refs rather than checking out something surprising. `$NORMALIZED_REF` is the fully-qualified name from gate 7 (§10), never the raw broker-supplied string.
+- Every invocation uses `--` before user-influenced arguments and passes argv as a slice (INV-3).
+- `remote set-url origin` points the workspace at the real upstream, so `git fetch` inside a build behaves sensibly instead of pointing at a host path that does not exist in the container.
+- **`gc.auto 0` on the mirror is not optional.** A force-push followed by `fetch --prune` can make the previously-fetched tip unreachable, and git's automatic gc is free to collect it — mid-run, 40 minutes into a build, on a repo the run already resolved. Disable automatic gc and run `git gc --prune=30.days.ago` from the daily ticker (§14.4) only when no run holds that mirror.
+- Submodules: `git submodule update --init --recursive --depth 1` inside the workspace, only when `.gitmodules` exists.
+- LFS: `git lfs fetch --all` in the mirror, `git lfs checkout` in the workspace, only when `.gitattributes` mentions LFS.
+- A per-repo mutex serialises fetches into one mirror; concurrent `fetch` into a bare repo is not reliably safe. Clones out of the mirror are reads and need no lock, so parallel runs on the same repo do not queue behind each other.
 - Credentials are the machine's own — SSH agent or a credential helper. The agent never receives, stores, or forwards git credentials.
-- `git worktree prune` on the mirror during startup reconciliation.
+- The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, and `LATEM_JOB` into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
+- Startup reconciliation deletes `work/<run-id>` for any run id not in a non-terminal state. With clones there is no worktree administrative state in the mirror, so there is nothing to prune and nothing to leak — one of the smaller reasons this model is easier to make crash-safe.
 
 ---
 
@@ -589,14 +808,24 @@ type Env interface {
 
 type Spec struct {
     RunID      string
-    Workspace  string            // host path to the worktree
+    Workspace  string            // host path to the run workspace (§12)
     Image      string
-    Env        map[string]string // includes redacted-at-log secrets
+    Env        map[string]string // includes secrets, registered with the redactor
     Caches     []CacheMount
     Labels     map[string]string // includes latem.run-id for reaping
     Resources  Resources
 }
+
+type Step struct {
+    Name    string
+    Run     string            // literal; handed to the shell as ONE argument
+    Env     map[string]string // merged over Spec.Env for this step only
+    Timeout time.Duration     // 0 means "remainder of the job budget"
+    EnvFile string            // container-visible path exported as $LATEM_ENV
+}
 ```
+
+**Every `Env` implementation obeys the same step contract (§9).** A step is a new process: no working directory, exported variable, or shell function survives it. The filesystem persists for the run. `Exec` starts each step in the workspace root with `Spec.Env` overlaid by `Step.Env`, plus whatever previous steps wrote to `$LATEM_ENV`. Implementations that cannot honour this — by, say, reusing a persistent shell — are not conformant, because job authors would then get different behaviour per executor.
 
 ### 13.1 Docker executor
 
@@ -606,10 +835,20 @@ Target: Linux x86_64 (desktop) and Linux arm64 (Mac mini container role).
 - Cache volumes mounted at the paths from `caches[].path` (§14).
 - Label every container `latem.run-id=<id>` and `latem.managed=true`. Startup reconciliation depends on this.
 - `--rm` is **not** used; the agent removes containers explicitly after `Fetch`, so artifacts remain retrievable if a step fails.
-- Non-root user inside the container. Provide `runner` (uid 1000) in the base image; bind-mount ownership is the usual friction point — document it, and on Linux pass `--user $(id -u):$(id -g)`.
 - Resources: `--cpus`, `--memory`, `--pids-limit 4096`.
 - GPU: when `runner.docker.gpu = true`, add `DeviceRequests` for all GPUs (equivalent to `--gpus all`). Preflight must verify NVIDIA Container Toolkit by running `nvidia-smi` in a throwaway container; fail the runner at startup, not mid-build.
-- Each step is `docker exec`-equivalent into the same container, so `cd`, `export`, and installed tools persist across steps within a run.
+- Android emulator jobs need `--device /dev/kvm`; preflight checks it exists and is readable by the daemon's user (§18.2).
+- Disk floor `min_free_gb` defaults to 40 for a docker runner — enough for a base image, a layer cache, and one build's intermediates.
+
+**Step execution.** Each step is one `docker exec` into the run's container. Per §9, that means a **new process every step**: `cd` and `export` do not carry over, the filesystem does. The exec sets `WorkingDir` to `/workspace` and passes the full merged environment explicitly rather than relying on anything the previous exec did. `Step.Run` is passed to the configured shell as a single argument — `["bash", "-c", step.Run]` as an argv slice, never a concatenated string (INV-3).
+
+**Base image contract.** The container image is the operator's, but three things are required of it, and `latem doctor` checks them by running the image once:
+
+1. A non-root user `runner` with uid 1000 and gid 1000, and a **writable `$HOME` that exists**. Passing `--user` for a uid with no `/etc/passwd` entry leaves `$HOME` unset or unwritable, and the resulting failures surface as npm, Gradle, and CocoaPods errors that look like tooling bugs.
+2. `bash`, `git`, and `ca-certificates` present. The agent shells out to none of these itself, but effectively every job does.
+3. Every path named in `caches[]` either exists and is owned by uid 1000, or is absent so the agent can create it with the right ownership.
+
+On Linux the agent additionally passes `--user $(id -u):$(id -g)` so bind-mounted workspace files are owned by the invoking user. On Docker Desktop for macOS, ownership is virtualised by the VM's filesystem layer and this flag is neither needed nor harmful — document both, because the difference is exactly the kind of thing that makes a job pass on one machine and fail on another.
 
 ### 13.2 Tart executor (macOS, ephemeral)
 
@@ -619,7 +858,7 @@ Target: any job touching Xcode. This is the isolation story for the Mac mini.
 Prepare:
   tart clone <base_image> latem-run-<run-id>
   tart set latem-run-<run-id> --cpu N --memory M
-  tart run --no-graphics --dir=workspace:<host-worktree> latem-run-<run-id> &
+  tart run --no-graphics --dir=workspace:<host-workspace> latem-run-<run-id> &
   poll `tart ip latem-run-<run-id>` until routable or boot_timeout
   ssh -o StrictHostKeyChecking=accept-new <ssh_user>@<ip> true   # readiness
 
@@ -633,10 +872,26 @@ Close:
   tart stop  → wait → tart delete   (both idempotent; delete even if stop fails)
 ```
 
-- Apple's licence permits **two** guest VMs per host. `concurrency` for a tart runner MUST be `<= 2`, and the config loader enforces it.
-- Caches cannot be Docker volumes here. Use host directories shared with `--dir`, one per cache name (§14.2).
+- Apple's licence permits **two** guest VMs per host. `concurrency` for a tart runner MUST be `<= 2`, enforced by the config loader (§8). The reference config uses 1 for a different reason — parallel Xcode builds contend — but 2 is the licence ceiling, and §8's draft-01 comment pointing at §13.3 for this was a cross-reference error.
+- Each step is a fresh `ssh` session, which gives the §9 step contract for free: no shell state survives, the VM's filesystem does.
+- Caches cannot be Docker volumes here. Use host directories shared with `--dir`, one per cache name (§14.2) — with the exception below.
 - The base image (`latem-xcode-*`) is built once by a documented Packer-style script in `examples/`: Xcode, command-line tools, Homebrew, Node, fastlane, CocoaPods. Rebuilding on Xcode upgrades is a documented operator task.
 - Boot cost is real (30–60s). Acceptable against a 20-minute iOS build; do not use tart for short jobs.
+- **Disk.** A Tart image carrying Xcode is on the order of 90 GB. `tart clone` is an APFS copy-on-write clone, so it is fast and initially near-free, but a running VM diverges and DerivedData is tens of gigabytes on its own. `min_free_gb` defaults to **150** for a tart runner; draft 01's global 20 was sized for a container host and would let a machine accept an iOS build it cannot finish. `latem doctor` reports the base image's real size rather than assuming this number.
+
+#### The DerivedData question — measure before implementing
+
+`--dir` is VirtioFS, and Xcode's DerivedData over VirtioFS is materially slower than the VM's own disk. §18.1 asserts DerivedData is "the largest single win" from shared cache directories. Both things cannot be true: if the share is slow enough, a warm cache over VirtioFS loses to a cold build on local disk, and the entire iOS caching story inverts.
+
+This is the one number in this document that changes an architecture rather than a constant, so it is settled by measurement, not by argument. Before the tart executor is written, time the same iOS build three ways on the target hardware:
+
+| Configuration | What it tells you |
+|---|---|
+| Cold VM, no shared caches | The floor. What every run costs if caching loses. |
+| DerivedData shared via `--dir` | Draft 01's assumption. |
+| DerivedData on the VM disk, CocoaPods + pnpm shared | The hedge: share the cheap, keep the expensive local. |
+
+`derived_data = "vm" | "shared"` (§8) exists so the answer is a config value rather than a rewrite. The default ships as whatever the measurement says. If option 3 wins, keeping DerivedData warm across runs additionally requires snapshotting the VM rather than cloning from a clean base — that is a real scope change to this section, and knowing about it before M5 rather than during it is the entire point of measuring first.
 
 ### 13.3 Native executor (macOS, no VM)
 
@@ -645,8 +900,10 @@ Fallback when Tart is unavailable or the base image is not built.
 - Runs directly on the host as the logged-in user. **No isolation.** Document this plainly; it is a convenience mode.
 - `concurrency` MUST be 1. Parallel Xcode builds contend on DerivedData and the keychain and produce failures that look like code bugs.
 - Requires a **LaunchAgent under an auto-login user**, not a LaunchDaemon. `codesign` needs a real user session with keychain access; daemon contexts fail with errors that point nowhere useful. This is the single most common install failure — `latem doctor` must detect and name it.
-- Every step runs `bash -lc` so the login environment (Homebrew paths, rbenv, nvm) is present.
-- Workspace is the worktree directly; no copy.
+- Requires **auto-login enabled**, and auto-login is defeated by FileVault. See §23 — this interacts badly enough with "survives reboots" that it is a `latem doctor` check, not a footnote.
+- Every step runs `bash -lc` as a **new process**, so the login environment (Homebrew paths, rbenv, nvm) is present and, per §9, nothing else carries between steps.
+- Workspace is the run's clone directly; no copy. Because §12 produces a self-contained repository, the workspace looks identical here and inside a container.
+- Disk floor defaults to 60 GB.
 
 ---
 
@@ -686,9 +943,11 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 
 - Docker build layers: `docker buildx prune --filter until=168h --force`.
 - Cache volumes exceeding `max_size` (default 25 GB per volume): evict by atime, oldest first, down to 80% of the cap.
-- Worktrees under `work/` older than 24h with no live run: delete, then `git worktree prune`.
+- Workspaces under `work/` older than 24h with no live run: delete. Nothing else to clean — §12's clones leave no administrative state behind in the mirror.
+- Mirror maintenance: `git gc --prune=30.days.ago` per mirror, skipped for any mirror a live run is reading, since automatic gc is disabled there (§12).
+- Tart: `tart list` for VMs matching `latem-run-*` with no live run; delete. A leaked VM carrying an Xcode image costs ~90 GB, which is the fastest way to fill a Mac mini.
 - Mirrors untouched for 90 days: report in `latem doctor`, never auto-delete (a mirror may be the only local copy).
-- When free disk drops below `min_free_gb` (default 20), prune aggressively and refuse new runs with `E_DISK` rather than failing halfway through a build.
+- When free disk drops below the runner's `min_free_gb`, prune aggressively and refuse new runs with `E_DISK` rather than failing halfway through a build. The floor is **per runner**, not global — 40 GB for docker, 150 GB for tart, 60 GB for native (§13). Draft 01's single global 20 GB was sized for containers and would admit an iOS build onto a machine that cannot hold one.
 
 ---
 
@@ -711,8 +970,8 @@ MATCH_PASSWORD = "op read op://Private/match/password"
 
 Rules:
 
-- Values are held in memory only, zeroed on run completion where the language allows.
-- Registered with the redactor (§16) **before** the first step starts.
+- **Secret values are `[]byte`, not `string`, everywhere inside `internal/secrets`.** Draft 01 promised values "zeroed on run completion where the language allows," which Go does not: a `string` is immutable and lives until the GC decides otherwise, so the promise was unenforceable as written. Holding `[]byte` makes it real — the buffer is explicitly zeroed when the run reaches a terminal state. Conversion to `string` happens exactly once, at the last moment, when building the executor's environment map, and that map is dropped with the run.
+- Registered with the redactor (§16) **before** the first step starts, and before the value is used for anything else.
 - Never written to sqlite, never included in `Update.ErrorMsg`, never sent to a broker (INV-4).
 - A declared secret that resolves empty is `E_MISSING_SECRET` at admission, not a runtime surprise 40 minutes in.
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
@@ -724,21 +983,38 @@ Rules:
 ```
 step stdout/stderr
    → line splitter (64 KB max line; longer lines truncated with a marker)
-   → REDACTOR  ← every secret value, every token, every matched pattern
+   → REDACTOR  ← every secret value, every secret LINE, every token, every pattern
+   → sequencer (assigns run-scoped monotonic seq, from 1)
    → fan-out ─┬─ local file  ~/.latem/logs/<run-id>.log
-              ├─ broker writer (batched: 100 lines or 250 ms)
+              ├─ broker LogSink (batched: 100 frames or 250 ms)
               └─ `latem logs -f` subscribers (ring buffer, 1000 lines)
 ```
 
-Redaction is applied **once, at the point of emission**, before fan-out. A new sink therefore cannot bypass it (INV-4).
+Redaction is applied **once, at the point of emission**, before sequencing and before fan-out. A new sink therefore cannot bypass it (INV-4), and a `LogFrame` that exists at all is already safe to transmit.
 
-**Redactor contents:**
+Sequence numbers are assigned after redaction and before fan-out, so the local file, the broker, and a `-f` subscriber all agree on numbering. `LogFrame.Seq` is what makes resumption after a partition non-duplicating (§7.2).
 
-- Every resolved secret value, and its base64 and URL-encoded forms — CI tooling re-encodes secrets constantly, and a base64'd token in a log is still a leaked token.
-- The machine token.
-- Pattern matches, always on: AWS keys `AKIA[0-9A-Z]{16}`, private key blocks `-----BEGIN [A-Z ]*PRIVATE KEY-----`, GitHub tokens `gh[pousr]_[A-Za-z0-9]{36,}`, Slack tokens `xox[baprs]-`, JWTs `eyJ[A-Za-z0-9_-]{10,}\.`, Apple `.p8` contents.
-- Replacement is `***` plus a stable 6-char hash of the value, so `***a3f9c1` lets an operator correlate occurrences without learning the secret.
-- Values shorter than 6 characters are not redacted — matching them produces log soup. Document this; warn at load when a secret is short.
+### Multi-line secrets
+
+The pipeline splits into lines and then redacts each line. It follows that registering only the whole value of a multi-line secret redacts **nothing** — the whole value never appears in any single line. Draft 01 did exactly this while also declaring `APP_STORE_CONNECT_KEY_P8` in its own example job, and listing a `-----BEGIN [A-Z ]*PRIVATE KEY-----` pattern that matches the header line and lets every base64 body line through. `echo "$APP_STORE_CONNECT_KEY_P8"` would have printed a usable App Store Connect key into the log file and shipped it to the control plane, with the INV-4 test passing.
+
+Normative rule. When a secret value is registered, the redactor registers:
+
+1. The **whole value**, verbatim.
+2. If the value contains a newline: **every non-empty line of it**, individually, after trimming trailing whitespace.
+3. The value with all whitespace stripped — tooling frequently re-emits PEMs as one long line.
+4. The base64 and URL-encoded forms of items 1 and 3.
+
+Items 2 and 3 are what draft 01 was missing. Lines shorter than the minimum length below are skipped, which for a PEM means the `-----BEGIN`/`-----END` delimiters are handled by the always-on pattern list rather than by value matching.
+
+### Redactor contents
+
+- Every resolved secret value, expanded per the four rules above.
+- The machine token, and the contents of `CancelRequest.Reason` are redacted before that string is logged or persisted.
+- Always-on patterns: AWS keys `AKIA[0-9A-Z]{16}`, PEM delimiters `-----BEGIN [A-Z ]*PRIVATE KEY-----`, GitHub tokens `gh[pousr]_[A-Za-z0-9]{36,}`, Slack tokens `xox[baprs]-`, JWTs `eyJ[A-Za-z0-9_-]{10,}\.`.
+- Replacement is `***` plus a stable 6-char hash of the matched value, so `***a3f9c1` lets an operator correlate occurrences without learning the secret. The hash is over the value, so the same secret reads the same everywhere.
+- **Values shorter than 6 characters are not redacted** — matching them produces log soup where every occurrence of `true` or `dev` becomes `***`. Warn at config load when a declared secret resolves to a short value, naming the secret and not the value.
+- The matcher is a single Aho-Corasick pass over the literal set plus one compiled alternation for the patterns. A per-line loop over N secrets is O(N × line length) and shows up as measurable overhead on verbose Gradle output, which is precisely the log volume this has to survive.
 
 Retention: `agent.log_retention` (default 14d), enforced by the daily ticker. Logs are gzipped after 24h.
 
@@ -785,7 +1061,7 @@ bundle exec fastlane pilot upload --ipa build/app.ipa \
 
 Required environment: `MATCH_PASSWORD`, `MATCH_GIT_URL`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_P8`, `KEYCHAIN_PASSWORD`.
 
-Caches: `cocoapods`, `derived-data`, `pnpm`. DerivedData is the largest single win and the reason not to use a fully clean VM without shared cache dirs.
+Caches: `cocoapods` and `pnpm` unconditionally — both are content-addressed, cheap to share, and unambiguously a win. `derived-data` is conditional on `runner.tart.derived_data`, because whether sharing it helps or hurts is a VirtioFS throughput question that §13.2 requires be answered by measurement before the tart executor is written. Draft 01 asserted DerivedData was "the largest single win"; it is the largest *potential* win and also the one most exposed to the share being slow. Do not design around either answer until the number exists.
 
 **Known failure modes to document in `docs/ios.md`:**
 
@@ -838,12 +1114,16 @@ latem version
 
 - git, docker, tart availability and versions
 - Docker daemon reachable; current user in the `docker` group
-- NVIDIA toolkit functional when `gpu = true`
-- macOS: LaunchAgent vs LaunchDaemon context, auto-login enabled, keychain unlockable, Xcode selected, licence accepted
+- Docker base image satisfies the §13.1 contract — runs the image once and checks uid 1000 exists, `$HOME` is writable, and `bash`/`git` are present
+- NVIDIA toolkit functional when `gpu = true`; `/dev/kvm` present and readable when an emulator job is configured
+- macOS: LaunchAgent vs LaunchDaemon context, auto-login enabled, **FileVault status** (§23), keychain unlockable, Xcode selected, licence accepted
+- Tart base image exists, and its actual on-disk size versus `min_free_gb`
+- **Mirrors and `work_dir` are on the same filesystem** — if not, §12's clones silently stop hardlinking and every run gets slower for no visible reason
 - Every configured repo reachable with current credentials
-- Every declared secret resolvable (names only)
-- Disk headroom against `min_free_gb`
-- Token file permissions `0600`
+- Every declared secret resolvable (names only), with a warning for any resolving shorter than 6 characters (§16)
+- Disk headroom against each runner's own `min_free_gb`
+- `~/.latem` is mode `0700`; `token_file` and `secrets.env` are `0600`
+- `metrics_addr` is loopback (INV-1)
 - Clock skew against the broker (token validation fails confusingly otherwise)
 
 ---
@@ -856,6 +1136,8 @@ latem version
 
 **Self-update** is opt-in and off by default (`[agent] auto_update = false`). When enabled: check a release feed daily, verify a minisign signature, download to a temp path, atomic rename, re-exec only when no run is active. Never update mid-run.
 
+**Metrics.** INV-1 forbids binding a non-loopback listener; it does not forbid loopback. `metrics_addr` (default `127.0.0.1:9838`, empty to disable) serves counters and gauges — runs by terminal state, run duration, queue depth, cache volume sizes, disk free per runner, broker connection state, log frames dropped. The config loader rejects a non-loopback value, so the invariant is enforced where it cannot be forgotten. Anyone wanting these off-machine points a local Prometheus at it or tunnels; the agent does not grow a remote surface for observability.
+
 ---
 
 ## 21. Error taxonomy
@@ -865,7 +1147,8 @@ Stable codes; the web app maps them to human copy, and they appear in `Update.Er
 | Code | State | Retryable | Meaning |
 |---|---|---|---|
 | `E_UNKNOWN_REPO` | rejected | no | Repo not in local config allowlist |
-| `E_INVALID_REF` | rejected | no | Ref failed validation (INV-3) |
+| `E_INVALID_REF` | rejected | no | Ref failed validation, or normalized to nothing (INV-3, §10 gates 2 and 7) |
+| `E_AMBIGUOUS_REF` | rejected | no | Both `refs/heads/<ref>` and `refs/tags/<ref>` exist; the agent will not guess |
 | `E_UNKNOWN_JOB` | rejected | no | Job absent from the registry at that commit |
 | `E_NO_RUNNER` | rejected | no | No runner carries all `runs_on` labels |
 | `E_BAD_INPUT` | rejected | no | Undeclared input, or a type/bound violation |
@@ -877,11 +1160,16 @@ Stable codes; the web app maps them to human copy, and they appear in `Update.Er
 | `E_CACHE` | failed | yes | Volume mount or lock acquisition failed |
 | `E_DISK` | failed | yes | Below `min_free_gb` |
 | `E_STEP` | failed | no | A step exited non-zero (`ExitCode` carries it) |
-| `E_TIMEOUT` | timed_out | no | Wall clock exceeded |
+| `E_TIMEOUT` | timed_out | no | Job wall clock exceeded |
+| `E_STEP_TIMEOUT` | timed_out | no | A single step exceeded `steps[].timeout` (§9) |
 | `E_ARTIFACT` | failed | no | Glob escaped the workspace, or collection failed |
 | `E_INTERRUPTED` | interrupted | yes | Agent died mid-run; set at reconciliation |
+| `E_APPROVAL_EXPIRED` | rejected | no | Unapproved for longer than `approval_ttl` (INV-5) |
+| `E_QUEUE_EXPIRED` | rejected | no | Queued for longer than `queue_ttl` |
 
 Retryable errors are safe for the control plane to offer as a one-click retry. Non-retryable ones need a human or a commit.
+
+One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what `latem run --wait` or `--follow` exits with (exit 3) when no agent is listening (§7.3). It is a CLI condition, not a run outcome.
 
 ---
 
@@ -894,25 +1182,31 @@ CREATE TABLE runs (
   id                TEXT PRIMARY KEY,
   repo              TEXT NOT NULL,
   job               TEXT NOT NULL,
-  ref               TEXT NOT NULL,
+  ref               TEXT NOT NULL,  -- as supplied, post-validation
+  ref_normalized    TEXT,           -- refs/heads/main — what policy matched (INV-5)
   sha               TEXT,
   runner            TEXT,
   state             TEXT NOT NULL,
   exit_code         INTEGER,
   error_code        TEXT,
-  error_message     TEXT,          -- redacted
+  error_message     TEXT,           -- redacted
   origin_kind       TEXT NOT NULL,
   origin_actor      TEXT,
+  cancel_reason     TEXT,           -- redacted, display only
   inputs_json       TEXT NOT NULL DEFAULT '{}',
   created_at        INTEGER NOT NULL,
   started_at        INTEGER,
   finished_at       INTEGER,
-  reported_state    TEXT,          -- last state acked by the broker
+  expires_at        INTEGER,        -- approval_ttl / queue_ttl deadline (§11)
+  reported_state    TEXT,           -- last state acked by the broker
+  last_acked_seq    INTEGER NOT NULL DEFAULT 0,  -- log resume point (§7.2)
   UNIQUE(id)
 );
 CREATE INDEX runs_state_idx ON runs(state) WHERE state NOT IN
   ('succeeded','failed','cancelled','rejected','timed_out','interrupted');
 CREATE INDEX runs_repo_created_idx ON runs(repo, created_at DESC);
+CREATE INDEX runs_expiry_idx ON runs(expires_at)
+  WHERE state IN ('queued','awaiting_approval');
 
 CREATE TABLE queue (
   run_id      TEXT PRIMARY KEY REFERENCES runs(id),
@@ -939,7 +1233,13 @@ CREATE TABLE cache_meta (
 
 `reported_state` is what makes broker reporting recoverable: on reconnect, replay every run where `reported_state != state`.
 
-`inputs_json` MUST be scrubbed of anything matching the redactor before persistence.
+`last_acked_seq` is the log equivalent, and it is why §7 returns a `LogSink` rather than an `io.WriteCloser`. On reconnect the agent resumes streaming from `last_acked_seq + 1` instead of re-sending a buffer the server already has. Persisting it means the resume point survives an agent restart, not just a reconnect.
+
+`ref_normalized` is stored separately from `ref` because policy was evaluated against the normalized form (INV-5). Keeping both makes an audit answerable — "this run was requested as `main` and matched `refs/heads/main`" — without re-deriving it from a mirror that has since moved on.
+
+`expires_at` is set when a run enters `queued` or `awaiting_approval` and cleared when it leaves. The partial index over it makes the TTL sweep a single indexed scan rather than a table walk.
+
+`inputs_json` and `cancel_reason` MUST be scrubbed through the redactor before persistence.
 
 ---
 
@@ -965,10 +1265,15 @@ WantedBy=default.target
 
 **macOS — LaunchAgent** at `~/Library/LaunchAgents/com.latem.agent.plist`, `RunAtLoad`, `KeepAlive`.
 
-Two things `latem doctor` must verify and explain, because getting either wrong produces opaque signing failures (§13.3):
+Three things `latem doctor` must verify and explain, because getting any of them wrong produces opaque signing failures (§13.3) or a machine that silently never comes back:
 
-1. This is a LaunchAgent, not a LaunchDaemon.
-2. Auto-login is enabled for the user, so a session exists after reboot.
+1. **This is a LaunchAgent, not a LaunchDaemon.** `codesign` needs a real user session with keychain access; a daemon context fails with errors that point nowhere useful.
+2. **Auto-login is enabled** for the user, so a session exists after reboot.
+3. **FileVault is off, or the operator knows what it costs.** This is the one draft 01 missed, and it quietly falsifies "survives reboots." With FileVault enabled, an unattended reboot stops at the pre-boot unlock screen: no login, no session, no LaunchAgent, no builds — until somebody walks over to the machine and types a password. A headless Mac mini in a cupboard is exactly the deployment this breaks, and the symptom is "my machine went offline overnight and nothing in the logs explains it," because the agent never started to log anything.
+
+   `latem doctor` reports FileVault status and, when it is on, names the two options rather than picking one: disable FileVault (accepting that a stolen machine yields its certificates and keystores), or reboot only via `sudo fdesetup authrestart`, which unlocks the disk for exactly the next boot. The trade-off is genuinely the operator's — a machine holding signing certificates is a reasonable thing to want encrypted — but it has to be a decision rather than a surprise. Document both in `docs/ios.md`.
+
+**Directory and file modes**, created by the installer and enforced at startup: `~/.latem` is `0700`; `config.toml`, `secrets.env`, and the token file are `0600`; `agent.sock` is `0600`. The agent refuses to start otherwise rather than warning, because a world-readable directory holding a machine token and every secret is the threat model failing silently.
 
 **Install script** `curl -fsSL … | sh`: detect OS/arch, download the matching binary, verify checksum, place in `~/.local/bin`, run `latem doctor`, print the next command. Never run as root.
 
@@ -976,11 +1281,11 @@ Two things `latem doctor` must verify and explain, because getting either wrong 
 
 ## 24. Testing requirements
 
-**Unit** — registry parsing (valid, invalid, unknown-field), ref validation table (§5 hostile inputs), input type checking, redactor correctness including encoded forms, state machine transition legality, cache name derivation.
+**Unit** — registry parsing (valid, invalid, unknown-field); the ref validation table (§5 hostile inputs); **ref normalization and policy matching** as a table covering `main` vs `refs/heads/main` vs `refs/tags/main`, `release/*` vs `release/**`, the ambiguous heads-and-tags case, and `refs/pull/*` rejection; input coercion and bounds; redactor correctness including encoded forms **and multi-line values**; `$LATEM_ENV` parsing including malformed lines, secret-name collisions, and `LATEM_*` collisions; state machine transition legality including both TTL expiries; cache name derivation; log sequence assignment and resume arithmetic.
 
-**Integration** (`test/integration`, build-tagged, needs Docker) — full run against a fixture repo; failing step produces `failed` with the right exit code; timeout produces `timed_out` and tears down; agent killed mid-run leaves nothing orphaned after restart; concurrent runs on one runner do not corrupt a shared cache; artifact glob escaping is rejected.
+**Integration** (`test/integration`, build-tagged, needs Docker) — full run against a fixture repo; **`git rev-parse HEAD` and `git describe` succeed inside the container**, which is the regression test for §12; a failing step produces `failed` with the right exit code; job timeout produces `timed_out` and tears down; a step timeout produces `E_STEP_TIMEOUT` and still collects artifacts; shell state does *not* leak between steps while filesystem state does; a cancel mid-run terminates within the grace window and still collects; agent killed mid-run leaves nothing orphaned after restart; concurrent runs on one runner do not corrupt a shared cache; artifact glob escaping is rejected; a broker disconnect mid-run produces no duplicated and no missing log frames after reconnect.
 
-**Invariant tests** (`invariants_test.go`) — one per rule in §5, named `TestINV1_NoInboundListeners` and so on, so a failure names the rule it broke.
+**Invariant tests** (`invariants_test.go`) — one per rule in §5, named `TestINV1_NoInboundListeners` and so on, so a failure names the rule it broke. `TestINV4_SecretsNeverLeave` MUST include a multi-line PEM fixture; a version that only covers single-line secrets passes while the leak in §16 is live, which is how draft 01 shipped it.
 
 **Manual matrix** (documented in `docs/testing.md`; not automatable) — iOS build end to end on real hardware with real signing; Tart VM lifecycle including forced kill; GPU passthrough; reboot recovery on both platforms.
 
@@ -990,11 +1295,15 @@ Two things `latem doctor` must verify and explain, because getting either wrong 
 
 Milestones are ordered by dependency and sized to be independently reviewable. Each is complete only when its acceptance criteria pass.
 
+> **These milestones are acceptance gates, not an assignment plan.** They describe *what must be true* at each stage. [`PLAN.md`](./PLAN.md) decomposes the same work into workstreams with disjoint file ownership so it can be built in parallel, and maps each workstream back to the milestone it satisfies. When the two disagree about scope, this section wins; when they disagree about ordering, `PLAN.md` wins.
+
 ### M0 — Prove the hard part manually (no code)
 
 Not an engineering task, but it gates everything after it. Run `eas build --platform ios --local` by hand on the Mac mini, with match, and get an `.ipa` to TestFlight. Do the Android equivalent.
 
-*Acceptance:* a build lands in TestFlight and in Play internal testing, and every command used is written down in `docs/manual-baseline.md`. Those commands become `examples/expo-app/ci/`.
+It also carries the one measurement that can change an architecture rather than a constant: the §13.2 DerivedData-over-VirtioFS timing, three configurations, on this hardware. Doing it here costs an afternoon. Discovering it during M5 costs the tart executor.
+
+*Acceptance:* a build lands in TestFlight and in Play internal testing; every command used is written down in `docs/manual-baseline.md`; the three timings are recorded and `derived_data` has a defensible default. Those commands become `examples/expo-app/ci/`.
 
 ### M1 — Skeleton and config
 
@@ -1010,15 +1319,15 @@ Not an engineering task, but it gates everything after it. Run `eas build --plat
 
 ### M3 — Docker executor and source
 
-Mirror + worktree acquisition, docker Prepare/Exec/Fetch/Close, container labelling, cache volume mounting, log streaming to file and terminal, `latem run --follow`.
+Mirror + hardlinked clone acquisition (§12), docker Prepare/Exec/Fetch/Close, container labelling, cache volume mounting, log streaming to file and terminal, `latem run --follow`.
 
-*Acceptance:* `latem run api test` builds a real repo end to end with no broker configured, warm caches on the second run, and a `git status`-clean worktree.
+*Acceptance:* `latem run api test` builds a real repo end to end with no broker configured, warm caches on the second run, a `git status`-clean workspace, and `git rev-parse HEAD` working **inside** the container.
 
 ### M4 — Agent daemon and local broker
 
 Runner pool, concurrency limits, concurrency groups, run state machine, graceful shutdown, crash reconciliation, unix socket broker, service install for both platforms.
 
-*Acceptance:* `kill -9` mid-run leaves zero orphaned containers or worktrees after restart, and the run shows `interrupted`.
+*Acceptance:* `kill -9` mid-run leaves zero orphaned containers, VMs, or workspaces after restart, and the run shows `interrupted`.
 
 ### M5 — macOS executors and the mobile pipeline
 
@@ -1042,9 +1351,36 @@ Cache pruning and disk guards, artifact retention, log rotation, `latem doctor -
 
 ## 26. Open questions
 
+Draft 01 carried six. Two are now decided and moved into the body: step-level timeouts are in §9 as `steps[].timeout`, and remote log volume is in §7.4 as `[agent] remote_logs`. Both were cheap to settle now and awkward to retrofit, which is what made them worth closing rather than tracking.
+
 1. **Registry location for polyrepo setups.** `.latem/jobs.yaml` in the repo is right for the common case, but a monorepo may want several. Proposal: allow `.latem/jobs.d/*.yaml`, merged, with duplicate job names an error. Defer to post-M7.
-2. **Step-level timeouts.** Currently job-level only. A 90-minute iOS job hiding a hung 5-minute step wastes an hour. Likely worth adding to §9 as `steps[].timeout` in M2 — cheap now, awkward later.
-3. **Matrix jobs.** Explicitly out of scope (N1), but multi-arch builds want them. Watch whether `examples/` ends up duplicating jobs; if so, reconsider with a strictly declarative, non-expression form.
-4. **Windows.** No current need. The executor interface should not acquire assumptions that make it impossible, but no work until someone asks.
-5. **Log storage cost at the control plane.** Verbose Gradle output is large. Decide whether the agent should ship full logs remotely by default or only on failure; `[agent] remote_logs = "always" | "on_failure"` is the likely shape.
-6. **Approval UX.** INV-5 requires local approval, which is safe but awkward when travelling — precisely the case the hosted layer exists for. A signed approval from an authenticated session may be acceptable, but it weakens the rule and needs a written threat model before it ships.
+2. **Matrix jobs.** Explicitly out of scope (N1), but multi-arch builds want them. Watch whether `examples/` ends up duplicating jobs; if so, reconsider with a strictly declarative, non-expression form.
+3. **Windows.** No current need. The executor interface should not acquire assumptions that make it impossible, but no work until someone asks.
+4. **Approval UX.** INV-5 requires local approval, which is safe but awkward when travelling — precisely the case the hosted layer exists for. A signed approval from an authenticated session may be acceptable, but it weakens the rule and needs a written threat model before it ships. Note that granting approval remotely would require a third inbound command kind, which §7.1 declares closed; that is the size of the change, and it is the right size.
+5. **Non-Expo mobile projects.** §18 is written entirely around `eas build --local`, while the product describes itself as building iOS and Android applications generally. Nothing in the agent is Expo-specific — steps are shell — but `examples/` currently would be. A bare `xcodebuild` + Gradle example is cheap insurance against the wedge being narrower than the pitch. Decide by M5.
+6. **Control plane licence.** The runner is Apache-2.0. The hosted layer is a separate decision and does not have to match; making it deliberately, before there is a public repo with an implied answer, is easier than making it later.
+
+---
+
+## 27. Changes from draft 01
+
+Fourteen findings, all resolved in the text above. Recorded here because several are corrections to statements draft 01 made confidently, and a reader who learned the old version needs to know what moved.
+
+| # | Section | Draft 01 said | Draft 02 says | Why it mattered |
+|---|---|---|---|---|
+| F1 | §9, §13.1 | `cd` and `export` persist across steps | Each step is a new process; only the filesystem persists. `$LATEM_ENV` is the sanctioned channel between steps | False as written. `docker exec`, `ssh`, and `bash -lc` all start fresh processes |
+| F2 | §12 | Mirror + `git worktree add` | Mirror + `git clone --local` (hardlinked) | A worktree's `.git` is a file pointing outside the mount; every `git` call inside a container failed |
+| F3 | §5, §16 | Redact each secret value | Also redact every **line** of a multi-line value, and the whitespace-stripped form | `APP_STORE_CONNECT_KEY_P8` is a PEM. Per-line redaction of a whole-value match redacts nothing |
+| F4 | §7 | `Runs()` yields `RunRequest`; `cancelled` reachable by "broker cancellation" | `Commands()` yields a closed two-kind union: `run` and `cancel` | The protocol could not express the Stop button the product promises |
+| F5 | §5, §10 | `allowed_refs` "glob, matched after resolution" | Normalize → match policy → resolve, with expansion rules stated exactly | Globbing against a SHA is meaningless; short vs fully-qualified spellings had no defined answer |
+| F6 | §7, §16, §22 | Logs are an `io.WriteCloser`; tolerate replays | `LogSink` with per-run monotonic `Seq` and a persisted `last_acked_seq` | State was idempotent; log lines were idempotent by nothing, so every partition duplicated output |
+| F7 | §5, §11, §21 | `awaiting_approval` with no exit | `approval_ttl` and `queue_ttl` → `rejected`, swept daily and at startup | Unapproved runs accumulated forever inside the partial index that exists to stay small |
+| F8 | §4, §7 | Wire types declared in `package broker` | All wire types in `pkg/protocol`; `internal/broker` holds only the interface | §4 already said protocol was the shared package; §7 contradicted it |
+| F9 | §8 | Two machine "roles" implying two agents | One agent, several labelled runners. `LATEM_CONFIG_DIR` for the rare exception | The architecture overview and the spec described different deployment models |
+| F10 | §15 | Secrets "zeroed where the language allows" | `[]byte` inside `internal/secrets`, converted to `string` once at env-build | Go strings cannot be zeroed; the guarantee was unenforceable |
+| F11 | §12, §14.4 | `fetch --prune` on mirrors | Plus `gc.auto 0`, with explicit gc from the daily ticker | Automatic gc could collect the run's commit mid-build after a force-push |
+| F12 | §8, §13, §14.4 | Global `min_free_gb = 20` | Per-runner floors: docker 40, native 60, tart 150 | A Tart Xcode image is ~90 GB; 20 admitted builds the machine could not finish |
+| F13 | §19, §23 | LaunchAgent + auto-login | Plus FileVault status and the two options it forces | FileVault stops an unattended reboot before login, so "survives reboots" was false on any encrypted machine |
+| F14 | §8, §13.2 | Tart `concurrency = 1` "see §13.3" | Ceiling is 2 (§13.2); §13.3 is the native executor's separate constraint | Wrong cross-reference on a licence-derived limit |
+
+Two open questions from draft 01 were closed into the body rather than carried: step-level timeouts (§9) and remote log volume (§7.4). Two were added: non-Expo mobile projects, and the control plane licence.
