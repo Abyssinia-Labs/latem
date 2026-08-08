@@ -64,6 +64,64 @@ func TestCommandUnmarshal_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// Run ids become filesystem paths — work/<id>, logs/<id>.log,
+// artifacts/<id>/ — and container and VM names. INV-3 enumerates validation
+// for repo, ref, and inputs and says nothing about id, which is how a control
+// plane sending {"id": "../../../../tmp/x"} could get a file written wherever
+// the agent's user can write.
+func TestCommandUnmarshal_RejectsTraversalIDs(t *testing.T) {
+	hostile := []string{
+		"../../../../tmp/pwned",
+		"..",
+		".",
+		"a/b",
+		"a\\b",
+		"run/../../../etc/cron.d/evil",
+		"run\x00id",
+		"run id",
+		".hidden",
+		"-starts-with-dash",
+		"run.id", // dots excluded outright, so no id can be "." or ".."
+		strings.Repeat("x", 65),
+		"",
+	}
+
+	for _, id := range hostile {
+		t.Run(id, func(t *testing.T) {
+			for _, body := range []string{
+				`{"kind":"run","run":{"id":` + quote(id) + `}}`,
+				`{"kind":"cancel","cancel":{"id":` + quote(id) + `}}`,
+			} {
+				var c Command
+				if err := json.Unmarshal([]byte(body), &c); err == nil {
+					t.Errorf("accepted hostile id %q", id)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateID_AcceptsRealIDs(t *testing.T) {
+	for _, id := range []string{
+		"run_01H8XGJWBWBAQ4ZZY1N2P3Q4R5",
+		"r1",
+		"RUN-2026-08-07-0001",
+		strings.Repeat("x", MaxIDLength),
+	} {
+		if err := ValidateID(id); err != nil {
+			t.Errorf("rejected legitimate id %q: %v", id, err)
+		}
+	}
+}
+
+func quote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 func TestCommandUnmarshal_AcceptsWellFormed(t *testing.T) {
 	const body = `{
 		"kind":"run",

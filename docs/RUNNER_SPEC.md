@@ -178,6 +178,7 @@ The agent resolves `job` against the registry it read from disk. An unknown name
 
 Validation, applied before use:
 
+- `id` — must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. Draft 02 omitted this and it was a real hole: the agent builds `work/<id>`, `logs/<id>.log`, `artifacts/<id>/`, and the container and VM name `latem-run-<id>` from this field, so an id of `../../../../tmp/x` writes wherever the agent's user can write. The class excludes every separator **and every dot**, so no id can traverse a directory or collide with `.` or `..`. Enforced in `protocol.ValidateID`, at decode, before a command is ever acted on — and re-checked by each consumer that turns an id into a path, because one validation point everything else trusts is the shape of the next incident.
 - `repo` — must match a `[repos.*]` key present in local config. Exact string match against a map. No path construction from this value.
 - `ref` — must match `^[A-Za-z0-9._/-]{1,255}$`, must not begin with `-`, must not contain `..`, must not be `HEAD@{…}`. This blocks git argument injection (`--upload-pack=`, `--exec=`).
 - `inputs` — every key must be declared in the job's `inputs:` block. Values are type-checked per declaration. Undeclared keys are a hard rejection, not a warning.
@@ -1409,5 +1410,7 @@ Implementing WS-00 surfaced four gaps between the §7 snippets and code that com
 | A2 | `Update.ErrorCode` typed as `ErrorCode`, not `string` | The §21 table already defines a closed set with a retryability column. Typing the field lets `Retryable()` and `TerminalState()` derive from one table instead of two switch statements that drift. |
 | A3 | `Resume` and `RunResume` added | §7.4 describes the resume frame in prose — "for every non-terminal run it owns, `{run_id, state, last_acked_seq}`" — but no §7.2 type expressed it. It crosses the wire, so per F8 it belongs in `pkg/protocol`. |
 | A4 | `protocol.Version` constant added | The spec calls the protocol independently versionable without giving it a version. Because inbound decoding is strict, even an additive change is visible to an older agent as a decode failure; a version makes that diagnosable rather than mysterious. |
+| A5 | `protocol.Duration` accepts a leading day component | §8 and §9 write retention as `log_retention = "14d"` and `retain: 7d`, and Go's `time.ParseDuration` rejects the unit outright — both would have failed at load. Only a leading component is accepted, so `1d12h` parses and `12h1d` does not. |
+| A6 | **`RunRequest.ID` and `CancelRequest.ID` are validated** (INV-3 above) | Found by `gosec` G304 during WS-02 and confirmed by hand: a control plane sending `{"id": "../../../../tmp/x"}` made the agent open a log file outside `~/.latem` entirely. INV-3 enumerated `repo`, `ref`, and `inputs` and never mentioned `id`, while `id` is the field every path is built from. |
 
-None of these widens the trust boundary. A1 and A4 are not wire changes at all, A2 narrows a field's legal values, and A3 formalises a frame the spec already required.
+A1, A4, and A5 are not wire changes. A2 and A6 narrow a field's legal values, and A3 formalises a frame the spec already required. **A6 is a security fix, not a tidy-up** — it closes a path traversal reachable from a compromised or buggy control plane, which is precisely the threat §5 exists to bound.

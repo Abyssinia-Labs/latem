@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 	"unicode/utf8"
 )
@@ -27,6 +28,41 @@ const (
 // text originating outside the trust boundary; the cap stops it being used as
 // a channel for bulk data or as a way to blow up a log line.
 const MaxCancelReasonRunes = 200
+
+// MaxIDLength bounds a run identifier.
+const MaxIDLength = 64
+
+// idPattern is deliberately narrower than "any string". See [ValidateID].
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+// ValidateID checks a run identifier from outside the trust boundary.
+//
+// A run id is not merely a label. The agent builds filesystem paths from it —
+// work/<id>, logs/<id>.log, artifacts/<id>/ — and container and VM names,
+// latem-run-<id>. An id containing "/" or ".." is therefore a path traversal
+// with a control plane on the far end of it: `{"id": "../../../../tmp/x"}`
+// gets a file written wherever the agent's user can write.
+//
+// RUNNER_SPEC's INV-3 enumerates validation for repo, ref, and inputs, and
+// says nothing about id, which is how this was missed. The character class
+// here excludes every separator and every dot, so no id can escape a
+// directory or collide with "." and "..".
+//
+// Consumers should still keep their own defences — see logstream.NewFileSink —
+// because a single validation point that everything else trusts is exactly the
+// shape of the next incident.
+func ValidateID(id string) error {
+	switch {
+	case id == "":
+		return fmt.Errorf("protocol: run id is empty")
+	case len(id) > MaxIDLength:
+		return fmt.Errorf("protocol: run id is %d bytes, limit %d", len(id), MaxIDLength)
+	case !idPattern.MatchString(id):
+		return fmt.Errorf(
+			"protocol: run id %q must match %s — ids become file and container names", id, idPattern)
+	}
+	return nil
+}
 
 // Command is one inbound message. Exactly one payload field is populated, and
 // it is the one matching Kind.
@@ -118,10 +154,7 @@ func (c Command) Validate() error {
 		if c.Cancel != nil {
 			return fmt.Errorf("protocol: command kind %q carries a cancel payload", c.Kind)
 		}
-		if c.Run.ID == "" {
-			return fmt.Errorf("protocol: run request has no id")
-		}
-		return nil
+		return ValidateID(c.Run.ID)
 
 	case CommandCancel:
 		if c.Cancel == nil {
@@ -130,10 +163,7 @@ func (c Command) Validate() error {
 		if c.Run != nil {
 			return fmt.Errorf("protocol: command kind %q carries a run payload", c.Kind)
 		}
-		if c.Cancel.ID == "" {
-			return fmt.Errorf("protocol: cancel request has no id")
-		}
-		return nil
+		return ValidateID(c.Cancel.ID)
 
 	case "":
 		return fmt.Errorf("protocol: command has no kind")

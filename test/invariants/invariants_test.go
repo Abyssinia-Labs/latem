@@ -14,7 +14,17 @@
 // their skip lines stay in front of people.
 package invariants
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/Abyssinia-Labs/latem/internal/logstream"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
+)
 
 // INV-1 — The agent only makes outbound connections.
 //
@@ -70,8 +80,109 @@ func TestINV3_NoShellInterpolation(t *testing.T) {
 // passes while the leak described in RUNNER_SPEC §16 is live — that is exactly
 // how draft 01 of the spec shipped an unredacted App Store Connect key with a
 // green test suite. Single-line coverage alone does not satisfy INV-4.
+//
+// This covers the log path end to end: a real emitter, a real on-disk file
+// sink, and a sink standing in for the broker. Two further surfaces named by
+// the invariant — inputs_json in the store and Update.ErrorMsg — do not exist
+// yet; WS-05 and WS-10 extend this test when they land. What is asserted here
+// is the dominant leak path and the one §16 is written about.
 func TestINV4_SecretsNeverLeave(t *testing.T) {
-	t.Skip("unskipped by WS-02 (log pipeline & redaction)")
+	const p8 = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj
+MzEfYyjiWA4R4/M2bS1GB4t7NXp98C3SC6dVMvDuictGeurT8jNbvJZHtCSuYEvu
+NMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s+CLOyS56YyCFGeJZ
+qgtzJ6GR3eqoYSW9b9UMvkBpZODSctWSNGj3P7jRFDO5VoTwCQAWbFnOjDfH5Ulg
+-----END PRIVATE KEY-----`
+
+	secrets := map[string]string{
+		"APP_STORE_CONNECT_KEY_P8":  p8,
+		"MATCH_PASSWORD":            "correct-horse-battery-staple",
+		"ANDROID_KEYSTORE_PASSWORD": "hunter2-but-longer",
+	}
+
+	dir := t.TempDir()
+	red := logstream.NewRedactor()
+	for _, v := range secrets {
+		red.Register([]byte(v))
+	}
+
+	fileSink, err := logstream.NewFileSink(dir, "run_inv4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &recordingSink{}
+	emitter := logstream.NewEmitter("run_inv4", red, fileSink, broker)
+
+	// The job echoes every secret, the way a debugging `set -x` or a careless
+	// `env` would.
+	var script strings.Builder
+	for name, value := range secrets {
+		script.WriteString("+ echo \"$" + name + "\"\n")
+		script.WriteString(value + "\n")
+	}
+	script.WriteString("BUILD SUCCESSFUL\n")
+
+	if err := emitter.Consume(context.Background(), protocol.StreamStdout, strings.NewReader(script.String())); err != nil {
+		t.Fatal(err)
+	}
+	if err := emitter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(dir, "run_inv4.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := strings.Join(broker.lines(), "\n")
+
+	for name, value := range secrets {
+		// Every line of a multi-line secret is checked individually, because
+		// the whole value never appears in one line and a whole-value check
+		// would therefore pass against a broken redactor.
+		for i, line := range strings.Split(value, "\n") {
+			line = strings.TrimSpace(line)
+			if len(line) < 6 {
+				continue
+			}
+			if strings.Contains(string(onDisk), line) {
+				t.Errorf("%s line %d reached the log file:\n%s", name, i, line)
+			}
+			if strings.Contains(transcript, line) {
+				t.Errorf("%s line %d reached the broker transcript:\n%s", name, i, line)
+			}
+		}
+	}
+
+	// The build's own output must survive, or the redactor is useless in a
+	// different way.
+	if !strings.Contains(string(onDisk), "BUILD SUCCESSFUL") {
+		t.Error("ordinary output was destroyed along with the secrets")
+	}
+}
+
+// recordingSink stands in for whatever a broker does with frames.
+type recordingSink struct {
+	mu     sync.Mutex
+	frames []protocol.LogFrame
+}
+
+func (s *recordingSink) Write(frames []protocol.LogFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.frames = append(s.frames, frames...)
+	return nil
+}
+
+func (s *recordingSink) Close() error { return nil }
+
+func (s *recordingSink) lines() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.frames))
+	for i, f := range s.frames {
+		out[i] = f.Line
+	}
+	return out
 }
 
 // INV-5 — The registry comes from disk, at the pinned commit.
