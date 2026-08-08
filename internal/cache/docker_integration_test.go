@@ -89,7 +89,7 @@ func TestIntegrationAcquireThroughTheManager(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = api.VolumeRemove(context.Background(), VolumeName("itest", "gradle")) })
 
-	mounts, err := l.Acquire(ctx, "itest", []string{"gradle"})
+	mounts, err := l.Acquire(ctx, "itest", []Request{{Name: "gradle", Target: "/cache/gradle"}})
 	if err != nil {
 		t.Fatal(err)
 	}

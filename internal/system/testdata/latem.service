@@ -1,0 +1,19 @@
+[Unit]
+Description=Latem runner agent
+Documentation=https://github.com/Abyssinia-Labs/latem
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/latem agent
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+# shutdown_grace (30m) plus a margin for the SIGTERM/SIGKILL escalation on
+# each run's process group. Too short kills the agent while it is tearing down
+# containers and VMs, and a leaked Tart VM costs 90 GB.
+TimeoutStopSec=1830
+
+[Install]
+WantedBy=default.target

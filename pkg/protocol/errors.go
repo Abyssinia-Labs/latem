@@ -36,6 +36,14 @@ const (
 	ErrApprovalExpired ErrorCode = "E_APPROVAL_EXPIRED"
 	ErrQueueExpired    ErrorCode = "E_QUEUE_EXPIRED"
 
+	// ErrSecretBackend means a secret store is unusable, as distinct from a
+	// secret nobody configured: a locked keychain, `op` not signed in, a
+	// world-readable secrets.env. It is retryable because the most common
+	// instance — a Mac mini whose keychain is locked after a reboot — is a
+	// machine condition that resolves without anyone editing a commit
+	// (amendment A16).
+	ErrSecretBackend ErrorCode = "E_SECRET_BACKEND"
+
 	// ErrAgentDown is a CLI condition, not a run outcome, and never appears in
 	// [Update.ErrorCode]. `latem run --wait` exits 3 with this when no agent is
 	// listening (RUNNER_SPEC §7.3). It is declared here so the CLI and any
@@ -68,10 +76,11 @@ var errorTable = map[ErrorCode]errorInfo{
 	ErrStep:        {StateFailed, false},
 	ErrArtifact:    {StateFailed, false},
 
-	ErrSource:   {StateFailed, true},
-	ErrExecutor: {StateFailed, true},
-	ErrCache:    {StateFailed, true},
-	ErrDisk:     {StateFailed, true},
+	ErrSource:        {StateFailed, true},
+	ErrExecutor:      {StateFailed, true},
+	ErrCache:         {StateFailed, true},
+	ErrDisk:          {StateFailed, true},
+	ErrSecretBackend: {StateFailed, true},
 
 	ErrTimeout:     {StateTimedOut, false},
 	ErrStepTimeout: {StateTimedOut, false},

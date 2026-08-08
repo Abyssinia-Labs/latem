@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.latem.agent</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/tester/.local/bin/latem</string>
+		<string>agent</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>ExitTimeOut</key>
+	<integer>1830</integer>
+	<!-- Standard, not Background: launchd throttles a Background job's CPU and
+	     disk I/O, and an Xcode build under that policy is slower for reasons
+	     that never appear in any log. -->
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/tester</string>
+	<key>StandardOutPath</key>
+	<string>/Users/tester/.latem/logs/agent.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/tester/.latem/logs/agent.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+</dict>
+</plist>

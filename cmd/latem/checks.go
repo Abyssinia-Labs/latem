@@ -1,0 +1,1030 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/Abyssinia-Labs/latem/internal/cache"
+	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
+	"github.com/Abyssinia-Labs/latem/internal/logstream"
+	"github.com/Abyssinia-Labs/latem/internal/metrics"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/source"
+	"github.com/Abyssinia-Labs/latem/internal/system"
+)
+
+// gitMinimum is the git release that introduced --end-of-options.
+//
+// RUNNER_SPEC amendment A7 requires it in every argument position holding a
+// ref, because `--` there means "a pathspec follows" and does not stop option
+// parsing the way INV-3 needs. An older git makes the argument-injection
+// defence quietly weaker, which is not a property to discover from a build.
+var gitMinimum = [3]int{2, 24, 0}
+
+// clockSkewWarn and clockSkewFail bound the acceptable difference between this
+// machine's clock and the broker's.
+//
+// A machine token is validated against a signing window. Below a minute
+// nothing breaks; past five, token validation fails with an error that names
+// authentication and sends an operator to regenerate a token that was never
+// the problem.
+const (
+	clockSkewWarn = time.Minute
+	clockSkewFail = 5 * time.Minute
+)
+
+// dockerProbe is the slice of the Docker executor `doctor` needs.
+//
+// It is an interface so every Docker check runs in a test on a machine with no
+// daemon. The base-image contract in particular is the check most worth
+// testing and the least testable against a real daemon: it needs an image that
+// deliberately violates §13.1.
+type dockerProbe interface {
+	Preflight(ctx context.Context) error
+	CheckImage(ctx context.Context, ref string) (docker.ImageReport, error)
+	Close() error
+}
+
+// secretResolver is the slice of the secrets chain `doctor` needs.
+type secretResolver interface {
+	Resolve(ctx context.Context, name string) (secrets.Value, error)
+	Providers() []string
+}
+
+// doctor holds everything a run of the checks needs.
+type doctor struct {
+	sys  *system.System
+	dir  string
+	file string
+
+	cfg    *config.Config
+	cfgErr error
+
+	includeSecrets bool
+
+	loadCfg    func() (*config.Config, error)
+	newDocker  func(docker.Options) (dockerProbe, error)
+	newSecrets func(secrets.Options) (secretResolver, error)
+	sameFS     func(mirrorDir, workDir string) error
+}
+
+func newDoctor() *doctor {
+	return &doctor{
+		sys: system.New(system.Options{
+			// A repo probe must never sit waiting for a username on a terminal
+			// nobody is watching. Both variables turn a missing credential
+			// into an immediate, reportable failure.
+			Env: []string{
+				"GIT_TERMINAL_PROMPT=0",
+				"GIT_SSH_COMMAND=ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new",
+			},
+		}),
+		dir:     configDir(),
+		file:    configFile(),
+		loadCfg: loadConfig,
+		newDocker: func(opts docker.Options) (dockerProbe, error) {
+			return docker.New(opts)
+		},
+		newSecrets: func(opts secrets.Options) (secretResolver, error) {
+			return secrets.New(opts)
+		},
+		sameFS: source.CheckSameFilesystem,
+	}
+}
+
+// run executes every check and returns the report.
+//
+// No check may stop the run. An operator on a fresh Mac mini is supposed to
+// get the whole list and do one afternoon's work, not fix-rerun-fix-rerun,
+// so a probe that panics or errors becomes a failed check rather than an
+// aborted diagnosis.
+func (d *doctor) run(ctx context.Context) report {
+	d.cfg, d.cfgErr = d.loadCfg()
+
+	var rep report
+	rep.section("Tooling", d.checkTooling(ctx)...)
+	rep.section("Configuration", d.checkConfiguration(ctx)...)
+	rep.section("Disk", d.checkDisk(ctx)...)
+	rep.section("Executors", d.checkExecutors(ctx)...)
+	rep.section("Repositories", d.checkRepos(ctx)...)
+	if d.includeSecrets {
+		rep.section("Secrets", d.checkSecrets(ctx)...)
+	}
+	if d.sys.IsMacOS() {
+		rep.section("macOS session", d.checkMacOS(ctx)...)
+	}
+	rep.section("Service", d.checkService(ctx)...)
+	rep.section("Broker", d.checkBroker(ctx)...)
+	return rep
+}
+
+// runnersFor returns the configured runners using an executor.
+func (d *doctor) runnersFor(ex config.Executor) []*config.Runner {
+	if d.cfg == nil {
+		return nil
+	}
+	var out []*config.Runner
+	for _, r := range d.cfg.Runners {
+		if r.Executor == ex {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------- tooling
+
+func (d *doctor) checkTooling(ctx context.Context) []check {
+	out := []check{d.checkGit(ctx)}
+	out = append(out, d.checkDocker(ctx)...)
+	out = append(out, d.checkTart(ctx))
+	if d.sys.IsLinux() {
+		out = append(out, d.checkKVM())
+	}
+	return out
+}
+
+func (d *doctor) checkGit(ctx context.Context) check {
+	git := d.sys.Git(ctx)
+	switch {
+	case !git.Found:
+		return fail("git.present", "git", "not on PATH", d.installCommand("git"))
+	case git.Version.IsZero():
+		return warn("git.version", "git", git.Banner+" — could not read a version from this banner")
+	case !git.Version.AtLeast(gitMinimum[0], gitMinimum[1], gitMinimum[2]):
+		return fail("git.version", "git",
+			fmt.Sprintf("%s — too old; --end-of-options needs git %d.%d+", git.Banner, gitMinimum[0], gitMinimum[1]),
+			d.installCommand("git")).
+			withNotes("INV-3 passes every ref through --end-of-options so a ref cannot become a git option. " +
+				"Without it, a ref like --upload-pack=/bin/sh is an argument injection (amendment A7).")
+	default:
+		return pass("git.version", "git", git.Banner)
+	}
+}
+
+func (d *doctor) checkDocker(ctx context.Context) []check {
+	dockerRunners := d.runnersFor(config.ExecutorDocker)
+	required := len(dockerRunners) > 0
+
+	cli := d.sys.Docker(ctx)
+	if !cli.Found {
+		detail := "not on PATH"
+		if !required {
+			return []check{warn("docker.present", "docker", detail+" (no docker runner configured)", d.installCommand("docker"))}
+		}
+		return []check{fail("docker.present", "docker",
+			fmt.Sprintf("%s, but %d docker runner(s) are configured", detail, len(dockerRunners)),
+			d.installCommand("docker"))}
+	}
+	out := []check{pass("docker.present", "docker", cli.Banner)}
+
+	// The daemon, not the CLI. A CLI with no daemon behind it is the single
+	// most common "docker is installed" false positive.
+	probe, err := d.newDocker(docker.Options{})
+	if err != nil {
+		out = append(out, fail("docker.daemon", "docker daemon", err.Error(), d.startDockerCommand()))
+	} else {
+		defer func() { _ = probe.Close() }()
+		if err := probe.Preflight(ctx); err != nil {
+			level := fail
+			if !required {
+				level = warn
+			}
+			out = append(out, level("docker.daemon", "docker daemon", firstLineOf(err.Error()), d.startDockerCommand()))
+		} else {
+			out = append(out, pass("docker.daemon", "docker daemon", "reachable"))
+		}
+	}
+
+	if d.sys.IsLinux() {
+		in, err := d.sys.InDockerGroup(ctx)
+		switch {
+		case err != nil:
+			out = append(out, warn("docker.group", "docker group", "could not read group membership: "+err.Error()))
+		case !in:
+			out = append(out, fail("docker.group", "docker group",
+				fmt.Sprintf("%s is not in the docker group", d.sys.User()),
+				fmt.Sprintf("sudo usermod -aG docker %s", d.sys.User()),
+				"newgrp docker   # or log out and back in").
+				withNotes("A shell that was open before the group was added still does not have it. "+
+					"The error this produces names the socket, not the group."))
+		default:
+			out = append(out, pass("docker.group", "docker group", d.sys.User()+" can reach the daemon socket"))
+		}
+	}
+	return out
+}
+
+func (d *doctor) checkTart(ctx context.Context) check {
+	tartRunners := d.runnersFor(config.ExecutorTart)
+	if !d.sys.IsMacOS() {
+		if len(tartRunners) > 0 {
+			return fail("tart.present", "tart",
+				fmt.Sprintf("a tart runner is configured but tart is macOS-only (this is %s)", d.sys.OS()))
+		}
+		return skip("tart.present", "tart", "macOS only")
+	}
+	tart := d.sys.Tart(ctx)
+	switch {
+	case tart.Found && !tart.Version.IsZero():
+		return pass("tart.present", "tart", "tart "+tart.Version.String())
+	case tart.Found:
+		return pass("tart.present", "tart", tart.Banner)
+	case len(tartRunners) > 0:
+		return fail("tart.present", "tart",
+			fmt.Sprintf("not on PATH, but runner %q uses the tart executor", tartRunners[0].Name),
+			"brew install cirruslabs/cli/tart")
+	default:
+		return warn("tart.present", "tart",
+			"not installed — Xcode jobs will fall back to the native executor, which has no isolation",
+			"brew install cirruslabs/cli/tart").
+			withNotes("The native executor runs builds directly on this host as the logged-in user " +
+				"and at concurrency 1 (§13.3). It is a convenience mode, not an isolation story.")
+	}
+}
+
+func (d *doctor) checkKVM() check {
+	k := system.CheckKVM()
+	switch {
+	case k.Err != nil:
+		return warn("kvm.device", "/dev/kvm", "could not be inspected: "+k.Err.Error())
+	case !k.Present:
+		return warn("kvm.device", "/dev/kvm", "absent — Android emulator jobs cannot run here",
+			"sudo modprobe kvm_intel   # or kvm_amd").
+			withNotes("Only emulator jobs need this. Whether one is configured cannot be known from " +
+				"local config: runs_on and the steps live in jobs.yaml at the resolved commit (INV-5).")
+	case !k.Usable:
+		return warn("kvm.device", "/dev/kvm", fmt.Sprintf("present but %s cannot open it read-write", d.sys.User()),
+			fmt.Sprintf("sudo usermod -aG kvm %s", d.sys.User()),
+			"newgrp kvm   # or log out and back in").
+			withNotes("An emulator opens the device read-write, so a read-only check passes and the " +
+				"emulator still fails.")
+	default:
+		return pass("kvm.device", "/dev/kvm", "present and writable")
+	}
+}
+
+// ---------------------------------------------------------- configuration
+
+func (d *doctor) checkConfiguration(_ context.Context) []check {
+	var out []check
+
+	if d.cfgErr != nil {
+		problems := config.Problems(d.cfgErr)
+		if len(problems) == 0 {
+			problems = []error{d.cfgErr}
+		}
+		// One check per problem, so each gets its own line and its own fix.
+		// internal/config already writes the remediation into the message —
+		// restating it here in different words would let the two drift.
+		for i, p := range problems {
+			out = append(out, fail(fmt.Sprintf("config.problem.%d", i+1), "config.toml", p.Error()))
+		}
+	} else {
+		out = append(out, pass("config.load", "config.toml",
+			fmt.Sprintf("%s — %d repo(s), %d runner(s)", d.file, len(d.cfg.Repos), len(d.cfg.Runners))))
+	}
+
+	out = append(out, d.checkModes()...)
+	out = append(out, d.checkMetricsAddr())
+	if c, ok := d.checkWorkDirLocation(); ok {
+		out = append(out, c)
+	}
+	return out
+}
+
+// checkModes enforces RUNNER_SPEC §23's directory and file modes.
+//
+// A world-readable ~/.latem holding a machine token and every secret is the
+// whole threat model failing quietly, which is why the agent refuses to start
+// rather than warning. `doctor` should therefore say so before the operator
+// discovers it from a service that will not come up.
+func (d *doctor) checkModes() []check {
+	type target struct {
+		id, title, path string
+		want            fs.FileMode
+	}
+	targets := []target{
+		{"modes.dir", "~/.latem mode", d.dir, 0o700},
+		{"modes.config", "config.toml mode", d.file, 0o600},
+	}
+	if d.cfg != nil {
+		targets = append(targets,
+			target{"modes.token", "token file mode", d.cfg.Paths.TokenFile, 0o600},
+			target{"modes.secrets", "secrets.env mode", d.cfg.Paths.SecretsEnv, 0o600},
+			target{"modes.socket", "agent.sock mode", d.cfg.Paths.Socket, 0o600},
+		)
+	} else {
+		// Without a parsed config the conventional names are the best that can
+		// be done, and saying so is better than skipping the check on exactly
+		// the machine that needs it.
+		targets = append(targets,
+			target{"modes.token", "token file mode", filepath.Join(d.dir, "agent.key"), 0o600},
+			target{"modes.secrets", "secrets.env mode", filepath.Join(d.dir, "secrets.env"), 0o600},
+		)
+	}
+
+	out := make([]check, 0, len(targets))
+	for _, t := range targets {
+		m := system.InspectMode(t.path, t.want)
+		switch {
+		case m.Err != nil:
+			out = append(out, warn(t.id, t.title, fmt.Sprintf("%s: %v", t.path, m.Err)))
+		case !m.Exists:
+			out = append(out, skip(t.id, t.title, t.path+" does not exist yet"))
+		case !m.OK:
+			out = append(out, fail(t.id, t.title,
+				fmt.Sprintf("%s is %04o, want %04o or stricter", t.path, m.Mode, t.want),
+				m.FixCommand()))
+		default:
+			out = append(out, pass(t.id, t.title, fmt.Sprintf("%s is %04o", t.path, m.Mode)))
+		}
+	}
+	return out
+}
+
+func (d *doctor) checkMetricsAddr() check {
+	if d.cfg == nil {
+		return skip("metrics.loopback", "metrics_addr", "config did not load")
+	}
+	addr := d.cfg.Agent.MetricsAddr
+	if addr == "" {
+		return pass("metrics.loopback", "metrics_addr", "disabled")
+	}
+	if err := metrics.CheckLoopback(addr); err != nil {
+		return fail("metrics.loopback", "metrics_addr", err.Error(),
+			fmt.Sprintf("set metrics_addr = \"127.0.0.1:%s\" in %s", portOf(addr), d.file)).
+			withNotes("INV-1: the agent makes outbound connections and binds nothing routable. " +
+				"There is no port to forward and no inbound firewall rule to write.")
+	}
+	return pass("metrics.loopback", "metrics_addr", addr+" is loopback")
+}
+
+// checkWorkDirLocation reports a work_dir outside the config directory.
+//
+// It matters for more than tidiness. The cache manager is constructed from a
+// single Root and derives work/, mirrors/, and caches/ underneath it, so a
+// relocated agent.work_dir leaves its disk gate measuring free space on the
+// config directory's filesystem rather than on the one the build will fill.
+func (d *doctor) checkWorkDirLocation() (check, bool) {
+	if d.cfg == nil {
+		return check{}, false
+	}
+	work := d.cfg.Paths.Work
+	if strings.HasPrefix(work, d.cfg.Paths.Dir+string(filepath.Separator)) {
+		return check{}, false
+	}
+	return warn("config.workdir", "agent.work_dir",
+		fmt.Sprintf("%s is outside %s", work, d.cfg.Paths.Dir)).
+		withNotes("Disk figures below are measured on the config directory's filesystem. " +
+			"Confirm that this is the same filesystem the workspaces land on."), true
+}
+
+// -------------------------------------------------------------------- disk
+
+func (d *doctor) checkDisk(ctx context.Context) []check {
+	if d.cfg == nil {
+		return []check{skip("disk.free", "free disk", "config did not load")}
+	}
+
+	// The agent creates these at startup; doctor creating them costs nothing
+	// and lets the same-filesystem check run on a machine that has never run
+	// a build — which is exactly the machine this check is for.
+	_ = os.MkdirAll(d.cfg.Paths.Work, 0o700)
+	_ = os.MkdirAll(d.cfg.Paths.Mirrors, 0o700)
+
+	runners := make(map[string]cache.RunnerConfig, len(d.cfg.Runners))
+	for _, r := range d.cfg.Runners {
+		runners[r.Name] = cache.RunnerConfig{Executor: string(r.Executor), MinFreeGB: r.MinFreeGB()}
+	}
+	mgr, err := cache.New(cache.Options{Root: d.cfg.Paths.Dir, Runners: runners})
+	if err != nil {
+		return []check{fail("disk.free", "free disk", err.Error())}
+	}
+
+	free, err := mgr.FreeGB(ctx)
+	if err != nil {
+		return []check{fail("disk.free", "free disk", err.Error())}
+	}
+
+	out := make([]check, 0, len(d.cfg.Runners)+2)
+	for _, r := range d.cfg.Runners {
+		floor := r.MinFreeGB()
+		id := "disk.free." + r.Name
+		title := "free disk / " + r.Name
+		detail := fmt.Sprintf("%.1f GB free, floor %.0f GB (%s)", free, floor, r.Executor)
+		if free < floor {
+			out = append(out, fail(id, title, detail,
+				"latem cache prune --aggressive",
+				"latem cache ls   # find what is large").
+				withNotes("The floor is per runner, not global: 40 GB for docker, 60 for native, "+
+					"150 for tart — a Tart image carrying Xcode is around 90 GB before the build "+
+					"writes a byte (§14.4). Below it the agent refuses runs with E_DISK rather than "+
+					"failing halfway through one."))
+		} else {
+			out = append(out, pass(id, title, detail))
+		}
+	}
+	if len(d.cfg.Runners) == 0 {
+		out = append(out, warn("disk.free", "free disk", fmt.Sprintf("%.1f GB free; no runners configured", free)))
+	}
+
+	out = append(out, d.checkSameFilesystem())
+	out = append(out, d.checkStaleMirrors(mgr))
+	return out
+}
+
+// checkSameFilesystem is finding F2, and it is the one nobody discovers alone.
+func (d *doctor) checkSameFilesystem() check {
+	mirrors, work := d.cfg.Paths.Mirrors, d.cfg.Paths.Work
+	if err := d.sameFS(mirrors, work); err != nil {
+		return fail("disk.samefs", "mirrors and work_dir", err.Error(),
+			fmt.Sprintf("put agent.work_dir on the same filesystem as %s, in %s", mirrors, d.file)).
+			withNotes("§12 clones each workspace from the mirror with `git clone --local`, which " +
+				"hardlinks the object store. Across filesystems git silently copies it instead — no " +
+				"error, no warning, just a multi-gigabyte copy per run and a machine that gets " +
+				"slower for reasons nobody attributes correctly.")
+	}
+	return pass("disk.samefs", "mirrors and work_dir", "one filesystem, so clones hardlink")
+}
+
+func (d *doctor) checkStaleMirrors(mgr *cache.Local) check {
+	stale, err := mgr.StaleMirrors(cache.StaleMirrorAge)
+	if err != nil {
+		return warn("disk.mirrors", "stale mirrors", err.Error())
+	}
+	if len(stale) == 0 {
+		return pass("disk.mirrors", "stale mirrors", "none older than 90 days")
+	}
+	return warn("disk.mirrors", "stale mirrors",
+		fmt.Sprintf("%d untouched for 90+ days: %s", len(stale), strings.Join(stale, ", ")),
+		fmt.Sprintf("rm -rf %s/<repo>.git   # only if you are sure", d.cfg.Paths.Mirrors)).
+		withNotes("Reported, never deleted automatically: a mirror may be the only local copy of a " +
+			"repository whose origin has since been renamed, made private, or deleted.")
+}
+
+// --------------------------------------------------------------- executors
+
+func (d *doctor) checkExecutors(ctx context.Context) []check {
+	if d.cfg == nil {
+		return []check{skip("executor.image", "base images", "config did not load")}
+	}
+	var out []check
+	out = append(out, d.checkDockerImages(ctx)...)
+	out = append(out, d.checkGPU(ctx)...)
+	out = append(out, d.checkTartImages(ctx)...)
+	if len(out) == 0 {
+		out = append(out, skip("executor.image", "base images", "no runner declares a base image"))
+	}
+	return out
+}
+
+// checkDockerImages runs each default image once against the §13.1 contract.
+func (d *doctor) checkDockerImages(ctx context.Context) []check {
+	var out []check
+	for _, r := range d.runnersFor(config.ExecutorDocker) {
+		if r.Docker == nil || r.Docker.DefaultImage == "" {
+			continue
+		}
+		id, title := "image."+r.Name, "base image / "+r.Name
+		probe, err := d.newDocker(docker.Options{DefaultImage: r.Docker.DefaultImage})
+		if err != nil {
+			out = append(out, fail(id, title, err.Error(), d.startDockerCommand()))
+			continue
+		}
+		rep, err := probe.CheckImage(ctx, r.Docker.DefaultImage)
+		_ = probe.Close()
+		if err != nil {
+			out = append(out, fail(id, title,
+				fmt.Sprintf("%s: %s", r.Docker.DefaultImage, firstLineOf(err.Error())),
+				fmt.Sprintf("docker pull %s", r.Docker.DefaultImage)))
+			continue
+		}
+		if rep.OK() {
+			out = append(out, pass(id, title, r.Docker.DefaultImage+" satisfies the §13.1 contract"))
+			continue
+		}
+		c := fail(id, title, fmt.Sprintf("%s does not satisfy the §13.1 contract", r.Docker.DefaultImage))
+		for _, f := range rep.Failures() {
+			c.Notes = append(c.Notes, f.Name+": "+f.Detail)
+		}
+		c.Notes = append(c.Notes,
+			"An image with no uid 1000 in /etc/passwd leaves $HOME unset or unwritable, and the "+
+				"failures land forty minutes into a build as npm EACCES, a Gradle daemon that will "+
+				"not start, or CocoaPods failing to write its cache — errors that look like tooling "+
+				"bugs and send you to the wrong repository entirely.")
+		c.Fix = append(c.Fix,
+			"add to your image: RUN useradd -u 1000 -m runner && apt-get install -y bash git ca-certificates")
+		out = append(out, c)
+	}
+	return out
+}
+
+func (d *doctor) checkGPU(ctx context.Context) []check {
+	var out []check
+	for _, r := range d.runnersFor(config.ExecutorDocker) {
+		if r.Docker == nil || !r.Docker.GPU {
+			continue
+		}
+		id, title := "gpu."+r.Name, "nvidia toolkit / "+r.Name
+		probe, err := d.newDocker(docker.Options{GPU: true})
+		if err != nil {
+			out = append(out, fail(id, title, err.Error(), d.startDockerCommand()))
+			continue
+		}
+		err = probe.Preflight(ctx)
+		_ = probe.Close()
+		if err != nil {
+			out = append(out, fail(id, title, firstLineOf(err.Error()),
+				"sudo apt-get install -y nvidia-container-toolkit",
+				"sudo nvidia-ctk runtime configure --runtime=docker",
+				"sudo systemctl restart docker").
+				withNotes("A GPU runner that fails this accepts no work at all rather than failing "+
+					"a build at minute forty (§20)."))
+			continue
+		}
+		out = append(out, pass(id, title, "nvidia-smi runs in a container"))
+	}
+	return out
+}
+
+// checkTartImages reports each Tart base image and its real on-disk size.
+func (d *doctor) checkTartImages(ctx context.Context) []check {
+	var out []check
+	for _, r := range d.runnersFor(config.ExecutorTart) {
+		if r.Tart == nil || r.Tart.BaseImage == "" {
+			continue
+		}
+		id, title := "tart.image."+r.Name, "tart image / "+r.Name
+		img := d.sys.TartImage(ctx, r.Tart.BaseImage)
+		if !img.Exists {
+			out = append(out, fail(id, title,
+				fmt.Sprintf("%s is not built on this machine", r.Tart.BaseImage),
+				"see examples/ for the base image build script").
+				withNotes("Until it exists, every Xcode job on this runner fails at Prepare (§13.2)."))
+			continue
+		}
+		floor := r.MinFreeGB()
+		detail := fmt.Sprintf("%s occupies %s on disk; runner floor is %.0f GB",
+			r.Tart.BaseImage, formatBytes(img.SizeBytes), floor)
+		if !img.Measured {
+			out = append(out, warn(id, title, r.Tart.BaseImage+" exists but its size could not be measured"))
+			continue
+		}
+		imageGB := float64(img.SizeBytes) / float64(1<<30)
+		if imageGB > floor {
+			out = append(out, warn(id, title, detail,
+				fmt.Sprintf("raise min_free_gb above %.0f under [runner.tart] for %q in %s",
+					imageGB, r.Name, d.file)).
+				withNotes("A clone diverges from its base as the VM runs, and DerivedData lands on "+
+					"top. A floor below the image's own size admits a build this machine cannot "+
+					"finish (§13.2)."))
+			continue
+		}
+		out = append(out, pass(id, title, detail))
+	}
+	return out
+}
+
+// ------------------------------------------------------------ repositories
+
+// checkRepos asks each configured remote whether this machine can read it.
+//
+// `git ls-remote` and not a plain reachability test, because the question is
+// not "is the host up" but "do the credentials on this machine work" — the
+// deploy key that expired, the ssh agent that is not forwarded into a
+// LaunchAgent's session, the token that was rotated. Each of those presents at
+// gate 6 as E_SOURCE partway into a run.
+func (d *doctor) checkRepos(ctx context.Context) []check {
+	if d.cfg == nil {
+		return []check{skip("repo.reach", "repositories", "config did not load")}
+	}
+	if len(d.cfg.Repos) == 0 {
+		return []check{warn("repo.reach", "repositories", "no [repos.*] entries; this agent would reject every run")}
+	}
+
+	out := make([]check, 0, len(d.cfg.Repos))
+	for _, name := range sortedStrings(d.cfg.Repos) {
+		repo := d.cfg.Repos[name]
+		id, title := "repo."+name, "repo / "+name
+		// --end-of-options rather than --, per amendment A7: -- would mean
+		// "a pathspec follows" and the URL is not a path.
+		outBytes, err := d.sys.Exec(ctx, "git", "ls-remote", "--heads", "--end-of-options", repo.URL)
+		if err == nil {
+			out = append(out, pass(id, title, repo.URL))
+			continue
+		}
+		detail := firstLineOf(strings.TrimSpace(string(outBytes)))
+		if detail == "" {
+			detail = err.Error()
+		}
+		out = append(out, fail(id, title, fmt.Sprintf("%s — %s", repo.URL, detail),
+			fmt.Sprintf("git ls-remote %s   # to see the full error", repo.URL)).
+			withNotes("An agent started by launchd or systemd does not inherit your interactive ssh "+
+				"agent. A deploy key in ~/.ssh with an ssh config entry works from both; a forwarded "+
+				"agent works from neither."))
+	}
+	return out
+}
+
+// ----------------------------------------------------------------- secrets
+
+// checkSecrets resolves every locally-known secret name.
+//
+// Names only, never values (INV-4). What is knowable locally is the set of
+// names in [secrets.commands] plus the keys in secrets.env — a job's own
+// secrets: block lives in jobs.yaml at the resolved commit and is not on disk
+// until a run checks it out, so this cannot be the complete set and does not
+// claim to be.
+func (d *doctor) checkSecrets(ctx context.Context) []check {
+	if d.cfg == nil {
+		return []check{skip("secrets.resolve", "secrets", "config did not load")}
+	}
+
+	chain, err := d.newSecrets(secrets.Options{
+		FilePath: d.cfg.Paths.SecretsEnv,
+		Commands: d.cfg.Secrets.Commands,
+	})
+	if err != nil {
+		return []check{fail("secrets.chain", "secrets chain", err.Error())}
+	}
+
+	out := []check{pass("secrets.chain", "secrets chain", strings.Join(chain.Providers(), " → "))}
+
+	names := d.knownSecretNames()
+	if len(names) == 0 {
+		out = append(out, skip("secrets.resolve", "secret names",
+			"none declared locally; a job's secrets: block is only readable at the resolved commit"))
+		return out
+	}
+
+	for _, name := range names {
+		id, title := "secret."+name, "secret / "+name
+		value, err := chain.Resolve(ctx, name)
+		switch {
+		case errors.Is(err, secrets.ErrNotFound):
+			out = append(out, fail(id, title, "no provider holds this name",
+				fmt.Sprintf("export LATEM_SECRET_%s=…   # to test", envName(name)),
+				fmt.Sprintf("or add it to %s", d.cfg.Paths.SecretsEnv)))
+		case err != nil:
+			c := fail(id, title, err.Error())
+			// A backend's own words are the whole answer to a support question
+			// — "op: you are not currently signed in" — and are deliberately
+			// absent from the error string, which can reach a broker (INV-4).
+			var ce *secrets.CommandError
+			if errors.As(err, &ce) && ce.Diagnostic() != "" {
+				c.Notes = append(c.Notes, ce.Diagnostic())
+			}
+			out = append(out, c)
+		case len(value) == 0:
+			out = append(out, fail(id, title, "resolved to an empty value, which is E_MISSING_SECRET at admission"))
+		case logstream.TooShort(value):
+			out = append(out, warn(id, title,
+				fmt.Sprintf("resolves, but is shorter than %d characters", logstream.MinRedactableLength)).
+				withNotes(fmt.Sprintf("Values under %d characters are not registered with the redactor: "+
+					"matching a short string turns every log line into a wall of asterisks and makes "+
+					"the build unreadable (§16). This value would appear in logs verbatim.",
+					logstream.MinRedactableLength)))
+		default:
+			out = append(out, pass(id, title, "resolves"))
+		}
+		value.Zero()
+	}
+	return out
+}
+
+// knownSecretNames is every secret name this machine can enumerate locally.
+func (d *doctor) knownSecretNames() []string {
+	set := map[string]bool{}
+	for name := range d.cfg.Secrets.Commands {
+		set[name] = true
+	}
+	for _, name := range readSecretsEnvNames(d.cfg.Paths.SecretsEnv) {
+		set[name] = true
+	}
+	return sortedStrings(set)
+}
+
+// readSecretsEnvNames reads the keys, and only the keys, of secrets.env.
+//
+// The values are never read into this process. The file is the one place on
+// disk holding plaintext secrets, and a diagnostic has no business loading
+// them to count them.
+func readSecretsEnvNames(path string) []string {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // the path comes from the agent's own validated config
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if key, _, ok := strings.Cut(line, "="); ok {
+			if key = strings.TrimSpace(strings.TrimPrefix(key, "export ")); key != "" {
+				names = append(names, key)
+			}
+		}
+	}
+	return names
+}
+
+func envName(name string) string {
+	return strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name))
+}
+
+// ------------------------------------------------------------ macOS session
+
+func (d *doctor) checkMacOS(ctx context.Context) []check {
+	return []check{
+		d.checkLaunchContext(ctx),
+		d.checkAgentNotDaemon(),
+		d.checkAutoLogin(ctx),
+		d.checkFileVault(ctx),
+		d.checkKeychain(ctx),
+		d.checkXcode(ctx),
+	}
+}
+
+func (d *doctor) checkLaunchContext(ctx context.Context) check {
+	lc, err := d.sys.LaunchContext(ctx)
+	switch {
+	case err != nil:
+		return warn("macos.session", "launchd context", "could not be read: "+err.Error())
+	case lc == system.LaunchContextAqua:
+		return pass("macos.session", "launchd context", "Aqua — a GUI session with keychain access")
+	case lc == system.LaunchContextSystem:
+		return fail("macos.session", "launchd context", "System — this is a daemon context",
+			"latem service uninstall",
+			"latem service install   # installs a LaunchAgent under ~/Library/LaunchAgents").
+			withNotes("codesign needs a real user session with keychain access. In a daemon context " +
+				"it fails with errors that point nowhere useful, and this is the single most common " +
+				"install failure (§13.3, §23).")
+	default:
+		return warn("macos.session", "launchd context",
+			lc.String()+" — no GUI session, so codesign will not reach the login keychain").
+			withNotes("Running doctor over ssh reports this even on a correctly configured machine. " +
+				"What matters is the context the agent runs in, not this shell.")
+	}
+}
+
+// checkAgentNotDaemon looks for a plist in the daemon locations.
+//
+// §23 puts this first among its three requirements, so a machine that has one
+// installed in the wrong place should hear about it even when doctor happens
+// to be running from a terminal.
+func (d *doctor) checkAgentNotDaemon() check {
+	daemonPaths := []string{
+		"/Library/LaunchDaemons/" + system.ServiceLabel + ".plist",
+		"/Library/LaunchAgents/" + system.ServiceLabel + ".plist",
+	}
+	for _, p := range daemonPaths {
+		if _, err := os.Stat(p); err == nil {
+			return fail("macos.daemon", "LaunchAgent location", p+" exists",
+				"sudo launchctl bootout system/"+system.ServiceLabel,
+				"sudo rm "+p,
+				"latem service install").
+				withNotes("A system-wide plist runs the agent outside your login session. " +
+					"It belongs in ~/Library/LaunchAgents and nowhere else.")
+		}
+	}
+	return pass("macos.daemon", "LaunchAgent location", "no system-wide plist; ~/Library/LaunchAgents is correct")
+}
+
+func (d *doctor) checkAutoLogin(ctx context.Context) check {
+	al, err := d.sys.AutoLogin(ctx)
+	switch {
+	case err != nil:
+		return warn("macos.autologin", "auto-login", "could not be read: "+err.Error())
+	case !al.Enabled:
+		return fail("macos.autologin", "auto-login", "not configured — no session exists after a reboot",
+			"System Settings → Users & Groups → Automatic login → "+d.sys.User()).
+			withNotes("A LaunchAgent needs a logged-in user. Without auto-login the machine boots, " +
+				"nobody logs in, the agent never starts, and it goes offline until somebody walks " +
+				"over to it (§23).")
+	case al.User != d.sys.User():
+		return fail("macos.autologin", "auto-login",
+			fmt.Sprintf("auto-logs in as %q but the agent runs as %q", al.User, d.sys.User()),
+			"System Settings → Users & Groups → Automatic login → "+d.sys.User()).
+			withNotes("This looks like a working configuration and is not: the LaunchAgent belongs " +
+				"to a user who is never logged in.")
+	default:
+		return pass("macos.autologin", "auto-login", "enabled for "+al.User)
+	}
+}
+
+// checkFileVault is finding F13, and it is the one that quietly falsifies
+// "survives reboots".
+//
+// Both answers are legitimate and the trade is genuinely the operator's — a
+// machine holding signing certificates is a reasonable thing to want encrypted
+// — so this names both and picks neither. What it will not do is let it be a
+// surprise.
+func (d *doctor) checkFileVault(ctx context.Context) check {
+	status, err := d.sys.FileVault(ctx)
+	switch status {
+	case system.FileVaultOff:
+		return pass("macos.filevault", "FileVault", "off — an unattended reboot reaches the login window")
+	case system.FileVaultOn:
+		return warn("macos.filevault", "FileVault", "on — an unattended reboot stops before login",
+			"sudo fdesetup authrestart   # reboot now, unlocking the disk for exactly this boot",
+			"sudo fdesetup disable       # or turn it off, if this machine is physically secure").
+			withNotes(
+				"With FileVault on, a reboot stops at the pre-boot unlock screen: no login, no "+
+					"session, no LaunchAgent, no builds — until somebody walks over and types a "+
+					"password. Nothing appears in any log, because the agent never started to write "+
+					"one. The symptom is \"my machine went offline overnight and nothing explains it\".",
+				"Two options, and this is the operator's decision rather than latem's. Disable "+
+					"FileVault, accepting that a stolen machine yields its signing certificates and "+
+					"keystores. Or keep it and reboot only via `sudo fdesetup authrestart`, which "+
+					"unlocks the disk for exactly the next boot — including from ssh, so remote "+
+					"reboots stay possible. A kernel panic or a power cut still parks the machine.",
+				"Documented in docs/ios.md.")
+	default:
+		detail := "could not be determined"
+		if err != nil {
+			detail += ": " + err.Error()
+		}
+		return warn("macos.filevault", "FileVault", detail, "fdesetup status")
+	}
+}
+
+func (d *doctor) checkKeychain(ctx context.Context) check {
+	ok, err := d.sys.KeychainUnlocked(ctx)
+	switch {
+	case err != nil:
+		return warn("macos.keychain", "login keychain", "could not be inspected: "+err.Error())
+	case !ok:
+		return fail("macos.keychain", "login keychain", "locked — every codesign on this machine will fail",
+			"security unlock-keychain ~/Library/Keychains/login.keychain-db",
+			"security set-keychain-settings -lut 36000   # stop it re-locking after 10 hours idle").
+			withNotes("This is the most common signing failure after a reboot, and it presents as a " +
+				"codesign error that names the certificate rather than the keychain. E_SECRET_BACKEND " +
+				"exists for exactly this: a machine condition that resolves without editing a commit " +
+				"(amendment A16).")
+	default:
+		return pass("macos.keychain", "login keychain", "unlocked")
+	}
+}
+
+func (d *doctor) checkXcode(ctx context.Context) check {
+	x := d.sys.Xcode(ctx)
+	switch {
+	case x.Err != nil || x.DeveloperDir == "":
+		return warn("macos.xcode", "Xcode", "xcode-select reported nothing",
+			"xcode-select --install",
+			"sudo xcode-select -s /Applications/Xcode.app/Contents/Developer")
+	case !x.IsFullXcode:
+		return fail("macos.xcode", "Xcode", x.DeveloperDir+" is the Command Line Tools, not Xcode",
+			"sudo xcode-select -s /Applications/Xcode.app/Contents/Developer").
+			withNotes("The Command Line Tools cannot build an iOS app. The failure — \"unable to find " +
+				"a destination matching the provided destination specifier\" — reads as a project " +
+				"problem rather than a machine one.")
+	case !x.LicenseAccepted:
+		return fail("macos.xcode", "Xcode", x.DeveloperDir+" — the licence has not been accepted",
+			"sudo xcodebuild -license accept").
+			withNotes("Every build on the machine fails until it is, with a message that only appears " +
+				"on the stderr of the first tool to notice.")
+	default:
+		detail := x.DeveloperDir
+		if !x.Version.IsZero() {
+			detail = fmt.Sprintf("Xcode %s at %s", x.Version, x.DeveloperDir)
+		}
+		return pass("macos.xcode", "Xcode", detail+", licence accepted")
+	}
+}
+
+// ----------------------------------------------------------------- service
+
+func (d *doctor) checkService(ctx context.Context) []check {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return []check{skip("service.installed", "agent service", "no service integration on "+runtime.GOOS)}
+	}
+
+	st, err := d.sys.ServiceStatus(ctx)
+	if err != nil {
+		return []check{warn("service.installed", "agent service", err.Error())}
+	}
+
+	var out []check
+	switch {
+	case !st.Installed:
+		out = append(out, warn("service.installed", "agent service",
+			"not installed — the agent will not start after a reboot", "latem service install"))
+	case !st.Running:
+		out = append(out, warn("service.installed", "agent service",
+			"installed at "+st.Path+" but not running", "latem service install"))
+	default:
+		out = append(out, pass("service.installed", "agent service", "running from "+st.Path))
+	}
+
+	if d.sys.IsLinux() {
+		linger, err := d.sys.Linger(ctx, "")
+		switch {
+		case err != nil:
+			out = append(out, warn("service.linger", "systemd linger", "could not be read: "+err.Error()))
+		case !linger:
+			out = append(out, fail("service.linger", "systemd linger",
+				fmt.Sprintf("disabled for %s — the service stops when you log out", d.sys.User()),
+				strings.Join(d.sys.EnableLingerArgv(""), " ")).
+				withNotes("A user unit without linger looks perfectly healthy while you are logged "+
+					"in and stops the moment you disconnect, which on a headless build machine is "+
+					"seconds after the install (§23)."))
+		default:
+			out = append(out, pass("service.linger", "systemd linger", "enabled for "+d.sys.User()))
+		}
+	}
+	return out
+}
+
+// ------------------------------------------------------------------ broker
+
+func (d *doctor) checkBroker(ctx context.Context) []check {
+	if d.cfg == nil {
+		return []check{skip("broker.clock", "clock skew", "config did not load")}
+	}
+	if !d.cfg.Broker.Remote.Enabled || d.cfg.Broker.Remote.URL == "" {
+		return []check{skip("broker.clock", "clock skew", "no remote broker configured")}
+	}
+
+	sk, err := d.sys.ClockSkew(ctx, d.cfg.Broker.Remote.URL)
+	if err != nil {
+		return []check{warn("broker.clock", "clock skew",
+			fmt.Sprintf("%s: %s", d.cfg.Broker.Remote.URL, firstLineOf(err.Error())))}
+	}
+
+	detail := fmt.Sprintf("%s off %s", sk.Abs().Round(time.Millisecond), d.cfg.Broker.Remote.URL)
+	switch {
+	case sk.Abs() >= clockSkewFail:
+		return []check{fail("broker.clock", "clock skew", detail, d.clockSyncCommand()).
+			withNotes("A machine token is validated against a signing window. This much skew makes " +
+				"every connection fail authentication, and the error names authentication — so the " +
+				"first thing an operator does is regenerate a token that was never the problem.")}
+	case sk.Abs() >= clockSkewWarn:
+		return []check{warn("broker.clock", "clock skew", detail, d.clockSyncCommand())}
+	default:
+		return []check{pass("broker.clock", "clock skew", detail)}
+	}
+}
+
+// ----------------------------------------------------------------- helpers
+
+// installCommand is the platform's way to install a tool.
+func (d *doctor) installCommand(tool string) string {
+	if d.sys.IsMacOS() {
+		switch tool {
+		case "git":
+			return "xcode-select --install   # or: brew install git"
+		case "docker":
+			return "brew install --cask docker"
+		}
+		return "brew install " + tool
+	}
+	switch tool {
+	case "docker":
+		return "curl -fsSL https://get.docker.com | sh"
+	default:
+		return "sudo apt-get install -y " + tool + "   # or your distribution's equivalent"
+	}
+}
+
+func (d *doctor) startDockerCommand() string {
+	if d.sys.IsMacOS() {
+		return "open -a Docker   # and wait for the whale to settle"
+	}
+	return "sudo systemctl start docker"
+}
+
+func (d *doctor) clockSyncCommand() string {
+	if d.sys.IsMacOS() {
+		return "sudo sntp -sS time.apple.com"
+	}
+	return "sudo systemctl restart systemd-timesyncd   # or: sudo chronyc makestep"
+}
+
+func firstLineOf(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+func portOf(addr string) string {
+	if i := strings.LastIndexByte(addr, ':'); i >= 0 {
+		return addr[i+1:]
+	}
+	return "9838"
+}

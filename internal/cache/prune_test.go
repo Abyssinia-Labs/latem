@@ -140,7 +140,7 @@ func TestPrune_SkipsACacheARunIsHolding(t *testing.T) {
 	pruner := newLocal(t, root, time.Second)
 	ctx := context.Background()
 
-	if _, err := holder.Acquire(ctx, "linux", []string{"pnpm"}); err != nil {
+	if _, err := holder.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}}); err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(root, "caches", "linux", "pnpm")
@@ -166,7 +166,7 @@ func TestPrune_RemovesOversizedVolumesWhole(t *testing.T) {
 	l := newLocal(t, t.TempDir(), time.Second, func(o *Options) { o.Docker = docker })
 	ctx := context.Background()
 
-	if _, err := l.Acquire(ctx, "docker", []string{"gradle"}); err != nil {
+	if _, err := l.Acquire(ctx, "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Release(ctx, "docker", []string{"gradle"}); err != nil {
@@ -194,7 +194,7 @@ func TestPrune_IgnoresVolumesOfUnknownSize(t *testing.T) {
 	l := newLocal(t, t.TempDir(), time.Second, func(o *Options) { o.Docker = docker })
 	ctx := context.Background()
 
-	if _, err := l.Acquire(ctx, "docker", []string{"gradle"}); err != nil {
+	if _, err := l.Acquire(ctx, "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 		t.Fatal(err)
 	}
 	docker.volumes["latem-cache-docker-gradle"].SizeBytes = -1
@@ -469,7 +469,7 @@ func TestPrune_ReportsVolumeRemovalFailures(t *testing.T) {
 	l := newLocal(t, t.TempDir(), time.Second, func(o *Options) { o.Docker = docker })
 	ctx := context.Background()
 
-	if _, err := l.Acquire(ctx, "docker", []string{"gradle"}); err != nil {
+	if _, err := l.Acquire(ctx, "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Release(ctx, "docker", []string{"gradle"}); err != nil {

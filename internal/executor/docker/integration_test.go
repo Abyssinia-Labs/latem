@@ -95,7 +95,7 @@ func run(t *testing.T, env executor.Env, name, script string) (int, string) {
 	defer cancel()
 
 	var log bytes.Buffer
-	code, err := env.Exec(ctx, executor.Step{Name: name, Run: script}, &log)
+	code, err := env.Exec(ctx, executor.Step{Name: name, Run: script}, &log, &log)
 	if err != nil {
 		t.Fatalf("Exec(%s): %v\n%s", name, err, log.String())
 	}
@@ -427,7 +427,7 @@ func TestIntegration_StepTimeout(t *testing.T) {
 		Name:    "hangs",
 		Run:     "sleep 300",
 		Timeout: 2 * time.Second,
-	}, io.Discard)
+	}, io.Discard, io.Discard)
 	elapsed := time.Since(start)
 
 	if err == nil {

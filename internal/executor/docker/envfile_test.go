@@ -86,7 +86,8 @@ func TestParseEnvFile_ProtectedKeysAreIgnored(t *testing.T) {
 		"NPM_TOKEN":      "real-token",
 		"LATEM_RUN_ID":   "r1",
 	}
-	protected := func(k string) bool { return protectedEnvKey(runEnvironment, k) }
+	secrets := []string{"MATCH_PASSWORD", "NPM_TOKEN"}
+	protected := func(k string) bool { return protectedEnvKey(runEnvironment, secrets, k) }
 
 	in := strings.Join([]string{
 		"MATCH_PASSWORD=stolen",
@@ -109,14 +110,17 @@ func TestParseEnvFile_ProtectedKeysAreIgnored(t *testing.T) {
 	}
 }
 
-func TestProtectedEnvKey(t *testing.T) {
+// The fallback path: no Secrets list, so the executor cannot tell a credential
+// from an ordinary variable and protects everything injected. Failing open
+// here would permit a credential overwrite.
+func TestProtectedEnvKey_FallbackWithNoSecretsList(t *testing.T) {
 	runEnvironment := map[string]string{"MATCH_PASSWORD": "x", "NODE_ENV": "production"}
 
 	tests := map[string]struct {
 		key  string
 		want bool
 	}{
-		"declared secret":          {"MATCH_PASSWORD", true},
+		"a secret, unidentifiable": {"MATCH_PASSWORD", true},
 		"any injected name":        {"NODE_ENV", true},
 		"latem env itself":         {"LATEM_ENV", true},
 		"any latem name":           {"LATEM_FUTURE_THING", true},
@@ -127,7 +131,7 @@ func TestProtectedEnvKey(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if got := protectedEnvKey(runEnvironment, tc.key); got != tc.want {
+			if got := protectedEnvKey(runEnvironment, nil, tc.key); got != tc.want {
 				t.Errorf("protectedEnvKey(%q) = %v, want %v", tc.key, got, tc.want)
 			}
 		})
@@ -215,4 +219,32 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b)
+}
+
+// Amendment A10 narrowed protection from "everything injected" to "the
+// declared secrets", which is what §9 actually says. The two halves of that
+// need separate assertions: credentials still cannot be overwritten, and
+// ordinary variables now can be.
+func TestProtectedEnvKey_NarrowedToDeclaredSecrets(t *testing.T) {
+	env := map[string]string{
+		"MATCH_PASSWORD": "real-secret",
+		"NODE_ENV":       "production",
+		"LATEM_RUN_ID":   "r1",
+	}
+	secrets := []string{"MATCH_PASSWORD"}
+
+	if !protectedEnvKey(env, secrets, "MATCH_PASSWORD") {
+		t.Error("a declared secret must not be overridable")
+	}
+	if !protectedEnvKey(env, secrets, "LATEM_ANYTHING") {
+		t.Error("the LATEM_ namespace must not be overridable")
+	}
+	// Before A10 this was refused, because the executor could not tell an
+	// ordinary injected variable from a credential.
+	if protectedEnvKey(env, secrets, "NODE_ENV") {
+		t.Error("an ordinary injected variable should be overridable once secrets are named")
+	}
+	if protectedEnvKey(env, secrets, "BUILD_NUMBER") {
+		t.Error("an absent key should be settable")
+	}
 }

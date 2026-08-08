@@ -3,6 +3,8 @@
 // This file is owned by WS-00 and frozen. The pipeline implementation is WS-02.
 package logstream
 
+import "strings"
+
 // Registrar accepts values that must never appear in output.
 //
 // It exists as a narrow interface so internal/secrets can register what it
@@ -33,10 +35,24 @@ type Registrar interface {
 	Register(value []byte)
 }
 
-// MinRedactableLength is the shortest value worth redacting. Callers should
-// warn — by name, never by value — when a declared secret resolves shorter
-// than this, because it will not be redacted and the operator should know.
+// MinRedactableLength is the shortest value worth redacting.
 const MinRedactableLength = 6
+
+// TooShort reports whether a value is below the length worth redacting.
+//
+// Callers resolving secrets should warn on this — by name, never by value —
+// because the operator has a secret that will appear in logs verbatim and
+// nothing else will tell them. Matching values this short turns every
+// occurrence of "true" or "dev" into a marker and makes logs unreadable, which
+// is why the floor exists rather than being zero.
+//
+// This lives beside the interface rather than beside the implementation
+// because internal/secrets consumes it, and a consumer reaching past the seam
+// into an implementation file is the coupling the seam exists to prevent
+// (amendment A13).
+func TooShort(value []byte) bool {
+	return len(strings.TrimSpace(string(value))) < MinRedactableLength
+}
 
 // Redactor removes registered values and known credential patterns from a line.
 type Redactor interface {

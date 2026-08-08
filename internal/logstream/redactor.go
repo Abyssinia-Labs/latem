@@ -52,17 +52,6 @@ func NewRedactor() Redactor {
 	return &redactor{literals: map[string]struct{}{}}
 }
 
-// TooShort reports whether a value is below the length worth redacting.
-//
-// Callers resolving secrets should warn on this — by name, never by value —
-// because the operator has a secret that will appear in logs verbatim and
-// nothing else will tell them. Matching values this short turns every
-// occurrence of "true" or "dev" into a marker and makes logs unreadable, which
-// is why the floor exists rather than being set to zero.
-func TooShort(value []byte) bool {
-	return len(strings.TrimSpace(string(value))) < MinRedactableLength
-}
-
 // Register adds a value and every form of it that RUNNER_SPEC §16 requires.
 func (r *redactor) Register(value []byte) {
 	forms := expandForms(value)

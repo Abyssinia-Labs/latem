@@ -22,16 +22,31 @@ import (
 // forever on a contended cache is worse than a run that says why it stopped.
 var ErrLockTimeout = errors.New("cache: lock acquisition timed out")
 
+// Request names one cache a run needs, and where it mounts.
+//
+// Target comes from the registry's caches[].path at the resolved commit, which
+// the cache manager has no way to read. Draft 02's Acquire took only names and
+// therefore returned mounts with an empty Target — silent at every layer
+// below, because a mount with no target simply does not mount and the build
+// runs cold forever (amendment A11).
+type Request struct {
+	Name   string
+	Target string
+}
+
 // Manager provisions caches for runs and reclaims space between them.
 type Manager interface {
-	// Acquire prepares the named caches for a run and returns their mounts.
+	// Acquire prepares the requested caches for a run and returns their mounts.
 	//
 	// Caches are scoped per runner, never shared between runners, because two
 	// runs writing one ~/.gradle corrupt each other in ways that surface as
 	// intermittent build failures nobody attributes to caching. Within a
 	// runner at concurrency > 1, this takes a per-cache flock held until
 	// [Release], and returns [ErrLockTimeout] rather than blocking forever.
-	Acquire(ctx context.Context, runner string, names []string) ([]executor.CacheMount, error)
+	//
+	// A Request with an empty Target is an error, not a cache that quietly
+	// does nothing.
+	Acquire(ctx context.Context, runner string, reqs []Request) ([]executor.CacheMount, error)
 
 	// Release drops the locks taken by [Acquire]. It must be idempotent and
 	// safe to call after a failed Acquire.
@@ -86,7 +101,7 @@ type NotImplemented struct{}
 
 var _ Manager = NotImplemented{}
 
-func (NotImplemented) Acquire(context.Context, string, []string) ([]executor.CacheMount, error) {
+func (NotImplemented) Acquire(context.Context, string, []Request) ([]executor.CacheMount, error) {
 	return nil, fmt.Errorf("cache: Acquire: %w", errors.ErrUnsupported)
 }
 

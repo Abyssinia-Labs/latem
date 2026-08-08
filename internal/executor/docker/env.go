@@ -17,18 +17,6 @@ import (
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
-// StderrSplitter is an optional interface the writer passed to
-// [runEnv.Exec] may implement to receive stderr separately.
-//
-// [executor.Env.Exec] takes one io.Writer, so by default a step's stdout and
-// stderr are interleaved into it in the order the daemon multiplexed them —
-// which is what a human reading a build log wants. But protocol.LogFrame
-// carries a Stream field, and logstream distinguishes stdout from stderr, so a
-// caller that wants the distinction can have it without a contract amendment.
-type StderrSplitter interface {
-	Stderr() io.Writer
-}
-
 // runEnv is one run's container. It satisfies [executor.Env].
 type runEnv struct {
 	api         APIClient
@@ -49,6 +37,15 @@ var _ executor.Env = (*runEnv)(nil)
 // ContainerID exposes the container this run is using, for diagnostics and for
 // reconciliation bookkeeping. Not part of [executor.Env].
 func (e *runEnv) ContainerID() string { return e.containerID }
+
+// EnvFile is the container-visible path exported as $LATEM_ENV.
+//
+// The orchestrator needs this to describe §9's between-step channel, and only
+// the executor knows it: a container path here, a guest path for tart, a host
+// path for native. Draft 02 put it on [executor.Step] and had the caller fill
+// it, which forced the orchestrator to import a concrete executor package to
+// get it right — defeating the interface (amendment A9).
+func (e *runEnv) EnvFile() string { return EnvFilePath }
 
 // Exec runs one step.
 //
@@ -75,24 +72,16 @@ func (e *runEnv) ContainerID() string { return e.containerID }
 // A step that exits non-zero is not an error: the exit code is the result, and
 // the agent maps a non-zero one to E_STEP. An error means the step could not
 // be run or could not be waited for.
-func (e *runEnv) Exec(ctx context.Context, step executor.Step, out io.Writer) (int, error) {
+func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return -1, codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
 	}
-	envFile := step.EnvFile
-	if envFile == "" {
-		envFile = EnvFilePath
-	}
+	envFile := EnvFilePath
 	env := mergeEnv(e.spec.Env, e.carried, step.Env)
 	env["LATEM_ENV"] = envFile
 	e.mu.Unlock()
-
-	stdout, stderr := out, out
-	if s, ok := out.(StderrSplitter); ok {
-		stderr = s.Stderr()
-	}
 
 	// A zero Timeout means "whatever remains of the job budget", which is
 	// already the deadline on ctx. Only a positive one tightens it.
@@ -115,7 +104,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, out io.Writer) (i
 	// §9's between-step channel. Merged after the step rather than before the
 	// next one so that the warnings land in the log of the step that caused
 	// them, which is the only place an author will look.
-	if mergeErr := e.mergeEnvFile(ctx, envFile, out); mergeErr != nil && err == nil {
+	if mergeErr := e.mergeEnvFile(ctx, envFile, stdout); mergeErr != nil && err == nil {
 		return code, mergeErr
 	}
 

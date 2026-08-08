@@ -1,0 +1,245 @@
+package native
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"regexp"
+	"strings"
+
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
+)
+
+const (
+	// EnvFileName is the basename of the file exported as $LATEM_ENV. It lives
+	// in a per-run directory under [Options.EnvFileDir], never in the
+	// workspace: the workspace is a git clone (§12), and a file appearing in it
+	// would show up in `git status`, in `git clean -n`, and eventually in
+	// somebody's commit.
+	EnvFileName = "env"
+
+	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored data
+	// the agent then trusts, so it gets a size it cannot exceed as well as a
+	// grammar it cannot break.
+	MaxEnvFileBytes = 64 << 10
+
+	// envDirMode and envFileMode are tight because, unlike the docker executor,
+	// this package knows exactly who will be reading and writing: the same user
+	// the agent runs as. There is no uid to guess at, so there is no reason to
+	// widen them. The file can hold whatever a step chose to put in it, which
+	// on a signing runner is occasionally something derived from a credential.
+	envDirMode  = 0o700
+	envFileMode = 0o600
+)
+
+// envKeyPattern is §9's grammar for a key a job may set.
+//
+// It is the POSIX identifier rule, and it is the reason a line like
+// `PATH=x; rm -rf /` cannot become anything but a variable named PATH — the key
+// is checked, the value is never interpreted.
+var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// parseEnvFile parses the KEY=value lines a step appended to $LATEM_ENV.
+//
+// The constraints come from RUNNER_SPEC §9 and each one exists because this is
+// a file a job writes and the agent then believes:
+//
+//   - Keys must be identifiers. Anything else is dropped.
+//   - Keys the protected predicate rejects are ignored. That covers every
+//     LATEM_* name, so a job cannot spoof the agent's own variables, and every
+//     declared secret name, so a job cannot overwrite an injected credential.
+//   - The file is capped at [MaxEnvFileBytes]; past the cap the tail is
+//     discarded, along with the partial line at the cut so that half a value
+//     never becomes a whole one.
+//   - Nothing is dropped silently. A job author whose `echo` did not take
+//     effect gets told why in the log of the step that wrote it.
+//
+// Warnings never quote the line or the value, only the position and, where the
+// key is known to be a well-formed identifier, the key. A malformed line may be
+// anything at all — including a secret a script printed into the wrong file
+// descriptor — and echoing it into the log to explain that it was dropped would
+// be its own leak.
+//
+// This is deliberately the same parser as the docker executor's, down to the
+// warning text. §9's contract is "identical across all three executors", and
+// two implementations that agree today drift the first time one of them fixes a
+// bug; see the package doc for why the shared version cannot live in
+// internal/executor.
+func parseEnvFile(data []byte, protected func(string) bool) (map[string]string, []string) {
+	var warnings []string
+
+	if len(data) > MaxEnvFileBytes {
+		data = data[:MaxEnvFileBytes]
+		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+			data = data[:i+1]
+		} else {
+			data = nil
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"$LATEM_ENV exceeded the %d byte limit; everything past it was ignored", MaxEnvFileBytes))
+	}
+
+	out := map[string]string{}
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSuffix(raw, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lineNo := i + 1
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"$LATEM_ENV line %d: no '=', dropped (expected KEY=value)", lineNo))
+			continue
+		}
+		if !envKeyPattern.MatchString(key) {
+			warnings = append(warnings, fmt.Sprintf(
+				"$LATEM_ENV line %d: key is not an identifier matching %s, dropped", lineNo, envKeyPattern))
+			continue
+		}
+		if protected != nil && protected(key) {
+			warnings = append(warnings, fmt.Sprintf(
+				"$LATEM_ENV line %d: %s is set by the agent and cannot be overwritten by a job, ignored", lineNo, key))
+			continue
+		}
+		out[key] = value
+	}
+	return out, warnings
+}
+
+// protectedEnvKey reports whether a job is forbidden from setting key.
+//
+// Two rules. Any LATEM_* name is the agent's, so a job cannot spoof $LATEM_ENV
+// itself or any variable the agent later adds.
+//
+// Any declared secret name is refused, which is exactly what §9 asks for.
+// [executor.Spec.Secrets] names them (amendment A10); before it existed this
+// package could not tell MATCH_PASSWORD from NODE_ENV and had to refuse the
+// whole injected set.
+//
+// The fallback survives on purpose. An executor handed a non-empty Env with no
+// Secrets list has no way to identify credentials, so it protects everything
+// injected. Failing open there would permit a credential overwrite; failing
+// closed costs a confusing refusal of a legal override, and that is the cheaper
+// mistake.
+func protectedEnvKey(runEnvironment map[string]string, secrets []string, key string) bool {
+	if strings.HasPrefix(key, EnvPrefix) {
+		return true
+	}
+	if len(secrets) > 0 {
+		for _, name := range secrets {
+			if name == key {
+				return true
+			}
+		}
+		return false
+	}
+	_, injected := runEnvironment[key]
+	return injected
+}
+
+// mergeEnvFile reads, truncates and merges $LATEM_ENV after a step.
+//
+// Reading and truncating are two operations rather than one atomic one, which
+// is fine: steps do not overlap, so nothing is writing to the file between
+// them. That is a consequence of §9's model, not an assumption this package
+// adds.
+func (e *runEnv) mergeEnvFile(out io.Writer) error {
+	data, err := e.readEnvFile()
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return nil
+	}
+
+	vars, warnings := parseEnvFile(data, func(k string) bool {
+		return protectedEnvKey(e.spec.Env, e.spec.Secrets, k)
+	})
+	for _, w := range warnings {
+		writeNote(out, w)
+	}
+
+	if len(data) > 0 {
+		if err := e.createEnvFile(); err != nil {
+			return err
+		}
+	}
+
+	e.mu.Lock()
+	for k, v := range vars {
+		e.carried[k] = v
+	}
+	e.mu.Unlock()
+	return nil
+}
+
+// writeNote emits an agent-authored line into the step's output stream. The
+// prefix matches logstream's, so a reader sees one convention for "this line
+// came from latem, not from your build".
+func writeNote(out io.Writer, msg string) {
+	if out == nil {
+		return
+	}
+	_, _ = io.WriteString(out, "[latem] "+msg+"\n")
+}
+
+// readEnvFile reads $LATEM_ENV from disk.
+//
+// A missing file is not an error: most steps never touch $LATEM_ENV, and a step
+// is free to delete it, so "absent" and "empty" both mean the same thing —
+// nothing to merge.
+func (e *runEnv) readEnvFile() ([]byte, error) {
+	// #nosec G304 -- envFile is built in Prepare from Options.EnvFileDir and a
+	// run id already through protocol.ValidateID (amendment A6). No part of it
+	// is broker-supplied or job-supplied.
+	f, err := os.Open(e.envFile)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", e.envFile)
+	}
+	defer func() { _ = f.Close() }()
+
+	// One byte past the cap, so [parseEnvFile] can tell "exactly at the limit"
+	// from "over it" and warn only in the second case. The limit is also what
+	// stops a job filling the agent's memory from a `yes >> $LATEM_ENV` that
+	// nothing else would bound — on native there is no container quota behind
+	// it, only the host's disk.
+	data, err := io.ReadAll(io.LimitReader(f, MaxEnvFileBytes+1))
+	if err != nil {
+		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", e.envFile)
+	}
+	if data == nil {
+		data = []byte{}
+	}
+	return data, nil
+}
+
+// createEnvFile writes an empty $LATEM_ENV, creating its directory. It is both
+// the initial creation and the between-step truncation, because a zero-length
+// overwrite is exactly a truncation.
+//
+// O_TRUNC rather than remove-and-recreate so that a step which captured the
+// path and holds it open across the boundary sees an empty file rather than a
+// deleted inode it can keep appending to invisibly.
+func (e *runEnv) createEnvFile() error {
+	if err := os.MkdirAll(e.envDir, envDirMode); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV directory (%s)", e.envDir)
+	}
+	// #nosec G304 -- see readEnvFile: the path is built from agent config and a
+	// validated run id.
+	f, err := os.OpenFile(e.envFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, envFileMode)
+	if err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", e.envFile)
+	}
+	if err := f.Close(); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", e.envFile)
+	}
+	return nil
+}

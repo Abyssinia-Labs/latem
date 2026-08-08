@@ -183,7 +183,18 @@ Validation, applied before use:
 - `ref` — must match `^[A-Za-z0-9._/-]{1,255}$`, must not begin with `-`, must not contain `..`, must not be `HEAD@{…}`. This blocks git argument injection (`--upload-pack=`, `--exec=`).
 - `inputs` — every key must be declared in the job's `inputs:` block. Values are type-checked per declaration. Undeclared keys are a hard rejection, not a warning.
 
-All git invocations use `--` before user-influenced arguments and `exec.Command` with an argv slice. Never `exec.Command("sh", "-c", …)`.
+All git invocations pass argv as a slice via `exec.Command`, with an **options terminator** before any user-influenced argument. Never `exec.Command("sh", "-c", …)`.
+
+**The terminator is `--` or `--end-of-options`, and which one is not a style choice** (amendment A7). Draft 02 said `--` universally, which is wrong for exactly the two commands §12 depends on, because to git `--` means "a pathspec follows" rather than "options are over":
+
+```console
+$ git checkout --detach -- "$SHA"
+fatal: git checkout: --detach does not take a path argument
+$ git rev-parse --verify -- "${SHA}^{commit}"
+fatal: Needed a single revision
+```
+
+So: use `--` where the following arguments really are paths, and `--end-of-options` (git ≥ 2.24) everywhere a revision or a ref name follows. Both stop option parsing, which is the property INV-3 needs; only one of them also claims the remaining arguments are files.
 
 *Test:* table-driven, with `--upload-pack=/bin/sh`, `; rm -rf /`, `$(id)`, `../../etc/passwd`, `refs/heads/x\nrefs/heads/y`, 10 KB refs, and unicode homoglyphs.
 
@@ -508,6 +519,19 @@ concurrency = 1                     # hard ceiling is 2 — Apple's licence, §1
   boot_timeout = "3m"
   min_free_gb  = 150                # a base image is ~90 GB; §13.2
   derived_data = "vm"               # "vm" | "shared" — set by measurement, §13.2
+
+# Fallback when Tart is unavailable or the base image is not built (§13.3).
+# Draft 02 described this executor and its 60 GB floor in §13.3 but gave the
+# schema no block to express either — amendment A14.
+[[runner]]
+name        = "ios-native"
+executor    = "native"
+labels      = ["macos", "arm64", "xcode", "ios", "native"]
+concurrency = 1                     # enforced; §13.3
+
+  [runner.native]
+  min_free_gb = 60
+  shell       = "bash"
 ```
 
 **One agent, several runners.** The example above is one machine — a Mac mini — hosting three execution slots, one of which is a Tart VM and one of which is Docker. That is the model: an agent owns a config directory, a machine id, and a set of labelled runners. "Two roles on one box" does **not** mean two agents; it means two `[[runner]]` blocks with different labels, and Apple work never lands on the container runner because the labels do not match.
@@ -734,6 +758,7 @@ Both non-terminal waiting states have an exit. Draft 01's `awaiting_approval` ha
 - **Cancellation.** A `cancel` command (§7.1) cancels the run's context. In `queued`, `awaiting_approval`, or `claimed` the effect is immediate — nothing has executed. In `preparing` or `running` it propagates to the executor, which signals the step's process group `SIGTERM`, waits 30s, then `SIGKILL`, then proceeds to `collecting`. In `collecting` it is ignored. Cancelling an unknown or already-terminal run is a no-op that reports success, so a phone tapping Stop twice is not an error.
 - **TTL sweep.** The daily ticker and agent startup both sweep `awaiting_approval` older than `approval_ttl` and `queued` older than `queue_ttl` into `rejected`, with `E_APPROVAL_EXPIRED` and `E_QUEUE_EXPIRED`. Sweeping at startup matters because an agent that was off for a week comes back to a queue full of runs nobody wants any more.
 - **Step timeouts** fail the run with `E_STEP_TIMEOUT` and terminal state `timed_out`, distinct from the job-level `E_TIMEOUT` only by error code. Both run `collecting`.
+- **`preparing` → `queued` is legal**, and the diagram above does not draw it (amendment A14). Gate 16 sends a run whose concurrency group is occupied back to `queued` — "wait, do not fail" — and gates 6 through 18 all execute while the run is in `preparing`. A run can therefore reach `preparing`, discover its group is busy, and return to the queue. Any implementation validating transitions against the diagram alone will reject a legal one.
 
 ---
 
@@ -766,13 +791,15 @@ git -C "$MIRRORS/$KEY.git" config gc.auto 0
 
 # per run
 git -C "$MIRRORS/$KEY.git" fetch --prune --tags -- origin
-SHA=$(git -C "$MIRRORS/$KEY.git" rev-parse --verify "${NORMALIZED_REF}^{commit}")
+SHA=$(git -C "$MIRRORS/$KEY.git" rev-parse --verify --end-of-options "${NORMALIZED_REF}^{commit}")
 
 git clone --local --no-checkout -- "$MIRRORS/$KEY.git" "$WORK/$RUN_ID"
-git -C "$WORK/$RUN_ID" checkout --detach -- "$SHA"
+git -C "$WORK/$RUN_ID" checkout --detach --end-of-options "$SHA"
 git -C "$WORK/$RUN_ID" remote set-url origin -- "$URL"
 git -C "$WORK/$RUN_ID" config gc.auto 0
 ```
+
+Note the two `--end-of-options` (amendment A7). Draft 02 wrote `--` on both of those lines and neither command would have run: to `checkout` and `rev-parse`, `--` announces a pathspec. `clone` and `remote set-url` genuinely do take paths and URLs, so they keep `--`.
 
 ### What this costs
 
@@ -787,7 +814,8 @@ Three requirements make the hardlinking safe and keep it fast:
 ### Notes
 
 - `${REF}^{commit}` fails loudly on annotated tags and non-commit refs rather than checking out something surprising. `$NORMALIZED_REF` is the fully-qualified name from gate 7 (§10), never the raw broker-supplied string.
-- Every invocation uses `--` before user-influenced arguments and passes argv as a slice (INV-3).
+- Every invocation passes argv as a slice with an options terminator before user-influenced arguments — `--` for paths, `--end-of-options` for revisions and refs (INV-3, amendment A7).
+- **LFS needs a fetch in the workspace, not only in the mirror** (amendment A7). `git clone --local` hard-links `objects/` and nothing else, so `.git/lfs/objects` does not come across and the workspace starts with an empty LFS store; `git lfs checkout` alone will not populate it. The sequence is `git lfs fetch --all` in the mirror, then `git lfs fetch` **in the workspace while origin still points at the mirror**, then `git lfs checkout` — and only then `remote set-url`. Draft 02 omitted the middle step. This is untested against a real LFS repository and belongs in the M3 integration suite.
 - `remote set-url origin` points the workspace at the real upstream, so `git fetch` inside a build behaves sensibly instead of pointing at a host path that does not exist in the container.
 - **`gc.auto 0` on the mirror is not optional.** A force-push followed by `fetch --prune` can make the previously-fetched tip unreachable, and git's automatic gc is free to collect it — mid-run, 40 minutes into a build, on a repo the run already resolved. Disable automatic gc and run `git gc --prune=30.days.ago` from the daily ticker (§14.4) only when no run holds that mirror.
 - Submodules: `git submodule update --init --recursive --depth 1` inside the workspace, only when `.gitmodules` exists.
@@ -977,11 +1005,16 @@ Resolution chain, first hit wins. Only names declared in the job's `secrets:` bl
 5. A shell command per secret, defined in config
 
 ```toml
-[secrets]
-provider = "chain"                                # env → file → keychain → command
 [secrets.commands]
-MATCH_PASSWORD = "op read op://Private/match/password"
+# An argv array, not a string (amendment A15).
+MATCH_PASSWORD = ["op", "read", "op://Private/match/password"]
 ```
+
+**Commands are argv arrays.** Draft 02 wrote them as shell-ish strings while INV-3 requires an argv slice and forbids `sh -c`, and never said how one becomes the other — leaving every implementation to write its own tokeniser and its own answer to what `"op read 'my vault/pw'"` means. An array deletes the question: the operator writes the split themselves, quoting is TOML's problem, and there is no layer that could accidentally interpret a metacharacter.
+
+A string form remains accepted for one release, tokenised by shell *quoting* rules with no shell *semantics* — any of `| & ; < > ( ) $ \` newline`, a leading `~`, or `$`/backtick inside double quotes is rejected at config load rather than passed through as a literal that looks like it worked.
+
+Draft 02's `[secrets] provider = "chain"` key is **removed**: §15 defines exactly one legal value, so the key could only ever be set to its default or be wrong.
 
 Rules:
 
@@ -1181,6 +1214,9 @@ Stable codes; the web app maps them to human copy, and they appear in `Update.Er
 | `E_INTERRUPTED` | interrupted | yes | Agent died mid-run; set at reconciliation |
 | `E_APPROVAL_EXPIRED` | rejected | no | Unapproved for longer than `approval_ttl` (INV-5) |
 | `E_QUEUE_EXPIRED` | rejected | no | Queued for longer than `queue_ttl` |
+| `E_SECRET_BACKEND` | failed | **yes** | A secret backend is unusable: keychain locked, `op` not signed in, `secrets.env` world-readable |
+
+`E_SECRET_BACKEND` is new in amendment A16. Draft 02 mapped every secrets failure to `E_MISSING_SECRET` — rejected, non-retryable — which is right for a name nobody configured and wrong for the most common case on a Mac mini: a keychain that is locked because the machine rebooted. That is a machine condition, it resolves without anyone editing a commit, and it should offer a retry. Distinguishing "you never set this" from "I cannot reach where you set it" is the difference between a useful error and a misleading one.
 
 Retryable errors are safe for the control plane to offer as a one-click retry. Non-retryable ones need a human or a commit.
 
@@ -1414,3 +1450,22 @@ Implementing WS-00 surfaced four gaps between the §7 snippets and code that com
 | A6 | **`RunRequest.ID` and `CancelRequest.ID` are validated** (INV-3 above) | Found by `gosec` G304 during WS-02 and confirmed by hand: a control plane sending `{"id": "../../../../tmp/x"}` made the agent open a log file outside `~/.latem` entirely. INV-3 enumerated `repo`, `ref`, and `inputs` and never mentioned `id`, while `id` is the field every path is built from. |
 
 A1, A4, and A5 are not wire changes. A2 and A6 narrow a field's legal values, and A3 formalises a frame the spec already required. **A6 is a security fix, not a tidy-up** — it closes a path traversal reachable from a compromised or buggy control plane, which is precisely the threat §5 exists to bound.
+
+### Amendments from Wave 1
+
+Seven implementations built simultaneously against the frozen contracts, each pushing on a different part of the spec. A7 through A16 are what they found. None was discovered by re-reading the document; every one came from something refusing to compile, refusing to run, or refusing to be expressible.
+
+| # | Section | Change | Why it surfaced |
+|---|---|---|---|
+| A7 | §5 (INV-3), §12 | Options terminator is `--` **or** `--end-of-options`; §12's `checkout` and `rev-parse` lines corrected; LFS gains a workspace-side fetch | §12's own shell sketch does not run. `git checkout --detach -- $SHA` fails outright, because to git `--` means "a pathspec follows". Verified on git 2.50.1 |
+| A8 | §7.2, §22 | `Update` gains `Runner`, `ExpiresAt`, `CancelReason` | Three columns of §22's schema were unreachable through the interface that owns them. `Transition` could clear an expiry but never set one |
+| A9 | §13 | `Env.Exec` takes separate stdout and stderr; `Env` gains `EnvFile()`; `Step.EnvFile` removed | One writer made `LogFrame.Stream` unfillable. And only the executor knows the `$LATEM_ENV` path, so the caller filling it forced the orchestrator to import a concrete executor |
+| A10 | §9, §13 | `Spec` gains `Secrets []string` | §9 requires `$LATEM_ENV` to ignore "a declared secret name", and nothing told the executor which keys those were. It had to protect the entire injected environment — safe, but it silently refused legal overrides of ordinary variables |
+| A11 | §14 | `cache.Manager.Acquire` takes `Request{Name, Target}`, not names | Mount paths live in the registry, which the cache manager cannot read. It returned mounts with an empty target — silent at every layer, and the only symptom is a build that stays cold forever |
+| A12 | §22 | `ClaimNext` documented as claiming *unpinned or pinned-to-me*, not label-matched | The old wording contradicted INV-5: a job's `runs_on` lives in `jobs.yaml` at the resolved commit, which is not on disk until after the claim |
+| A13 | §16 | `TooShort` moved beside the `Registrar` interface | It sat in the implementation file while the constant it uses sat in the seam, so `internal/secrets` reached past the interface it was given |
+| A14 | §8, §11 | `[runner.native]` block added; `preparing → queued` documented as legal | §13.3 required a native disk floor the schema could not express. Gate 16 requires a state transition the diagram does not draw |
+| A15 | §15 | `[secrets.commands]` are argv arrays; `provider` key removed | The spec wrote commands as strings, INV-3 demands argv, and nothing said how one becomes the other. `provider` had exactly one legal value |
+| A16 | §21 | `E_SECRET_BACKEND` added, retryable | Every secrets failure collapsed to a non-retryable `E_MISSING_SECRET`, including a locked keychain after a reboot — a machine condition that resolves on its own |
+
+Three of these (A7, A9, A11) describe things that could not have worked as written. Two (A10, A12) are places the spec asked for a guarantee it gave no way to implement. That is the return on freezing contracts first and building against them in parallel: the defects surfaced in a week of implementation rather than in month three of integration.

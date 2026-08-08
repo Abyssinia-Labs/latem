@@ -107,7 +107,7 @@ func TestExec_EveryStepIsFullyConfigured(t *testing.T) {
 		{Name: "two", Run: "echo $LEAKED"},
 	}
 	for _, s := range steps {
-		if _, err := env.Exec(context.Background(), s, io.Discard); err != nil {
+		if _, err := env.Exec(context.Background(), s, io.Discard, io.Discard); err != nil {
 			t.Fatalf("Exec(%s): %v", s.Name, err)
 		}
 	}
@@ -143,7 +143,7 @@ func TestExec_StepEnvOverridesRunEnv(t *testing.T) {
 	})
 
 	_, err := env.Exec(context.Background(),
-		executor.Step{Name: "s", Run: "true", Env: map[string]string{"NODE_ENV": "test"}}, io.Discard)
+		executor.Step{Name: "s", Run: "true", Env: map[string]string{"NODE_ENV": "test"}}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -162,10 +162,10 @@ func TestExec_LatemEnvCarriesForward(t *testing.T) {
 	f := &fakeAPI{envFileData: []byte("BUILD_NUMBER=42\nARTIFACT=app.aab\n")}
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
-	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "true"}, io.Discard); err != nil {
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "true"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("Exec one: %v", err)
 	}
-	if _, err := env.Exec(context.Background(), executor.Step{Name: "two", Run: "true"}, io.Discard); err != nil {
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "two", Run: "true"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("Exec two: %v", err)
 	}
 
@@ -187,7 +187,7 @@ func TestExec_LatemEnvIsTruncatedBetweenSteps(t *testing.T) {
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
 	before := len(f.copiedTo)
-	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "true"}, io.Discard); err != nil {
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "true"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
 	if len(f.copiedTo) != before+1 {
@@ -204,7 +204,7 @@ func TestExec_LatemEnvWarningsReachTheStepLog(t *testing.T) {
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
 	var log bytes.Buffer
-	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "true"}, &log); err != nil {
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "true"}, &log, &log); err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
 	if !strings.Contains(log.String(), "[latem] $LATEM_ENV line 1") {
@@ -222,7 +222,7 @@ func TestExec_StreamsOutputAndReturnsExitCode(t *testing.T) {
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
 	var log bytes.Buffer
-	code, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &log)
+	code, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &log, &log)
 	// A non-zero exit is a result, not an error: the agent maps it to E_STEP.
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -237,26 +237,38 @@ func TestExec_StreamsOutputAndReturnsExitCode(t *testing.T) {
 	}
 }
 
-type splitWriter struct {
-	out, err bytes.Buffer
-}
-
-func (s *splitWriter) Write(p []byte) (int, error) { return s.out.Write(p) }
-func (s *splitWriter) Stderr() io.Writer           { return &s.err }
-
-func TestExec_StderrSplitterSeparatesStreams(t *testing.T) {
+// Amendment A9 gave Exec separate stdout and stderr writers. Before it,
+// executor.Env.Exec took one io.Writer, which made protocol.LogFrame.Stream
+// unfillable: the wire type has the field and the log pipeline distinguishes
+// the two, but the executor could not say which was which.
+func TestExec_StdoutAndStderrAreReportedSeparately(t *testing.T) {
 	f := &fakeAPI{envFileMissing: true, execStdout: []string{"out\n"}, execStderr: []string{"err\n"}}
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
-	var w splitWriter
-	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &w); err != nil {
+	var stdout, stderr bytes.Buffer
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &stdout, &stderr); err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
-	if !strings.Contains(w.out.String(), "out") || strings.Contains(w.out.String(), "err") {
-		t.Errorf("stdout = %q", w.out.String())
+	if !strings.Contains(stdout.String(), "out") || strings.Contains(stdout.String(), "err") {
+		t.Errorf("stdout = %q", stdout.String())
 	}
-	if !strings.Contains(w.err.String(), "err") {
-		t.Errorf("stderr = %q", w.err.String())
+	if !strings.Contains(stderr.String(), "err") || strings.Contains(stderr.String(), "out") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// Passing one writer twice is legal for a caller that wants them interleaved,
+// which is what a human reading a build log usually wants.
+func TestExec_SameWriterTwiceInterleaves(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true, execStdout: []string{"out\n"}, execStderr: []string{"err\n"}}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
+
+	var both bytes.Buffer
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &both, &both); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(both.String(), "out") || !strings.Contains(both.String(), "err") {
+		t.Errorf("combined = %q", both.String())
 	}
 }
 
@@ -268,7 +280,7 @@ func TestExec_StepTimeout(t *testing.T) {
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
 	_, err := env.Exec(context.Background(),
-		executor.Step{Name: "hangs", Run: "sleep 900", Timeout: 50 * time.Millisecond}, io.Discard)
+		executor.Step{Name: "hangs", Run: "sleep 900", Timeout: 50 * time.Millisecond}, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("Exec returned no error for a step that never finished")
 	}
@@ -292,7 +304,7 @@ func TestExec_ParentCancellationIsNotAStepTimeout(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}()
-	_, err := env.Exec(ctx, executor.Step{Name: "cancelled", Run: "sleep 900"}, io.Discard)
+	_, err := env.Exec(ctx, executor.Step{Name: "cancelled", Run: "sleep 900"}, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("Exec returned no error for a cancelled step")
 	}
@@ -343,7 +355,7 @@ func TestExec_AfterCloseIsRefused(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	_, err := env.Exec(context.Background(), executor.Step{Name: "s", Run: "true"}, io.Discard)
+	_, err := env.Exec(context.Background(), executor.Step{Name: "s", Run: "true"}, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("Exec succeeded on a closed environment")
 	}

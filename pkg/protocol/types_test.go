@@ -149,7 +149,7 @@ func TestRunState_Waiting(t *testing.T) {
 // Retryability is what a control plane hangs a one-click retry button on.
 // Offering it for something that cannot succeed is worse than not offering it.
 func TestErrorCode_RetryableMatchesSpec(t *testing.T) {
-	retryable := []ErrorCode{ErrSource, ErrExecutor, ErrCache, ErrDisk, ErrInterrupted}
+	retryable := []ErrorCode{ErrSource, ErrExecutor, ErrCache, ErrDisk, ErrInterrupted, ErrSecretBackend}
 	notRetryable := []ErrorCode{
 		ErrUnknownRepo, ErrInvalidRef, ErrAmbiguousRef, ErrUnknownJob,
 		ErrNoRunner, ErrBadInput, ErrMissingSecret, ErrNoRegistry,

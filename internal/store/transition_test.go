@@ -374,3 +374,79 @@ func TestTransition_IllegalChangesNothing(t *testing.T) {
 		t.Errorf("a refused transition still wrote artifacts: %+v", arts)
 	}
 }
+
+// Amendment A8 added Runner, ExpiresAt and CancelReason to protocol.Update so
+// that three §22 columns would be reachable through the Store interface. The
+// fields were added before Transition applied them, so for a while a caller
+// could set them and watch them vanish with no error — the failure mode this
+// pins shut.
+func TestTransition_AppliesA8Fields(t *testing.T) {
+	d := newTestDB(t)
+	r := mustCreate(t, d, Run{ID: "run_a8", Repo: "api", Job: "test", Ref: "main", State: protocol.StateQueued})
+
+	deadline := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+
+	// Into a waiting state, carrying a deadline and the runner that claimed it.
+	if err := d.Transition(t.Context(), r.ID, protocol.StateClaimed, protocol.Update{
+		State:  protocol.StateClaimed,
+		Runner: "linux-x64",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Get(t.Context(), r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Runner != "linux-x64" {
+		t.Errorf("Runner = %q, want it persisted", got.Runner)
+	}
+
+	// A cancel reason survives, redacted.
+	if err := d.Transition(t.Context(), r.ID, protocol.StateCancelled, protocol.Update{
+		State:        protocol.StateCancelled,
+		CancelReason: "stopped from the phone",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.Get(t.Context(), r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CancelReason == "" {
+		t.Error("CancelReason was dropped")
+	}
+	// Leaving a waiting state clears the deadline regardless of the caller.
+	if got.ExpiresAt != nil {
+		t.Errorf("ExpiresAt = %v, want it cleared on a terminal state", got.ExpiresAt)
+	}
+	_ = deadline
+}
+
+// Entering a waiting state with a deadline stores it; only the caller knows
+// the configured TTLs, which is why it travels with the transition.
+func TestTransition_SetsExpiryOnAWaitingState(t *testing.T) {
+	d := newTestDB(t)
+	r := mustCreate(t, d, Run{ID: "run_exp", Repo: "api", Job: "test", Ref: "main",
+		State: protocol.StateAwaitingApproval})
+
+	// The real flow: `latem approve` moves a parked run back to queued, where
+	// it picks up a fresh queue_ttl deadline.
+	deadline := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+	if err := d.Transition(t.Context(), r.ID, protocol.StateQueued, protocol.Update{
+		State:     protocol.StateQueued,
+		ExpiresAt: &deadline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := d.Get(t.Context(), r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExpiresAt == nil {
+		t.Fatal("ExpiresAt was dropped entering a waiting state")
+	}
+	if !got.ExpiresAt.Equal(deadline) {
+		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, deadline)
+	}
+}

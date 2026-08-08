@@ -91,11 +91,19 @@ type Store interface {
 	// Enqueue adds a run to the local queue.
 	Enqueue(ctx context.Context, runID string, priority int) error
 
-	// ClaimNext atomically claims the highest-priority queued run whose job can
-	// run on one of the given runner names, returning [ErrNotFound] when there
-	// is nothing to claim. Atomicity is the whole contract: this is a
-	// conditional UPDATE relying on sqlite's write serialization, not a read
-	// followed by a write.
+	// ClaimNext atomically claims the highest-priority claimable run,
+	// returning [ErrNotFound] when there is nothing to claim. Atomicity is the
+	// whole contract: this is a conditional UPDATE relying on sqlite's write
+	// serialization, not a read followed by a write.
+	//
+	// "Claimable" means unpinned, or pinned to one of the given runner names.
+	// It deliberately does NOT mean "whose job can run on these runners",
+	// which is what draft 02's comment claimed and which is unanswerable here:
+	// a job's runs_on lives in jobs.yaml at the resolved commit, and INV-5
+	// says that file is not read until after checkout — which happens after
+	// the claim. Label matching is gate 13, in internal/registry, and a run
+	// that fails it is rejected with E_NO_RUNNER having already been claimed
+	// (amendment A12).
 	ClaimNext(ctx context.Context, runners []string) (Run, error)
 
 	// Claim atomically claims one specific run, returning [ErrNotClaimable] if

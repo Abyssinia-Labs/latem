@@ -94,7 +94,7 @@ func TestAcquire_DirectoryBackedRunner(t *testing.T) {
 	root := t.TempDir()
 	l := newLocal(t, root, time.Second)
 
-	mounts, err := l.Acquire(context.Background(), "linux", []string{"pnpm"})
+	mounts, err := l.Acquire(context.Background(), "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,10 +110,24 @@ func TestAcquire_DirectoryBackedRunner(t *testing.T) {
 	if info, _ := os.Stat(want); info.Mode().Perm()&0o077 != 0 {
 		t.Errorf("cache directory mode = %o, want owner-only", info.Mode().Perm())
 	}
-	// Target is deliberately empty: the mount point lives in the registry at
-	// the resolved commit, which this package cannot see.
-	if mounts[0].Target != "" {
-		t.Errorf("Target = %q, want it left to the orchestrator", mounts[0].Target)
+	// Target comes through on the Request (amendment A11). Before it did, this
+	// returned an empty Target and the mount silently did nothing — the build
+	// simply ran cold forever, with no error anywhere to explain it.
+	if mounts[0].Target != "/cache/pnpm" {
+		t.Errorf("Target = %q, want the requested mount point", mounts[0].Target)
+	}
+}
+
+// A cache with no mount point is refused rather than mounted nowhere.
+func TestAcquire_RejectsRequestWithNoTarget(t *testing.T) {
+	l := newLocal(t, t.TempDir(), time.Second)
+
+	_, err := l.Acquire(context.Background(), "linux", []Request{{Name: "pnpm"}})
+	if err == nil {
+		t.Fatal("accepted a cache request with no mount target")
+	}
+	if CodeOf(err) != protocol.ErrCache {
+		t.Errorf("code = %s, want %s", CodeOf(err), protocol.ErrCache)
 	}
 }
 
@@ -122,7 +136,7 @@ func TestAcquire_VolumeBackedRunner(t *testing.T) {
 	docker := newFakeDocker()
 	l := newLocal(t, t.TempDir(), time.Second, func(o *Options) { o.Docker = docker })
 
-	mounts, err := l.Acquire(context.Background(), "docker", []string{"gradle"})
+	mounts, err := l.Acquire(context.Background(), "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +161,7 @@ func TestAcquire_VolumeBackedRunner(t *testing.T) {
 func TestAcquire_DockerRunnerWithoutADaemonFails(t *testing.T) {
 	l := newLocal(t, t.TempDir(), time.Second)
 
-	_, err := l.Acquire(context.Background(), "docker", []string{"gradle"})
+	_, err := l.Acquire(context.Background(), "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}})
 	if err == nil {
 		t.Fatal("Acquire silently substituted a directory for a volume")
 	}
@@ -161,7 +175,7 @@ func TestAcquire_ReportsVolumeCreationFailures(t *testing.T) {
 	docker.createErr = errors.New("daemon is not running")
 	l := newLocal(t, t.TempDir(), time.Second, func(o *Options) { o.Docker = docker })
 
-	_, err := l.Acquire(context.Background(), "docker", []string{"gradle"})
+	_, err := l.Acquire(context.Background(), "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}})
 	if CodeOf(err) != protocol.ErrCache {
 		t.Fatalf("err = %v, CodeOf = %q, want %s", err, CodeOf(err), protocol.ErrCache)
 	}
@@ -177,10 +191,10 @@ func TestList_ReportsBothBackends(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	if _, err := l.Acquire(ctx, "linux", []string{"pnpm"}); err != nil {
+	if _, err := l.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Acquire(ctx, "docker", []string{"gradle"}); err != nil {
+	if _, err := l.Acquire(ctx, "docker", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "caches", "linux", "pnpm", "blob"), make([]byte, 512), 0o600); err != nil {
@@ -224,7 +238,7 @@ func TestList_ReturnsWhatItCanWhenDockerFails(t *testing.T) {
 	l := newLocal(t, t.TempDir(), time.Second, func(o *Options) { o.Docker = docker })
 	ctx := context.Background()
 
-	if _, err := l.Acquire(ctx, "linux", []string{"pnpm"}); err != nil {
+	if _, err := l.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}}); err != nil {
 		t.Fatal(err)
 	}
 

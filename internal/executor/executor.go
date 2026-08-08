@@ -46,7 +46,21 @@ type Env interface {
 	//
 	// [Step.Run] is handed to the shell as a SINGLE argument — an argv slice,
 	// never a concatenated command string (INV-3).
-	Exec(ctx context.Context, step Step, out io.Writer) (exitCode int, err error)
+	//
+	// stdout and stderr are reported separately (amendment A9). Draft 02 took
+	// one writer, which made [protocol.LogFrame.Stream] unfillable: the log
+	// pipeline distinguishes the two and the wire type has a field for it,
+	// but the executor could not say which was which. Passing the same writer
+	// twice is legal for a caller that does not care.
+	Exec(ctx context.Context, step Step, stdout, stderr io.Writer) (exitCode int, err error)
+
+	// EnvFile is the environment-visible path to export as $LATEM_ENV.
+	//
+	// Only the executor knows it — it is a container path for docker, a guest
+	// path for tart, a host path for native. Draft 02 had the caller fill
+	// [Step.EnvFile], which meant the orchestrator had to import a concrete
+	// executor package to get it right, defeating the interface (amendment A9).
+	EnvFile() string
 
 	// Fetch copies paths matching glob out of the environment, for artifact
 	// collection. The glob is relative to the workspace root and must not
@@ -69,7 +83,22 @@ type Spec struct {
 	Image     string
 	// Env is the run environment. It includes resolved secrets, which have
 	// already been registered with the redactor before this struct is built.
-	Env       map[string]string
+	Env map[string]string
+
+	// Secrets names the keys of Env that came from a job's secrets: block.
+	//
+	// RUNNER_SPEC §9 requires $LATEM_ENV to ignore keys colliding with a
+	// declared secret name, so that a job cannot overwrite an injected
+	// credential. Draft 02 gave the executor no way to tell a secret from any
+	// other environment entry, forcing it to protect *every* key in Env — safe,
+	// but stricter than the spec, and it silently refused legal overrides of
+	// ordinary variables like NODE_ENV (amendment A10).
+	//
+	// An executor handed an empty Secrets with a non-empty Env must fall back
+	// to protecting everything. Failing open here would mean a credential
+	// overwrite; failing closed costs a confusing refusal.
+	Secrets []string
+
 	Caches    []CacheMount
 	Labels    map[string]string // includes latem.run-id, for crash reaping
 	Resources Resources
@@ -87,12 +116,6 @@ type Step struct {
 	// Timeout bounds this step alone. Zero means "whatever remains of the job
 	// budget", so it is opt-in and never tightens a job by accident.
 	Timeout time.Duration
-	// EnvFile is the environment-visible path exported as $LATEM_ENV. A step
-	// may append KEY=value lines to it; the agent merges them into the run
-	// environment for subsequent steps, subject to the constraints in
-	// RUNNER_SPEC §9. It is the only sanctioned channel between steps, because
-	// shell state does not survive one.
-	EnvFile string
 }
 
 // CacheMount is one cache made available to a run. Caches are mounted, not

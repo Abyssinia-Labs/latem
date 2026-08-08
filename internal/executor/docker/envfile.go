@@ -116,19 +116,27 @@ func parseEnvFile(data []byte, protected func(string) bool) (map[string]string, 
 // Two rules. Any LATEM_* name is the agent's, so a job cannot spoof
 // $LATEM_ENV itself or any variable the agent later adds.
 //
-// Any key already present in the run environment is refused as well, and that
-// is broader than §9, which names only "a declared secret name". The reason is
-// a gap in the frozen contract rather than a choice: [executor.Spec] carries
-// Env with the secrets already resolved into it and carries no list of which
-// keys those were, so this package cannot distinguish MATCH_PASSWORD from
-// NODE_ENV. Refusing the whole injected set is the only reading that keeps
-// §9's actual guarantee — "a job cannot overwrite an injected credential" —
-// and it errs toward refusing a legal override rather than permitting an
-// illegal one. Reported as a contract defect; when Spec grows a Secrets field
-// this can be narrowed to it.
-func protectedEnvKey(runEnvironment map[string]string, key string) bool {
+// Any declared secret name is refused, which is exactly what §9 asks for.
+// [executor.Spec.Secrets] names them (amendment A10); before it existed this
+// package could not tell MATCH_PASSWORD from NODE_ENV and had to refuse the
+// whole injected set.
+//
+// The fallback survives on purpose. An executor handed a non-empty Env with no
+// Secrets list has no way to identify credentials, so it protects everything
+// injected. Failing open there would permit a credential overwrite; failing
+// closed costs a confusing refusal of a legal override, and that is the
+// cheaper mistake.
+func protectedEnvKey(runEnvironment map[string]string, secrets []string, key string) bool {
 	if strings.HasPrefix(key, "LATEM_") {
 		return true
+	}
+	if len(secrets) > 0 {
+		for _, name := range secrets {
+			if name == key {
+				return true
+			}
+		}
+		return false
 	}
 	_, injected := runEnvironment[key]
 	return injected
@@ -150,7 +158,7 @@ func (e *runEnv) mergeEnvFile(ctx context.Context, envFile string, out io.Writer
 	}
 
 	vars, warnings := parseEnvFile(data, func(k string) bool {
-		return protectedEnvKey(e.spec.Env, k)
+		return protectedEnvKey(e.spec.Env, e.spec.Secrets, k)
 	})
 	for _, w := range warnings {
 		writeNote(out, w)

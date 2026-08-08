@@ -48,7 +48,7 @@ func TestAcquire_SerialisesConcurrentRunsOnOneCache(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := l.Acquire(ctx, "linux", []string{"gradle"}); err != nil {
+			if _, err := l.Acquire(ctx, "linux", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 				t.Error(err)
 				return
 			}
@@ -86,12 +86,12 @@ func TestAcquire_ExcludesAnotherProcessHoldingTheSameCache(t *testing.T) {
 	second := newLocal(t, root, 150*time.Millisecond)
 	ctx := context.Background()
 
-	if _, err := first.Acquire(ctx, "linux", []string{"gradle"}); err != nil {
+	if _, err := first.Acquire(ctx, "linux", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 		t.Fatal(err)
 	}
 
 	start := time.Now()
-	_, err := second.Acquire(ctx, "linux", []string{"gradle"})
+	_, err := second.Acquire(ctx, "linux", []Request{{Name: "gradle", Target: "/cache/gradle"}})
 	if err == nil {
 		t.Fatal("a second holder acquired a cache the first still has")
 	}
@@ -109,7 +109,7 @@ func TestAcquire_ExcludesAnotherProcessHoldingTheSameCache(t *testing.T) {
 	if err := first.Release(ctx, "linux", []string{"gradle"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := second.Acquire(ctx, "linux", []string{"gradle"}); err != nil {
+	if _, err := second.Acquire(ctx, "linux", []Request{{Name: "gradle", Target: "/cache/gradle"}}); err != nil {
 		t.Fatalf("the cache stayed locked after Release: %v", err)
 	}
 }
@@ -123,13 +123,13 @@ func TestAcquire_TimesOutRatherThanHanging(t *testing.T) {
 	waiter := newLocal(t, root, 50*time.Millisecond)
 	ctx := context.Background()
 
-	if _, err := holder.Acquire(ctx, "linux", []string{"pnpm"}); err != nil {
+	if _, err := holder.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}}); err != nil {
 		t.Fatal(err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := waiter.Acquire(ctx, "linux", []string{"pnpm"})
+		_, err := waiter.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}})
 		done <- err
 	}()
 
@@ -148,14 +148,14 @@ func TestAcquire_HonoursContextCancellation(t *testing.T) {
 	holder := newLocal(t, root, time.Minute)
 	waiter := newLocal(t, root, time.Minute)
 
-	if _, err := holder.Acquire(context.Background(), "linux", []string{"pnpm"}); err != nil {
+	if _, err := holder.Acquire(context.Background(), "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}}); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := waiter.Acquire(ctx, "linux", []string{"pnpm"})
+	_, err := waiter.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want the context's error — a cancelled run should not wait ten minutes", err)
 	}
@@ -167,7 +167,7 @@ func TestAcquire_HonoursContextCancellation(t *testing.T) {
 func TestAcquire_LocksInSortedOrder(t *testing.T) {
 	l := newLocal(t, t.TempDir(), time.Second)
 
-	mounts, err := l.Acquire(context.Background(), "linux", []string{"pnpm", "gradle", "cocoapods"})
+	mounts, err := l.Acquire(context.Background(), "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}, {Name: "gradle", Target: "/cache/gradle"}, {Name: "cocoapods", Target: "/cache/cocoapods"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestAcquire_LocksInSortedOrder(t *testing.T) {
 func TestAcquire_DeduplicatesNames(t *testing.T) {
 	l := newLocal(t, t.TempDir(), 200*time.Millisecond)
 
-	mounts, err := l.Acquire(context.Background(), "linux", []string{"pnpm", "pnpm"})
+	mounts, err := l.Acquire(context.Background(), "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}, {Name: "pnpm", Target: "/cache/pnpm"}})
 	if err != nil {
 		t.Fatalf("a repeated cache name deadlocked against itself: %v", err)
 	}
@@ -202,16 +202,16 @@ func TestAcquire_UnwindsAfterAPartialFailure(t *testing.T) {
 
 	// Hold the second cache in sorted order, so the first is taken and then
 	// has to be given back.
-	if _, err := holder.Acquire(ctx, "linux", []string{"zebra"}); err != nil {
+	if _, err := holder.Acquire(ctx, "linux", []Request{{Name: "zebra", Target: "/cache/zebra"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runner.Acquire(ctx, "linux", []string{"alpha", "zebra"}); err == nil {
+	if _, err := runner.Acquire(ctx, "linux", []Request{{Name: "alpha", Target: "/cache/alpha"}, {Name: "zebra", Target: "/cache/zebra"}}); err == nil {
 		t.Fatal("Acquire succeeded while zebra was held")
 	}
 
 	// alpha must be free again for anyone, including another process.
 	third := newLocal(t, root, 200*time.Millisecond)
-	if _, err := third.Acquire(ctx, "linux", []string{"alpha"}); err != nil {
+	if _, err := third.Acquire(ctx, "linux", []Request{{Name: "alpha", Target: "/cache/alpha"}}); err != nil {
 		t.Errorf("alpha stayed locked after a partial acquisition failed: %v", err)
 	}
 }
@@ -224,7 +224,7 @@ func TestRelease_IsIdempotentAndSafeAfterFailure(t *testing.T) {
 	if err := l.Release(ctx, "linux", []string{"pnpm"}); err != nil {
 		t.Errorf("releasing a cache that was never acquired: %v", err)
 	}
-	if _, err := l.Acquire(ctx, "linux", []string{"pnpm"}); err != nil {
+	if _, err := l.Acquire(ctx, "linux", []Request{{Name: "pnpm", Target: "/cache/pnpm"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Release(ctx, "linux", []string{"pnpm"}); err != nil {
@@ -262,7 +262,7 @@ func TestAcquire_RejectsUnsafeNames(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := l.Acquire(ctx, tc.runner, []string{tc.cache}); err == nil {
+			if _, err := l.Acquire(ctx, tc.runner, []Request{{Name: tc.cache, Target: "/cache/x"}}); err == nil {
 				t.Fatalf("Acquire(%q, %q) was accepted; these become volume names and paths",
 					tc.runner, tc.cache)
 			} else if CodeOf(err) != protocol.ErrCache {

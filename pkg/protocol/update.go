@@ -5,6 +5,13 @@ import "time"
 // Update publishes a state transition. It is idempotent by (run id, state):
 // a broker receiving the same transition twice must treat the second as a
 // no-op, because the agent replays unacknowledged transitions on reconnect.
+//
+// Runner, ExpiresAt, and CancelReason were added in amendment A8. Draft 02's
+// Update could not express any of them, which left three columns of the §22
+// schema unreachable through the [store.Store] interface that owns it: the
+// deadline set on entering a waiting state, the reason a run was stopped, and
+// which runner claimed the work. Each also belongs on the wire — a control
+// plane showing a run wants all three.
 type Update struct {
 	State      RunState      `json:"state"`
 	ExitCode   *int          `json:"exit_code,omitempty"`
@@ -13,6 +20,21 @@ type Update struct {
 	StartedAt  *time.Time    `json:"started_at,omitempty"`
 	FinishedAt *time.Time    `json:"finished_at,omitempty"`
 	Artifacts  []ArtifactRef `json:"artifacts,omitempty"`
+
+	// Runner names the execution slot that claimed this run. It is not known
+	// at Create time — gate 13 selects it during preparing, after the claim.
+	Runner string `json:"runner,omitempty"`
+
+	// ExpiresAt is the approval_ttl or queue_ttl deadline (§11). Set on
+	// entering queued or awaiting_approval; a transition out of a waiting
+	// state clears it. Only the caller knows the configured TTLs, which is
+	// why this travels with the transition rather than being derived.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+
+	// CancelReason echoes [CancelRequest.Reason] for audit and display. It
+	// originated outside the trust boundary, so it is redacted and truncated
+	// before it reaches here, exactly like ErrorMsg.
+	CancelReason string `json:"cancel_reason,omitempty"`
 }
 
 // ArtifactRef describes an artifact without carrying it.

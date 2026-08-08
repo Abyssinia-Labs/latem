@@ -28,6 +28,16 @@ import (
 //     concurrency group with the outcome "queued — wait, do not fail", and
 //     gates 6-18 run during preparing. The §11 diagram has no such arrow; §10
 //     requires it.
+//   - preparing may reach awaiting_approval, and without this edge INV-5 is
+//     unenforceable. §11 draws "gate 4 / 8 ──▶ awaiting_approval" as though
+//     both gates sat in the same place, but they do not: gate 4 is the cheap
+//     pre-check that runs before a run row exists, so Admit can simply create
+//     the row already parked. Gate 8 is the *authoritative* ref-policy check,
+//     it runs during preparing because it needs a fetched mirror, and with no
+//     edge out of preparing it had nowhere to put the run. The consequence was
+//     specific: a ref that gate 4 admitted optimistically — a tag under a
+//     branch policy, say — could not be parked for approval by the check that
+//     actually decides (amendment A17).
 //   - collecting may reach cancelled. §11 says collecting always runs, "including
 //     after failed, timed_out, and cancelled", so a run cancelled while running
 //     reaches cancelled *through* collecting. ("A cancel arriving during
@@ -57,6 +67,7 @@ var legalTransitions = map[protocol.RunState][]protocol.RunState{
 	protocol.StatePreparing: {
 		protocol.StateRunning,
 		protocol.StateQueued,
+		protocol.StateAwaitingApproval,
 		protocol.StateCollecting,
 		protocol.StateCancelled,
 		protocol.StateRejected,
@@ -168,8 +179,31 @@ func (d *DB) Transition(ctx context.Context, runID string, to protocol.RunState,
 			set = append(set, "finished_at = ?")
 			args = append(args, nullTime(u.FinishedAt))
 		}
-		if !to.IsWaiting() {
+		// Amendment A8 added these three to [protocol.Update] precisely so the
+		// columns would be reachable through the Store interface. Applying
+		// them here is the other half of that change: without it the fields
+		// exist, callers set them, and Transition drops them silently — which
+		// is worse than not having added them, because the caller has no way
+		// to tell.
+		if u.Runner != "" {
+			set = append(set, "runner = ?")
+			args = append(args, u.Runner)
+		}
+		if u.CancelReason != "" {
+			// Display-only text from outside the trust boundary (§7.1), so it
+			// gets the same treatment as ErrorMsg.
+			set = append(set, "cancel_reason = ?")
+			args = append(args, d.red.Redact(u.CancelReason))
+		}
+
+		switch {
+		case !to.IsWaiting():
+			// Leaving a waiting state always clears the deadline, whatever the
+			// caller passed.
 			set = append(set, "expires_at = NULL")
+		case u.ExpiresAt != nil:
+			set = append(set, "expires_at = ?")
+			args = append(args, nullTime(u.ExpiresAt))
 		}
 
 		args = append(args, runID)

@@ -138,20 +138,35 @@ func (l *Local) volumeBacked(runner string) bool {
 
 // Acquire prepares the named caches and returns their mounts.
 //
-// [executor.CacheMount.Target] is left empty. The mount point comes from the
-// registry's caches[].path at the resolved commit (INV-5), which this package
-// deliberately cannot see — it would have to import the registry and be handed
-// a parsed job to do it. The orchestrator fills it in; [WithTargets] is the
-// one-liner for that, and it fails loudly on a cache with no declared path
-// rather than mounting it nowhere.
+// Each [Request] carries the mount point from the registry's caches[].path at
+// the resolved commit (INV-5), which this package deliberately cannot read
+// itself. An empty Target is refused rather than mounted nowhere: a cache that
+// silently does not mount is invisible at every layer below, and the only
+// symptom is a build that stays cold forever (amendment A11).
 //
 // Names are locked in sorted order. Two runs asking for {gradle, pnpm} and
 // {pnpm, gradle} would otherwise deadlock for the full ten minutes and both
 // fail, which is the kind of bug that only appears once the machine is busy.
-func (l *Local) Acquire(ctx context.Context, runner string, names []string) ([]executor.CacheMount, error) {
+func (l *Local) Acquire(ctx context.Context, runner string, reqs []Request) ([]executor.CacheMount, error) {
 	if err := validateName("runner", runner); err != nil {
 		return nil, cacheErr(err, "acquiring caches")
 	}
+
+	targets := make(map[string]string, len(reqs))
+	names := make([]string, 0, len(reqs))
+	for _, r := range reqs {
+		if r.Target == "" {
+			return nil, cacheErr(nil,
+				"cache %q has no mount target; a cache that does not mount is a build that never warms", r.Name)
+		}
+		if prev, dup := targets[r.Name]; dup && prev != r.Target {
+			return nil, cacheErr(nil,
+				"cache %q requested with two mount targets, %q and %q", r.Name, prev, r.Target)
+		}
+		targets[r.Name] = r.Target
+		names = append(names, r.Name)
+	}
+
 	wanted, err := sortedUnique(names)
 	if err != nil {
 		return nil, cacheErr(err, "acquiring caches for runner %s", runner)
@@ -193,7 +208,7 @@ func (l *Local) Acquire(ctx context.Context, runner string, names []string) ([]e
 		held = append(held, lockPath)
 		l.touch(lockPath)
 
-		mounts = append(mounts, executor.CacheMount{Name: name, Source: source})
+		mounts = append(mounts, executor.CacheMount{Name: name, Source: source, Target: targets[name]})
 	}
 	return mounts, nil
 }
