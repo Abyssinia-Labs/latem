@@ -1,11 +1,15 @@
 package main
 
 import (
-	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/broker/local"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 func newRunCommand() *cobra.Command {
@@ -57,15 +61,15 @@ Examples:
 			if err != nil {
 				return err
 			}
-			_ = parsed
-
-			// TODO(WS-10/WS-11): build a protocol.RunRequest, submit it
-			// through internal/broker/local, and stream updates from
-			// internal/run. Argument parsing and validation are done here;
-			// everything after admission belongs to those workstreams.
-			return errNotWired(
-				fmt.Sprintf("latem run %s %s", args[0], args[1]),
-				"WS-10 (internal/run) and WS-11 (internal/broker/local)")
+			return submitRun(cmd, submission{
+				repo:   args[0],
+				job:    args[1],
+				ref:    ref,
+				inputs: parsed,
+				actor:  actor,
+				follow: follow,
+				wait:   wait || follow,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&ref, "ref", "", "branch, tag, or fully-qualified ref (default: the repo's default branch)")
@@ -74,6 +78,87 @@ Examples:
 	cmd.Flags().BoolVar(&wait, "wait", false, "block until the run finishes")
 	cmd.Flags().StringVar(&actor, "actor", "", "who to record as having requested this (default: the current user)")
 	return cmd
+}
+
+// DefaultRef is what `latem run` uses when --ref is not given.
+//
+// The help text promises "the repo's default branch" and this is not that, and
+// the difference is worth stating rather than hiding. Learning a remote's HEAD
+// means `git ls-remote --symref`, which internal/source does not expose and
+// which would put a network round trip in front of a command whose whole point
+// is that it queues without one. So the CLI guesses the overwhelmingly common
+// answer and the run's own gates give a precise error when the guess is wrong:
+// a repo whose default branch is `master` gets E_INVALID_REF naming the ref it
+// tried, not a mysterious failure.
+const DefaultRef = "main"
+
+// submission is the shape of one `latem run`, after flag parsing.
+type submission struct {
+	repo, job, ref string
+	inputs         map[string]string
+	actor          string
+	follow, wait   bool
+}
+
+// submitRun queues a run and, depending on the flags, watches it.
+//
+// The two paths through here are §7.3's, and the asymmetry is deliberate.
+// Without --wait or --follow the run is queued whether or not an agent is
+// listening, and the command exits 0 — the work is durable and starts when an
+// agent does. With either flag there is nothing to wait for on a machine with
+// no agent, so the answer is exit 3 and no queue write at all: queueing a run
+// that will begin hours later, unwatched, after the user has moved on, is
+// worse than refusing.
+func submitRun(cmd *cobra.Command, s submission) error {
+	ctx := cmd.Context()
+	st, closeState, err := openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+
+	id, err := agent.NewRunID()
+	if err != nil {
+		return err
+	}
+	if s.ref == "" {
+		s.ref = DefaultRef
+	}
+	if s.actor == "" {
+		s.actor = currentActor()
+	}
+
+	req := protocol.RunRequest{
+		ID:     id,
+		Repo:   s.repo,
+		Job:    s.job,
+		Ref:    s.ref,
+		Inputs: s.inputs,
+		Origin: protocol.Origin{
+			Kind:        "cli",
+			Actor:       s.actor,
+			RequestedAt: time.Now(),
+		},
+	}
+
+	sub, err := st.client.Submit(ctx, req, local.SubmitOptions{
+		ExpiresAt:    time.Now().Add(st.queueTTL()),
+		RequireAgent: s.wait,
+	})
+	if err != nil {
+		return st.agentDown(err)
+	}
+
+	// The id goes to stdout on its own so `id=$(latem run myapp test)` works.
+	// Everything else is commentary and belongs on stderr.
+	printf(cmd.OutOrStdout(), "%s\n", sub.RunID)
+	if !sub.AgentRunning {
+		printf(cmd.ErrOrStderr(), "queued (agent not running) — it starts when one does: `latem agent`\n")
+	}
+	if !s.wait {
+		return nil
+	}
+	return watchRun(cmd, st, sub.RunID, s.follow)
 }
 
 // parseInputs turns repeated --input key=value flags into a map.

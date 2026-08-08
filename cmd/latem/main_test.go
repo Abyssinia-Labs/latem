@@ -103,20 +103,20 @@ func TestHelpDocumentsExitCodes(t *testing.T) {
 	}
 }
 
-// TestUnwiredCommandsRefuseClearly is the rule for everything WS-10 and WS-11
-// still own: refuse, name the workstream, and never print a plausible-looking
-// empty result that somebody builds a script on.
+// TestUnwiredCommandsRefuseClearly is the rule for everything still owned by a
+// workstream that has not landed: refuse, name the workstream, and never print
+// a plausible-looking empty result that somebody builds a script on.
+//
+// WS-11 wired agent, run, list, logs, cancel, and approve, so they left this
+// table. `register` remains, because it needs WS-14's remote transport to
+// verify connectivity and a `register` that wrote a token file without ever
+// reaching the control plane would report success for a machine that cannot
+// talk to it.
 func TestUnwiredCommandsRefuseClearly(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
 	}{
-		{"agent", []string{"agent"}},
-		{"run", []string{"run", "myapp", "test"}},
-		{"list", []string{"list"}},
-		{"logs", []string{"logs", "run-1"}},
-		{"cancel", []string{"cancel", "run-1"}},
-		{"approve", []string{"approve", "run-1"}},
 		{"register", []string{"register", "--url", "wss://x/agent", "--token", "t"}},
 	}
 	for _, tt := range tests {
@@ -142,6 +142,55 @@ func TestUnwiredCommandsRefuseClearly(t *testing.T) {
 			}
 			if out.Len() > 0 {
 				t.Errorf("an unwired command wrote output that could be mistaken for a result:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// TestWiredCommandsFailOnAMissingConfig is the other half of the rule above.
+//
+// Every command WS-11 wired now needs a config, and the failure it produces on
+// a machine that has none has to be the config error — not a refusal naming a
+// workstream, and emphatically not an empty list and exit 0. An operator who
+// has not run `latem register` should be sent to `latem register`, and a
+// script that greps for "not wired" should stop matching the moment the wiring
+// lands.
+func TestWiredCommandsFailOnAMissingConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LATEM_CONFIG_DIR", filepath.Join(home, "nothing-here"))
+	t.Cleanup(func() { global.configDir = "" })
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{"agent", []string{"agent"}},
+		{"run", []string{"run", "myapp", "test"}},
+		{"list", []string{"list"}},
+		{"logs", []string{"logs", "run-1"}},
+		{"cancel", []string{"cancel", "run-1"}},
+		{"approve", []string{"approve", "run-1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRootCommand()
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetErr(&out)
+			root.SetArgs(tt.args)
+
+			err := root.Execute()
+			if err == nil {
+				t.Fatalf("%v exited 0 with no config", tt.args)
+			}
+			if strings.Contains(err.Error(), "not wired up yet") {
+				t.Errorf("%v still returns the unwired refusal: %v", tt.args, err)
+			}
+			if got := exitCode(err); got != ExitFailure {
+				t.Errorf("exit code = %d, want %d (err %v)", got, ExitFailure, err)
+			}
+			if !strings.Contains(err.Error(), "config") {
+				t.Errorf("the failure should name the config: %v", err)
 			}
 		})
 	}

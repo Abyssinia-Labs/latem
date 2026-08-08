@@ -527,3 +527,29 @@ func TestExecute_NoBrokerIsNotAnError(t *testing.T) {
 		t.Errorf("the local log is missing: %v", err)
 	}
 }
+
+// Amendment A21 added RefNormalized and SHA to protocol.Update, and the store
+// applies them — but for a while nothing set them, so every completed run left
+// ref_normalized and sha NULL. That is precisely the audit trail INV-5 exists
+// to leave: "requested as main, built refs/heads/main at 3bf1261".
+func TestExecute_RecordsTheResolvedRefAndSHA(t *testing.T) {
+	h := newHarness(t)
+	o := h.build()
+
+	res := h.run(o, h.request("test"))
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("state = %s: %s", res.State, res.ErrorMsg)
+	}
+
+	got := mustGet(t, h.db, "run1")
+	if got.RefNormalized != "refs/heads/main" {
+		t.Errorf("ref_normalized = %q, want the fully-qualified name policy matched", got.RefNormalized)
+	}
+	if got.SHA != h.source.sha {
+		t.Errorf("sha = %q, want %q", got.SHA, h.source.sha)
+	}
+	// The raw request survives beside it, so an audit can answer both halves.
+	if got.Ref != "main" {
+		t.Errorf("ref = %q, want the ref as requested", got.Ref)
+	}
+}

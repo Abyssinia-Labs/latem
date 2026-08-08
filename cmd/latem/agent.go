@@ -1,7 +1,16 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+
 	"github.com/spf13/cobra"
+
+	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 func newAgentCommand() *cobra.Command {
@@ -38,12 +47,37 @@ SIGHUP reloads the reloadable half of the config. Changes to [[runner]],
 machine.id, agent.work_dir, agent.metrics_addr, and broker.local.socket need a
 restart, and the agent says which ones it read but did not apply.`,
 		Args: noArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// TODO(WS-11): call agent.Run(ctx, cfg) once internal/agent exists.
-			// This command owns only the flags, the help, and the exit codes;
-			// the lifecycle above belongs to WS-11, which also owns the local
-			// broker the flags below feed.
-			return errNotWired("latem agent", "WS-11 (internal/agent, internal/broker/local)")
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Step 1 of §6, and the reason it is here rather than inside
+			// internal/agent: a config that does not parse must fail before a
+			// lock is taken, a database is opened, or a socket is bound.
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+
+			var drain time.Duration
+			if drainFor != "" {
+				var d protocol.Duration
+				if err := d.UnmarshalText([]byte(drainFor)); err != nil {
+					return usageErrorf("--drain-after %q: %v", drainFor, err)
+				}
+				drain = d.Duration()
+			}
+
+			a, err := agent.New(agent.Options{
+				Config:     cfg,
+				Version:    version,
+				Logger:     agentLogger(cmd.ErrOrStderr()),
+				Once:       once,
+				DrainAfter: drain,
+			})
+			if err != nil {
+				return err
+			}
+			// The context is already wired to SIGINT and SIGTERM by main, so
+			// §6 step 9 is a plain block on it. Run returns after draining.
+			return a.Run(cmd.Context())
 		},
 	}
 	cmd.Flags().BoolVar(&once, "once", false,
@@ -51,4 +85,25 @@ restart, and the agent says which ones it read but did not apply.`,
 	cmd.Flags().StringVar(&drainFor, "drain-after", "",
 		"stop accepting new runs after this duration and exit when they finish (e.g. 8h)")
 	return cmd
+}
+
+// agentLogger is the daemon's narration.
+//
+// Text rather than JSON, on stderr rather than stdout, and at Info by default.
+// A service wrapper captures stderr into the journal or into a LaunchAgent log
+// file, and a person reading either wants sentences. LATEM_LOG=debug turns the
+// quieter lines on — the free-disk probe, the log pipeline — without a config
+// change, because the machine you need debug output from is usually one you are
+// already ssh'd into.
+func agentLogger(w io.Writer) *slog.Logger {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("LATEM_LOG")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }

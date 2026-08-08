@@ -1,8 +1,16 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -49,15 +57,16 @@ expires it (§22).
 preparing, running, collecting, succeeded, failed, timed_out, cancelled,
 rejected, interrupted.`,
 		Args: noArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if state != "" && !protocol.RunState(state).Valid() {
 				return usageErrorf("unknown state %q — see `latem list --help` for the set", state)
 			}
-			// TODO(WS-11): read from internal/store through the local broker.
-			// Reading sqlite directly from the CLI would take a second
-			// connection to a database the agent holds in WAL mode, and the
-			// agent is the process that owns reconciliation of what is in it.
-			return errNotWired("latem list", "WS-11 (internal/broker/local)")
+			return listRuns(cmd, listFilter{
+				state: protocol.RunState(state),
+				repo:  repo,
+				limit: limit,
+				all:   allRun,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&state, "state", "", "only runs in this state")
@@ -90,11 +99,8 @@ Exit codes:
   2  usage
   3  --follow was given and no agent is listening`,
 		Args: runIDArg,
-		RunE: func(_ *cobra.Command, args []string) error {
-			// TODO(WS-11): tail ~/.latem/logs/<id>.log for the static case and
-			// subscribe through the local broker for --follow, so a run being
-			// written to and a run already finished behave identically.
-			return errNotWired("latem logs "+args[0], "WS-11 (internal/broker/local)")
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return showLogs(cmd, args[0], follow, tail)
 		},
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "stream new lines as they arrive")
@@ -124,11 +130,8 @@ Exit codes:
   2  usage
   3  no agent is listening`,
 		Args: runIDArg,
-		RunE: func(_ *cobra.Command, args []string) error {
-			// TODO(WS-11): send a protocol.CancelRequest over the local
-			// socket. The reason is normalized by protocol.NewCancelCommand,
-			// so no path here can produce an over-long one.
-			return errNotWired("latem cancel "+args[0], "WS-11 (internal/broker/local)")
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cancelRun(cmd, args[0], reason)
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "why, for display (max 200 runes)")
@@ -156,12 +159,239 @@ Exit codes:
   2  usage
   3  no agent is listening`,
 		Args: runIDArg,
-		RunE: func(_ *cobra.Command, args []string) error {
-			// TODO(WS-11): transition awaiting_approval -> queued through the
-			// store, over the local socket. It must stay local: an approval
-			// path reachable from a broker would undo INV-5.
-			return errNotWired("latem approve "+args[0], "WS-11 (internal/broker/local)")
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return approveRun(cmd, args[0])
 		},
 	}
 	return cmd
+}
+
+// listFilter is `latem list`'s flags, after validation.
+type listFilter struct {
+	state protocol.RunState
+	repo  string
+	limit int
+	all   bool
+}
+
+// states resolves the flags into the set the store filters on.
+//
+// The default is the non-terminal states — the runs something might still
+// happen to — because that is the question an operator standing at a build
+// machine is asking. History is one flag away and, unlike the default, it
+// grows without bound.
+func (f listFilter) states() []protocol.RunState {
+	switch {
+	case f.state != "":
+		return []protocol.RunState{f.state}
+	case f.all:
+		return nil
+	default:
+		return []protocol.RunState{
+			protocol.StateQueued,
+			protocol.StateAwaitingApproval,
+			protocol.StateClaimed,
+			protocol.StatePreparing,
+			protocol.StateRunning,
+			protocol.StateCollecting,
+		}
+	}
+}
+
+// listRuns prints one run per line, tab separated.
+//
+// Raw tabs rather than an aligned table, because the help promises output that
+// composes with cut and awk and a tabwriter's padding would make every column
+// position depend on the longest value in it.
+func listRuns(cmd *cobra.Command, f listFilter) error {
+	ctx := cmd.Context()
+	st, closeState, err := openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+
+	runs, err := st.db.List(ctx, store.Filter{
+		Repo:   f.repo,
+		States: f.states(),
+		Limit:  f.limit,
+	})
+	if err != nil {
+		return err
+	}
+
+	out := cmd.OutOrStdout()
+	if len(runs) == 0 {
+		// Not an error, and not silence either: an empty list and a wrong
+		// filter look identical, and one of them is a mistake worth naming.
+		printf(cmd.ErrOrStderr(), "no runs match — `latem list --all` includes finished ones\n")
+		return nil
+	}
+
+	printf(out, "RUN ID\tSTATE\tREPO\tJOB\tREF\tSTARTED\tDURATION\n")
+	for _, r := range runs {
+		started := "-"
+		if r.StartedAt != nil {
+			started = formatAge(*r.StartedAt)
+		}
+		printf(out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.ID, r.State, r.Repo, r.Job, refOf(r), started, runDuration(r))
+	}
+	return nil
+}
+
+// refOf prefers the normalized ref, because that is what policy matched and
+// what the SHA came from (INV-5). It falls back to the ref as supplied for a
+// run that never got as far as gate 7.
+func refOf(r store.Run) string {
+	if r.RefNormalized != "" {
+		return r.RefNormalized
+	}
+	return r.Ref
+}
+
+// showLogs prints a run's log (§16).
+func showLogs(cmd *cobra.Command, runID string, follow bool, tailLines int) error {
+	ctx := cmd.Context()
+	st, closeState, err := openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+
+	r, err := st.db.Get(ctx, runID)
+	if isNotFound(err) {
+		return noSuchRun(runID)
+	}
+	if err != nil {
+		return err
+	}
+
+	if !follow {
+		if err := printLog(cmd, st, runID, tailLines); errors.Is(err, os.ErrNotExist) {
+			return noLogYet(runID)
+		} else if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// §7.3's exit 3: following needs something to follow. A terminal run is
+	// the exception — its log is complete and there is nothing to wait for, so
+	// refusing would be pedantry.
+	if !r.State.IsTerminal() {
+		if err := st.requireAgent(ctx); err != nil {
+			return err
+		}
+	}
+
+	// A run that is queued has no log file yet, and that is the ordinary case
+	// for `latem run … --follow` on a busy machine. Treating the missing file
+	// as an error here would make -f useless for exactly the runs somebody
+	// wants to watch; the tail reopens on every tick until it appears.
+	err = printLog(cmd, st, runID, tailLines)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if r.State.IsTerminal() {
+			return noLogYet(runID)
+		}
+	case err != nil:
+		return err
+	}
+	if r.State.IsTerminal() {
+		return nil
+	}
+
+	t := newLogTail(st.cfg.Paths.Logs, runID)
+	defer t.close()
+	if err == nil {
+		// Only skip what was already printed. A log that did not exist a
+		// moment ago must be streamed from its first byte.
+		t.seekEnd()
+	}
+	return waitForRun(ctx, st, runID, t, cmd.OutOrStdout())
+}
+
+// noLogYet is the exit-1 answer for a run with nothing to show.
+func noLogYet(runID string) error {
+	return fmt.Errorf("no log for %s — it has not started yet, or agent.log_retention has expired it", runID)
+}
+
+// printLog writes the log as it stands, honouring --tail. A missing log is
+// reported as [os.ErrNotExist] so the caller can decide whether that is a
+// failure or simply a run that has not started.
+func printLog(cmd *cobra.Command, st *state, runID string, tailLines int) error {
+	rc, err := readLog(st.cfg.Paths.Logs, runID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rc.Close() }()
+
+	if tailLines <= 0 {
+		_, err = io.Copy(cmd.OutOrStdout(), rc)
+		return err
+	}
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return err
+	}
+	printf(cmd.OutOrStdout(), "%s", lastLines(string(data), tailLines))
+	return nil
+}
+
+// cancelRun stops a run (§11).
+func cancelRun(cmd *cobra.Command, runID, reason string) error {
+	ctx := cmd.Context()
+	st, closeState, err := openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+
+	// The help promises exit 1 for an unknown id, and §7.1 promises that a
+	// cancel for an unknown run is a no-op reporting success. Both are right
+	// for their own caller: a broker must not learn which ids exist by which
+	// cancels error, and a person at a terminal who mistyped an id needs to be
+	// told. The lookup is local and the distinction stops here.
+	if _, err := st.db.Get(ctx, runID); isNotFound(err) {
+		return noSuchRun(runID)
+	} else if err != nil {
+		return err
+	}
+
+	req := protocol.CancelRequest{ID: runID, Actor: currentActor(), Reason: reason}
+	if err := st.client.Cancel(ctx, req); err != nil {
+		return st.agentDown(err)
+	}
+	printf(cmd.ErrOrStderr(), "cancelled %s\n", runID)
+	return nil
+}
+
+// approveRun releases a run parked by INV-5's ref policy.
+func approveRun(cmd *cobra.Command, runID string) error {
+	ctx := cmd.Context()
+	st, closeState, err := openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+
+	err = agent.Approve(ctx, st.db, runID, st.queueTTL(), time.Now())
+	switch {
+	case isNotFound(err):
+		return noSuchRun(runID)
+	case errors.Is(err, agent.ErrNotAwaitingApproval):
+		return err
+	case err != nil:
+		return err
+	}
+
+	printf(cmd.ErrOrStderr(), "approved %s — it is queued\n", runID)
+	if !st.client.AgentRunning(ctx) {
+		// Not an error. Approval is a store transition, so it holds whether or
+		// not an agent is up; saying nothing would leave the user watching a
+		// queue that nothing is draining.
+		printf(cmd.ErrOrStderr(), "no agent is running, so it starts when one does: `latem agent`\n")
+	}
+	return nil
 }

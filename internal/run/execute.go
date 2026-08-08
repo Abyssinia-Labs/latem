@@ -39,9 +39,13 @@ type execution struct {
 
 	ws       *source.Workspace
 	resolved *registry.Resolved
-	runner   *Runner
-	sec      *secrets.Set
-	env      executor.Env
+	// refNormalized and sha are what INV-5 decided at gates 7 and 9. They ride
+	// on the next transition rather than one of their own (amendment A21).
+	refNormalized string
+	sha           string
+	runner        *Runner
+	sec           *secrets.Set
+	env           executor.Env
 
 	teardowns []teardownStep
 }
@@ -221,12 +225,17 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	x.ws = ws
 	x.onTeardown("workspace", func(context.Context) error { return ws.Remove() })
 
-	// §22 has ref_normalized and sha columns for exactly this pair, and there
-	// is no way to write them: they are decided here, at gates 7 and 9, long
-	// after store.Create, and neither protocol.Update nor store.Store carries
-	// them. So the audit trail INV-5 is meant to leave gets written into the
-	// run's own log instead. Reported as a contract defect rather than worked
-	// around, because the fix belongs in the interface.
+	// Record what INV-5 actually decided, in the columns §22 keeps for it
+	// (amendment A21). The pair is settled here, at gates 7 and 9, long after
+	// store.Create — which is why Update had to grow the fields — and it is
+	// the answer to the only question anyone asks about a surprising build:
+	// requested as "main", built refs/heads/main at 3bf1261.
+	//
+	// They ride on the next transition rather than one of their own. A
+	// self-transition would persist them a few milliseconds sooner and cost a
+	// duplicate report of a state that did not change, which a broker must
+	// ignore and an operator reading a run's history should never see.
+	x.refNormalized, x.sha = normalized, ws.SHA
 	x.note("checked out %s at %s", normalized, shortSHA(ws.SHA))
 
 	// Gate 11 — the registry, off disk, at this commit.
@@ -465,6 +474,16 @@ func (x *execution) raced(err error) Result {
 func (x *execution) to(ctx context.Context, to protocol.RunState, u protocol.Update) error {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeTimeout)
 	defer cancel()
+
+	// Carried rather than sent on their own, so a run that is rejected at gate
+	// 12 still records the commit it was rejected at. Re-sending them on every
+	// later transition is a no-op in the store and costs nothing on the wire.
+	if u.RefNormalized == "" {
+		u.RefNormalized = x.refNormalized
+	}
+	if u.SHA == "" {
+		u.SHA = x.sha
+	}
 
 	if err := x.o.transition(sctx, x.run.ID, to, u); err != nil {
 		return err

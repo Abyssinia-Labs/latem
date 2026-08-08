@@ -28,16 +28,10 @@ import (
 
 // INV-1 — The agent only makes outbound connections.
 //
-// Start an agent, enumerate listening sockets for the process, assert every
-// entry is a Unix socket or bound to loopback. There is no HTTP server, no
-// port to forward, and no inbound firewall rule; getting this wrong turns
-// onboarding into a router tutorial for every user.
-//
-// The loopback metrics listener (RUNNER_SPEC §20) is permitted and must be
-// asserted as loopback rather than merely tolerated.
-func TestINV1_NoInboundListeners(t *testing.T) {
-	t.Skip("unskipped by WS-11 (agent & local broker)")
-}
+// Unskipped by WS-11 and moved to inv1_unix_test.go, which carries a
+// `//go:build unix` tag: enumerating a process's own listening sockets needs
+// syscalls that do not exist on Windows, and keeping them out of this file is
+// what lets the portable invariants below still compile there.
 
 // INV-2 — The broker supplies names, never definitions.
 //
