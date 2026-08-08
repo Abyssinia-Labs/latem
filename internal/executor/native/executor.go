@@ -419,15 +419,19 @@ func sameDir(a, b string) bool {
 //
 // live reports whether a run is still in flight; a nil live reaps everything,
 // which is only safe at startup before any run has been claimed.
-func (e *Executor) Reap(live func(runID string) bool) error {
+func (e *Executor) Reap(_ context.Context, live func(runID string) bool) ([]executor.Reaped, error) {
 	entries, err := os.ReadDir(e.envDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return wrapErr(protocol.ErrExecutor, err, "read %s", e.envDir)
+		return nil, wrapErr(protocol.ErrExecutor, err, "read %s", e.envDir)
 	}
-	var firstErr error
+
+	var (
+		reaped   []executor.Reaped
+		firstErr error
+	)
 	for _, ent := range entries {
 		if !ent.IsDir() || !strings.HasPrefix(ent.Name(), EnvDirPrefix) {
 			continue
@@ -436,9 +440,13 @@ func (e *Executor) Reap(live func(runID string) bool) error {
 		if live != nil && live(runID) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(e.envDir, ent.Name())); err != nil && firstErr == nil {
-			firstErr = wrapErr(protocol.ErrExecutor, err, "remove %s", ent.Name())
+		if err := os.RemoveAll(filepath.Join(e.envDir, ent.Name())); err != nil {
+			if firstErr == nil {
+				firstErr = wrapErr(protocol.ErrExecutor, err, "remove %s", ent.Name())
+			}
+			continue
 		}
+		reaped = append(reaped, executor.Reaped{RunID: runID, Kind: "workspace", Ref: ent.Name()})
 	}
-	return firstErr
+	return reaped, firstErr
 }

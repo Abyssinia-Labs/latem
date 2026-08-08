@@ -1,5 +1,7 @@
 package protocol
 
+import "errors"
+
 // ErrorCode is a stable identifier for why a run did not succeed. The web app
 // maps these to human copy, so the strings are API and renaming one is a
 // breaking change (RUNNER_SPEC §21).
@@ -50,6 +52,17 @@ const (
 	// tooling reading its output share one spelling.
 	ErrAgentDown ErrorCode = "E_AGENT_DOWN"
 )
+
+// ErrNoAgent is the sentinel behind [ErrAgentDown], for errors.Is.
+//
+// The code names the condition for a human; this names it for a program. Both
+// the local broker's client and the CLI need to recognise "nothing is
+// listening" and each had defined its own value, which is two spellings of one
+// condition waiting to disagree (amendment A20).
+//
+// The exit code stays in the CLI rather than here: §7.3 fixes it at 3, but an
+// exit status is a property of a process, and this package is the wire.
+var ErrNoAgent = errors.New("latem: no agent is listening on the local socket")
 
 // errorInfo is the single source for the §21 table. Deriving both the terminal
 // state and the retry hint from one map is deliberate: two independent switch

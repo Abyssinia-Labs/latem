@@ -384,3 +384,47 @@ func TestDefaultMinFreeGB(t *testing.T) {
 		}
 	}
 }
+
+// Amendment A24. config.Paths makes work_dir relocatable, and a relocated tree
+// can sit on a different filesystem — so deriving it from Root regardless made
+// FreeGB measure the wrong disk, silently, on exactly the gate that exists to
+// stop a build dying at 80% with a full disk.
+func TestPaths_WorkAndMirrorsAreOverridable(t *testing.T) {
+	root := t.TempDir()
+	elsewhere := t.TempDir()
+
+	def := paths{root: root}
+	if got, want := def.work(), filepath.Join(root, "work"); got != want {
+		t.Errorf("default work = %q, want %q", got, want)
+	}
+	if got, want := def.mirrors(), filepath.Join(root, "mirrors"); got != want {
+		t.Errorf("default mirrors = %q, want %q", got, want)
+	}
+
+	moved := paths{root: root, workDir: elsewhere + "/w", mirrorDir: elsewhere + "/m"}
+	if got := moved.work(); got != elsewhere+"/w" {
+		t.Errorf("work = %q, want the override", got)
+	}
+	if got := moved.mirrors(); got != elsewhere+"/m" {
+		t.Errorf("mirrors = %q, want the override", got)
+	}
+	// caches/ is not relocatable and must stay under Root.
+	if got, want := moved.caches(), filepath.Join(root, "caches"); got != want {
+		t.Errorf("caches = %q, want %q", got, want)
+	}
+}
+
+// FreeGB must measure the filesystem the work tree is actually on.
+func TestFreeGB_FollowsTheWorkDirOverride(t *testing.T) {
+	l, err := New(Options{Root: t.TempDir(), WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := l.FreeGB(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got <= 0 {
+		t.Errorf("FreeGB = %v, want a real measurement", got)
+	}
+}

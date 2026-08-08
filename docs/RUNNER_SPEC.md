@@ -160,6 +160,10 @@ The agent MUST NOT bind a TCP listener on any non-loopback interface. The local 
 
 *Test:* start an agent, enumerate listening sockets for the process, assert every entry is a Unix socket or bound to `127.0.0.1`.
 
+> **The obvious implementation of that test is vacuous on macOS.** `getsockopt(SO_ACCEPTCONN)` returns `ENOPROTOOPT` on Darwin **for a genuine listening socket** — verified on macOS 26. A detector written that way enumerates zero descriptors, finds nothing to object to, and reports the invariant clean having examined nothing.
+>
+> A conformant test therefore falls back to `SOCK_STREAM` plus no peer (`ENOTCONN`) plus a non-zero port, asserts explicitly that it enumerated *something*, and carries a negative control that binds `0.0.0.0:0` and requires the detector to see it. Without the control there is nothing to distinguish "no violations" from "no vision" — which is the same failure the INV-4 test has, for the same reason.
+
 ### INV-2 — The broker supplies names, never definitions
 
 The inbound command set is **closed at two kinds**: `run` and `cancel` (§7). A third kind is a §5 change requiring a written threat model, not a feature.
@@ -1469,3 +1473,25 @@ Seven implementations built simultaneously against the frozen contracts, each pu
 | A16 | §21 | `E_SECRET_BACKEND` added, retryable | Every secrets failure collapsed to a non-retryable `E_MISSING_SECRET`, including a locked keychain after a reboot — a machine condition that resolves on its own |
 
 Three of these (A7, A9, A11) describe things that could not have worked as written. Two (A10, A12) are places the spec asked for a guarantee it gave no way to implement. That is the return on freezing contracts first and building against them in parallel: the defects surfaced in a week of implementation rather than in month three of integration.
+
+### Amendments from Wave 2
+
+Four more implementations — the orchestrator, the local broker, the CLI, and the native executor — against the same contracts.
+
+| # | Section | Change | Why it surfaced |
+|---|---|---|---|
+| A17 | §10, §11 | `preparing → awaiting_approval` is legal | **Gate 8 could not park a run.** §11 draws "gate 4 / 8 ──▶ awaiting_approval" as though both gates sat in one place; they do not. Gate 4 runs before a row exists, so `Admit` creates it parked. Gate 8 is the *authoritative* INV-5 check, runs during `preparing` because it needs a fetched mirror, and had no edge out. A ref gate 4 admitted optimistically — a tag under a branch policy — could never be parked by the check that decides |
+| A18 | §7 | `protocol.Ack` added | `Command` was a one-way vocabulary, so every transport had to invent its own "accepted, run id r_123". The local broker did; the WebSocket broker would have invented a different one |
+| A19 | §7 | `Broker` gains `Close()` | Both transports need shutdown, so the agent had to hold a concrete type — undercutting the one property the interface exists for |
+| A20 | §7.3, §21 | `protocol.ErrNoAgent` sentinel added | Two packages had each defined their own value for "nothing is listening". The exit code stays in the CLI: §7.3 fixes it at 3, but an exit status is a property of a process, not of the wire |
+| A21 | §7.2, §22 | `Update` gains `RefNormalized` and `SHA` | Both are decided at gates 7 and 9, long after `Create`. §22 has columns for exactly this pair and nothing could write them, so the audit trail INV-5 exists to leave was permanently NULL |
+| A22 | §15, §21 | `secrets` distinguishes `E_SECRET_BACKEND` from `E_MISSING_SECRET` | A16 added the code; the package predated it and collapsed both, telling an operator to fix a commit when the answer was to unlock a keychain |
+| A23 | §6, §13 | `Executor` gains `Reap` | §6 step 5 says reconciliation is not optional, and each executor had grown its own shape — docker `Discover`+`Remove`, native `Reap` — so the agent would have type-switched on a concrete executor to clean up after a crash |
+| A24 | §14 | `cache.Options` gains `WorkDir`/`MirrorDir` | `work/` was derived from the cache root while `agent.work_dir` is relocatable, so a relocated tree made `FreeGB` measure the wrong filesystem — silently, on exactly the gate that exists to stop a build dying at 80% with a full disk |
+| A25 | §5 (INV-1) | The INV-1 test recipe carries the Darwin caveat | `SO_ACCEPTCONN` returns `ENOPROTOOPT` on macOS for a real listening socket, so the obvious detector reports the invariant clean having enumerated nothing |
+| A26 | §19 | `config.DerivePaths` exported | `doctor` exists for the machine whose config does not parse, and `Load` returns nil on failure — taking the paths with it |
+
+Two further items are recorded but **not** amended, because neither is a contract defect:
+
+- **`$LATEM_ENV` parsing, artifact containment, and the error triple are duplicated verbatim across the docker and native executors**, and will be a third copy with Tart — while §9 requires the step contract be identical across all three. The shared code has nowhere to live because `internal/executor` is frozen. This is tech debt with a known trigger point (the Tart executor), not a gap, and refactoring two working packages now buys nothing.
+- **Artifact glob semantics diverge**: `internal/artifact.Resolve` expands a directory to the regular files beneath it; the docker executor's collector returns nothing for a directory, and its test asserts that. `artifacts: [dist]` therefore collects different files depending on which path runs. §17 does not say which is right, and it should before M3 closes.

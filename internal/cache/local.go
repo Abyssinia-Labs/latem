@@ -45,9 +45,15 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 
 // Options configures a [Local].
 type Options struct {
-	// Root is the agent home, ~/.latem. caches/, work/, mirrors/ and
-	// artifacts/ hang off it.
+	// Root is the agent home, ~/.latem. caches/ hangs off it, and so do work/
+	// and mirrors/ unless overridden below.
 	Root string
+	// WorkDir and MirrorDir override the derived locations. config.Paths makes
+	// both relocatable — `agent.work_dir` moves the work tree, and a relocated
+	// tree can live on a different filesystem — so deriving them from Root
+	// regardless made FreeGB measure the wrong disk (amendment A24). Empty
+	// keeps the default under Root.
+	WorkDir, MirrorDir string
 	// Runners maps runner name to its configuration. A runner missing here is
 	// treated as directory-backed with the strictest disk floor, because the
 	// alternative — assuming Docker — would create a volume no executor mounts
@@ -124,7 +130,11 @@ func New(opts Options) (*Local, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Local{opts: opts, paths: paths{root: opts.Root}, locks: newLockSet()}, nil
+	return &Local{
+		opts:  opts,
+		paths: paths{root: opts.Root, workDir: opts.WorkDir, mirrorDir: opts.MirrorDir},
+		locks: newLockSet(),
+	}, nil
 }
 
 func (l *Local) runner(name string) RunnerConfig {

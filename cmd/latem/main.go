@@ -130,7 +130,35 @@ func newRootCommand() *cobra.Command {
 		newServiceCommand(),
 		newVersionCommand(),
 	)
+
+	markUnknownArgsAsUsageErrors(root)
 	return root
+}
+
+// markUnknownArgsAsUsageErrors makes `latem nosuchcommand` exit 2 rather than 1.
+//
+// The root command already returns a usage error for a stray argument, but it
+// never sees one: for a command that has subcommands and no explicit Args,
+// cobra applies legacyArgs, which produces its own `unknown command "x"` error
+// during argument validation — before RunE is reached. That error is an
+// ordinary error, so it fell through to the generic exit 1 while the exit-code
+// table, the --help text, and every command's own validation all said a
+// malformed command line is 2.
+//
+// Only commands that both have subcommands and declare no Args of their own
+// are touched, so `cache rm <name>` keeps its own argument rules.
+func markUnknownArgsAsUsageErrors(c *cobra.Command) {
+	if c.HasSubCommands() && c.Args == nil {
+		c.Args = func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return usageErrorf("unknown command %q for %q", args[0], cmd.CommandPath())
+			}
+			return nil
+		}
+	}
+	for _, sub := range c.Commands() {
+		markUnknownArgsAsUsageErrors(sub)
+	}
 }
 
 // commandPath finds the deepest command cobra was executing, so the "run

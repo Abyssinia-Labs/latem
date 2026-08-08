@@ -189,6 +189,17 @@ func (d *DB) Transition(ctx context.Context, runID string, to protocol.RunState,
 			set = append(set, "runner = ?")
 			args = append(args, u.Runner)
 		}
+		// Amendment A21. Both are decided at gates 7 and 9, long after Create,
+		// and §22 has columns for exactly this pair — but nothing could write
+		// them, so the audit trail INV-5 exists to leave was permanently NULL.
+		if u.RefNormalized != "" {
+			set = append(set, "ref_normalized = ?")
+			args = append(args, u.RefNormalized)
+		}
+		if u.SHA != "" {
+			set = append(set, "sha = ?")
+			args = append(args, u.SHA)
+		}
 		if u.CancelReason != "" {
 			// Display-only text from outside the trust boundary (§7.1), so it
 			// gets the same treatment as ErrorMsg.

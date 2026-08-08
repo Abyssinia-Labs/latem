@@ -50,6 +50,18 @@ type Broker interface {
 
 	// Heartbeat publishes liveness and capacity.
 	Heartbeat(ctx context.Context, h protocol.MachineHealth) error
+
+	// Close releases the transport: a listener for the local broker, a
+	// connection for the remote one.
+	//
+	// Draft 02 had no lifecycle method, so the agent had to hold a concrete
+	// type to shut a broker down — which undercuts the one property this
+	// interface exists for, that the agent contains no branch on which
+	// transport is in use (amendment A19).
+	//
+	// MUST be idempotent: graceful shutdown and a deferred close both run on
+	// the normal path.
+	Close() error
 }
 
 // LogSink accepts batched log frames.
@@ -99,3 +111,5 @@ func (NotImplemented) Logs(context.Context, string) (LogSink, error) {
 func (NotImplemented) Heartbeat(context.Context, protocol.MachineHealth) error {
 	return fmt.Errorf("broker: Heartbeat: %w", errors.ErrUnsupported)
 }
+
+func (NotImplemented) Close() error { return nil }

@@ -35,6 +35,36 @@ type Update struct {
 	// originated outside the trust boundary, so it is redacted and truncated
 	// before it reaches here, exactly like ErrorMsg.
 	CancelReason string `json:"cancel_reason,omitempty"`
+
+	// RefNormalized is the fully-qualified ref that policy was matched against
+	// (INV-5), and SHA is the commit it resolved to. Both are decided at gates
+	// 7 and 9, long after the run row is created, and §22 has columns for
+	// exactly this pair — but nothing could write them, so the audit trail
+	// INV-5 exists to leave was permanently NULL (amendment A21).
+	//
+	// They belong on the wire as well as in the database: "requested as main,
+	// built refs/heads/main at 3bf1261" is the answer to the only question
+	// anyone asks about a surprising build.
+	RefNormalized string `json:"ref_normalized,omitempty"`
+	SHA           string `json:"sha,omitempty"`
+}
+
+// Ack is a transport's reply to an inbound [Command].
+//
+// Draft 02 made Command a one-way vocabulary, so every transport had to invent
+// its own way of saying "accepted, run id r_123" or "refused, that run already
+// finished". The local broker did; the WebSocket broker would have invented a
+// different one, and the two would have disagreed about a case neither author
+// had thought about (amendment A18).
+//
+// This is a reply, not a command: it carries no verb and cannot cause work.
+type Ack struct {
+	OK    bool   `json:"ok"`
+	RunID string `json:"run_id,omitempty"`
+	// Code is set when OK is false, and is one of the §21 codes.
+	Code ErrorCode `json:"code,omitempty"`
+	// Error is human-facing, already redacted.
+	Error string `json:"error,omitempty"`
 }
 
 // ArtifactRef describes an artifact without carrying it.

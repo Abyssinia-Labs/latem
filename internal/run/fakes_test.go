@@ -179,7 +179,15 @@ func (f *fakeExecutor) Prepare(_ context.Context, spec executor.Spec) (executor.
 	return f.env, nil
 }
 
-func (f *fakeExecutor) Name() string                    { return "fake" }
+func (f *fakeExecutor) Name() string { return "fake" }
+
+// Reap satisfies executor.Executor (amendment A23). The orchestrator does not
+// call it — startup reconciliation belongs to the agent (§6 step 5) — so this
+// records the call and reports nothing to clean.
+func (f *fakeExecutor) Reap(context.Context, func(string) bool) ([]executor.Reaped, error) {
+	return nil, nil
+}
+
 func (f *fakeExecutor) Preflight(context.Context) error { return nil }
 
 // ---------------------------------------------------------------- broker ---
@@ -222,6 +230,9 @@ func (b *fakeBroker) Logs(context.Context, string) (broker.LogSink, error) {
 }
 
 func (b *fakeBroker) Heartbeat(context.Context, protocol.MachineHealth) error { return nil }
+
+// Close satisfies broker.Broker (amendment A19).
+func (b *fakeBroker) Close() error { return nil }
 
 func (b *fakeBroker) states(runID string) []protocol.RunState {
 	b.mu.Lock()

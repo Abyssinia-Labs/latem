@@ -85,6 +85,18 @@ func (p Paths) MirrorDir(repo string) string {
 
 // derivePaths fills every path from the config directory. Overrides from the
 // config file are applied afterwards, by [applyPathOverrides].
+// DerivePaths returns the layout under a config directory, without loading or
+// validating any config file.
+//
+// `latem doctor` exists for the machine whose config does not parse, and Load
+// returns nil on any validation failure — taking Paths with it. So the one
+// command that most needs to know where token_file and secrets.env live could
+// not find out, and duplicated the derivation instead (amendment A26).
+//
+// dir must already be resolved: --config-dir, then $LATEM_CONFIG_DIR, then
+// ~/.latem. Use [Options.Dir] for that.
+func DerivePaths(dir string) Paths { return derivePaths(dir) }
+
 func derivePaths(dir string) Paths {
 	return Paths{
 		Dir:        dir,

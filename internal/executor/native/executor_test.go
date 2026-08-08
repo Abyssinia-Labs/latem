@@ -453,7 +453,7 @@ func TestReap(t *testing.T) {
 		}
 	}
 
-	if err := e.Reap(func(runID string) bool { return runID == "alive" }); err != nil {
+	if err := mustReap(t, e, func(runID string) bool { return runID == "alive" }); err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
 	for name, wantGone := range map[string]bool{
@@ -470,7 +470,14 @@ func TestReap(t *testing.T) {
 
 func TestReap_MissingDirectoryIsNotAnError(t *testing.T) {
 	e := newExecutor(t, Options{EnvFileDir: filepath.Join(t.TempDir(), "never-created")})
-	if err := e.Reap(nil); err != nil {
+	if err := mustReap(t, e, nil); err != nil {
 		t.Errorf("Reap on a directory that was never created: %v", err)
 	}
+}
+
+// mustReap adapts the A23 signature for tests that only care about the error.
+func mustReap(t *testing.T, e *Executor, live func(runID string) bool) error {
+	t.Helper()
+	_, err := e.Reap(t.Context(), live)
+	return err
 }

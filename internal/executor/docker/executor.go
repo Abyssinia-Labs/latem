@@ -475,6 +475,40 @@ func (e *Executor) Remove(ctx context.Context, id string) error {
 	return nil
 }
 
+// Reap implements [executor.Reap]: it removes every managed container whose
+// run is no longer live (§6 step 5).
+//
+// Discover and Remove remain exported because reconciliation wants to log what
+// it found before it removes it, and because `latem doctor` lists leftovers
+// without deleting them. This is the interface-shaped wrapper over the pair,
+// added by amendment A23 so the agent does not type-switch to clean up.
+func (e *Executor) Reap(ctx context.Context, live func(runID string) bool) ([]executor.Reaped, error) {
+	found, err := e.Discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		reaped   []executor.Reaped
+		firstErr error
+	)
+	for _, c := range found {
+		if live != nil && live(c.RunID) {
+			continue
+		}
+		if err := e.Remove(ctx, c.ID); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			// Keep going: one undeletable container must not strand the rest,
+			// and startup reconciliation runs before anything else works.
+			continue
+		}
+		reaped = append(reaped, executor.Reaped{RunID: c.RunID, Kind: "container", Ref: c.ID})
+	}
+	return reaped, firstErr
+}
+
 // Preflight verifies the machine can actually execute the work this runner
 // accepts (§20).
 //

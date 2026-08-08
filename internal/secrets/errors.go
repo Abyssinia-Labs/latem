@@ -3,6 +3,7 @@ package secrets
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -58,30 +59,50 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
+	// The prefix follows Code(), so a locked keychain reads E_SECRET_BACKEND
+	// in the message as well as in the field a control plane switches on.
+	code := e.Code()
 	switch {
 	case e.Msg != "" && e.Err != nil:
-		return fmt.Sprintf("%s: %s: %v", protocol.ErrMissingSecret, e.Msg, e.Err)
+		return fmt.Sprintf("%s: %s: %v", code, e.Msg, e.Err)
 	case e.Msg != "":
-		return fmt.Sprintf("%s: %s", protocol.ErrMissingSecret, e.Msg)
+		return fmt.Sprintf("%s: %s", code, e.Msg)
 	case e.Err != nil:
-		return fmt.Sprintf("%s: %v", protocol.ErrMissingSecret, e.Err)
+		return fmt.Sprintf("%s: %v", code, e.Err)
 	}
-	return string(protocol.ErrMissingSecret)
+	return string(code)
 }
 
 func (e *Error) Unwrap() error { return e.Err }
 
-// Code returns the RUNNER_SPEC §21 code for this failure, which is always
-// E_MISSING_SECRET.
+// Code returns the RUNNER_SPEC §21 code for this failure.
 //
-// Every way this package can fail is, from the run's point of view, the same
-// event: a declared secret did not arrive. Whether that was because no
-// provider held it, because `secrets.env` was world-readable, or because `op`
-// was not signed in is a distinction for the operator's terminal — `latem
-// doctor` has the detail — and not for a control plane's retry button. §21
-// defines no code for a broken secret backend, and inventing one here would
-// produce a code the web app cannot render.
-func (e *Error) Code() protocol.ErrorCode { return protocol.ErrMissingSecret }
+// The distinction it draws is the one a retry button depends on. A secret
+// nobody configured is E_MISSING_SECRET: rejected, non-retryable, and no
+// amount of waiting fixes it. A secret store that could not be reached is
+// E_SECRET_BACKEND: failed, retryable, because the most common instance — a
+// Mac mini whose login keychain is locked after a reboot — is a machine
+// condition that resolves without anyone editing a commit.
+//
+// This package originally returned E_MISSING_SECRET for both and said so in a
+// comment, because §21 defined no code for a broken backend. Amendment A16
+// added one, and collapsing the two would now tell an operator to go and fix
+// a commit when the answer was to unlock a keychain.
+//
+// A program that is simply not installed stays E_MISSING_SECRET: `op` absent
+// from PATH is a configuration fact, not a transient one.
+func (e *Error) Code() protocol.ErrorCode {
+	var ce *CommandError
+	if errors.As(e.Err, &ce) && !ce.NotInstalled() {
+		return protocol.ErrSecretBackend
+	}
+	if errors.Is(e.Err, fs.ErrPermission) {
+		// A world-readable secrets.env, or a file this user cannot read: the
+		// value exists, the store is unusable. Fixable in place.
+		return protocol.ErrSecretBackend
+	}
+	return protocol.ErrMissingSecret
+}
 
 // CodeOf returns the §21 code for a secrets failure, or the empty code for
 // anything else.

@@ -27,6 +27,33 @@ type Executor interface {
 	// and stops accepting work; recovery is automatic. Never accept a run onto
 	// a runner that cannot execute it.
 	Preflight(ctx context.Context) error
+
+	// Reap removes what this executor left behind for runs that are no longer
+	// live, and reports what it removed.
+	//
+	// This is RUNNER_SPEC §6 step 5, which says plainly that it is not
+	// optional: a leaked container is untidy, a leaked Tart VM carrying an
+	// Xcode image costs ~90 GB. live reports whether a run id is still in a
+	// non-terminal state; anything managed by this executor whose run id is
+	// not live is removed.
+	//
+	// Draft 02 gave the interface no such method, so each implementation grew
+	// its own — docker got Discover plus Remove, native got Reap — and the
+	// agent would have had to type-switch on a concrete executor to clean up
+	// after a crash. That is the coupling A9 removed for EnvFile(), reappearing
+	// on the one path that runs before anything else works (amendment A23).
+	Reap(ctx context.Context, live func(runID string) bool) ([]Reaped, error)
+}
+
+// Reaped is one resource removed by [Executor.Reap], for the operator-facing
+// log line. A reap that says nothing is indistinguishable from a reap that
+// found nothing.
+type Reaped struct {
+	RunID string
+	// Kind is "container", "vm", or "workspace".
+	Kind string
+	// Ref identifies it to the underlying tool: a container id, a VM name.
+	Ref string
 }
 
 // Env is one run's environment.
@@ -160,4 +187,8 @@ func (NotImplemented) Name() string { return "not-implemented" }
 
 func (NotImplemented) Preflight(context.Context) error {
 	return fmt.Errorf("executor: Preflight: %w", errors.ErrUnsupported)
+}
+
+func (NotImplemented) Reap(context.Context, func(string) bool) ([]Reaped, error) {
+	return nil, fmt.Errorf("executor: Reap: %w", errors.ErrUnsupported)
 }

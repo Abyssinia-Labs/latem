@@ -118,11 +118,34 @@ func VolumeName(runner, name string) string {
 // paths derives every path the cache subsystem uses from the agent root
 // (~/.latem). Keeping them in one place means a layout change is one edit
 // rather than a grep.
-type paths struct{ root string }
+// paths locates the trees this package sweeps.
+//
+// work and mirrors are overridable because config.Paths makes them so:
+// `agent.work_dir` relocates the work tree, and a relocated tree can sit on a
+// different filesystem. Deriving them from root regardless meant FreeGB
+// measured the wrong disk — silently, on exactly the gate (§10 steps 5 and 17)
+// that exists to stop a build dying at 80% with a full disk (amendment A24).
+type paths struct {
+	root      string
+	workDir   string
+	mirrorDir string
+}
 
-func (p paths) caches() string  { return filepath.Join(p.root, "caches") }
-func (p paths) work() string    { return filepath.Join(p.root, "work") }
-func (p paths) mirrors() string { return filepath.Join(p.root, "mirrors") }
+func (p paths) caches() string { return filepath.Join(p.root, "caches") }
+
+func (p paths) work() string {
+	if p.workDir != "" {
+		return p.workDir
+	}
+	return filepath.Join(p.root, "work")
+}
+
+func (p paths) mirrors() string {
+	if p.mirrorDir != "" {
+		return p.mirrorDir
+	}
+	return filepath.Join(p.root, "mirrors")
+}
 
 // cacheDir is §14.2's `~/.latem/caches/<runner-name>/<cache-name>/`.
 func (p paths) cacheDir(runner, name string) string {
