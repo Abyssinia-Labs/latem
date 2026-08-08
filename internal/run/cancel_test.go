@@ -175,16 +175,28 @@ func TestCancel_WaitingRunIsImmediate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
+			h.source.refs = map[string]bool{
+				"refs/heads/main": true, "refs/heads/feature/x": true,
+			}
 			o := h.build()
 
 			req := h.request("test")
 			req.Ref = tc.ref
-			r, err := o.Admit(t.Context(), req, 0)
-			if err != nil {
-				t.Fatalf("Admit: %v", err)
+
+			// Reaching awaiting_approval means going through gate 8, which is
+			// the only gate that parks a run now (amendment A27).
+			var state protocol.RunState
+			if tc.want == protocol.StateAwaitingApproval {
+				state = h.run(o, req).State
+			} else {
+				r, err := o.Admit(t.Context(), req, 0)
+				if err != nil {
+					t.Fatalf("Admit: %v", err)
+				}
+				state = r.State
 			}
-			if r.State != tc.want {
-				t.Fatalf("precondition: state = %s, want %s", r.State, tc.want)
+			if state != tc.want {
+				t.Fatalf("precondition: state = %s, want %s", state, tc.want)
 			}
 
 			if err := o.Cancel(t.Context(), protocol.CancelRequest{

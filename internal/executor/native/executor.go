@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +68,12 @@ type Options struct {
 	// SIGKILL when a step's process group is stopped.
 	TerminateGrace time.Duration
 
+	// ReapGrace overrides [ReapTerminateGrace], the same pause for a process
+	// group [Executor.Reap] found abandoned by a crashed agent. It is separate
+	// from TerminateGrace because a reap happens at startup with the runner
+	// unavailable and nobody watching the log; see [ReapTerminateGrace].
+	ReapGrace time.Duration
+
 	// PipeDrainDelay overrides [DefaultPipeDrainDelay], the pause between a
 	// step's shell exiting and the agent closing the log pipes that something
 	// the step abandoned is still holding open.
@@ -79,11 +86,12 @@ type Options struct {
 type Executor struct {
 	opts Options
 
-	shell    string
-	shellErr error
-	envDir   string
-	grace    time.Duration
-	drain    time.Duration
+	shell     string
+	shellErr  error
+	envDir    string
+	grace     time.Duration
+	reapGrace time.Duration
+	drain     time.Duration
 
 	// goos and uid are fields rather than direct calls so Preflight's
 	// platform-specific and root-only branches are testable.
@@ -119,18 +127,23 @@ func New(opts Options) (*Executor, error) {
 	if grace <= 0 {
 		grace = TerminateGrace
 	}
+	reapGrace := opts.ReapGrace
+	if reapGrace <= 0 {
+		reapGrace = ReapTerminateGrace
+	}
 	drain := opts.PipeDrainDelay
 	if drain <= 0 {
 		drain = DefaultPipeDrainDelay
 	}
 
 	e := &Executor{
-		opts:   opts,
-		envDir: envDir,
-		grace:  grace,
-		drain:  drain,
-		goos:   runtime.GOOS,
-		uid:    currentUID(),
+		opts:      opts,
+		envDir:    envDir,
+		grace:     grace,
+		reapGrace: reapGrace,
+		drain:     drain,
+		goos:      runtime.GOOS,
+		uid:       currentUID(),
 	}
 	if resolved, err := exec.LookPath(shell); err != nil {
 		e.shell, e.shellErr = shell, err
@@ -408,14 +421,32 @@ func sameDir(a, b string) bool {
 	return ra == rb
 }
 
-// Reap removes the $LATEM_ENV directories left behind by runs that ended
-// without a Close — an agent killed mid-run (§11's E_INTERRUPTED).
+// Reap collects what runs that ended without a Close left on this host — an
+// agent killed mid-run (§11's E_INTERRUPTED).
 //
 // This is the native counterpart of the docker executor's label-based
-// reconciliation, and it is much smaller because there is much less to leak: no
-// container, no VM, just an empty directory per interrupted run under
-// [Options.EnvFileDir]. It is offered so startup reconciliation has something
-// to call rather than leaving litter in $TMPDIR that nothing ever collects.
+// reconciliation. Two things per interrupted run, in this order:
+//
+//  1. The step's process group, if one is still running. This is the part that
+//     matters, and the part §6 step 5 did not originally have words for: with no
+//     container and no VM, killing the agent leaves the step's `bash -lc` and
+//     everything under it reparented to launchd and still running. An abandoned
+//     `xcodebuild` holds DerivedData and a keychain handle and competes with the
+//     next build for the machine, which is exactly §13.3's class of "failures
+//     that look like code bugs". [stepGroup] is the record that makes this
+//     possible, and — more importantly — makes it safe to do by number.
+//  2. The $LATEM_ENV directory, which is otherwise litter in $TMPDIR that
+//     nothing else ever collects.
+//
+// Only directories directly under this executor's own [Options.EnvFileDir],
+// named with [EnvDirPrefix], are considered. Nothing here follows a path from a
+// broker, a job or another agent, which is the outer half of the guard;
+// [signalPgid] is the inner half.
+//
+// A group that could not be verified or could not be signalled is reported as an
+// error, and its directory is removed anyway. That is deliberate: keeping the
+// record for a later attempt means keeping a number that is one pid rollover
+// away from naming something else entirely.
 //
 // live reports whether a run is still in flight; a nil live reaps everything,
 // which is only safe at startup before any run has been claimed.
@@ -440,7 +471,22 @@ func (e *Executor) Reap(_ context.Context, live func(runID string) bool) ([]exec
 		if live != nil && live(runID) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(e.envDir, ent.Name())); err != nil {
+		dir := filepath.Join(e.envDir, ent.Name())
+
+		// Groups first: the directory removal below takes the records with it,
+		// and a record removed before its group was stopped is a process nobody
+		// can name any more.
+		groups, groupErr := reapGroups(dir, e.reapGrace)
+		for _, pgid := range groups {
+			reaped = append(reaped, executor.Reaped{
+				RunID: runID, Kind: ReapedProcessGroup, Ref: strconv.Itoa(pgid),
+			})
+		}
+		if groupErr != nil && firstErr == nil {
+			firstErr = wrapErr(protocol.ErrExecutor, groupErr, "run %s: abandoned process group", runID)
+		}
+
+		if err := os.RemoveAll(dir); err != nil {
 			if firstErr == nil {
 				firstErr = wrapErr(protocol.ErrExecutor, err, "remove %s", ent.Name())
 			}

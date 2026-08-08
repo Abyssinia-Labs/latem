@@ -217,6 +217,19 @@ func (d *DB) Transition(ctx context.Context, runID string, to protocol.RunState,
 			args = append(args, nullTime(u.ExpiresAt))
 		}
 
+		// Entering awaiting_approval always discards any approval on the row
+		// (amendment A27), and it is done here rather than left to the caller
+		// so that no path can forget. The case it exists for is the whole
+		// reason approval pins a commit: a run approved at commit A, whose ref
+		// then moved to B, is parked again by gate 8 — and if the old approval
+		// survived, the next attempt would find a stale approved_sha and the
+		// operator would never be asked about B. Clearing it in the same
+		// statement that records the new sha means the row can never say
+		// "approved" about a commit nobody was shown.
+		if to == protocol.StateAwaitingApproval {
+			set = append(set, "approved_at = NULL", "approved_sha = NULL")
+		}
+
 		args = append(args, runID)
 		// The assignments joined here are literals appended above, one per field
 		// the update actually carries; every value is bound.

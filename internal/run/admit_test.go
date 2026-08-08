@@ -96,9 +96,13 @@ func TestAdmit_Gate3BadInput(t *testing.T) {
 	}
 }
 
-// Gate 4 is conservative: no expansion of "nowhere-near-policy" can match, so
-// the answer is decidable without a fetch.
-func TestAdmit_Gate4ParksWithoutTouchingTheNetwork(t *testing.T) {
+// Gate 4 no longer parks a run outside policy; it queues it for gate 8
+// (amendment A27). Parking is a question put to a person — "may this commit
+// build?" — and no commit is known here, because nothing has been fetched.
+//
+// What it still does is touch nothing. The fetch that resolves the commit is
+// gate 6's, on the claim, and the run reaching the queue is what schedules it.
+func TestAdmit_Gate4DefersToGate8WithoutTouchingTheNetwork(t *testing.T) {
 	h := newHarness(t)
 	o := h.build()
 
@@ -108,22 +112,21 @@ func TestAdmit_Gate4ParksWithoutTouchingTheNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
-	if r.State != protocol.StateAwaitingApproval {
-		t.Fatalf("state = %s, want awaiting_approval", r.State)
+	if r.State != protocol.StateQueued {
+		t.Fatalf("state = %s, want queued", r.State)
+	}
+	if r.SHA != "" {
+		t.Error("gate 4 invented a commit; nothing has been fetched yet")
 	}
 	if r.ExpiresAt == nil {
-		t.Fatal("no approval_ttl deadline")
-	}
-	// The repo's own 2h approval_ttl, not the 24h default.
-	if d := time.Until(*r.ExpiresAt); d > 3*time.Hour {
-		t.Errorf("approval deadline is %s out, want the repo's 2h", d)
+		t.Fatal("no queue_ttl deadline")
 	}
 	if len(h.source.fetched) != 0 {
 		t.Error("gate 4 touched the network")
 	}
-	// awaiting_approval is not claimable.
-	if _, err := h.db.ClaimNext(t.Context(), nil); !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("an unapproved run was claimable: %v", err)
+	// It is claimable, which is how it reaches the gate that can decide.
+	if _, err := h.db.ClaimNext(t.Context(), nil); err != nil {
+		t.Errorf("the run never reached the queue: %v", err)
 	}
 }
 

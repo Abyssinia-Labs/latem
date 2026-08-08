@@ -9,6 +9,11 @@
 // Of the interfaces frozen in WS-00 this one is the most likely to need
 // amendment — it has the widest surface and the least prior art in the spec.
 // Amending it is cheap and expected; diverging from it quietly is not.
+//
+// One amendment so far: A27 added [Store.Approve] and the two approval fields
+// on [Run]. INV-5 required a local approval the interface gave no way to
+// record, so the half of the invariant that says "and then it runs" could not
+// be implemented at all — see [Store.Approve].
 package store
 
 import (
@@ -59,6 +64,15 @@ type Run struct {
 	// waiting state, cleared on leaving it.
 	ExpiresAt *time.Time
 
+	// ApprovedAt and ApprovedSHA are what a local `latem approve` recorded
+	// (amendment A27). ApprovedSHA is the commit the operator said yes to, not
+	// the ref: a ref can point at a branch a contributor controls, so an
+	// approval that named only the ref would be defeated by a force-push
+	// between the approval and the build. Gate 8 admits an out-of-policy run
+	// only while the freshly resolved commit still equals this one.
+	ApprovedAt  *time.Time
+	ApprovedSHA string
+
 	// ReportedState is the last state a broker acknowledged. Replaying every
 	// run where ReportedState != State is what makes reporting recoverable.
 	ReportedState protocol.RunState
@@ -86,7 +100,34 @@ type Store interface {
 	// Transition persists a state change and any fields that accompany it. It
 	// MUST reject a transition the state machine does not allow, so an
 	// ordering bug surfaces here rather than as a nonsensical run history.
+	//
+	// Entering awaiting_approval clears any approval on the row. Parking a run
+	// means a human has to look at it again, and an approval that survived the
+	// park would be an approval of a commit nobody is being shown.
 	Transition(ctx context.Context, runID string, to protocol.RunState, u protocol.Update) error
+
+	// Approve records a local approval and moves the run awaiting_approval →
+	// queued, atomically, returning the row as it now stands (amendment A27).
+	//
+	// It is one method rather than the Get/Transition/Enqueue sequence it
+	// replaces because the three steps must not be separable. The commit being
+	// pinned is read and written inside the same transaction, so no force-push
+	// can land between "which commit is this?" and "that commit is approved" —
+	// which is the exact race INV-5's approval exists to close.
+	//
+	// The run must be in awaiting_approval and must already have a resolved
+	// sha: approval names a commit, and a row with no commit has nothing to
+	// pin. Approving a run that is already queued is a no-op success, because
+	// approving twice is something a person does.
+	//
+	// approvedAt is stamped on the row; expiresAt is the queue_ttl deadline
+	// that replaces the approval_ttl one — an approved run still carrying its
+	// approval deadline would be swept as an expired queue entry minutes after
+	// a human said yes to it. Both are passed in rather than derived here
+	// because the clock and the configured TTL belong to the caller.
+	//
+	// It returns [ErrNotFound], [ErrNotAwaitingApproval], or [ErrNoCommit].
+	Approve(ctx context.Context, runID string, approvedAt, expiresAt time.Time) (Run, error)
 
 	// Enqueue adds a run to the local queue.
 	Enqueue(ctx context.Context, runID string, priority int) error
@@ -157,6 +198,10 @@ func (NotImplemented) List(context.Context, Filter) ([]Run, error) {
 
 func (NotImplemented) Transition(context.Context, string, protocol.RunState, protocol.Update) error {
 	return unsupported("Transition")
+}
+
+func (NotImplemented) Approve(context.Context, string, time.Time, time.Time) (Run, error) {
+	return Run{}, unsupported("Approve")
 }
 
 func (NotImplemented) Enqueue(context.Context, string, int) error { return unsupported("Enqueue") }

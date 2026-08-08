@@ -54,7 +54,7 @@ is a document with tests attached, not a paragraph in a README.
 | **INV-2** | The control plane supplies names, never definitions. The inbound command set is closed at two kinds — `run` and `cancel`. A `run` carries `{id, repo, job, ref, inputs, origin}` and has no field able to express a command, an image, a path, an executor, or a timeout. |
 | **INV-3** | Nothing from outside the trust boundary reaches a shell. Every git invocation passes argv as a slice with an options terminator, so a ref named `--upload-pack=/bin/sh` is a ref. |
 | **INV-4** | Secrets never leave the machine. Redaction happens at the point of emission, so no sink can be added that bypasses it — including multi-line values, line by line, because `APP_STORE_CONNECT_KEY_P8` is a PEM block and redacting only the whole value redacts nothing. |
-| **INV-5** | The job registry comes from your disk at the resolved commit. `jobs.yaml` is read from the checked-out workspace, never fetched from a broker, so a run is reproducible from the commit alone. Refs outside your allowlist need a local `latem approve`. |
+| **INV-5** | The job registry comes from your disk at the resolved commit. `jobs.yaml` is read from the checked-out workspace, never fetched from a broker, so a run is reproducible from the commit alone. Refs outside your allowlist need a local `latem approve`, and what that approves is one commit — if the branch moves before the run starts, it is parked again rather than built. |
 
 Each has a test named after it. A pull request that weakens one is rejected
 regardless of its other merits. The full statement is
@@ -232,7 +232,7 @@ latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
 latem cancel <run-id> [--reason R]
-latem approve <run-id>               Local only; a broker cannot grant it (INV-5)
+latem approve <run-id>               Local only; pins that run's commit (INV-5)
 latem register --url U --token T
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>

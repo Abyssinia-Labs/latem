@@ -97,8 +97,10 @@ type RefLister interface {
 //
 // Draft 01 of the spec said the policy glob was "matched after resolution",
 // which is not implementable: resolution produces a SHA, and globbing
-// release/* against a SHA matches nothing. The real order is normalize, match
-// policy, then resolve (finding F5). This is the first of those three.
+// release/* against a SHA matches nothing. The order is normalize, resolve,
+// then match the policy against the *name* (finding F5, reordered by amendment
+// A27 so a parked run knows which commit it is asking about). This is the first
+// of those three, and the only one that needs a mirror to answer.
 //
 // Candidates, in order:
 //

@@ -56,6 +56,20 @@
 // and merged after every step. [parseEnvFile] carries §9's constraints and the
 // reason for each.
 //
+// # What survives a killed agent
+//
+// A step runs in a process group of its own ([setProcessGroup]), which is what
+// makes a timeout or a cancel able to stop the tree rather than only the shell.
+// Nothing in the agent runs when the agent itself is killed, though, and the
+// group is then reparented to launchd and keeps going — an `xcodebuild` holding
+// DerivedData and a keychain handle, competing with the next build for the
+// machine. So each running step also leaves a record beside $LATEM_ENV, named
+// [GroupRecordPrefix], holding the process group number and — through a flock on
+// a descriptor the whole step tree inherits — the proof that the number still
+// means what it meant. [Executor.Reap] collects them at startup, which is §6
+// step 5 for the one resource this executor has. [stepGroup] is where the
+// mechanism, and the residual risk it does not remove, are written down.
+//
 // # The workspace is the clone itself
 //
 // No copy, no mount, no bind. §12 produces a self-contained repository with a

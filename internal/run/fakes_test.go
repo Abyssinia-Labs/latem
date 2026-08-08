@@ -37,10 +37,23 @@ type fakeSource struct {
 	sha      string
 
 	fetchErr   error
+	resolveErr error
 	acquireErr error
 
 	fetched    []source.Repo
+	resolved   []string
 	workspaces []string
+	// checkedOut records the (ref, sha) pairs gate 10 was asked for, which is
+	// what proves the checkout used the commit gate 8 admitted rather than
+	// resolving the name a second time.
+	checkedOut [][2]string
+}
+
+// setSHA moves the ref, as a force-push does.
+func (s *fakeSource) setSHA(sha string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sha = sha
 }
 
 func newFakeSource(t *testing.T, registryYAML string) *fakeSource {
@@ -72,10 +85,26 @@ func (m *fakeMirror) HasRef(_ context.Context, fullyQualified string) (bool, err
 	return m.src.refs[fullyQualified], nil
 }
 
-func (m *fakeMirror) Acquire(_ context.Context, runID, normalizedRef string) (*source.Workspace, error) {
+// Resolve is gate 9. It answers with whatever the ref points at *now*, which
+// is what makes a test able to move it between one attempt and the next.
+func (m *fakeMirror) Resolve(_ context.Context, normalizedRef string) (string, error) {
+	s := m.src
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resolved = append(s.resolved, normalizedRef)
+	if s.resolveErr != nil {
+		return "", s.resolveErr
+	}
+	return s.sha, nil
+}
+
+func (m *fakeMirror) Checkout(
+	_ context.Context, runID, normalizedRef, sha string,
+) (*source.Workspace, error) {
 	s := m.src
 	s.mu.Lock()
 	err := s.acquireErr
+	s.checkedOut = append(s.checkedOut, [2]string{normalizedRef, sha})
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -96,8 +125,12 @@ func (m *fakeMirror) Acquire(_ context.Context, runID, normalizedRef string) (*s
 	s.workspaces = append(s.workspaces, path)
 	s.mu.Unlock()
 
+	// The workspace is at the sha it was told to check out, not at whatever the
+	// ref points at by now. A real `git checkout --detach <sha>` behaves the
+	// same way, and the difference is the whole point of gate 10 taking a
+	// commit rather than a name.
 	return &source.Workspace{
-		Path: path, RunID: runID, Repo: "app", Ref: normalizedRef, SHA: s.sha,
+		Path: path, RunID: runID, Repo: "app", Ref: normalizedRef, SHA: sha,
 	}, nil
 }
 
@@ -575,6 +608,25 @@ func (h *harness) run(o *Orchestrator, req protocol.RunRequest) Result {
 	res, err := o.Execute(h.t.Context(), h.admitAndClaim(o, req))
 	if err != nil {
 		h.t.Fatalf("Execute: %v", err)
+	}
+	return res
+}
+
+// rerun claims and executes a run that is already in the queue, which is what
+// the agent's pool does on its next poll after an approval.
+func (h *harness) rerun(o *Orchestrator, runID string) Result {
+	h.t.Helper()
+
+	if err := h.db.Claim(h.t.Context(), runID); err != nil {
+		h.t.Fatalf("Claim %s: %v", runID, err)
+	}
+	r, err := h.db.Get(h.t.Context(), runID)
+	if err != nil {
+		h.t.Fatalf("Get %s: %v", runID, err)
+	}
+	res, err := o.Execute(h.t.Context(), r)
+	if err != nil {
+		h.t.Fatalf("Execute %s: %v", runID, err)
 	}
 	return res
 }

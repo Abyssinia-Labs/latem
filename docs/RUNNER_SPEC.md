@@ -225,19 +225,28 @@ approval_ttl = "24h"                              # unapproved → rejected
 
 #### Ref normalization, stated exactly
 
-Draft 01 said the glob was "matched after resolution," which is meaningless — resolution produces a SHA, and globbing `release/*` against a SHA matches nothing. The real order is **normalize, match policy, then resolve**:
+Draft 01 said the glob was "matched after resolution," which is meaningless — resolution produces a SHA, and globbing `release/*` against a SHA matches nothing. The order is **normalize, resolve, then match policy**:
 
 1. **Validate** the raw `ref` string (INV-3 regex).
 2. **Normalize to a fully-qualified ref name** against the mirror, in this order: if it already begins with `refs/`, take it as-is; otherwise try `refs/heads/<ref>`, then `refs/tags/<ref>`. Exactly one must exist. Zero is `E_INVALID_REF`; more than one is `E_AMBIGUOUS_REF` — never guess.
 3. **Expand each `allowed_refs` entry** the same way: an entry without a `refs/` prefix means `refs/heads/<entry>`. So `main` matches `refs/heads/main` and does **not** match `refs/tags/main`. To allow tags, write `refs/tags/v*` explicitly.
-4. **Match** the expanded globs against the normalized name with path-aware globbing, where `*` does not cross `/`. `release/*` matches `refs/heads/release/1.2` and not `refs/heads/release/1.2/hotfix`; use `release/**` for that.
-5. **Resolve** the normalized name to an immutable SHA, and record both in the run row.
+4. **Resolve** the normalized name to an immutable SHA, and record both in the run row.
+5. **Match** the expanded globs against the normalized *name* — never against the SHA — with path-aware globbing, where `*` does not cross `/`. `release/*` matches `refs/heads/release/1.2` and not `refs/heads/release/1.2/hotfix`; use `release/**` for that.
+
+Draft 02 had steps 4 and 5 the other way round, and amendment A27 swapped them. Matching still happens against the name, so nothing about the policy answer changes; what changes is that the commit is known *before* the policy decision, which is what lets a run refused by step 5 be parked with the commit an operator is being asked to approve. Resolving first costs a `git rev-parse` against a mirror that has already been fetched — a local read, no clone, and nothing in the commit is looked at, let alone executed.
 
 Two consequences worth stating because they are the point of the rule. `refs/heads/main` and `main` are the same ref and get the same policy answer — a fully-qualified spelling cannot smuggle a branch past a short-form allowlist. And `refs/pull/*`, `refs/merge-requests/*`, and every other server-synthesised namespace fail step 3 by construction, so an untrusted pull request cannot execute without an explicit, deliberate config entry.
 
 #### Approval
 
 Runs on non-matching refs enter `awaiting_approval` and require a local `latem approve <run-id>`. Approval is a local action only; a broker cannot grant it, and no inbound command kind can express it (INV-2).
+
+**Approval is bound to a commit, not to a ref.** `latem approve` records `approved_at` and `approved_sha` (§22), where `approved_sha` is the commit the run was parked at, and gate 8 admits an out-of-policy run only while the freshly resolved commit still equals it. This is the whole content of the mechanism rather than an implementation detail. The reason this invariant exists at all is that a `ref` can point at a branch a contributor controls — so an approval that granted the *ref* could be obtained for a benign commit and spent on a hostile one: push, ask, get approved, force-push, and the run builds what arrived last. That is a time-of-check-to-time-of-use hole wide enough to defeat the invariant completely, and an approval mechanism with it is decoration.
+
+If the ref moves between the approval and the build, the run is **parked again** rather than built, the approval is discarded, and the message says the ref moved. The operator is then asked about the commit that actually arrived. Two consequences follow:
+
+- **A run is never parked without a resolved commit.** Gate 4 — the conservative pre-check, which runs before anything has been fetched — therefore does not park. It rejects when the repo does not permit approval at all, and otherwise queues the run for gate 8 to decide once the commit is known. A run parked with no commit would be one nothing could ever approve, since there would be nothing to pin.
+- **`latem approve` refuses a run with no `sha`.** In practice that is a row parked by an agent older than amendment A27; there is no safe reading of such an approval, because the only commit it could name is "whatever the ref points at by the time a runner picks this up".
 
 `awaiting_approval` is not terminal, so it needs an exit or it accumulates forever and the partial index in §22 grows without bound. A run unapproved after `approval_ttl` (default 24h) transitions to `rejected` with `E_APPROVAL_EXPIRED`. The same applies to `queued`: `queue_ttl` (default 72h) → `rejected` with `E_QUEUE_EXPIRED`. Both are swept by the daily ticker and at agent startup.
 
@@ -689,16 +698,17 @@ Two gates from draft 01 are split in two here, because each had a cheap conserva
  1. repo lookup                 → E_UNKNOWN_REPO    map hit in config; no path building
  2. ref syntax                  → E_INVALID_REF     regex + prefix + ".." (INV-3)
  3. input sanity                → E_BAD_INPUT       ≤64 keys, identifier-shaped, ≤4 KB each
- 4. ref policy — conservative   → awaiting_approval no expansion of the ref can match
+ 4. ref policy — conservative   → E_INVALID_REF     no expansion can match, approval disabled
  5. disk headroom               → E_DISK            agent floor = min(runner min_free_gb)
 
                               ─── first contact with the outside world ───
  6. mirror fetch                → E_SOURCE          per-repo mutex (§12)
  7. ref normalization           → E_INVALID_REF     exactly one of heads/tags must exist
                                 → E_AMBIGUOUS_REF   both exist — never guess
- 8. ref policy — authoritative  → awaiting_approval glob vs normalized name (INV-5)
- 9. resolve to SHA              → E_SOURCE          ${REF}^{commit}
-10. workspace clone + checkout  → E_SOURCE          hardlinked local clone (§12)
+ 9. resolve to SHA              → E_SOURCE          ${REF}^{commit} — before 8, see below
+ 8. ref policy — authoritative  → awaiting_approval glob vs normalized name, and the
+                                                    approved commit, if any (INV-5)
+10. workspace clone + checkout  → E_SOURCE          hardlinked local clone at that SHA (§12)
 11. read .latem/jobs.yaml       → E_NO_REGISTRY / E_BAD_REGISTRY
 12. job lookup                  → E_UNKNOWN_JOB
 13. label match                 → E_NO_RUNNER       runner labels ⊇ job.runs_on
@@ -712,7 +722,18 @@ Two gates from draft 01 are split in two here, because each had a cheap conserva
 
 Gates 1–5 run **before** any network or filesystem activity, so a hostile request costs a few microseconds and a rejected row. Gate 6 is the first action that touches the outside world.
 
-**Gate 4, the conservative pre-check.** The ref is not yet known to be a branch or a tag, so expand it both ways — `refs/heads/<ref>` and `refs/tags/<ref>`, plus the literal value if it is already fully qualified — and test all candidates against the policy globs. If *none* can match, no fetch can change that answer, so the run goes to `awaiting_approval` immediately without touching the network. If *any* could match, proceed and let gate 8 decide for real against the one that actually exists. The check is sound in the direction that matters: it never lets something through that gate 8 would reject.
+**Gates 8 and 9 run in the order shown**, which is not their numbering (amendment A27). Gate 8 is the gate that parks a run for a human, and a park has to name the commit being approved — approval is approval *of a commit* (INV-5), so parking before resolving produces a run nobody can approve. Gate 9 is a `git rev-parse` against the mirror gate 6 has already fetched: a local read, no clone, no execution, and nothing from the commit is trusted or even looked at. The numbering is left alone because the codes and the prose elsewhere refer to it.
+
+**Gate 10 checks out the SHA gate 8 admitted**, rather than resolving the ref a second time. Two resolutions are two answers, and the interval between them is exactly the interval an approval is supposed to close.
+
+**Gate 4, the conservative pre-check.** The ref is not yet known to be a branch or a tag, so expand it both ways — `refs/heads/<ref>` and `refs/tags/<ref>`, plus the literal value if it is already fully qualified — and test all candidates against the policy globs. If *none* can match:
+
+- when the repo sets `require_approval_otherwise = false`, no fetch can change the answer and the run is rejected with `E_INVALID_REF`, having touched nothing;
+- otherwise the run is **queued**, and gate 8 decides once gate 9 knows the commit.
+
+Draft 02 had this gate park the run instead, and amendment A27 removed that. A run parked here carries no `sha` — nothing has been fetched, so the ref has not been resolved and cannot be — and `latem approve` binds an approval to a commit. The invariant's second half was therefore unreachable from its first: the runs the cheap gate parked were precisely the ones no approval could release. The cost of deferring is one incremental mirror fetch and one `rev-parse` for an out-of-policy ref on a repo that permits approval. That is bounded by the runner pool and is strictly less than what the same repo already spends on a ref that *is* in policy, which is a full clone and a build.
+
+If *any* expansion could match, proceed and let gate 8 decide for real against the one that actually exists. The check is sound in the direction that matters: it never lets something through that gate 8 would admit on its own.
 
 **Gate 5 vs gate 17.** The runner is not selected until gate 13, so gate 5 can only enforce the weakest floor across enabled runners. Gate 17 re-checks the selected runner's own `min_free_gb` — the Tart runner's 150 GB is not a sensible bar for admitting a Docker job. Checking twice costs one `statfs` and prevents both a false rejection and a build that dies at 80% with a full disk.
 
@@ -722,8 +743,8 @@ Gates 1–5 run **before** any network or filesystem activity, so a hostile requ
 
 ```
                        ┌───────────────────┐
-        gate 4 / 8 ───▶│ awaiting_approval │──── latem approve ────┐
-                       └───────────────────┘                       │
+   gate 8 (only) ───▶  │ awaiting_approval │──── latem approve ────┐
+   from preparing      └───────────────────┘     (pins the SHA)    │
                                  │                                 │
                     approval_ttl │                                 │
                                  ▼                                 ▼
@@ -763,6 +784,8 @@ Both non-terminal waiting states have an exit. Draft 01's `awaiting_approval` ha
 - **TTL sweep.** The daily ticker and agent startup both sweep `awaiting_approval` older than `approval_ttl` and `queued` older than `queue_ttl` into `rejected`, with `E_APPROVAL_EXPIRED` and `E_QUEUE_EXPIRED`. Sweeping at startup matters because an agent that was off for a week comes back to a queue full of runs nobody wants any more.
 - **Step timeouts** fail the run with `E_STEP_TIMEOUT` and terminal state `timed_out`, distinct from the job-level `E_TIMEOUT` only by error code. Both run `collecting`.
 - **`preparing` → `queued` is legal**, and the diagram above does not draw it (amendment A14). Gate 16 sends a run whose concurrency group is occupied back to `queued` — "wait, do not fail" — and gates 6 through 18 all execute while the run is in `preparing`. A run can therefore reach `preparing`, discover its group is busy, and return to the queue. Any implementation validating transitions against the diagram alone will reject a legal one.
+- **`preparing` → `awaiting_approval` is the only way into `awaiting_approval`** (amendments A17 and A27). Gate 8 is the only gate that parks a run, it runs during `preparing` because it needs a fetched mirror, and the edge had to be added for it (A17). Gate 4 no longer parks anything: a run parked before a commit is resolved cannot be approved (INV-5).
+- **Entering `awaiting_approval` clears `approved_at` and `approved_sha`.** A run parked a second time — because its ref moved after it was approved — must not carry the earlier approval, or the next attempt would compare a fresh commit against a pin the operator has not been shown since. The clear happens in the same statement that records the new commit, so there is no window in which the row says "approved" about a commit nobody was asked about.
 
 ---
 
@@ -1155,7 +1178,7 @@ latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
 latem cancel <run-id>
-latem approve <run-id>               Local-only; satisfies INV-5
+latem approve <run-id>               Local-only; pins the run's commit (INV-5)
 latem register --url U --token T     Write config + machine token, verify connectivity
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
@@ -1255,6 +1278,8 @@ CREATE TABLE runs (
   expires_at        INTEGER,        -- approval_ttl / queue_ttl deadline (§11)
   reported_state    TEXT,           -- last state acked by the broker
   last_acked_seq    INTEGER NOT NULL DEFAULT 0,  -- log resume point (§7.2)
+  approved_at       INTEGER,        -- local `latem approve` (INV-5, amendment A27)
+  approved_sha      TEXT,           -- the commit that approval pinned
   UNIQUE(id)
 );
 CREATE INDEX runs_state_idx ON runs(state) WHERE state NOT IN
@@ -1293,6 +1318,10 @@ CREATE TABLE cache_meta (
 `ref_normalized` is stored separately from `ref` because policy was evaluated against the normalized form (INV-5). Keeping both makes an audit answerable — "this run was requested as `main` and matched `refs/heads/main`" — without re-deriving it from a mirror that has since moved on.
 
 `expires_at` is set when a run enters `queued` or `awaiting_approval` and cleared when it leaves. The partial index over it makes the TTL sweep a single indexed scan rather than a table walk.
+
+`approved_at` and `approved_sha` are what a local `latem approve` recorded (amendment A27), and `approved_sha` is a commit rather than a ref on purpose — see INV-5. They are written together with the `awaiting_approval` → `queued` transition and the queue row, in one transaction, because reading the commit and pinning it must not be separable: a sequence that read `sha` and then wrote it back as approved would have a window in it, and that window is the one a force-push exploits. Entering `awaiting_approval` clears both. Nothing on the wire carries them; approval is local-only (INV-2, INV-5), and a broker learns only that the run reached `queued`.
+
+They are nullable with no default, so migration `0002` applies forward over an existing history: every run already on disk reads as never approved, which is what it is. A row left in `awaiting_approval` by a pre-A27 agent has no `sha` and cannot be approved — there is nothing to pin — and the honest answer is to cancel it and submit the run again.
 
 `inputs_json` and `cancel_reason` MUST be scrubbed through the redactor before persistence.
 
@@ -1427,7 +1456,7 @@ Fourteen findings, all resolved in the text above. Recorded here because several
 | F2 | §12 | Mirror + `git worktree add` | Mirror + `git clone --local` (hardlinked) | A worktree's `.git` is a file pointing outside the mount; every `git` call inside a container failed |
 | F3 | §5, §16 | Redact each secret value | Also redact every **line** of a multi-line value, and the whitespace-stripped form | `APP_STORE_CONNECT_KEY_P8` is a PEM. Per-line redaction of a whole-value match redacts nothing |
 | F4 | §7 | `Runs()` yields `RunRequest`; `cancelled` reachable by "broker cancellation" | `Commands()` yields a closed two-kind union: `run` and `cancel` | The protocol could not express the Stop button the product promises |
-| F5 | §5, §10 | `allowed_refs` "glob, matched after resolution" | Normalize → match policy → resolve, with expansion rules stated exactly | Globbing against a SHA is meaningless; short vs fully-qualified spellings had no defined answer |
+| F5 | §5, §10 | `allowed_refs` "glob, matched after resolution" | Normalize → match policy → resolve, with expansion rules stated exactly (reordered to normalize → resolve → match by A27; the match is still against the name) | Globbing against a SHA is meaningless; short vs fully-qualified spellings had no defined answer |
 | F6 | §7, §16, §22 | Logs are an `io.WriteCloser`; tolerate replays | `LogSink` with per-run monotonic `Seq` and a persisted `last_acked_seq` | State was idempotent; log lines were idempotent by nothing, so every partition duplicated output |
 | F7 | §5, §11, §21 | `awaiting_approval` with no exit | `approval_ttl` and `queue_ttl` → `rejected`, swept daily and at startup | Unapproved runs accumulated forever inside the partial index that exists to stay small |
 | F8 | §4, §7 | Wire types declared in `package broker` | All wire types in `pkg/protocol`; `internal/broker` holds only the interface | §4 already said protocol was the shared package; §7 contradicted it |
@@ -1480,7 +1509,7 @@ Four more implementations — the orchestrator, the local broker, the CLI, and t
 
 | # | Section | Change | Why it surfaced |
 |---|---|---|---|
-| A17 | §10, §11 | `preparing → awaiting_approval` is legal | **Gate 8 could not park a run.** §11 draws "gate 4 / 8 ──▶ awaiting_approval" as though both gates sat in one place; they do not. Gate 4 runs before a row exists, so `Admit` creates it parked. Gate 8 is the *authoritative* INV-5 check, runs during `preparing` because it needs a fetched mirror, and had no edge out. A ref gate 4 admitted optimistically — a tag under a branch policy — could never be parked by the check that decides |
+| A17 | §10, §11 | `preparing → awaiting_approval` is legal (its account of gate 4 is superseded by A27, which stopped gate 4 parking anything) | **Gate 8 could not park a run.** §11 draws "gate 4 / 8 ──▶ awaiting_approval" as though both gates sat in one place; they do not. Gate 4 runs before a row exists, so `Admit` creates it parked. Gate 8 is the *authoritative* INV-5 check, runs during `preparing` because it needs a fetched mirror, and had no edge out. A ref gate 4 admitted optimistically — a tag under a branch policy — could never be parked by the check that decides |
 | A18 | §7 | `protocol.Ack` added | `Command` was a one-way vocabulary, so every transport had to invent its own "accepted, run id r_123". The local broker did; the WebSocket broker would have invented a different one |
 | A19 | §7 | `Broker` gains `Close()` | Both transports need shutdown, so the agent had to hold a concrete type — undercutting the one property the interface exists for |
 | A20 | §7.3, §21 | `protocol.ErrNoAgent` sentinel added | Two packages had each defined their own value for "nothing is listening". The exit code stays in the CLI: §7.3 fixes it at 3, but an exit status is a property of a process, not of the wire |
@@ -1490,6 +1519,9 @@ Four more implementations — the orchestrator, the local broker, the CLI, and t
 | A24 | §14 | `cache.Options` gains `WorkDir`/`MirrorDir` | `work/` was derived from the cache root while `agent.work_dir` is relocatable, so a relocated tree made `FreeGB` measure the wrong filesystem — silently, on exactly the gate that exists to stop a build dying at 80% with a full disk |
 | A25 | §5 (INV-1) | The INV-1 test recipe carries the Darwin caveat | `SO_ACCEPTCONN` returns `ENOPROTOOPT` on macOS for a real listening socket, so the obvious detector reports the invariant clean having enumerated nothing |
 | A26 | §19 | `config.DerivePaths` exported | `doctor` exists for the machine whose config does not parse, and `Load` returns nil on failure — taking the paths with it |
+| A27 | §5 (INV-5), §10, §11, §22 | **Approval is implemented, and bound to a commit.** `runs` gains `approved_at` and `approved_sha`; `store.Store` gains `Approve`; `registry.AdmitRef` gains an approval input; gates 8 and 9 swap so the SHA is resolved before the policy decision; gate 4 no longer parks | **`latem approve` did nothing.** It moved a parked run to `queued`; the run was claimed, prepared, and parked again by the same gate 8, having paid for another mirror fetch and clone. Nothing recorded that a human had said yes — §22 had no column for it and `AdmitRef` had no input for it — so the loop never terminated and INV-5's second sentence was unimplemented. The fix could not be "approved runs skip gate 8": approval had to name a *commit*, because INV-5 exists precisely because a `ref` can point at a branch a contributor controls, and a ref-scoped approval is spent by force-pushing after it is granted. Pinning the commit forced the rest: the SHA must exist before a run is parked (so 9 moves ahead of 8), gate 4 cannot park at all (nothing is fetched yet, so it has no commit), gate 10 must check out the SHA gate 8 admitted rather than resolving again, and parking must clear any earlier approval |
+
+**A27 is a security fix, not a feature.** The half of INV-5 that worked — parking — is the half that costs nothing to get right. The half that did not is the one an operator relies on, and the obvious implementation of it, a boolean "approved" consulted by gate 8, would have been worse than none: it reads as a control, and it grants execution of whatever a branch points at whenever a runner gets round to the run. The whole design follows from refusing that. F5's ordering (normalize → match → resolve) is corrected to normalize → resolve → match; matching still happens against the ref *name*, so no policy answer changes.
 
 Two further items are recorded but **not** amended, because neither is a contract defect:
 

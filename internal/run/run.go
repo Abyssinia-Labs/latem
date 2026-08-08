@@ -12,14 +12,14 @@
 // # The gate chain (§10)
 //
 // [Orchestrator.Admit] runs gates 1-5 — the ones decidable without touching
-// the network or the filesystem — and files the run as queued,
-// awaiting_approval, or rejected. [Orchestrator.Execute] runs the rest:
+// the network or the filesystem — and files the run as queued or rejected.
+// [Orchestrator.Execute] runs the rest:
 //
 //  6. mirror fetch          Source.Fetch
 //  7. ref normalization     registry.NormalizeRef
-//  8. ref policy            registry.AdmitRef
-//  9. resolve to SHA    ┐   Mirror.Acquire
-//  10. clone + checkout  ┘
+//  9. resolve to SHA        Mirror.Resolve      ┐ swapped by amendment A27
+//  8. ref policy            registry.AdmitRef   ┘
+//  10. clone + checkout      Mirror.Checkout
 //  11. read jobs.yaml        FROM THE WORKSPACE (INV-5)
 //  12. job lookup        ┐
 //  13. label match       │   Registry.Admit
@@ -33,6 +33,13 @@
 // Gate 11 is the invariant the whole design exists to protect. The registry is
 // read off disk from the workspace at the resolved commit and never from a
 // broker, so a control plane can name a job and cannot define one.
+//
+// Gates 8 and 9 run in the order shown, which is not the order §10 lists them
+// in. Gate 8 is the gate that parks a run for a human, and a park has to name
+// the commit being approved or the approval means "this branch, whenever the
+// build gets round to it" — which a force-push turns into approval of somebody
+// else's code (amendment A27). Resolving first costs a `git rev-parse` against
+// an already-fetched mirror.
 //
 // # The state machine (§11)
 //

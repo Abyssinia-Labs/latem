@@ -81,6 +81,9 @@ func rejectErr(err error, fallback protocol.ErrorCode) Decision {
 // Ordering is the whole point. A hostile request is rejected after a map
 // lookup and a regexp, having caused no fetch, no clone, no container, and no
 // process. Gate 6 is the first thing that talks to the outside world.
+//
+// It returns either a proceed or a rejection, never awaiting_approval. See gate
+// 4 below for why parking is not something this function can honestly do.
 func PreAdmit(req protocol.RunRequest, p Policy) Decision {
 	// Gate 1 — repo lookup. An exact map hit against local config. No path is
 	// ever constructed from this value; a repo absent here cannot be built,
@@ -116,16 +119,25 @@ func PreAdmit(req protocol.RunRequest, p Policy) Decision {
 
 	// Gate 4 — conservative ref policy (INV-5). See [CouldMatchPolicy] for why
 	// an optimistic answer here is sound.
+	//
+	// It rejects and never parks (amendment A27). Parking is what asks a human
+	// to approve a commit, and no commit is known here: nothing has been
+	// fetched, so the ref has not been resolved and cannot be. A run parked at
+	// this gate would carry no sha, `latem approve` would have nothing to pin,
+	// and the only way out would be an approval that means "whatever this
+	// branch points at whenever the build eventually starts" — which is the
+	// force-push hole approval exists to close. So when approval is possible
+	// the run proceeds and the authoritative gate 8 parks it, after gate 9 has
+	// resolved the commit the operator will be asked about.
+	//
+	// The cheap half of this gate is kept exactly where the answer is knowable
+	// with no I/O: a repo that does not permit approval at all is refused here,
+	// having caused no fetch.
 	expanded := ExpandPolicy(repo.AllowedRefs)
-	if !CouldMatchPolicy(req.Ref, expanded) {
-		if !repo.RequireApprovalOtherwise {
-			return reject(protocol.ErrInvalidRef,
-				"ref %q is outside allowed_refs for %q and approval is disabled",
-				req.Ref, req.Repo)
-		}
-		return needsApproval(
-			"ref %q is outside allowed_refs for %q; approve locally with `latem approve %s`",
-			req.Ref, req.Repo, req.ID)
+	if !CouldMatchPolicy(req.Ref, expanded) && !repo.RequireApprovalOtherwise {
+		return reject(protocol.ErrInvalidRef,
+			"ref %q is outside allowed_refs for %q and approval is disabled",
+			req.Ref, req.Repo)
 	}
 
 	// Gate 5 — disk headroom against the weakest runner floor.
@@ -137,20 +149,83 @@ func PreAdmit(req protocol.RunRequest, p Policy) Decision {
 	return Decision{}
 }
 
+// Approval is what a local `latem approve` means to gate 8 (amendment A27).
+//
+// It is three-valued rather than a bool because "approved, but not for the
+// commit this run is about to build" is a distinct answer that deserves a
+// distinct message: the operator looked at something, and it is no longer what
+// they looked at.
+//
+// The comparison itself is deliberately not done here. This package decides
+// policy from names — it never sees a SHA, has no mirror to resolve one
+// against, and would have to be handed two of them to compare. Which commit was
+// approved and which one the ref resolves to now are facts the orchestrator
+// already holds; [ApprovalFor] turns that pair into this. Keeping it that way
+// means gate 8 stays a pure function of the policy and one enum, and the code
+// that could get a commit comparison wrong is one line with its own test.
+type Approval uint8
+
+const (
+	// NotApproved is the ordinary case: nobody has approved this run.
+	NotApproved Approval = iota
+	// ApprovedForThisCommit means an operator approved exactly the commit the
+	// ref resolves to now.
+	ApprovedForThisCommit
+	// ApprovedForAnotherCommit means an operator approved this run, and the ref
+	// has moved since. It is not a weaker form of approval; it is a refusal
+	// with a reason.
+	ApprovedForAnotherCommit
+)
+
+// ApprovalFor classifies a recorded approval against the commit a run is about
+// to build.
+//
+// Empty is never a match on either side. An approved_sha of "" is a run nobody
+// approved, and a resolved SHA of "" is a caller that has not resolved one yet
+// — treating those as equal would admit an unapproved run on a pair of empty
+// strings, which is the kind of bug that reads as obviously fine.
+func ApprovalFor(approvedSHA, resolvedSHA string) Approval {
+	switch {
+	case approvedSHA == "":
+		return NotApproved
+	case resolvedSHA != "" && approvedSHA == resolvedSHA:
+		return ApprovedForThisCommit
+	default:
+		return ApprovedForAnotherCommit
+	}
+}
+
 // AdmitRef runs gate 8, the authoritative policy check, against a ref that has
-// already been normalized by [NormalizeRef].
+// already been normalized by [NormalizeRef] and resolved to a commit.
 //
 // Gate 4 asked whether any expansion *could* match. This asks whether the one
 // that actually exists *does*. Both are needed: the first keeps hostile
 // requests cheap, the second keeps the answer correct.
-func AdmitRef(runID, repoName, normalized string, repo RepoPolicy) Decision {
+//
+// A ref outside the policy is admitted only by an approval bound to the commit
+// in hand. INV-5 exists because "a ref can point at a branch a contributor
+// controls" — so an approval that granted the *ref* would be defeated by
+// pushing something benign, asking for approval, and force-pushing before the
+// build starts. That is a time-of-check-to-time-of-use hole that defeats the
+// invariant entirely, which is why [ApprovedForAnotherCommit] parks the run
+// again rather than being rounded up to a yes.
+func AdmitRef(runID, repoName, normalized string, repo RepoPolicy, approval Approval) Decision {
 	if MatchPolicy(normalized, ExpandPolicy(repo.AllowedRefs)) {
+		return Decision{}
+	}
+	if approval == ApprovedForThisCommit {
 		return Decision{}
 	}
 	if !repo.RequireApprovalOtherwise {
 		return reject(protocol.ErrInvalidRef,
 			"ref %q is outside allowed_refs for %q and approval is disabled",
 			normalized, repoName)
+	}
+	if approval == ApprovedForAnotherCommit {
+		return needsApproval(
+			"ref %q moved since it was approved; approval covers one commit, "+
+				"so this run needs a fresh `latem approve %s`",
+			normalized, runID)
 	}
 	return needsApproval(
 		"ref %q is outside allowed_refs for %q; approve locally with `latem approve %s`",

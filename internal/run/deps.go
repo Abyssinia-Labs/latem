@@ -14,13 +14,24 @@ import (
 type Store = store.Store
 
 // Mirror is the subset of [source.Mirror] the gate chain uses: gate 7 asks
-// which fully-qualified name exists, gates 9 and 10 turn it into a workspace.
+// which fully-qualified name exists, gate 9 turns it into a commit, gate 10
+// turns that commit into a workspace.
+//
+// The two are separate calls rather than source.Mirror's combined Acquire
+// because gate 8 now sits between them (amendment A27). Resolving first is what
+// lets a parked run record the commit an operator is being asked to approve;
+// checking out the SHA gate 8 was given, rather than re-resolving the ref, is
+// what stops the checkout being a second, unchecked resolution of a name that
+// may have moved in the meantime.
 //
 // It also satisfies [registry.RefLister], which is what lets normalization stay
 // a pure function in internal/registry with no git repository behind it.
 type Mirror interface {
 	HasRef(ctx context.Context, fullyQualified string) (bool, error)
-	Acquire(ctx context.Context, runID, normalizedRef string) (*source.Workspace, error)
+	// Resolve is gate 9: the immutable commit a normalized ref names.
+	Resolve(ctx context.Context, normalizedRef string) (string, error)
+	// Checkout is gate 10: a workspace at exactly that commit.
+	Checkout(ctx context.Context, runID, normalizedRef, sha string) (*source.Workspace, error)
 }
 
 // Source is the subset of [source.Manager] the gate chain uses.

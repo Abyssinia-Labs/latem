@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -42,38 +43,39 @@ func (o *Orchestrator) terminalUpdate(out outcome, refs []protocol.ArtifactRef) 
 	}
 }
 
-// Approve moves an awaiting_approval run back into the queue (RUNNER_SPEC §11,
-// `latem approve`).
+// Approve records a local approval and moves the run back into the queue
+// (RUNNER_SPEC §11, INV-5, `latem approve`).
 //
 // It puts the run in queued and not straight into a runner's hands: the §11
 // machine has no awaiting_approval → claimed edge, and approving a run is
 // saying it may be built, not that it must be built next.
 //
+// The state change, the pin, and the queue row are one store call rather than
+// three (amendment A27). They have to be: what is being approved is the commit
+// on the row, and a sequence that read it, then wrote it back as approved,
+// would have a window between the two — the same window a force-push exploits,
+// reached from a different direction.
+//
 // A run that is already queued is a success — approving twice is something a
 // person does, and a second `latem approve` should not read as an error.
-func (o *Orchestrator) Approve(ctx context.Context, runID string) error {
-	r, err := o.store.Get(ctx, runID)
+//
+// The returned run carries the pinned commit, so a caller can say which one it
+// approved. Errors come from the store: [store.ErrNotFound],
+// [store.ErrNotAwaitingApproval], [store.ErrNoCommit].
+func (o *Orchestrator) Approve(ctx context.Context, runID string) (store.Run, error) {
+	now := o.now()
+	r, err := o.store.Approve(ctx, runID, now, now.Add(o.queueTTL()))
 	if err != nil {
-		return fmt.Errorf("run: approve %s: %w", runID, err)
-	}
-	switch r.State {
-	case protocol.StateQueued:
-		return nil
-	case protocol.StateAwaitingApproval:
-	default:
-		return fmt.Errorf("run: approve %s: run is %s, not %s",
-			runID, r.State, protocol.StateAwaitingApproval)
+		return store.Run{}, fmt.Errorf("run: approve %s: %w", runID, err)
 	}
 
-	expires := o.now().Add(o.queueTTL())
-	u := protocol.Update{State: protocol.StateQueued, ExpiresAt: &expires}
-	if err := o.transition(ctx, runID, protocol.StateQueued, u); err != nil {
-		return err
-	}
-	if err := o.store.Enqueue(ctx, runID, 0); err != nil {
-		return fmt.Errorf("run: approve %s: enqueue: %w", runID, err)
-	}
-	return nil
+	// The store already persisted it, so only the report is outstanding —
+	// local truth first, as everywhere else in §11.
+	o.reporter.enqueue(runID, protocol.Update{
+		State:     protocol.StateQueued,
+		ExpiresAt: r.ExpiresAt,
+	})
+	return r, nil
 }
 
 // SweepExpired rejects waiting runs past their deadline and reports each one

@@ -75,13 +75,19 @@ func TestSourceManager_AdaptsARealManager(t *testing.T) {
 		t.Fatal("a tag that does not exist was reported present")
 	}
 
-	ws, err := mirror.Acquire(t.Context(), "run1", "refs/heads/main")
+	// Gates 9 and 10, separately, which is how the orchestrator drives them so
+	// that gate 8 can sit between (amendment A27).
+	sha, err := mirror.Resolve(t.Context(), "refs/heads/main")
 	if err != nil {
-		t.Fatalf("Acquire: %v", err)
+		t.Fatalf("Resolve: %v", err)
+	}
+	ws, err := mirror.Checkout(t.Context(), "run1", "refs/heads/main", sha)
+	if err != nil {
+		t.Fatalf("Checkout: %v", err)
 	}
 	t.Cleanup(func() { _ = ws.Remove() })
-	if ws.SHA == "" || ws.Ref != "refs/heads/main" {
-		t.Fatalf("workspace = %+v", ws)
+	if ws.SHA != sha || ws.Ref != "refs/heads/main" {
+		t.Fatalf("workspace = %+v, want a checkout at %s", ws, sha)
 	}
 	if _, err := readRegistry(ws.Path); codeOf(err) != protocol.ErrNoRegistry {
 		t.Fatalf("a repo with no .latem/jobs.yaml gave %v", err)

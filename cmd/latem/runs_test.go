@@ -103,6 +103,26 @@ func seedCLIRun(t *testing.T, db *store.DB, id string, state protocol.RunState) 
 	}
 }
 
+// seedParkedCLIRun is a run parked by gate 8: awaiting approval, with the
+// commit it would build already recorded.
+func seedParkedCLIRun(t *testing.T, db *store.DB, id, sha string) {
+	t.Helper()
+	r := store.Run{
+		ID:            id,
+		Repo:          "app",
+		Job:           "test",
+		Ref:           "feature/x",
+		RefNormalized: "refs/heads/feature/x",
+		SHA:           sha,
+		State:         protocol.StateAwaitingApproval,
+		OriginKind:    "cli",
+		CreatedAt:     time.Now().Add(-2 * time.Minute),
+	}
+	if err := db.Create(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // execCommand runs one subcommand and returns stdout, stderr, and the error.
 func execCommand(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
@@ -394,10 +414,16 @@ func TestCancelAQueuedRunWithNoAgent(t *testing.T) {
 
 // `latem approve` is the only local-only verb (INV-5, INV-2). It works with no
 // agent running, because approval is a store transition rather than a message.
+//
+// What it approves is the commit the run was parked at, and it says so: an
+// operator whose next question is "which commit did I just authorise?" should
+// not have to run a second command to find out (amendment A27).
 func TestApproveMovesAParkedRunToQueued(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+
 	dir := newClientConfigDir(t)
 	db := clientStore(t, dir)
-	seedCLIRun(t, db, "r_parked", protocol.StateAwaitingApproval)
+	seedParkedCLIRun(t, db, "r_parked", sha)
 
 	_, stderr, err := execCommand(t, "approve", "r_parked")
 	if err != nil {
@@ -405,6 +431,9 @@ func TestApproveMovesAParkedRunToQueued(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "queued") {
 		t.Errorf("approve should say what it did:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, sha[:12]) {
+		t.Errorf("approve should name the commit it pinned:\n%s", stderr)
 	}
 
 	r, err := db.Get(context.Background(), "r_parked")
@@ -414,10 +443,50 @@ func TestApproveMovesAParkedRunToQueued(t *testing.T) {
 	if r.State != protocol.StateQueued {
 		t.Errorf("state = %s, want queued", r.State)
 	}
+	if r.ApprovedSHA != sha {
+		t.Errorf("approved_sha = %q, want %q", r.ApprovedSHA, sha)
+	}
 
 	seedCLIRun(t, db, "r_running", protocol.StateRunning)
 	if _, _, err := execCommand(t, "approve", "r_running"); err == nil {
 		t.Error("approving a run that is not parked should fail")
+	}
+
+	// Approving twice is something a person does. The second one succeeds and
+	// repeats the commit that is pinned, rather than reading as an error or as
+	// a fresh decision.
+	_, stderr, err = execCommand(t, "approve", "r_parked")
+	if err != nil {
+		t.Fatalf("second approve: %v", err)
+	}
+	if !strings.Contains(stderr, sha[:12]) {
+		t.Errorf("a second approve should still name the pinned commit:\n%s", stderr)
+	}
+
+	// An ordinary queued run was never waiting on anybody, and no commit was
+	// approved. Printing "approved ... at " with nothing after it would
+	// misrepresent the one fact this command exists to establish.
+	seedCLIRun(t, db, "r_plain", protocol.StateQueued)
+	_, stderr, err = execCommand(t, "approve", "r_plain")
+	if err != nil {
+		t.Fatalf("approving an already-queued run: %v", err)
+	}
+	if !strings.Contains(stderr, "already queued") {
+		t.Errorf("approving a queued run should say so:\n%s", stderr)
+	}
+
+	// A run with no resolved commit has nothing to pin, and the message has to
+	// say so rather than reading as a database error.
+	seedCLIRun(t, db, "r_nocommit", protocol.StateAwaitingApproval)
+	_, _, err = execCommand(t, "approve", "r_nocommit")
+	if err == nil {
+		t.Fatal("approving a run with no commit succeeded")
+	}
+	if !strings.Contains(err.Error(), "no resolved commit") {
+		t.Errorf("error should explain what is missing: %v", err)
+	}
+	if _, _, err := execCommand(t, "approve", "r_nosuchrun"); exitCode(err) != ExitFailure {
+		t.Errorf("approving an unknown run = %v, want exit 1", err)
 	}
 }
 

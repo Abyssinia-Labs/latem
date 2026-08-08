@@ -210,32 +210,61 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		return nil, registry.Decision{}, err
 	}
 
-	// Gate 8 — authoritative ref policy, against the name that actually
-	// exists rather than the ones that might have (INV-5).
-	if d := registry.AdmitRef(x.run.ID, x.req.Repo, normalized, policy); !d.OK() {
+	// Gate 9 — resolve, BEFORE gate 8 decides (amendment A27). §10 used to
+	// order these the other way, and that ordering is what made INV-5's
+	// approval unimplementable: gate 8 parked a run without knowing which
+	// commit it was parking, so `latem approve` had nothing to bind to and the
+	// only approval it could express was "this ref, whenever it eventually
+	// builds" — a force-push away from meaningless.
+	//
+	// Resolving first is safe, and cheap. It is a `git rev-parse` against a
+	// mirror that gate 6 has already fetched: a local read, no execution, no
+	// clone, and nothing from the commit is trusted or even looked at. What it
+	// buys is that every parked run records exactly the commit an operator is
+	// being asked to approve.
+	sha, err := mirror.Resolve(ctx, normalized)
+	if err != nil {
+		return nil, registry.Decision{}, err
+	}
+
+	// Record what INV-5 decided, in the columns §22 keeps for it (amendment
+	// A21). The pair is settled here, at gates 7 and 9, long after store.Create
+	// — which is why Update had to grow the fields — and it is the answer to
+	// the only question anyone asks about a surprising build: requested as
+	// "main", built refs/heads/main at 3bf1261.
+	//
+	// They are set before gate 8 rather than after it because a parked run
+	// needs them most: they ride on whatever transition comes next, including
+	// the one into awaiting_approval.
+	x.refNormalized, x.sha = normalized, sha
+
+	// Gate 8 — authoritative ref policy, against the name that actually exists
+	// rather than the ones that might have, and against the commit that name
+	// resolves to right now (INV-5).
+	//
+	// The approval is classified here rather than in internal/registry: which
+	// commit was approved is a fact this row carries, and gate 8 decides policy
+	// from names. A ref that has moved since it was approved comes back as a
+	// fresh park, not as a yes.
+	approval := registry.ApprovalFor(x.run.ApprovedSHA, sha)
+	if d := registry.AdmitRef(x.run.ID, x.req.Repo, normalized, policy, approval); !d.OK() {
 		return nil, d, nil
 	}
-	x.note("ref %s → %s", x.req.Ref, normalized)
+	if approval == registry.ApprovedForThisCommit {
+		x.note("approved locally at %s", shortSHA(sha))
+	}
+	x.note("ref %s → %s at %s", x.req.Ref, normalized, shortSHA(sha))
 
-	// Gates 9 and 10 — resolve ${REF}^{commit} and build the workspace.
-	ws, err := mirror.Acquire(ctx, x.run.ID, normalized)
+	// Gate 10 — the workspace, at the commit gate 8 just admitted. Checkout
+	// rather than Acquire: Acquire resolves the ref again, and a second
+	// resolution is a second answer — the window between them is precisely the
+	// one an approval is supposed to close.
+	ws, err := mirror.Checkout(ctx, x.run.ID, normalized, sha)
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}
 	x.ws = ws
 	x.onTeardown("workspace", func(context.Context) error { return ws.Remove() })
-
-	// Record what INV-5 actually decided, in the columns §22 keeps for it
-	// (amendment A21). The pair is settled here, at gates 7 and 9, long after
-	// store.Create — which is why Update had to grow the fields — and it is
-	// the answer to the only question anyone asks about a surprising build:
-	// requested as "main", built refs/heads/main at 3bf1261.
-	//
-	// They ride on the next transition rather than one of their own. A
-	// self-transition would persist them a few milliseconds sooner and cost a
-	// duplicate report of a state that did not change, which a broker must
-	// ignore and an operator reading a run's history should never see.
-	x.refNormalized, x.sha = normalized, ws.SHA
 	x.note("checked out %s at %s", normalized, shortSHA(ws.SHA))
 
 	// Gate 11 — the registry, off disk, at this commit.
@@ -249,24 +278,40 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 // awaitApproval parks a run whose ref failed gate 8, the authoritative policy
 // check (INV-5).
 //
-// §11 draws this edge — "gate 4 / 8 ──▶ awaiting_approval" — as though both
-// gates sat in the same place. They do not. Gate 4 is the cheap pre-check that
-// runs before a run row exists, so Admit creates the row already parked. Gate 8
-// is the authoritative check: it needs a fetched mirror, so it runs during
-// preparing, and until amendment A17 the state table had no edge out of
-// preparing to park it. The gate 4 half worked and the gate 8 half could not,
-// which meant a ref gate 4 admitted optimistically — a tag under a branch
-// policy, say — could not be parked by the check that actually decides.
+// This is now the only thing that parks a run. §11 draws the edge as "gate 4 /
+// 8 ──▶ awaiting_approval", as though both gates sat in the same place; they do
+// not, and only one of them can honestly park. Gate 4 runs before anything has
+// been fetched, so it knows no commit, and a run parked without a commit is a
+// run `latem approve` cannot bind an approval to (amendment A27). Gate 8 runs
+// during preparing, after gate 9 has resolved one — and until amendment A17 the
+// state table had no edge out of preparing to park it at all.
+//
+// The message carries the commit, because a parked run is a question put to a
+// person and "approve refs/heads/feature/x" is not a question anyone can answer
+// safely. The commits are appended here rather than composed in
+// internal/registry, which decides policy from names and never sees a SHA.
 func (x *execution) awaitApproval(ctx context.Context, dec registry.Decision) Result {
 	expires := x.o.now().Add(x.o.approvalTTLFor(x.req.Repo))
+	msg := dec.Msg
+	switch {
+	case x.run.ApprovedSHA != "" && x.sha != "":
+		msg = fmt.Sprintf("%s (approved %s, now %s)",
+			msg, shortSHA(x.run.ApprovedSHA), shortSHA(x.sha))
+	case x.sha != "":
+		msg = fmt.Sprintf("%s — this would build %s", msg, shortSHA(x.sha))
+	}
+
 	u := protocol.Update{
-		ErrorMsg:  truncate(dec.Msg, MaxErrorMsgBytes),
+		ErrorMsg:  truncate(msg, MaxErrorMsgBytes),
 		ExpiresAt: &expires,
 	}
+	// The transition also clears any approval on the row, in the store and in
+	// the same statement that records the new commit: the operator approved a
+	// different one and has to be asked again.
 	if err := x.to(ctx, protocol.StateAwaitingApproval, u); err != nil {
 		return x.raced(err)
 	}
-	x.note("awaiting approval: %s", dec.Msg)
+	x.note("awaiting approval: %s", msg)
 	return Result{
 		RunID:    x.run.ID,
 		State:    protocol.StateAwaitingApproval,

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -93,6 +94,9 @@ func TestMigrate_RunsColumns(t *testing.T) {
 		"exit_code", "error_code", "error_message", "origin_kind", "origin_actor",
 		"cancel_reason", "inputs_json", "created_at", "started_at", "finished_at",
 		"expires_at", "reported_state", "last_acked_seq",
+		// 0002, amendment A27. ALTER TABLE appends, so these come last and the
+		// order here is the order on disk.
+		"approved_at", "approved_sha",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("runs columns =\n %v\nwant\n %v", got, want)
@@ -235,6 +239,68 @@ func TestMigrate_PopulatedDatabase(t *testing.T) {
 	arts, err := reopened.Artifacts(t.Context(), run.ID)
 	if err != nil || len(arts) != 1 {
 		t.Errorf("artifacts = %v, %v; want one row preserved", arts, err)
+	}
+}
+
+// TestMigrate_0002OverAVersion1Database is the upgrade A27 actually ships into:
+// a machine with a month of history, whose runs table has no approval columns
+// at all. The rows must survive, read back as "never approved", and the new
+// columns must be writable afterwards.
+//
+// The fixture is built by applying only migration 1 and inserting through raw
+// SQL, because [DB.Create] projects the post-0002 column list and would not
+// compile against the old schema — which is the point: this is the only way to
+// exercise the transition from what was on disk to what is on disk now.
+func TestMigrate_0002OverAVersion1Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	d, err := Open(t.Context(), path, &fakeRedactor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	all := mustLoadMigrations(t)
+	if _, err := d.db.ExecContext(t.Context(), `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+		  version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.applyMigration(t.Context(), all[0]); err != nil {
+		t.Fatalf("applying 0001: %v", err)
+	}
+
+	_, err = d.db.ExecContext(t.Context(), `
+		INSERT INTO runs (id, repo, job, ref, sha, state, origin_kind, inputs_json,
+		                  created_at, last_acked_seq)
+		VALUES ('r_old', 'myapp', 'build', 'feature/x', ?, 'awaiting_approval', 'cli', '{}', ?, 0)`,
+		"0123456789abcdef0123456789abcdef01234567", toUnix(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrating a version-1 database forward: %v", err)
+	}
+
+	got, err := d.Get(t.Context(), "r_old")
+	if err != nil {
+		t.Fatalf("run lost across 0002: %v", err)
+	}
+	if got.State != protocol.StateAwaitingApproval {
+		t.Errorf("state = %s, want awaiting_approval", got.State)
+	}
+	if got.ApprovedAt != nil || got.ApprovedSHA != "" {
+		t.Errorf("a pre-A27 row reads as approved: %v / %q", got.ApprovedAt, got.ApprovedSHA)
+	}
+
+	// The columns are not merely present, they work.
+	now := time.Now().UTC().Truncate(time.Second)
+	approved, err := d.Approve(t.Context(), "r_old", now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Approve after migrating forward: %v", err)
+	}
+	if approved.ApprovedSHA == "" {
+		t.Error("approve wrote no pin after the migration")
 	}
 }
 

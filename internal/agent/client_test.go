@@ -36,21 +36,28 @@ func TestNewRunIDIsAlwaysValid(t *testing.T) {
 
 // Approval is the only local-only action in the system (INV-5, INV-2): a
 // broker cannot grant it and no inbound command kind can express it. What it
-// does is move a parked run back to the queue with a fresh deadline.
+// does is pin the commit the run was parked at and move it back to the queue
+// with a fresh deadline.
 func TestApproveQueuesAParkedRun(t *testing.T) {
 	cfg := newConfigDir(t, configOptions{})
 	db := openStore(t, cfg)
 	ctx := context.Background()
 
-	seedRun(t, db, "r_parked", protocol.StateAwaitingApproval)
+	parked := seedParkedRun(t, db, "r_parked")
 	approvalDeadline := time.Now().Add(2 * time.Hour)
 	if err := db.SetExpiry(ctx, "r_parked", approvalDeadline); err != nil {
 		t.Fatal(err)
 	}
 
 	now := time.Now()
-	if err := Approve(ctx, db, "r_parked", 48*time.Hour, now); err != nil {
+	approved, err := Approve(ctx, db, "r_parked", 48*time.Hour, now)
+	if err != nil {
 		t.Fatalf("Approve: %v", err)
+	}
+	// What was approved is a commit. A ref can be force-pushed; a commit
+	// cannot, which is the whole reason the pin exists (amendment A27).
+	if approved.ApprovedSHA != parked.SHA {
+		t.Errorf("approved_sha = %q, want the parked commit %q", approved.ApprovedSHA, parked.SHA)
 	}
 
 	r, err := db.Get(ctx, "r_parked")
@@ -87,11 +94,11 @@ func TestApproveIsIdempotent(t *testing.T) {
 	db := openStore(t, cfg)
 	ctx := context.Background()
 
-	seedRun(t, db, "r_twice", protocol.StateAwaitingApproval)
-	if err := Approve(ctx, db, "r_twice", time.Hour, time.Now()); err != nil {
+	seedParkedRun(t, db, "r_twice")
+	if _, err := Approve(ctx, db, "r_twice", time.Hour, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := Approve(ctx, db, "r_twice", time.Hour, time.Now()); err != nil {
+	if _, err := Approve(ctx, db, "r_twice", time.Hour, time.Now()); err != nil {
 		t.Errorf("a second approve should succeed: %v", err)
 	}
 }
@@ -105,17 +112,25 @@ func TestApproveRefusesWhatItCannotApprove(t *testing.T) {
 	seedRun(t, db, "r_done", protocol.StateSucceeded)
 
 	for _, id := range []string{"r_running", "r_done"} {
-		err := Approve(ctx, db, id, time.Hour, time.Now())
+		_, err := Approve(ctx, db, id, time.Hour, time.Now())
 		if !errors.Is(err, ErrNotAwaitingApproval) {
 			t.Errorf("Approve(%s) = %v, want ErrNotAwaitingApproval", id, err)
 		}
 	}
 
-	if err := Approve(ctx, db, "r_missing", time.Hour, time.Now()); err == nil {
+	// A run parked with no resolved commit — the shape an agent older than
+	// A27 left behind. There is nothing to pin, and pinning nothing would mean
+	// approving whatever the ref points at when the build starts.
+	seedRun(t, db, "r_nocommit", protocol.StateAwaitingApproval)
+	if _, err := Approve(ctx, db, "r_nocommit", time.Hour, time.Now()); !errors.Is(err, ErrNoCommit) {
+		t.Errorf("Approve(r_nocommit) = %v, want ErrNoCommit", err)
+	}
+
+	if _, err := Approve(ctx, db, "r_missing", time.Hour, time.Now()); err == nil {
 		t.Error("approving a run that does not exist should fail")
 	}
 	// An id that cannot name a run must be refused before it names a path.
-	if err := Approve(ctx, db, "../../etc/passwd", time.Hour, time.Now()); err == nil {
+	if _, err := Approve(ctx, db, "../../etc/passwd", time.Hour, time.Now()); err == nil {
 		t.Error("approving a traversal id should fail at validation (INV-3, A6)")
 	}
 }

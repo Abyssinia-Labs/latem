@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,27 +216,22 @@ func TestCancelOverTheSocketStopsARunningRun(t *testing.T) {
 // A17 is what makes the parking possible at all: gate 8 runs during preparing
 // and until A17 the state machine had no edge out of it.
 //
-// # The half of INV-5 that cannot currently work, and why this test stops here
-//
-// Approval is not representable. §22's schema has no approved_at column,
-// registry.AdmitRef takes no "a human already said yes" input, and gate 8
-// re-evaluates the ref policy on every attempt — so a run moved back to queued
-// by `latem approve` is claimed, prepared, and parked again by the same gate,
-// having paid for another mirror fetch and checkout on the way. The end state
-// is awaiting_approval, exactly where it started.
-//
-// So this asserts the parking, which works, and the queue transition, which is
-// all `latem approve` can honestly promise against the frozen contracts. The
-// missing piece is reported as a contract defect rather than papered over in
-// this package: an approval flag written by the agent and read by nothing
-// would be a second, private answer to a question INV-5 says the registry owns.
-func TestARefOutsidePolicyIsParkedForApproval(t *testing.T) {
+// This is INV-5's approval, end to end, against a real git repository and a
+// real agent: park → approve → claim → prepare → build. It could not be written
+// before amendment A27. §22 had no approved_at column, registry.AdmitRef took
+// no "a human already said yes" input, and gate 8 re-evaluated the ref policy
+// on every attempt — so a run moved back to queued by `latem approve` was
+// claimed, prepared, and parked again by the same gate, having paid for another
+// mirror fetch on the way. The end state was awaiting_approval, exactly where
+// it started, and the loop never terminated.
+func TestARefOutsidePolicyIsParkedAndRunsOnceApproved(t *testing.T) {
 	if !hasGit(t) {
 		t.Skip("git is not installed")
 	}
 	repo := shortTempDir(t)
 	newRepo(t, repo, testJobs)
 	runGit(t, repo, "branch", "sideshow")
+	sideshow := runGit(t, repo, "rev-parse", "sideshow")
 
 	cfg := newConfigDir(t, configOptions{repoURL: repo})
 	ta := newTestAgent(t, cfg, nil)
@@ -253,6 +249,108 @@ func TestARefOutsidePolicyIsParkedForApproval(t *testing.T) {
 	}
 	if parked.ErrorMsg == "" {
 		t.Error("a parked run should say which policy parked it")
+	}
+
+	// The park names a commit. Without one there is nothing for an approval to
+	// mean, because a ref is a value a contributor can force-push.
+	if parked.SHA != sideshow {
+		t.Fatalf("parked at %q, want the commit sideshow resolves to, %q", parked.SHA, sideshow)
+	}
+	if parked.RefNormalized != "refs/heads/sideshow" {
+		t.Errorf("ref_normalized = %q, want refs/heads/sideshow", parked.RefNormalized)
+	}
+
+	approved, err := Approve(context.Background(), openStore(t, cfg),
+		"r_parked", 72*time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if approved.ApprovedSHA != sideshow {
+		t.Fatalf("approved %q, want %q", approved.ApprovedSHA, sideshow)
+	}
+
+	done := waitState(t, cfg, "r_parked", 60*time.Second,
+		protocol.StateSucceeded, protocol.StateFailed,
+		protocol.StateRejected, protocol.StateAwaitingApproval)
+	if done.State != protocol.StateSucceeded {
+		t.Fatalf("an approved run gave %s (%s): %s", done.State, done.ErrorCode, done.ErrorMsg)
+	}
+	if done.SHA != sideshow {
+		t.Errorf("built %q, approved %q", done.SHA, sideshow)
+	}
+}
+
+// The same path, with the branch moving between the park and the approval —
+// which is the case INV-5's approval exists for. The operator is shown one
+// commit; by the time they say yes, a contributor has pushed another. What they
+// approved is the commit they were shown, so the run parks again rather than
+// building code nobody looked at.
+func TestAnApprovalDoesNotCoverACommitThatArrivedAfterIt(t *testing.T) {
+	if !hasGit(t) {
+		t.Skip("git is not installed")
+	}
+	repo := shortTempDir(t)
+	newRepo(t, repo, testJobs)
+	runGit(t, repo, "checkout", "-q", "-b", "sideshow")
+	first := runGit(t, repo, "rev-parse", "HEAD")
+
+	cfg := newConfigDir(t, configOptions{repoURL: repo})
+	ta := newTestAgent(t, cfg, nil)
+	ta.run(t)
+
+	enqueueDirectly(t, cfg, "r_moved", "sideshow")
+	parked := waitState(t, cfg, "r_moved", 60*time.Second,
+		protocol.StateAwaitingApproval, protocol.StateRejected, protocol.StateFailed)
+	if parked.SHA != first {
+		t.Fatalf("parked at %q, want %q", parked.SHA, first)
+	}
+
+	// The push, after the operator was shown `first` and before they act.
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "something else entirely")
+	second := runGit(t, repo, "rev-parse", "HEAD")
+	if second == first {
+		t.Fatal("the branch did not move")
+	}
+
+	if _, err := Approve(context.Background(), openStore(t, cfg),
+		"r_moved", 72*time.Hour, time.Now()); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// It comes back parked at the new commit, with the old approval discarded.
+	db := openStore(t, cfg)
+	var reparked store.Run
+	waitFor(t, "the run to be parked again at the commit that arrived", 60*time.Second, func() bool {
+		r, err := db.Get(context.Background(), "r_moved")
+		if err != nil {
+			return false
+		}
+		reparked = r
+		return r.State == protocol.StateAwaitingApproval && r.SHA == second
+	})
+	if reparked.ApprovedSHA != "" {
+		t.Errorf("the approval of %s survived the branch moving to %s", first, second)
+	}
+	if !strings.Contains(reparked.ErrorMsg, "moved") {
+		t.Errorf("the run should say the ref moved: %q", reparked.ErrorMsg)
+	}
+
+	// And approving what is now on the branch builds it, so the mechanism is a
+	// question that can be answered rather than a dead end.
+	approved, err := Approve(context.Background(), db, "r_moved", 72*time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("second Approve: %v", err)
+	}
+	if approved.ApprovedSHA != second {
+		t.Fatalf("approved %q, want %q", approved.ApprovedSHA, second)
+	}
+	done := waitState(t, cfg, "r_moved", 60*time.Second,
+		protocol.StateSucceeded, protocol.StateFailed, protocol.StateRejected)
+	if done.State != protocol.StateSucceeded {
+		t.Fatalf("state = %s (%s): %s", done.State, done.ErrorCode, done.ErrorMsg)
+	}
+	if done.SHA != second {
+		t.Errorf("built %q, approved %q", done.SHA, second)
 	}
 }
 

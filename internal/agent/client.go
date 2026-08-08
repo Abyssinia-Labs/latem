@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -40,20 +39,31 @@ func NewRunID() (string, error) {
 }
 
 // ApprovalStore is what [Approve] needs. It is narrower than [store.Store]
-// because approval touches exactly three statements, and because the caller is
-// `latem approve` — a short-lived CLI process that opens the same sqlite file
-// the agent holds in WAL mode, and should be able to prove from the type what
-// it is allowed to do to it.
+// because approval is one write, and because the caller is `latem approve` — a
+// short-lived CLI process that opens the same sqlite file the agent holds in
+// WAL mode, and should be able to prove from the type what it is allowed to do
+// to it.
+//
+// It was three methods (Get, Transition, Enqueue) until amendment A27 made the
+// store do all of it in one transaction. The narrowing is the point: a CLI that
+// could read a commit and then write it back as approved would have a window
+// between the two, and that window is the one a force-push exploits.
 type ApprovalStore interface {
-	Get(ctx context.Context, runID string) (store.Run, error)
-	Transition(ctx context.Context, runID string, to protocol.RunState, u protocol.Update) error
-	Enqueue(ctx context.Context, runID string, priority int) error
+	Approve(ctx context.Context, runID string, approvedAt, expiresAt time.Time) (store.Run, error)
 }
 
 // ErrNotAwaitingApproval means the run was not parked for a human.
-var ErrNotAwaitingApproval = errors.New("agent: run is not awaiting approval")
+//
+// It aliases the store's sentinel rather than wrapping it, so a caller that
+// knows only this package and a caller that knows only the store both match the
+// same error.
+var ErrNotAwaitingApproval = store.ErrNotAwaitingApproval
 
-// Approve moves an awaiting_approval run back into the queue (§11, INV-5).
+// ErrNoCommit means the run has no resolved commit for the approval to pin.
+var ErrNoCommit = store.ErrNoCommit
+
+// Approve records a local approval and moves the run back into the queue
+// (§11, INV-5).
 //
 // # Why this is a store write and not a command
 //
@@ -65,45 +75,41 @@ var ErrNotAwaitingApproval = errors.New("agent: run is not awaiting approval")
 // pool finds the run on its next poll, which is the same path a run enqueued
 // while the agent was down takes (§7.3).
 //
+// # What is being approved
+//
+// A commit, not a ref (amendment A27). The run row carries the commit gate 9
+// resolved before gate 8 parked it, and approval pins exactly that one: gate 8
+// admits the run on the next attempt only while the ref still resolves to it.
+// Approving the ref instead would mean approving whatever the branch points at
+// by the time a runner picks the run up, and INV-5 exists precisely because
+// that is a value a contributor controls.
+//
 // The run lands in queued rather than claimed: §11 has no awaiting_approval →
 // claimed edge, and approving a run says it may be built, not that it must be
 // built next.
 //
 // Approving a run that is already queued succeeds. Approving twice is
 // something a person does, and the second one should not read as an error.
-func Approve(ctx context.Context, st ApprovalStore, runID string, queueTTL time.Duration, now time.Time) error {
+//
+// It returns the run as it now stands, so the caller can say which commit it
+// just approved.
+func Approve(
+	ctx context.Context, st ApprovalStore, runID string, queueTTL time.Duration, now time.Time,
+) (store.Run, error) {
 	if err := protocol.ValidateID(runID); err != nil {
-		return fmt.Errorf("agent: approve: %w", err)
+		return store.Run{}, fmt.Errorf("agent: approve: %w", err)
 	}
-	r, err := st.Get(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("agent: approve %s: %w", runID, err)
-	}
-	switch r.State {
-	case protocol.StateQueued:
-		return nil
-	case protocol.StateAwaitingApproval:
-	default:
-		return fmt.Errorf("agent: approve %s: run is %s: %w", runID, r.State, ErrNotAwaitingApproval)
-	}
-
 	if queueTTL <= 0 {
 		queueTTL = 72 * time.Hour
 	}
-	expires := now.Add(queueTTL)
 
-	// The new deadline travels with the transition (amendment A8). It has to
-	// be replaced rather than left alone: an approved run still carrying its
-	// approval_ttl would be swept as an expired queue entry by the very next
-	// ticker, minutes after a human said yes to it.
-	if err := st.Transition(ctx, runID, protocol.StateQueued, protocol.Update{
-		State:     protocol.StateQueued,
-		ExpiresAt: &expires,
-	}); err != nil {
-		return fmt.Errorf("agent: approve %s: %w", runID, err)
+	// The queue deadline replaces the approval one rather than being left
+	// alone (amendment A8): an approved run still carrying its approval_ttl
+	// would be swept as an expired queue entry by the very next ticker,
+	// minutes after a human said yes to it.
+	r, err := st.Approve(ctx, runID, now, now.Add(queueTTL))
+	if err != nil {
+		return store.Run{}, fmt.Errorf("agent: approve %s: %w", runID, err)
 	}
-	if err := st.Enqueue(ctx, runID, 0); err != nil {
-		return fmt.Errorf("agent: approve %s: enqueue: %w", runID, err)
-	}
-	return nil
+	return r, nil
 }

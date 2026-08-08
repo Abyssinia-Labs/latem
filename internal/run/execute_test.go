@@ -424,6 +424,146 @@ func TestExecute_Gate8ParksAnUnapprovedRef(t *testing.T) {
 	}
 }
 
+// The loop INV-5's approval half used to be: a parked run was approved, moved
+// to queued, claimed, prepared, and parked again by the same gate 8 that parked
+// it the first time — having paid for another mirror fetch on the way. Nothing
+// recorded that a human had said yes, so nothing could ever say yes twice.
+//
+// This is the whole path, end to end: park → approve → claim → prepare → build.
+func TestExecute_AnApprovedRunBuildsInsteadOfLooping(t *testing.T) {
+	h := newHarness(t)
+	h.source.refs = map[string]bool{"refs/heads/feature/x": true}
+	o := h.build()
+
+	req := h.request("test")
+	req.Ref = "feature/x"
+	if got := h.run(o, req).State; got != protocol.StateAwaitingApproval {
+		t.Fatalf("state = %s, want awaiting_approval", got)
+	}
+
+	parked := mustGet(t, h.db, "run1")
+	if parked.SHA != h.source.sha {
+		t.Fatalf("parked sha = %q, want the resolved commit %q", parked.SHA, h.source.sha)
+	}
+	if parked.RefNormalized != "refs/heads/feature/x" {
+		t.Errorf("parked ref_normalized = %q", parked.RefNormalized)
+	}
+
+	approved, err := o.Approve(t.Context(), "run1")
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if approved.ApprovedSHA != parked.SHA {
+		t.Fatalf("approved %q, want the commit the operator was shown, %q",
+			approved.ApprovedSHA, parked.SHA)
+	}
+
+	res := h.rerun(o, "run1")
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("state = %s (%s): %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	if h.exec.prepared != 1 {
+		t.Errorf("executor prepared %d environments, want 1", h.exec.prepared)
+	}
+	// It built the commit that was approved, and nothing else.
+	if got := mustGet(t, h.db, "run1"); got.SHA != approved.ApprovedSHA {
+		t.Errorf("built %q, approved %q", got.SHA, approved.ApprovedSHA)
+	}
+}
+
+// The attack approval exists to stop, and the reason approval names a commit
+// rather than a ref: push something benign, ask for approval, then force-push
+// before the run is claimed. INV-5 says a ref "can point at a branch a
+// contributor controls", so an approval that granted the *ref* would hand the
+// operator's yes to whoever pushes last.
+func TestExecute_ApprovalDoesNotSurviveTheRefMoving(t *testing.T) {
+	const hostile = "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"
+
+	h := newHarness(t)
+	h.source.refs = map[string]bool{"refs/heads/feature/x": true}
+	o := h.build()
+
+	req := h.request("test")
+	req.Ref = "feature/x"
+	if got := h.run(o, req).State; got != protocol.StateAwaitingApproval {
+		t.Fatalf("state = %s, want awaiting_approval", got)
+	}
+	benign := mustGet(t, h.db, "run1").SHA
+
+	if _, err := o.Approve(t.Context(), "run1"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// The force-push, between the approval and the claim.
+	h.source.setSHA(hostile)
+
+	res := h.rerun(o, "run1")
+	if res.State != protocol.StateAwaitingApproval {
+		t.Fatalf("state = %s (%s): a moved ref was built on a stale approval: %s",
+			res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	if h.exec.prepared != 0 {
+		t.Fatal("the hostile commit reached the executor")
+	}
+	for _, co := range h.source.checkedOut {
+		if co[1] == hostile {
+			t.Fatal("the hostile commit was checked out")
+		}
+	}
+	if !strings.Contains(res.ErrorMsg, "moved") {
+		t.Errorf("the message should say the ref moved: %q", res.ErrorMsg)
+	}
+	if !strings.Contains(res.ErrorMsg, shortSHA(benign)) ||
+		!strings.Contains(res.ErrorMsg, shortSHA(hostile)) {
+		t.Errorf("the message should name both commits, %s and %s: %q",
+			shortSHA(benign), shortSHA(hostile), res.ErrorMsg)
+	}
+
+	// The stale approval is gone: the operator approved a different commit and
+	// has to be asked about this one.
+	reparked := mustGet(t, h.db, "run1")
+	if reparked.ApprovedSHA != "" || reparked.ApprovedAt != nil {
+		t.Errorf("the approval of %s survived the ref moving to %s", benign, hostile)
+	}
+	if reparked.SHA != hostile {
+		t.Errorf("re-parked at %q, want the commit it would now build, %q", reparked.SHA, hostile)
+	}
+
+	// And the operator can approve what they are now being shown, which is the
+	// difference between a security control and a dead end.
+	approved, err := o.Approve(t.Context(), "run1")
+	if err != nil {
+		t.Fatalf("re-approve: %v", err)
+	}
+	if approved.ApprovedSHA != hostile {
+		t.Fatalf("approved %q, want %q", approved.ApprovedSHA, hostile)
+	}
+	if got := h.rerun(o, "run1").State; got != protocol.StateSucceeded {
+		t.Fatalf("state = %s, want succeeded after a fresh approval", got)
+	}
+}
+
+// Gate 10 checks out the commit gate 8 admitted, rather than resolving the ref
+// a second time. Two resolutions are two answers, and the window between them
+// is the one the approval closed.
+func TestExecute_CheckoutUsesTheCommitGate8Admitted(t *testing.T) {
+	h := newHarness(t)
+	o := h.build()
+
+	if got := h.run(o, h.request("test")).State; got != protocol.StateSucceeded {
+		t.Fatalf("state = %s", got)
+	}
+	if len(h.source.checkedOut) != 1 {
+		t.Fatalf("checkouts = %v, want one", h.source.checkedOut)
+	}
+	if got := h.source.checkedOut[0]; got[0] != "refs/heads/main" || got[1] != h.source.sha {
+		t.Errorf("checked out %v, want refs/heads/main at %s", got, h.source.sha)
+	}
+	if len(h.source.resolved) != 1 {
+		t.Errorf("the ref was resolved %d times, want once", len(h.source.resolved))
+	}
+}
+
 func TestExecute_RepoRemovedFromAllowlistAfterAdmission(t *testing.T) {
 	h := newHarness(t)
 	o := h.build()

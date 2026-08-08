@@ -77,18 +77,32 @@ func TestPreAdmit_Gate4_RefPolicy(t *testing.T) {
 		}
 	}
 
-	// Outside policy with approval enabled — parks rather than fails.
-	d := PreAdmit(req("myapp", "test", "feature/x"), p)
-	if d.State != protocol.StateAwaitingApproval {
-		t.Fatalf("got %+v", d)
-	}
-	if !strings.Contains(d.Msg, "latem approve run_1") {
-		t.Errorf("message should name the command that unblocks it: %q", d.Msg)
+	// Outside policy with approval enabled — proceeds, so that gate 9 can
+	// resolve the commit gate 8 will park it with (amendment A27). Parking
+	// here would produce a run with no commit to approve.
+	if d := PreAdmit(req("myapp", "test", "feature/x"), p); !d.OK() {
+		t.Errorf("gate 4 should defer to gate 8 when approval is possible, got %+v", d)
 	}
 
-	// Outside policy with approval disabled — rejected outright.
-	if d := PreAdmit(req("strict", "test", "feature/x"), p); d.State != protocol.StateRejected {
+	// Outside policy with approval disabled — rejected outright, with no
+	// network touched. This is the half of the gate that is still decidable
+	// here, and it is the half that keeps a hostile request cheap.
+	d := PreAdmit(req("strict", "test", "feature/x"), p)
+	if d.State != protocol.StateRejected || d.Code != protocol.ErrInvalidRef {
 		t.Errorf("got %+v", d)
+	}
+}
+
+// Gate 4 never parks. Approval is approval of a commit, and this gate runs
+// before anything has been fetched, so there is no commit for it to name.
+func TestPreAdmit_Gate4_NeverParks(t *testing.T) {
+	p := testPolicy()
+	for _, ref := range []string{"main", "feature/x", "refs/tags/v9", "release/1.2"} {
+		for _, repo := range []string{"myapp", "strict"} {
+			if d := PreAdmit(req(repo, "test", ref), p); d.State == protocol.StateAwaitingApproval {
+				t.Errorf("PreAdmit(%s, %s) parked a run with no resolved commit: %+v", repo, ref, d)
+			}
+		}
 	}
 }
 
@@ -127,12 +141,74 @@ func TestPreAdmit_GateOrdering(t *testing.T) {
 func TestAdmitRef_Authoritative(t *testing.T) {
 	repo := RepoPolicy{AllowedRefs: []string{"main"}, RequireApprovalOtherwise: true}
 
-	if d := AdmitRef("run_1", "myapp", "refs/heads/main", repo); !d.OK() {
+	if d := AdmitRef("run_1", "myapp", "refs/heads/main", repo, NotApproved); !d.OK() {
 		t.Errorf("refs/heads/main should be allowed by a policy of \"main\": %+v", d)
 	}
 	// A tag of the same name is a different object and needs approval.
-	if d := AdmitRef("run_1", "myapp", "refs/tags/main", repo); d.State != protocol.StateAwaitingApproval {
+	d := AdmitRef("run_1", "myapp", "refs/tags/main", repo, NotApproved)
+	if d.State != protocol.StateAwaitingApproval {
 		t.Errorf("refs/tags/main should need approval, got %+v", d)
+	}
+	if !strings.Contains(d.Msg, "latem approve run_1") {
+		t.Errorf("message should name the command that unblocks it: %q", d.Msg)
+	}
+}
+
+// The second half of INV-5: an approval bound to the commit in hand admits the
+// run, and an approval of any other commit does not (amendment A27).
+func TestAdmitRef_Approval(t *testing.T) {
+	repo := RepoPolicy{AllowedRefs: []string{"main"}, RequireApprovalOtherwise: true}
+	const ref = "refs/heads/feature/x"
+
+	if d := AdmitRef("run_1", "myapp", ref, repo, ApprovedForThisCommit); !d.OK() {
+		t.Errorf("an approved commit should run: %+v", d)
+	}
+
+	// The attack this exists to stop: approve a benign commit, force-push a
+	// hostile one, and the run must not build the second.
+	d := AdmitRef("run_1", "myapp", ref, repo, ApprovedForAnotherCommit)
+	if d.State != protocol.StateAwaitingApproval {
+		t.Fatalf("a moved ref should park again, got %+v", d)
+	}
+	if !strings.Contains(d.Msg, "moved") {
+		t.Errorf("the message should say the ref moved, not repeat the policy line: %q", d.Msg)
+	}
+	if !strings.Contains(d.Msg, "latem approve run_1") {
+		t.Errorf("message should name the command that unblocks it: %q", d.Msg)
+	}
+
+	// Approval is not a way around a repo that does not permit approval at all.
+	closed := RepoPolicy{AllowedRefs: []string{"main"}}
+	for _, a := range []Approval{NotApproved, ApprovedForAnotherCommit} {
+		if d := AdmitRef("run_1", "myapp", ref, closed, a); d.State != protocol.StateRejected {
+			t.Errorf("approval %v under a closed policy = %+v, want rejected", a, d)
+		}
+	}
+}
+
+func TestApprovalFor(t *testing.T) {
+	const a = "0123456789abcdef0123456789abcdef01234567"
+	const b = "fedcba9876543210fedcba9876543210fedcba98"
+
+	tests := []struct {
+		name              string
+		approved, resolve string
+		want              Approval
+	}{
+		{"nothing approved", "", a, NotApproved},
+		{"same commit", a, a, ApprovedForThisCommit},
+		{"the ref moved", a, b, ApprovedForAnotherCommit},
+		// Two empty strings are equal, and must not be a match: that would
+		// admit an unapproved run the moment a caller forgot to resolve one.
+		{"both empty", "", "", NotApproved},
+		{"approved but nothing resolved", a, "", ApprovedForAnotherCommit},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ApprovalFor(tc.approved, tc.resolve); got != tc.want {
+				t.Errorf("ApprovalFor(%q, %q) = %v, want %v", tc.approved, tc.resolve, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -146,7 +222,7 @@ func TestGate4And8_TogetherCatchATagPretendingToBeABranch(t *testing.T) {
 		t.Fatalf("gate 4 should admit %q optimistically: %+v", "main", d)
 	}
 	// Gate 8, after normalization discovered it is actually a tag, does not.
-	d := AdmitRef("run_1", "myapp", "refs/tags/main", p.Repos["myapp"])
+	d := AdmitRef("run_1", "myapp", "refs/tags/main", p.Repos["myapp"], NotApproved)
 	if d.OK() {
 		t.Error("gate 8 should refuse a tag under a branch policy")
 	}

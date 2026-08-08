@@ -479,6 +479,28 @@ func seedRun(t *testing.T, db *store.DB, id string, state protocol.RunState) sto
 	return r
 }
 
+// seedParkedRun is a run in awaiting_approval with a commit already resolved,
+// which is the only shape gate 8 can produce (amendment A27) and the only one
+// `latem approve` can act on.
+func seedParkedRun(t *testing.T, db *store.DB, id string) store.Run {
+	t.Helper()
+	r := store.Run{
+		ID:            id,
+		Repo:          "app",
+		Job:           "test",
+		Ref:           "feature/x",
+		RefNormalized: "refs/heads/feature/x",
+		SHA:           "0123456789abcdef0123456789abcdef01234567",
+		State:         protocol.StateAwaitingApproval,
+		OriginKind:    "cli",
+		CreatedAt:     time.Now(),
+	}
+	if err := db.Create(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 // waitFor polls until cond holds, and fails with why if it never does.
 func waitFor(t *testing.T, why string, timeout time.Duration, cond func() bool) {
 	t.Helper()

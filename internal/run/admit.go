@@ -16,15 +16,21 @@ import (
 // ref-policy pre-check, and the weakest disk floor on the machine. A hostile
 // request costs a map lookup, a regexp, and one row.
 //
-// Three outcomes, all of which create a row:
+// Two outcomes, both of which create a row:
 //
 //   - queued, with a queue_ttl deadline;
-//   - awaiting_approval, with an approval_ttl deadline, when the ref is
-//     outside allowed_refs and the repo permits approval (INV-5). A broker
-//     cannot grant this; only `latem approve` can;
 //   - rejected, terminal, carrying the §21 code the gate produced.
 //
-// Only a queued run is enqueued. The row exists in every case because a
+// It no longer parks anything (amendment A27). Gate 4's approval branch was the
+// third outcome, and it created a run in awaiting_approval that carried no
+// commit — because nothing has been fetched at this point and the ref has not
+// been resolved. `latem approve` binds an approval to a commit, so such a run
+// could never be approved at all: the invariant's second half was unreachable
+// from its first. A ref outside allowed_refs is now queued when the repo
+// permits approval, and gate 8 parks it once gate 9 knows what it would build.
+// Where no approval is possible, gate 4 still rejects for free.
+//
+// Only a queued run is enqueued. The row exists in both cases because a
 // rejection nobody can see is a support question, and because §22's history is
 // what makes an audit answerable.
 func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, priority int) (store.Run, error) {
@@ -36,7 +42,6 @@ func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, prior
 	}
 
 	decision := registry.PreAdmit(req, o.policy(ctx))
-	_, repoCfg, _ := o.repoPolicy(req.Repo)
 
 	now := o.now()
 	r := store.Run{
@@ -51,15 +56,12 @@ func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, prior
 		CreatedAt:   now,
 	}
 
-	switch {
-	case decision.OK():
+	if decision.OK() {
 		r.ExpiresAt = ptr(now.Add(o.queueTTL()))
-	case decision.State == protocol.StateAwaitingApproval:
-		r.State = protocol.StateAwaitingApproval
-		r.ErrorCode = decision.Code
-		r.ErrorMsg = truncate(decision.Msg, MaxErrorMsgBytes)
-		r.ExpiresAt = ptr(now.Add(o.approvalTTL(repoCfg)))
-	default:
+	} else {
+		// Every decision gates 1-5 can now return is terminal, so this branch
+		// stamps finished_at unconditionally. [registry.PreAdmit] documents
+		// that it never returns awaiting_approval.
 		r.State = decision.State
 		r.ErrorCode = decision.Code
 		r.ErrorMsg = truncate(decision.Msg, MaxErrorMsgBytes)

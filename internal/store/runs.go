@@ -19,7 +19,7 @@ import (
 const runColumns = `id, repo, job, ref, ref_normalized, sha, runner, state,
 	exit_code, error_code, error_message, origin_kind, origin_actor,
 	cancel_reason, inputs_json, created_at, started_at, finished_at,
-	expires_at, reported_state, last_acked_seq`
+	expires_at, reported_state, last_acked_seq, approved_at, approved_sha`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows.
 type scanner interface {
@@ -47,13 +47,15 @@ func scanRun(s scanner) (Run, error) {
 		expiresAt    sql.NullInt64
 		reported     sql.NullString
 		lastAcked    int64
+		approvedAt   sql.NullInt64
+		approvedSHA  sql.NullString
 	)
 
 	err := s.Scan(
 		&r.ID, &r.Repo, &r.Job, &r.Ref, &refNorm, &sha, &runner, &r.State,
 		&exitCode, &errCode, &errMsg, &r.OriginKind, &originActor,
 		&cancelReason, &inputsJSON, &createdAt, &startedAt, &finishedAt,
-		&expiresAt, &reported, &lastAcked,
+		&expiresAt, &reported, &lastAcked, &approvedAt, &approvedSHA,
 	)
 	if err != nil {
 		return Run{}, err
@@ -74,6 +76,8 @@ func scanRun(s scanner) (Run, error) {
 	r.StartedAt = scanTime(startedAt)
 	r.FinishedAt = scanTime(finishedAt)
 	r.ExpiresAt = scanTime(expiresAt)
+	r.ApprovedAt = scanTime(approvedAt)
+	r.ApprovedSHA = approvedSHA.String
 	r.ReportedState = protocol.RunState(reported.String)
 	if lastAcked < 0 {
 		return Run{}, fmt.Errorf("store: run %s has negative last_acked_seq %d", r.ID, lastAcked)
@@ -184,8 +188,8 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 			  id, repo, job, ref, ref_normalized, sha, runner, state,
 			  exit_code, error_code, error_message, origin_kind, origin_actor,
 			  cancel_reason, inputs_json, created_at, started_at, finished_at,
-			  expires_at, reported_state, last_acked_seq
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			  expires_at, reported_state, last_acked_seq, approved_at, approved_sha
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Repo, r.Job, r.Ref, nullString(r.RefNormalized), nullString(r.SHA),
 			nullString(r.Runner), string(r.State),
 			nullInt(r.ExitCode), nullString(string(r.ErrorCode)), nullString(d.red.Redact(r.ErrorMsg)),
@@ -193,6 +197,7 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 			nullString(d.red.Redact(r.CancelReason)), inputs, toUnix(r.CreatedAt),
 			nullTime(r.StartedAt), nullTime(r.FinishedAt), nullTime(r.ExpiresAt),
 			nullString(string(r.ReportedState)), lastAcked,
+			nullTime(r.ApprovedAt), nullString(r.ApprovedSHA),
 		)
 		if err != nil {
 			return fmt.Errorf("store: Create %s: %w", r.ID, err)

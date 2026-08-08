@@ -138,6 +138,14 @@ func StepArgv(shell, run string) []string {
 // A step that exits non-zero is not an error: the exit code is the result, and
 // the agent maps a non-zero one to E_STEP. An error means the step could not be
 // run or could not be waited for.
+//
+// # When the agent itself is killed
+//
+// Neither the deadline nor [runEnv.Close] runs then, and the step's group is
+// reparented to launchd and keeps going. Every step therefore also writes a
+// [stepGroup] record into the run's $LATEM_ENV directory, which is what lets
+// [Executor.Reap] collect the group after the agent is restarted — §6 step 5 for
+// the one resource this executor has.
 func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error) {
 	e.mu.Lock()
 	if e.closed {
@@ -205,9 +213,28 @@ func (e *runEnv) run(
 	cmd.WaitDelay = e.drain
 	setProcessGroup(cmd)
 
+	// Before Start, because the record's descriptor has to be in the child's
+	// table from its first instruction — that inheritance is what lets a reap
+	// after a crash tell this group from a recycled pid. See [stepGroup].
+	group, err := newStepGroup(e.envDir, cmd)
+	if err != nil {
+		return -1, err
+	}
+	// Released on every path out of this function, including the two that go
+	// through p.stop(), which does not return until the group is gone. A record
+	// that outlived its step would make the next reap look at a group that has
+	// already been dealt with.
+	defer group.release()
+
 	if err := cmd.Start(); err != nil {
 		return -1, fmt.Errorf("start %s: %w", e.shell, err)
 	}
+	// A write to a file created a moment ago, so a failure here means the
+	// filesystem is in trouble and the step is about to find that out for
+	// itself. It is not worth killing a started step over: the cost is one
+	// process group that a crash would leak, which is the state every step was
+	// in before this record existed.
+	_ = group.note(processGroupOf(cmd))
 
 	p := &stepProc{cmd: cmd, grace: e.grace, done: make(chan struct{})}
 	go p.reap()
