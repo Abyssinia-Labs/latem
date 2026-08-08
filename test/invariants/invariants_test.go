@@ -35,21 +35,29 @@ func TestINV1_NoInboundListeners(t *testing.T) {
 // execution occurs outside the registry-declared command set, and that the
 // decoder rejects any kind outside the closed set rather than defaulting.
 //
-// The decoder half is already covered by pkg/protocol/command_test.go. This
-// test covers the other half: that a well-formed but hostile command cannot
-// reach an exec.
+// Two thirds are already covered at the unit level:
+// pkg/protocol/command_test.go pins the closed command set, and
+// internal/registry/admission_test.go pins that a hostile input reaches only
+// an environment map and never a command string. What remains is the
+// end-to-end claim — that no execution occurs outside the registry-declared
+// command set — which needs a real executor to assert against.
 func TestINV2_NamesNotDefinitions(t *testing.T) {
-	t.Skip("unskipped by WS-01 (registry & admission)")
+	t.Skip("registry half done in WS-01; execution half needs WS-10 (run orchestration)")
 }
 
 // INV-3 — Broker-supplied values are never interpolated into a shell.
 //
-// Table-driven, with --upload-pack=/bin/sh, "; rm -rf /", $(id),
-// ../../etc/passwd, refs containing newlines, 10 KB refs, and unicode
-// homoglyphs. Assert every git invocation passes argv as a slice with `--`
-// before user-influenced arguments, and that nothing reaches `sh -c`.
+// The validation table — --upload-pack=/bin/sh, "; rm -rf /", $(id),
+// ../../etc/passwd, embedded newlines, 10 KB refs, unicode homoglyphs — lives
+// in internal/registry/ref_test.go and passes.
+//
+// What is left is the claim validation exists to back up: that every git
+// invocation passes argv as a slice with "--" before user-influenced
+// arguments, and that nothing anywhere reaches `sh -c`. That is a property of
+// the call sites, not of the validator, and the call sites are in
+// internal/source.
 func TestINV3_NoShellInterpolation(t *testing.T) {
-	t.Skip("unskipped by WS-01 (registry & admission)")
+	t.Skip("validation done in WS-01; git call sites need WS-06 (source acquisition)")
 }
 
 // INV-4 — Secrets never leave the machine.
@@ -68,12 +76,13 @@ func TestINV4_SecretsNeverLeave(t *testing.T) {
 
 // INV-5 — The registry comes from disk, at the pinned commit.
 //
-// Assert jobs.yaml is read from the checked-out workspace and never from a
-// broker; that policy is matched against the normalized ref name; that
-// refs/heads/main and main receive the same policy answer; that a
-// server-synthesised namespace such as refs/pull/* cannot run without an
-// explicit config entry; and that approval is local-only — no inbound command
-// can grant it.
+// The policy half passes in internal/registry/ref_test.go: normalization
+// before matching, refs/heads/main and main receiving the same answer, tags
+// requiring an explicit entry, and refs/pull/* failing by construction.
+//
+// Still outstanding: that jobs.yaml is read from the checked-out workspace at
+// the resolved commit and never from a broker, and that approval is a local
+// action no inbound command can grant. Both are orchestration properties.
 func TestINV5_RegistryFromDisk(t *testing.T) {
-	t.Skip("unskipped by WS-01 (registry & admission)")
+	t.Skip("policy half done in WS-01; disk read and approval need WS-10 (run orchestration)")
 }

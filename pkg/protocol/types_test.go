@@ -25,6 +25,40 @@ func TestDuration_AcceptsGoStrings(t *testing.T) {
 	}
 }
 
+// RUNNER_SPEC writes retention in days — log_retention = "14d", retain: 7d —
+// and Go's own parser rejects the unit. Spelling those as "336h" in config
+// would mean a reader has to divide by 24 to learn how long logs are kept.
+func TestDuration_AcceptsDays(t *testing.T) {
+	for in, want := range map[string]time.Duration{
+		"1d":    24 * time.Hour,
+		"7d":    7 * 24 * time.Hour,
+		"14d":   14 * 24 * time.Hour,
+		"90d":   90 * 24 * time.Hour,
+		"1d12h": 36 * time.Hour,
+		"2d30m": 48*time.Hour + 30*time.Minute,
+	} {
+		var d Duration
+		if err := d.UnmarshalText([]byte(in)); err != nil {
+			t.Errorf("%q: %v", in, err)
+			continue
+		}
+		if d.Duration() != want {
+			t.Errorf("%q decoded to %v, want %v", in, d.Duration(), want)
+		}
+	}
+}
+
+// Duration strings are written largest unit first. Accepting the reverse would
+// mean accepting "1h1d1m", which reads like a typo because it is one.
+func TestDuration_RejectsMisplacedDays(t *testing.T) {
+	for _, in := range []string{"12h1d", "30m2d", "1h1d1m", "d", "1dd"} {
+		var d Duration
+		if err := d.UnmarshalText([]byte(in)); err == nil {
+			t.Errorf("accepted %q", in)
+		}
+	}
+}
+
 // A bare number is ambiguous: Go reads 30 as 30 nanoseconds, every human
 // writing `timeout: 30` in a CI file means minutes. Refusing beats guessing.
 func TestDuration_RejectsBareNumbers(t *testing.T) {
