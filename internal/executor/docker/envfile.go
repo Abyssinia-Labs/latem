@@ -1,0 +1,262 @@
+package docker
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"regexp"
+	"strings"
+
+	"github.com/docker/docker/api/types/container"
+
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
+)
+
+const (
+	// EnvFilePath is the container-visible path exported as $LATEM_ENV, and
+	// the value the agent should put in [executor.Step.EnvFile].
+	//
+	// It lives inside the container rather than on the bind-mounted workspace
+	// on purpose: the workspace is a git clone (§12), and a file appearing in
+	// it would show up in `git status`, in `git clean -n`, and eventually in
+	// somebody's commit.
+	EnvFilePath = "/tmp/latem/env"
+
+	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored
+	// data the agent then trusts, so it gets a size it cannot exceed as well
+	// as a grammar it cannot break.
+	MaxEnvFileBytes = 64 << 10
+
+	// envFileMode and envDirMode are permissive because this package cannot
+	// know which uid the image's `runner` maps to at the time it creates the
+	// file, and a $LATEM_ENV the job cannot append to is a silently broken
+	// feature. The blast radius is one file in one single-tenant container
+	// that is destroyed at the end of the run.
+	envFileMode = 0o666
+	envDirMode  = 0o777
+)
+
+// envKeyPattern is §9's grammar for a key a job may set.
+//
+// It is the POSIX identifier rule, and it is the reason a line like
+// `PATH=x; rm -rf /` cannot become anything but a variable named PATH — the
+// key is checked, the value is never interpreted.
+var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// parseEnvFile parses the KEY=value lines a step appended to $LATEM_ENV.
+//
+// The constraints come from RUNNER_SPEC §9 and each one exists because this is
+// a file a job writes and the agent then believes:
+//
+//   - Keys must be identifiers. Anything else is dropped.
+//   - Keys the protected predicate rejects are ignored. That covers every
+//     LATEM_* name, so a job cannot spoof the agent's own variables, and every
+//     name already in the run environment, so a job cannot overwrite an
+//     injected credential.
+//   - The file is capped at [MaxEnvFileBytes]; past the cap the tail is
+//     discarded, along with the partial line at the cut so that half a value
+//     never becomes a whole one.
+//   - Nothing is dropped silently. A job author whose `echo` did not take
+//     effect gets told why in the log of the step that wrote it.
+//
+// Warnings never quote the line or the value, only the position and, where the
+// key is known to be a well-formed identifier, the key. A malformed line may
+// be anything at all — including a secret a script printed into the wrong file
+// descriptor — and echoing it into the log to explain that it was dropped
+// would be its own leak.
+func parseEnvFile(data []byte, protected func(string) bool) (map[string]string, []string) {
+	var warnings []string
+
+	if len(data) > MaxEnvFileBytes {
+		data = data[:MaxEnvFileBytes]
+		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+			data = data[:i+1]
+		} else {
+			data = nil
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"$LATEM_ENV exceeded the %d byte limit; everything past it was ignored", MaxEnvFileBytes))
+	}
+
+	out := map[string]string{}
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSuffix(raw, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lineNo := i + 1
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"$LATEM_ENV line %d: no '=', dropped (expected KEY=value)", lineNo))
+			continue
+		}
+		if !envKeyPattern.MatchString(key) {
+			warnings = append(warnings, fmt.Sprintf(
+				"$LATEM_ENV line %d: key is not an identifier matching %s, dropped", lineNo, envKeyPattern))
+			continue
+		}
+		if protected != nil && protected(key) {
+			warnings = append(warnings, fmt.Sprintf(
+				"$LATEM_ENV line %d: %s is set by the agent and cannot be overwritten by a job, ignored", lineNo, key))
+			continue
+		}
+		out[key] = value
+	}
+	return out, warnings
+}
+
+// protectedEnvKey reports whether a job is forbidden from setting key.
+//
+// Two rules. Any LATEM_* name is the agent's, so a job cannot spoof
+// $LATEM_ENV itself or any variable the agent later adds.
+//
+// Any key already present in the run environment is refused as well, and that
+// is broader than §9, which names only "a declared secret name". The reason is
+// a gap in the frozen contract rather than a choice: [executor.Spec] carries
+// Env with the secrets already resolved into it and carries no list of which
+// keys those were, so this package cannot distinguish MATCH_PASSWORD from
+// NODE_ENV. Refusing the whole injected set is the only reading that keeps
+// §9's actual guarantee — "a job cannot overwrite an injected credential" —
+// and it errs toward refusing a legal override rather than permitting an
+// illegal one. Reported as a contract defect; when Spec grows a Secrets field
+// this can be narrowed to it.
+func protectedEnvKey(runEnvironment map[string]string, key string) bool {
+	if strings.HasPrefix(key, "LATEM_") {
+		return true
+	}
+	_, injected := runEnvironment[key]
+	return injected
+}
+
+// mergeEnvFile reads, truncates and merges $LATEM_ENV after a step.
+//
+// Reading and truncating are two API calls rather than one atomic operation,
+// which is fine: steps do not overlap, so nothing is writing to the file
+// between them. That is a consequence of §9's model, not an assumption this
+// package adds.
+func (e *runEnv) mergeEnvFile(ctx context.Context, envFile string, out io.Writer) error {
+	data, err := e.readEnvFile(ctx, envFile)
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return nil
+	}
+
+	vars, warnings := parseEnvFile(data, func(k string) bool {
+		return protectedEnvKey(e.spec.Env, k)
+	})
+	for _, w := range warnings {
+		writeNote(out, w)
+	}
+
+	if len(data) > 0 {
+		if err := e.createEnvFile(ctx, envFile); err != nil {
+			return err
+		}
+	}
+
+	e.mu.Lock()
+	for k, v := range vars {
+		e.carried[k] = v
+	}
+	e.mu.Unlock()
+	return nil
+}
+
+// writeNote emits an agent-authored line into the step's output stream. The
+// prefix matches logstream's, so a reader sees one convention for "this line
+// came from latem, not from your build".
+func writeNote(out io.Writer, msg string) {
+	if out == nil {
+		return
+	}
+	_, _ = io.WriteString(out, "[latem] "+msg+"\n")
+}
+
+// readEnvFile copies $LATEM_ENV out of the container.
+//
+// A missing file is not an error: most steps never touch $LATEM_ENV, and the
+// file is recreated empty after every step that does, so "absent" and "empty"
+// both mean the same thing — nothing to merge.
+func (e *runEnv) readEnvFile(ctx context.Context, envFile string) ([]byte, error) {
+	rc, _, err := e.api.CopyFromContainer(ctx, e.containerID, envFile)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
+		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", envFile)
+	}
+	defer func() { _ = rc.Close() }()
+
+	tr := tar.NewReader(rc)
+	hdr, err := tr.Next()
+	if errors.Is(err, io.EOF) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", envFile)
+	}
+	if hdr.Typeflag != tar.TypeReg {
+		return nil, nil
+	}
+
+	// One byte past the cap, so [parseEnvFile] can tell "exactly at the limit"
+	// from "over it" and warn only in the second case. The limit is also what
+	// stops a job filling the agent's memory from inside a container.
+	data, err := io.ReadAll(io.LimitReader(tr, MaxEnvFileBytes+1))
+	if err != nil {
+		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", envFile)
+	}
+	if data == nil {
+		data = []byte{}
+	}
+	return data, nil
+}
+
+// createEnvFile writes an empty $LATEM_ENV into the container, creating its
+// directory. It is both the initial creation and the between-step truncation,
+// because a zero-length overwrite is exactly a truncation.
+//
+// It uses the archive API rather than an exec so that it works regardless of
+// what the image contains, and so that the file's mode is set by this package
+// instead of by whatever umask the image ships.
+func (e *runEnv) createEnvFile(ctx context.Context, envFile string) error {
+	dir := path.Dir(envFile)
+	parent := path.Dir(dir)
+	dirName := path.Base(dir)
+	fileName := path.Base(envFile)
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     dirName + "/",
+		Typeflag: tar.TypeDir,
+		Mode:     envDirMode,
+	}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build $LATEM_ENV archive")
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     dirName + "/" + fileName,
+		Typeflag: tar.TypeReg,
+		Mode:     envFileMode,
+		Size:     0,
+	}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build $LATEM_ENV archive")
+	}
+	if err := tw.Close(); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build $LATEM_ENV archive")
+	}
+
+	if err := e.api.CopyToContainer(ctx, e.containerID, parent, &buf,
+		container.CopyToContainerOptions{}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", envFile)
+	}
+	return nil
+}

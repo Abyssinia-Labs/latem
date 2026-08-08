@@ -1,0 +1,160 @@
+# Reference job registry for an Expo application — RUNNER_SPEC §9, §18.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ UNVERIFIED                                                                │
+# │                                                                           │
+# │ This file PARSES against internal/registry (verified). Nothing in it has  │
+# │ ever RUN: no agent has executed these jobs, and the scripts they call are │
+# │ themselves unverified drafts. Treat every timeout as a guess and every    │
+# │ cache path as an assertion to check on the real machine. M0 replaces the  │
+# │ guesses with measurements.                                                │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# What this file is allowed to contain, and what it deliberately does not:
+#
+#   - `steps[].run` is literal. It is the only place a command may be written,
+#     and it points at a script in ci/. Everything conditional, every loop, and
+#     every multi-command sequence lives in that script, because a step is a new
+#     process (§9) and shell state does not survive it. That is N1 working as
+#     intended, not a limitation to route around.
+#   - `${input.NAME}` is the only interpolation, legal only in `steps[].env`.
+#     There is no `${{ }}`, no `if:`, no expressions.
+#   - Secrets are named, never interpolated. They arrive in the environment
+#     because they are declared below.
+
+version: 1
+
+defaults:
+  timeout: 30m
+  shell: bash
+
+# Caches are MOUNTED, not archived (§14). There is no save/restore step, no
+# tarball, and no size ceiling in the job. A path here is where the cache
+# appears inside the execution environment — so the Linux paths are the docker
+# base image's `runner` home (uid 1000, §13.1) and the macOS paths are the Tart
+# guest's home, shared in with `--dir` (§14.2).
+caches:
+  - name: pnpm
+    path: /home/runner/.pnpm-store
+  - name: gradle
+    path: /home/runner/.gradle
+  - name: cocoapods
+    path: ~/Library/Caches/CocoaPods
+  # UNVERIFIED and load-bearing: whether this cache should be declared at all is
+  # the open question in §13.2. If the DerivedData-over-VirtioFS measurement in
+  # docs/manual-baseline.md says the share is slower than a cold local build,
+  # remove `derived-data` from ios-release's `caches:` list and set
+  # `derived_data = "vm"` in config.toml. Do not assume; measure.
+  - name: derived-data
+    path: ~/Library/Developer/Xcode/DerivedData
+
+jobs:
+  test:
+    description: Unit tests and typecheck
+    runs_on: [linux, docker]
+    image: ghcr.io/me/ci-base:20
+    timeout: 15m
+    caches: [pnpm]
+    steps:
+      - name: Install
+        run: ./ci/install.sh
+        timeout: 5m
+      - name: Test
+        run: ./ci/test.sh
+        timeout: 10m
+
+  ios-release:
+    description: Build an iOS release locally and upload it to TestFlight
+    # A runner must carry ALL of these labels. The `ios` runner in the §8
+    # reference config carries [macos, arm64, xcode, ios], so this job matches
+    # it and can never land on the container runner sharing the same machine.
+    runs_on: [macos, xcode]
+    timeout: 90m
+    caches: [cocoapods, derived-data, pnpm]
+    # Serialises across jobs, not merely across runners: a second iOS run
+    # queues rather than contending on the keychain and DerivedData (§13.3).
+    concurrency_group: ios
+    inputs:
+      channel:
+        type: enum
+        values: [internal, external]
+        default: internal
+      notes:
+        type: string
+        max_length: 500
+        default: ""
+    # Names only. Resolved by §15's chain (env → secrets.env → Keychain → pass →
+    # command) and registered with the redactor before the first step starts.
+    #
+    # MATCH_GIT_URL is not really a secret — it is the URL of the private certs
+    # repo. It is declared here anyway because `secrets:` is the only channel
+    # that injects a value into the job environment; `steps[].env` may reference
+    # inputs and nothing else. The cost is that the URL is redacted out of logs,
+    # which is mildly inconvenient and entirely harmless. The alternative is to
+    # hardcode it in ci/ios/match.sh or a Matchfile, which is also fine.
+    #
+    # APP_STORE_CONNECT_KEY_P8 is a multi-line PEM. §16's redactor registers
+    # every line of a multi-line secret individually — without that, echoing
+    # this variable would print a usable App Store Connect key into the log.
+    secrets:
+      - MATCH_PASSWORD
+      - MATCH_GIT_URL
+      - APP_STORE_CONNECT_KEY_ID
+      - APP_STORE_CONNECT_ISSUER_ID
+      - APP_STORE_CONNECT_KEY_P8
+      - KEYCHAIN_PASSWORD
+    artifacts:
+      - path: build/*.ipa
+        retain: 7d
+    steps:
+      - name: Install dependencies
+        run: ./ci/install.sh
+        timeout: 10m
+      - name: Unlock keychain
+        run: ./ci/ios/unlock-keychain.sh
+        timeout: 2m
+      - name: Sync certificates
+        run: ./ci/ios/match.sh
+        timeout: 5m
+      - name: Build and upload
+        run: ./ci/ios/build.sh
+        timeout: 70m
+        env:
+          RELEASE_CHANNEL: ${input.channel}
+          RELEASE_NOTES: ${input.notes}
+
+  android-release:
+    description: Build an Android release locally and upload it to Play internal testing
+    runs_on: [linux, docker]
+    image: ghcr.io/me/ci-base-android:20
+    timeout: 60m
+    caches: [gradle, pnpm]
+    concurrency_group: android
+    inputs:
+      track:
+        type: enum
+        values: [internal, alpha, beta]
+        default: internal
+      notes:
+        type: string
+        max_length: 500
+        default: ""
+    secrets:
+      - ANDROID_KEYSTORE_B64
+      - ANDROID_KEYSTORE_PASSWORD
+      - ANDROID_KEY_ALIAS
+      - ANDROID_KEY_PASSWORD
+      - PLAY_SERVICE_ACCOUNT_JSON
+    artifacts:
+      - path: build/*.aab
+        retain: 7d
+    steps:
+      - name: Install dependencies
+        run: ./ci/install.sh
+        timeout: 10m
+      - name: Build and upload
+        run: ./ci/android/build.sh
+        timeout: 45m
+        env:
+          RELEASE_TRACK: ${input.track}
+          RELEASE_NOTES: ${input.notes}
