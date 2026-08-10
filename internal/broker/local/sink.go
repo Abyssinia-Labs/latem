@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/Abyssinia-Labs/latem/internal/broker"
+	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -26,12 +27,18 @@ import (
 // # So Acked is the whole implementation
 //
 // [broker.LogSink.Acked] is the agent's resume point: it persists the value and
-// resumes from Acked()+1. Locally, "durably accepted" means written to the
-// runs table, so each batch advances last_acked_seq and Acked returns what the
-// database took. That is not a shortcut around the interface — it is the
-// interface answered honestly for a transport where the far side is the same
-// disk. Returning the highest sequence *seen* instead, without the write,
-// would claim durability the restart path does not have.
+// resumes from Acked()+1. Locally, "durably accepted" means written to this
+// machine's database, so each batch advances broker_state's last_acked_seq
+// under [store.BrokerLocal] and Acked returns what the database took. That is
+// not a shortcut around the interface — it is the interface answered honestly
+// for a transport where the far side is the same disk. Returning the highest
+// sequence *seen* instead, without the write, would claim durability the
+// restart path does not have.
+//
+// Advancing on every batch is also exactly why amendment A28 gave the row a
+// broker key. This value races ahead of anything a network can confirm, and
+// while it was a single column shared with internal/broker/remote it told the
+// control plane it already held frames it had never seen.
 type sink struct {
 	st    Store
 	runID string
@@ -82,7 +89,7 @@ func (s *sink) Write(ctx context.Context, frames []protocol.LogFrame) error {
 		return nil
 	}
 
-	if err := s.st.SetLastAckedSeq(ctx, s.runID, highest); err != nil {
+	if err := s.st.SetLastAckedSeq(ctx, store.BrokerLocal, s.runID, highest); err != nil {
 		return err
 	}
 	s.acked = highest

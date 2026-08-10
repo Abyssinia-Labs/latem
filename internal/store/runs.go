@@ -19,7 +19,7 @@ import (
 const runColumns = `id, repo, job, ref, ref_normalized, sha, runner, state,
 	exit_code, error_code, error_message, origin_kind, origin_actor,
 	cancel_reason, inputs_json, created_at, started_at, finished_at,
-	expires_at, reported_state, last_acked_seq, approved_at, approved_sha`
+	expires_at, approved_at, approved_sha`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows.
 type scanner interface {
@@ -45,8 +45,6 @@ func scanRun(s scanner) (Run, error) {
 		startedAt    sql.NullInt64
 		finishedAt   sql.NullInt64
 		expiresAt    sql.NullInt64
-		reported     sql.NullString
-		lastAcked    int64
 		approvedAt   sql.NullInt64
 		approvedSHA  sql.NullString
 	)
@@ -55,7 +53,7 @@ func scanRun(s scanner) (Run, error) {
 		&r.ID, &r.Repo, &r.Job, &r.Ref, &refNorm, &sha, &runner, &r.State,
 		&exitCode, &errCode, &errMsg, &r.OriginKind, &originActor,
 		&cancelReason, &inputsJSON, &createdAt, &startedAt, &finishedAt,
-		&expiresAt, &reported, &lastAcked, &approvedAt, &approvedSHA,
+		&expiresAt, &approvedAt, &approvedSHA,
 	)
 	if err != nil {
 		return Run{}, err
@@ -78,11 +76,6 @@ func scanRun(s scanner) (Run, error) {
 	r.ExpiresAt = scanTime(expiresAt)
 	r.ApprovedAt = scanTime(approvedAt)
 	r.ApprovedSHA = approvedSHA.String
-	r.ReportedState = protocol.RunState(reported.String)
-	if lastAcked < 0 {
-		return Run{}, fmt.Errorf("store: run %s has negative last_acked_seq %d", r.ID, lastAcked)
-	}
-	r.LastAckedSeq = uint64(lastAcked)
 
 	if inputsJSON != "" {
 		if err := json.Unmarshal([]byte(inputsJSON), &r.Inputs); err != nil {
@@ -158,10 +151,6 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 	if err := checkErrorCode(r.ErrorCode); err != nil {
 		return fmt.Errorf("store: Create: %w", err)
 	}
-	lastAcked, err := seqToInt64(r.LastAckedSeq)
-	if err != nil {
-		return err
-	}
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
 	}
@@ -188,15 +177,14 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 			  id, repo, job, ref, ref_normalized, sha, runner, state,
 			  exit_code, error_code, error_message, origin_kind, origin_actor,
 			  cancel_reason, inputs_json, created_at, started_at, finished_at,
-			  expires_at, reported_state, last_acked_seq, approved_at, approved_sha
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			  expires_at, approved_at, approved_sha
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Repo, r.Job, r.Ref, nullString(r.RefNormalized), nullString(r.SHA),
 			nullString(r.Runner), string(r.State),
 			nullInt(r.ExitCode), nullString(string(r.ErrorCode)), nullString(d.red.Redact(r.ErrorMsg)),
 			r.OriginKind, nullString(r.OriginActor),
 			nullString(d.red.Redact(r.CancelReason)), inputs, toUnix(r.CreatedAt),
 			nullTime(r.StartedAt), nullTime(r.FinishedAt), nullTime(r.ExpiresAt),
-			nullString(string(r.ReportedState)), lastAcked,
 			nullTime(r.ApprovedAt), nullString(r.ApprovedSHA),
 		)
 		if err != nil {
@@ -278,63 +266,6 @@ func (d *DB) NonTerminal(ctx context.Context) ([]Run, error) {
 		return nil, fmt.Errorf("store: NonTerminal: %w", err)
 	}
 	return scanRuns(rows)
-}
-
-// Unreported returns runs whose reported_state lags state, oldest first.
-//
-// Oldest first matters: replay after a reconnect should reach the broker in the
-// order the runs happened, or a dashboard briefly shows this morning's build
-// finishing after this afternoon's.
-//
-// A NULL reported_state — nothing has ever been acked — counts as lagging.
-func (d *DB) Unreported(ctx context.Context) ([]Run, error) {
-	rows, err := d.db.QueryContext(ctx,
-		`SELECT `+runColumns+` FROM runs
-		  WHERE reported_state IS NULL OR reported_state <> state
-		  ORDER BY created_at ASC, id ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("store: Unreported: %w", err)
-	}
-	return scanRuns(rows)
-}
-
-// MarkReported records that a broker acknowledged a state.
-//
-// It is written unconditionally rather than only when it advances, because a
-// stale ack arriving after the run moved on must leave the run in [Unreported]
-// — which it does: reported_state then differs from state again and the newer
-// transition is replayed. Silently keeping the newest value would instead hide
-// a transition the broker never saw.
-func (d *DB) MarkReported(ctx context.Context, runID string, state protocol.RunState) error {
-	if !state.Valid() {
-		return fmt.Errorf("store: MarkReported: unknown state %q", state)
-	}
-	res, err := d.db.ExecContext(ctx,
-		`UPDATE runs SET reported_state = ? WHERE id = ?`, string(state), runID)
-	if err != nil {
-		return fmt.Errorf("store: MarkReported %s: %w", runID, err)
-	}
-	return affectedOne(res, runID, "MarkReported")
-}
-
-// SetLastAckedSeq persists the log resume point (§7.2, finding F6).
-//
-// The write is monotonic — MAX(last_acked_seq, ?) — because acks can arrive out
-// of order after a reconnect, and a rewind would make the agent re-send frames
-// the server already has. That duplicated region is exactly the part of the
-// build that was happening when the network dropped, so it is the worst
-// possible thing to duplicate.
-func (d *DB) SetLastAckedSeq(ctx context.Context, runID string, seq uint64) error {
-	stored, err := seqToInt64(seq)
-	if err != nil {
-		return err
-	}
-	res, err := d.db.ExecContext(ctx,
-		`UPDATE runs SET last_acked_seq = MAX(last_acked_seq, ?) WHERE id = ?`, stored, runID)
-	if err != nil {
-		return fmt.Errorf("store: SetLastAckedSeq %s: %w", runID, err)
-	}
-	return affectedOne(res, runID, "SetLastAckedSeq")
 }
 
 // SetRunner records which runner owns a run.

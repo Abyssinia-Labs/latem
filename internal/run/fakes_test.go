@@ -230,8 +230,24 @@ type reported struct {
 	update protocol.Update
 }
 
+// fakeBroker stands in for a transport, including the part of a transport's
+// contract that amendment A28 made explicit: a broker records what it has
+// accepted, under its own key, and nothing else does it for it. key and st are
+// what make this fake behave like internal/broker/local rather than like a
+// recorder that quietly leaves the store alone.
 type fakeBroker struct {
+	// key is the broker_state key this transport writes under. Empty means it
+	// keeps no durable record, which is what a transport with no store does.
+	key string
+	st  Store
+	// block holds Report until it is closed, standing in for a transport whose
+	// far side has stopped answering. It is unbuffered and never receives, so a
+	// reporter that published to two brokers from one goroutine would never
+	// reach the second.
+	block <-chan struct{}
+
 	mu       sync.Mutex
+	name     string
 	reports  []reported
 	frames   []protocol.LogFrame
 	failNext int
@@ -244,22 +260,36 @@ func (b *fakeBroker) Commands(context.Context) (<-chan protocol.Command, error) 
 }
 func (b *fakeBroker) Claim(context.Context, string) error { return nil }
 
-func (b *fakeBroker) Report(_ context.Context, runID string, u protocol.Update) error {
+func (b *fakeBroker) Report(ctx context.Context, runID string, u protocol.Update) error {
+	if b.block != nil {
+		select {
+		case <-b.block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.failNext > 0 {
 		b.failNext--
+		b.mu.Unlock()
 		return errors.New("broker unavailable")
 	}
 	b.reports = append(b.reports, reported{runID, u})
+	key, st := b.key, b.st
+	b.mu.Unlock()
+
+	if key != "" && st != nil {
+		return st.MarkReported(ctx, key, runID, u.State)
+	}
 	return nil
 }
 
-func (b *fakeBroker) Logs(context.Context, string) (broker.LogSink, error) {
+func (b *fakeBroker) Logs(_ context.Context, runID string) (broker.LogSink, error) {
 	if b.logsErr != nil {
 		return nil, b.logsErr
 	}
-	return &fakeLogSink{b: b}, nil
+	return &fakeLogSink{b: b, runID: runID}, nil
 }
 
 func (b *fakeBroker) Heartbeat(context.Context, protocol.MachineHealth) error { return nil }
@@ -291,16 +321,27 @@ func (b *fakeBroker) lines() []protocol.LogFrame {
 	return append([]protocol.LogFrame(nil), b.frames...)
 }
 
-type fakeLogSink struct{ b *fakeBroker }
+type fakeLogSink struct {
+	b     *fakeBroker
+	runID string
+}
 
-func (s *fakeLogSink) Write(_ context.Context, frames []protocol.LogFrame) error {
+func (s *fakeLogSink) Write(ctx context.Context, frames []protocol.LogFrame) error {
 	s.b.mu.Lock()
-	defer s.b.mu.Unlock()
 	s.b.frames = append(s.b.frames, frames...)
 	for _, f := range frames {
 		if f.Seq > s.b.acked {
 			s.b.acked = f.Seq
 		}
+	}
+	high, key, st := s.b.acked, s.b.key, s.b.st
+	s.b.mu.Unlock()
+
+	// Persisting the resume point is the transport's job now, not
+	// internal/run's: only the transport knows which key its acknowledgements
+	// belong under (amendment A28).
+	if key != "" && st != nil && high > 0 {
+		return st.SetLastAckedSeq(ctx, key, s.runID, high)
 	}
 	return nil
 }
@@ -504,7 +545,7 @@ func newHarness(t *testing.T) *harness {
 		t:      t,
 		dir:    dir,
 		db:     db,
-		broker: &fakeBroker{},
+		broker: &fakeBroker{name: store.BrokerLocal, key: store.BrokerLocal, st: db},
 		source: newFakeSource(t, defaultRegistryYAML),
 		secret: &fakeSecrets{values: map[string]string{"MATCH_PASSWORD": "correct horse battery staple"}},
 		caches: &fakeCache{free: 500},
@@ -549,8 +590,8 @@ func (h *harness) build() *Orchestrator {
 	if o.Store == nil {
 		o.Store = h.db
 	}
-	if o.Broker == nil && !h.brokerless {
-		o.Broker = h.broker
+	if len(o.Brokers) == 0 && !h.brokerless {
+		o.Brokers = []broker.Broker{h.broker}
 	}
 	o.Source = h.source
 	o.Secrets = h.secret

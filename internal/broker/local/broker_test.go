@@ -1,6 +1,7 @@
 package local
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -62,16 +63,26 @@ func TestReport_PersistsAndMarksReported(t *testing.T) {
 	if run.State != protocol.StateClaimed {
 		t.Errorf("state = %s, want claimed", run.State)
 	}
-	if run.ReportedState != protocol.StateClaimed {
-		t.Errorf("reported_state = %s, want claimed", run.ReportedState)
-	}
 
-	unreported, err := db.Unreported(t.Context())
+	unreported, err := db.Unreported(t.Context(), store.BrokerLocal)
 	if err != nil {
 		t.Fatalf("Unreported: %v", err)
 	}
 	if len(unreported) != 0 {
 		t.Errorf("%d runs still awaiting replay after Report", len(unreported))
+	}
+
+	// And only this transport's. "Persisted on this disk" is not "accepted by a
+	// control plane", and while the two shared §22's single reported_state
+	// column this call silently cleared the remote transport's replay set too —
+	// so a run that finished during an outage was never sent to anybody
+	// (amendment A28).
+	remote, err := db.Unreported(t.Context(), store.BrokerRemote)
+	if err != nil {
+		t.Fatalf("Unreported(remote): %v", err)
+	}
+	if len(remote) != 1 || remote[0].ID != "r_report" {
+		t.Errorf("Unreported(remote) = %+v; the local broker's acknowledgement satisfied another transport's replay condition", remote)
 	}
 }
 
@@ -243,12 +254,18 @@ func TestSink_AckedIsPersisted(t *testing.T) {
 		t.Errorf("Acked = %d, want 3", got)
 	}
 
-	run, err := db.Get(t.Context(), "r_logs")
+	seq, err := db.LastAckedSeq(t.Context(), store.BrokerLocal, "r_logs")
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("LastAckedSeq: %v", err)
 	}
-	if run.LastAckedSeq != 3 {
-		t.Errorf("last_acked_seq = %d, want 3", run.LastAckedSeq)
+	if seq != 3 {
+		t.Errorf("last_acked_seq(local) = %d, want 3", seq)
+	}
+	// Under this transport's key and no other. The remote transport has not
+	// been given a frame, and a resume frame claiming otherwise would make the
+	// control plane skip the whole of this run's output.
+	if seq, err = db.LastAckedSeq(t.Context(), store.BrokerRemote, "r_logs"); err != nil || seq != 0 {
+		t.Errorf("last_acked_seq(remote) = %d, %v; want 0 — this transport wrote to a key it does not own", seq, err)
 	}
 
 	// A sink opened after a restart resumes where the store left off rather
@@ -281,12 +298,12 @@ func TestSink_DoesNotRewind(t *testing.T) {
 	if got := sink.Acked(); got != 4 {
 		t.Errorf("Acked = %d after a replay, want 4", got)
 	}
-	run, err := db.Get(t.Context(), "r_replay")
+	seq, err := db.LastAckedSeq(t.Context(), store.BrokerLocal, "r_replay")
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("LastAckedSeq: %v", err)
 	}
-	if run.LastAckedSeq != 4 {
-		t.Errorf("last_acked_seq = %d, want 4", run.LastAckedSeq)
+	if seq != 4 {
+		t.Errorf("last_acked_seq = %d, want 4", seq)
 	}
 }
 
@@ -374,4 +391,32 @@ func frames(runID string, seqs ...uint64) []protocol.LogFrame {
 		}
 	}
 	return out
+}
+
+// failingSeqStore is a *store.DB that cannot answer for a transport's resume
+// point. Everything else about the local broker is exercised against a real
+// database on purpose (see the note at the top of helpers_test.go); this one
+// path cannot be, because the only ways to make store.LastAckedSeq fail are a
+// run that does not exist — which Get has already refused by then — and a
+// database that is gone.
+type failingSeqStore struct {
+	Store
+	err error
+}
+
+func (f failingSeqStore) LastAckedSeq(context.Context, string, string) (uint64, error) {
+	return 0, f.err
+}
+
+// A sink that cannot read its own resume point must refuse to open rather than
+// start at zero. Starting at zero would re-send the whole of a run's log after
+// a restart, and finding F6 exists to make that impossible.
+func TestLogs_RefusesWhenTheResumePointCannotBeRead(t *testing.T) {
+	b, db := newBroker(t)
+	seedQueued(t, db, "r_noseq")
+
+	b.st = failingSeqStore{Store: db, err: errors.New("state database is gone")}
+	if _, err := b.Logs(t.Context(), "r_noseq"); err == nil {
+		t.Fatal("Logs opened a sink without knowing where the transport had got to; it would resume from zero and re-send the whole log")
+	}
 }

@@ -33,8 +33,12 @@ type execution struct {
 
 	red     logstream.Redactor
 	emitter *logstream.Emitter
-	logSink brokerLogSink
 	// deferred holds notes produced before the emitter existed.
+	//
+	// The broker sinks themselves are not held here. Each one is owned by the
+	// batching wrapper the emitter closes, and since A28 nothing outside the
+	// transport needs to read a sink's resume point — the transport persists its
+	// own, under its own key.
 	deferred []string
 
 	ws       *source.Workspace

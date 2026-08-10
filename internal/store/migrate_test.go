@@ -58,7 +58,7 @@ func TestMigrate_CreatesTheSpecSchema(t *testing.T) {
 	names := objectNames(t, d)
 
 	for _, want := range []string{
-		"runs", "queue", "artifacts", "cache_meta",
+		"runs", "queue", "artifacts", "cache_meta", "broker_state",
 		"runs_state_idx", "runs_repo_created_idx", "runs_expiry_idx",
 		"schema_migrations",
 	} {
@@ -93,9 +93,16 @@ func TestMigrate_RunsColumns(t *testing.T) {
 		"id", "repo", "job", "ref", "ref_normalized", "sha", "runner", "state",
 		"exit_code", "error_code", "error_message", "origin_kind", "origin_actor",
 		"cancel_reason", "inputs_json", "created_at", "started_at", "finished_at",
-		"expires_at", "reported_state", "last_acked_seq",
+		"expires_at",
 		// 0002, amendment A27. ALTER TABLE appends, so these come last and the
 		// order here is the order on disk.
+		//
+		// reported_state and last_acked_seq used to sit between expires_at and
+		// these two. 0003 moved them into broker_state and dropped them
+		// (amendment A28): they were never properties of a run, they were
+		// properties of a run *and a transport*, and leaving the columns behind
+		// would have left a second source of truth for exactly the values a
+		// partition depends on.
 		"approved_at", "approved_sha",
 	}
 	if !slices.Equal(got, want) {
@@ -301,6 +308,110 @@ func TestMigrate_0002OverAVersion1Database(t *testing.T) {
 	}
 	if approved.ApprovedSHA == "" {
 		t.Error("approve wrote no pin after the migration")
+	}
+}
+
+// TestMigrate_0003PreservesLocalReportingState is the upgrade A28 ships into.
+//
+// A machine with a month of history has runs whose reported_state and
+// last_acked_seq were written by the only transport that existed. Those values
+// have to land under broker = 'local' and nowhere else: losing them would make
+// the first start after the upgrade replay every run the machine has ever done
+// and re-stream every log it still has, and putting them under 'remote' as well
+// would tell a control plane it holds output it has never seen.
+//
+// The fixture applies 0001 and 0002 by hand and inserts through raw SQL,
+// because [DB.Create] projects the post-0003 column list and cannot write the
+// columns this migration exists to move.
+func TestMigrate_0003PreservesLocalReportingState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	d, err := Open(t.Context(), path, &fakeRedactor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	all := mustLoadMigrations(t)
+	if len(all) < 3 {
+		t.Fatalf("expected at least three migrations, have %d", len(all))
+	}
+	if _, err := d.db.ExecContext(t.Context(), `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+		  version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all[:2] {
+		if err := d.applyMigration(t.Context(), m); err != nil {
+			t.Fatalf("applying %s: %v", m.name, err)
+		}
+	}
+
+	now := toUnix(time.Now())
+	// r_reported carries both values. r_quiet carries neither, and is here to
+	// pin that the migration does not manufacture rows for runs that never had
+	// anything to preserve.
+	if _, err := d.db.ExecContext(t.Context(), `
+		INSERT INTO runs (id, repo, job, ref, state, origin_kind, inputs_json,
+		                  created_at, reported_state, last_acked_seq)
+		VALUES ('r_reported', 'myapp', 'build', 'main', 'running', 'cli', '{}', ?, 'preparing', 812),
+		       ('r_quiet',    'myapp', 'build', 'main', 'queued',  'cli', '{}', ?, NULL, 0)`,
+		now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.Migrate(t.Context()); err != nil {
+		t.Fatalf("migrating a version-2 database forward: %v", err)
+	}
+
+	// The values moved, under 'local' and only 'local'.
+	if got, err := d.LastAckedSeq(t.Context(), BrokerLocal, "r_reported"); err != nil || got != 812 {
+		t.Errorf("LastAckedSeq(local) = %d, %v; want the pre-upgrade 812 preserved", got, err)
+	}
+	if got, err := d.LastAckedSeq(t.Context(), BrokerRemote, "r_reported"); err != nil || got != 0 {
+		t.Errorf("LastAckedSeq(remote) = %d, %v; the local transport's resume point was copied to a transport that has never seen a frame", got, err)
+	}
+
+	unreportedLocal, err := d.Unreported(t.Context(), BrokerLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range unreportedLocal {
+		if r.ID == "r_reported" && r.State != protocol.StateRunning {
+			t.Errorf("unexpected row %+v", r)
+		}
+	}
+	// reported_state was 'preparing' and the run is 'running', so it still lags
+	// — the point is that it lags by one transition rather than reading as
+	// never reported at all.
+	var reported string
+	if err := d.db.QueryRowContext(t.Context(),
+		`SELECT reported_state FROM broker_state WHERE run_id = 'r_reported' AND broker = 'local'`).
+		Scan(&reported); err != nil {
+		t.Fatalf("the pre-upgrade reported_state did not survive: %v", err)
+	}
+	if reported != "preparing" {
+		t.Errorf("reported_state = %q under broker 'local', want the pre-upgrade %q", reported, "preparing")
+	}
+
+	var quietRows int
+	if err := d.db.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM broker_state WHERE run_id = 'r_quiet'`).Scan(&quietRows); err != nil {
+		t.Fatal(err)
+	}
+	if quietRows != 0 {
+		t.Errorf("a run with nothing to preserve got %d broker_state rows", quietRows)
+	}
+
+	// And the old columns are gone rather than left as a second answer.
+	for _, col := range []string{"reported_state", "last_acked_seq"} {
+		var n int
+		if err := d.db.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = ?`, col).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("runs still has a %s column; two sources of truth for the same fact is the defect A28 removed", col)
+		}
 	}
 }
 

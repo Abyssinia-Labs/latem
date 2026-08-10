@@ -12,7 +12,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/signal"
 	"syscall"
@@ -202,15 +201,4 @@ func noArgs(cmd *cobra.Command, args []string) error {
 		return usageErrorf("%s takes no arguments, got %q", cmd.CommandPath(), args[0])
 	}
 	return nil
-}
-
-// errNotWired is what an unimplemented subcommand returns.
-//
-// It is a hard refusal rather than a plausible-looking no-op on purpose. A
-// command that prints an empty list and exits 0 is indistinguishable from a
-// machine with nothing queued, and somebody will build a script on top of that
-// answer before the real implementation lands.
-func errNotWired(what, workstream string) error {
-	return errors.New(what + " is not wired up yet — it needs " + workstream +
-		"\n\nthe flags, output shape, and exit codes above are final; the wiring is not")
 }

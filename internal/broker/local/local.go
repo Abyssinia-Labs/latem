@@ -317,11 +317,17 @@ func (b *Broker) Claim(ctx context.Context, runID string) error {
 // Report persists a state transition and marks it acknowledged.
 //
 // For a remote broker "report" means send. Locally there is nobody to send to,
-// so the honest local meaning is: make it durable, then record that the broker
-// has seen it. The second half is not decoration — reported_state is what
-// store.Unreported keys on, and a local broker that never marked anything
-// reported would leave every run in the replay set forever, so the agent would
-// re-report its whole history on every reconnect.
+// so the honest local meaning is: make it durable, then record that this
+// transport has seen it. The second half is not decoration —
+// broker_state.reported_state is what store.Unreported keys on, and a local
+// broker that never marked anything reported would leave every run in its own
+// replay set forever.
+//
+// The mark is written under [store.BrokerLocal] and under nothing else
+// (amendment A28). "Persisted here" is not "accepted by a control plane", and
+// while the two shared one column this call silently satisfied the remote
+// transport's replay condition as well — so a run that finished during an
+// outage was never sent to anybody.
 //
 // The transition itself is applied rather than assumed. RUNNER_SPEC §11 has
 // the agent persist before it reports, which makes this call a self-transition
@@ -368,7 +374,7 @@ func (b *Broker) Report(ctx context.Context, runID string, u protocol.Update) er
 		}
 	}
 
-	return b.st.MarkReported(ctx, runID, u.State)
+	return b.st.MarkReported(ctx, store.BrokerLocal, runID, u.State)
 }
 
 // Logs returns the sequenced sink for one run.
@@ -376,6 +382,11 @@ func (b *Broker) Report(ctx context.Context, runID string, u protocol.Update) er
 // The run is looked up first so that a sink for an id that does not exist
 // fails here, where the caller still has context, rather than on the first
 // batch of a build that has already started producing output.
+//
+// The resume point is read back under this transport's own key. Before A28 it
+// came off the [store.Run] the lookup already had, which was the same column the
+// remote transport wrote — so a restarted agent could open a local sink already
+// positioned at whatever the control plane happened to have acknowledged.
 func (b *Broker) Logs(ctx context.Context, runID string) (broker.LogSink, error) {
 	if err := protocol.ValidateID(runID); err != nil {
 		return nil, fmt.Errorf("local: Logs: %w", err)
@@ -384,7 +395,11 @@ func (b *Broker) Logs(ctx context.Context, runID string) (broker.LogSink, error)
 	if err != nil {
 		return nil, err
 	}
-	return newSink(b.st, run.ID, run.LastAckedSeq), nil
+	acked, err := b.st.LastAckedSeq(ctx, store.BrokerLocal, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return newSink(b.st, run.ID, acked), nil
 }
 
 // Heartbeat records liveness locally.

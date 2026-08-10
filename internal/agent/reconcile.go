@@ -162,8 +162,18 @@ func crashed(s protocol.RunState) bool {
 	}
 }
 
-// report persists a transition and marks it reported, through the broker when
-// there is one so that the amendment A8 columns are written too.
+// report persists a transition and marks it reported, through the local broker
+// when there is one so that the amendment A8 columns are written too.
+//
+// It is deliberately the local transport alone, and not the fan-out
+// [Agent.brokerList] gives the orchestrator. This runs during §6's startup
+// sequence, before there has been time for a control plane connection to exist;
+// asking the remote transport would fail on every cold start, turn a normal
+// condition into a reconciliation error, and make an unreachable hosted layer
+// look like a broken machine. Nothing is lost by not asking: the transition is
+// durable, this transport's broker_state row is the one being marked, and the
+// remote one picks the run up from store.Unreported(remote) on its next
+// connection (amendment A28).
 func (a *Agent) report(ctx context.Context, runID string, u protocol.Update) error {
 	if brk := a.brokerOrNil(); brk != nil {
 		return brk.Report(ctx, runID, u)
@@ -310,10 +320,11 @@ func (a *Agent) logReconciliation(rec Reconciliation) {
 	}
 }
 
-// brokerOrNil returns the broker the orchestrator reports through, or nil when
-// none is configured. It exists so that internal/run's tolerance of a nil
-// broker — §7.3 has the agent doing useful work with no control plane — stays
-// a single expression rather than a nil check at every call site.
+// brokerOrNil returns the local broker, or nil when there is none.
+//
+// It exists so that [Agent.report]'s tolerance of having no broker at all —
+// §7.3 has the agent doing useful work with no control plane — stays a single
+// expression rather than a nil check at every call site.
 func (a *Agent) brokerOrNil() broker.Broker {
 	if a.localBrk == nil {
 		return nil

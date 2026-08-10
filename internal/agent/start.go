@@ -12,6 +12,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/artifact"
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
+	"github.com/Abyssinia-Labs/latem/internal/broker/remote"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
@@ -87,13 +88,13 @@ func hasLabel(labels []string, want string) bool {
 // partially built agent — which is why each field is assigned as soon as it
 // exists rather than at the end.
 //
-// One deviation from §6's numbering is deliberate and worth stating. The local
-// broker is opened before the orchestrator rather than at step 7, because
-// internal/run takes its broker at construction and two things only the broker
-// does are not optional: [local.Broker.Report] marks reported_state, which is
-// what store.Unreported keys on — an agent that never marked anything reported
-// would replay its whole history on every reconnect — and
-// [local.Broker.Logs] is what persists last_acked_seq, the resume point of
+// One deviation from §6's numbering is deliberate and worth stating. Both
+// brokers are opened before the orchestrator rather than at step 7, because
+// internal/run takes its brokers at construction and things only a broker does
+// are not optional: [local.Broker.Report] marks broker_state.reported_state,
+// which is what store.Unreported keys on — an agent that never marked anything
+// reported would replay its whole history on every reconnect — and each
+// transport's Logs is what persists its own last_acked_seq, the resume point of
 // finding F6. Nothing acts on an inbound command before the pool starts, so
 // binding the socket earlier changes where a run is recorded, not when it
 // executes.
@@ -113,8 +114,13 @@ func (a *Agent) start(ctx context.Context) error {
 
 	// Step 3 — sqlite and migrations. The redactor is required rather than
 	// optional: inputs_json and cancel_reason are scrubbed on the way in
-	// (INV-4), and a nil one would satisfy the interface silently.
-	db, err := store.Open(ctx, a.cfg.Paths.DB, logstream.NewRedactor())
+	// (INV-4), and a nil one would satisfy the interface silently. It is built
+	// here rather than inline so the machine token can go into it before the
+	// first row is written.
+	red := logstream.NewRedactor()
+	a.loadMachineToken(red)
+
+	db, err := store.Open(ctx, a.cfg.Paths.DB, red)
 	if err != nil {
 		return wrapStartup("opening the state database", err)
 	}
@@ -256,20 +262,21 @@ func (a *Agent) buildOrchestrator() error {
 		}))
 	}
 
-	// A nil broker is legal here and would still build every run correctly;
-	// see the ordering note on [Agent.start] for why it is not what happens.
-	var brk = a.brokerOrNil()
-
+	// An empty broker list is legal here and would still build every run
+	// correctly; see the ordering note on [Agent.start] for why it is not what
+	// happens. Every configured transport is passed, and internal/run fans
+	// reports and log frames out to all of them.
 	orch, err := run.New(run.Options{
-		Config:    a.cfg,
-		Store:     a.db,
-		Broker:    brk,
-		Source:    run.SourceManager(a.src),
-		Secrets:   provider,
-		Caches:    a.caches,
-		Artifacts: artifact.NewCollector(a.cfg.Paths.Artifacts),
-		Runners:   runners,
-		Now:       a.now,
+		Config:       a.cfg,
+		Store:        a.db,
+		Brokers:      a.brokerList(),
+		AlwaysRedact: a.alwaysRedact(),
+		Source:       run.SourceManager(a.src),
+		Secrets:      provider,
+		Caches:       a.caches,
+		Artifacts:    artifact.NewCollector(a.cfg.Paths.Artifacts),
+		Runners:      runners,
+		Now:          a.now,
 	})
 	if err != nil {
 		return wrapStartup("orchestrator", err)
@@ -279,12 +286,6 @@ func (a *Agent) buildOrchestrator() error {
 }
 
 // startLocalBroker binds the Unix socket (§7.3).
-//
-// The remote transport is deliberately absent. WS-14 owns
-// internal/broker/remote and it does not exist; a stub that accepted a URL and
-// did nothing would make a misconfigured control plane look like a working
-// one. The seam is [Agent.brokers], which every heartbeat already fans out
-// over, so adding the transport is an append rather than a redesign.
 func (a *Agent) startLocalBroker() error {
 	if !a.cfg.Broker.Local.Enabled {
 		a.log.Warn("broker.local is disabled; `latem run` cannot reach this agent")
@@ -300,13 +301,111 @@ func (a *Agent) startLocalBroker() error {
 		return wrapStartup("local broker", err)
 	}
 	a.localBrk = brk
-	a.brokers = append(a.brokers, brk)
+	a.brokers = append(a.brokers, transport{name: store.BrokerLocal, b: brk})
+	return a.startRemoteBroker()
+}
 
-	if a.cfg.Broker.Remote.Enabled {
-		a.log.Warn("broker.remote is configured but no remote transport exists yet (WS-14); serving locally only",
-			"url", a.cfg.Broker.Remote.URL)
+// startRemoteBroker connects to the control plane (§7.4), when one is
+// configured.
+//
+// A failure here is not a startup failure, and that is the point of the whole
+// transport. [remote.Open] does not touch the network — it starts a reconnect
+// loop and returns — so an unreachable control plane costs this agent nothing,
+// and a revoked token stops the loop while the local broker keeps serving. The
+// only error it can return is a configuration one, and that is fatal for the
+// same reason every other §8 mistake is: an agent that starts on a config it
+// could not make sense of fails later, inside somebody's build.
+//
+// [Agent.brokers] is the fan-out seam. Heartbeats, commands, state transitions
+// and log frames all go to every entry: [Agent.publishHealth],
+// [Agent.consumeCommands], and internal/run through [Agent.brokerList].
+//
+// That fan-out was impossible until amendment A28. §22 gave `reported_state`
+// and `last_acked_seq` one column each for the whole machine, and the local
+// broker wrote both the moment a transition or a batch was persisted, so a
+// fanned-out sink would have advanced the remote transport's resume point to
+// "everything this machine has emitted" — silently losing exactly the frames
+// covering an outage. The `broker_state` table keys both by transport, and each
+// transport now writes and reads only its own row.
+func (a *Agent) startRemoteBroker() error {
+	if !a.cfg.Broker.Remote.Enabled {
+		return nil
 	}
+	brk, err := remote.Open(remote.Options{
+		URL:       a.cfg.Broker.Remote.URL,
+		TokenFile: a.cfg.Paths.TokenFile,
+		MachineID: a.cfg.Machine.ID,
+		Store:     a.db,
+		QueueTTL:  a.queueTTL(),
+		LogMode:   remote.LogMode(a.cfg.Agent.RemoteLogs),
+		Logger:    a.log,
+	})
+	if err != nil {
+		return wrapStartup("remote broker", err)
+	}
+	a.remoteBrk = brk
+	a.brokers = append(a.brokers, transport{name: store.BrokerRemote, b: brk})
+	a.log.Info("remote broker configured", "url", a.cfg.Broker.Remote.URL, "remote_logs", a.cfg.Agent.RemoteLogs)
 	return nil
+}
+
+// loadMachineToken registers the machine token with red and keeps a copy for
+// every per-run redactor (RUNNER_SPEC §16, INV-4).
+//
+// §16's "redactor contents" lists the machine token first and nothing in the
+// tree registered it: internal/secrets registers what a job *declares*, and the
+// token is not a declared secret — it is the credential that authenticates this
+// machine to the control plane, held in its own file precisely so it is never
+// an environment variable anybody could declare. A build that printed it — a
+// script that cats ~/.latem/agent.key, a support bundle, a `set -x` over the
+// config directory — put it in the log file and shipped it to the control plane
+// with INV-4's tests passing.
+//
+// A missing or unreadable file is not a startup failure. The token is optional
+// on a machine with no control plane, and when there is one [remote.Broker]
+// says so far more usefully than this could: it names the file, the fix, and the
+// fact that local operation is unaffected.
+//
+// It is read once, here. Rotating the token with `latem register` takes effect
+// on the transport at the next reconnect, because that path re-reads the file
+// per dial; for redaction it takes effect at the next restart. The old value
+// stays registered either way, which is the safe direction — a rotated-out token
+// is still a secret, and the window in which the new one is unregistered is the
+// window in which nothing on this machine has printed it yet.
+func (a *Agent) loadMachineToken(red logstream.Registrar) {
+	path := a.cfg.Paths.TokenFile
+	token, err := remote.ReadToken(path)
+	if err != nil {
+		if a.cfg.Broker.Remote.Enabled {
+			a.log.Warn("the machine token could not be read, so it cannot be kept out of build logs",
+				"token_file", path, "err", err)
+		} else {
+			a.log.Debug("no machine token to register with the redactor", "token_file", path, "err", err)
+		}
+		return
+	}
+
+	value := []byte(token)
+	if logstream.TooShort(value) {
+		// Named, never printed — the same rule internal/secrets follows. Short
+		// values are not redacted at all (§16), so an operator with a two-letter
+		// token has one that will appear in logs verbatim and nothing else would
+		// ever tell them.
+		a.log.Warn("the machine token is too short to redact and will appear in build logs verbatim",
+			"token_file", path, "min_length", logstream.MinRedactableLength)
+		return
+	}
+
+	red.Register(value)
+	a.machineToken = value
+}
+
+// alwaysRedact is what every run's redactor is seeded with (§16).
+func (a *Agent) alwaysRedact() [][]byte {
+	if len(a.machineToken) == 0 {
+		return nil
+	}
+	return [][]byte{a.machineToken}
 }
 
 func (a *Agent) queueTTL() time.Duration {
@@ -348,12 +447,21 @@ func (a *Agent) stop(ctx context.Context) {
 		_ = a.metricsSrv.Close(ctx)
 		a.metricsSrv = nil
 	}
+	if a.remoteBrk != nil {
+		// Before the local broker, so that the last thing a control plane hears
+		// is a clean close rather than a connection that stopped answering.
+		if err := a.remoteBrk.Close(); err != nil {
+			a.log.Warn("closing the remote broker", "err", err)
+		}
+		a.remoteBrk = nil
+	}
 	if a.localBrk != nil {
 		if err := a.localBrk.Close(); err != nil {
 			a.log.Warn("closing the local broker", "err", err)
 		}
 		a.localBrk = nil
 	}
+	a.brokers = nil
 	if a.orch != nil {
 		_ = a.orch.Close()
 	}

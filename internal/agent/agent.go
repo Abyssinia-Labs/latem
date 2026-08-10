@@ -37,6 +37,13 @@
 // internal/broker/local's package comment; it is repeated here because this is
 // the package that gets it wrong.
 //
+// internal/broker/remote is the opposite and both are consumed here, so the
+// difference has to be understood rather than smoothed over. There is no shared
+// database behind that transport, so its Commands *does* replay a backlog after
+// every reconnect. What makes reading both safe is that neither handler does
+// anything a repeat could damage: a run command rings a doorbell, and a cancel
+// is defined by §7.1 as a no-op for an unknown, unclaimed, or terminal id.
+//
 // # What "no orphans after kill -9" costs
 //
 // The M4 acceptance criterion is that a hard kill mid-run leaves no container,
@@ -62,6 +69,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/broker"
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
+	"github.com/Abyssinia-Labs/latem/internal/broker/remote"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
@@ -193,13 +201,19 @@ type Agent struct {
 	caches     *cache.Local
 	orch       *run.Orchestrator
 	localBrk   *local.Broker
-	brokers    []broker.Broker
+	remoteBrk  *remote.Broker
+	brokers    []transport
 	metrics    *metrics.Metrics
 	metricsSrv *metrics.Server
 	closers    []io.Closer
 
 	runners []*runnerState
 	slots   *slots
+
+	// machineToken is §16's redactor content that no declared secret covers. It
+	// is held so every per-run redactor can be given it; it is never logged and
+	// never leaves this process.
+	machineToken []byte
 
 	// draining is set once shutdown begins or --drain-after fires. It is read
 	// by the pool before every claim and by every heartbeat.
@@ -433,26 +447,73 @@ func (a *Agent) spawn(wg *sync.WaitGroup, fn func()) {
 	}()
 }
 
-// consumeCommands is §6 step 7's reading half.
-//
-// A run command is a doorbell and nothing more: internal/broker/local has
-// already made the run durable, so the only thing left to do is wake a worker.
-// Acting on the request carried in the command instead would introduce a
-// second path into execution — one that works when the agent happens to be up
-// — and the two would drift.
-func (a *Agent) consumeCommands(ctx context.Context) {
-	if a.localBrk == nil {
-		return
+// transport is one broker and the name it is known by, which is also the key
+// its state is stored under (store.BrokerLocal, store.BrokerRemote). Keeping
+// the two the same means a log line about a transport and a row about a
+// transport name it identically, and there is no second vocabulary to learn.
+type transport struct {
+	name string
+	b    broker.Broker
+}
+
+// brokerList is what the orchestrator fans out to.
+func (a *Agent) brokerList() []broker.Broker {
+	out := make([]broker.Broker, 0, len(a.brokers))
+	for _, t := range a.brokers {
+		out = append(out, t.b)
 	}
-	cmds, err := a.localBrk.Commands(ctx)
+	return out
+}
+
+// consumeCommands is §6 step 7's reading half: every configured transport, read
+// concurrently, handled identically.
+//
+// A run command is a doorbell and nothing more. Both transports have already
+// made the run durable in sqlite before delivering it — internal/broker/local
+// on the socket handler, internal/broker/remote in [handleCommand] — so the
+// only thing left to do is wake a worker. Acting on the request carried in the
+// command instead would introduce a second path into execution, one that works
+// only when the agent happens to be up, and the two would drift.
+//
+// One goroutine per transport rather than a merged channel. There is nothing to
+// order between them: a run is a wake-up and a cancel addresses one run id, so
+// interleaving is not a hazard, and a merger would only add a place for one
+// silent transport to hold up another.
+//
+// The remote transport replays a backlog after a reconnect (see
+// internal/broker/remote's package comment), which is why both handlers have to
+// be idempotent by run id — and both are. Ringing the doorbell twice is one
+// doorbell, and §7.1 defines cancel as a no-op for an unknown, unclaimed, or
+// terminal id.
+func (a *Agent) consumeCommands(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, t := range a.brokers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.consumeFrom(ctx, t)
+		}()
+	}
+	wg.Wait()
+}
+
+// consumeFrom drains one transport's command stream until it closes.
+//
+// A transport that will not yield commands is logged and abandoned, and nothing
+// else changes: the other transports keep being read, the runner pool keeps
+// claiming from the queue, and the machine keeps building. That is the same
+// promise §7.4 makes about a revoked token, applied one layer up.
+func (a *Agent) consumeFrom(ctx context.Context, t transport) {
+	cmds, err := t.b.Commands(ctx)
 	if err != nil {
-		a.log.Error("local broker command stream", "err", err)
+		a.log.Error("broker command stream", "broker", t.name, "err", err)
 		return
 	}
 	for cmd := range cmds {
 		switch cmd.Kind {
 		case protocol.CommandRun:
-			a.log.Info("run queued", "run_id", cmd.Run.ID, "repo", cmd.Run.Repo, "job", cmd.Run.Job)
+			a.log.Info("run queued",
+				"run_id", cmd.Run.ID, "repo", cmd.Run.Repo, "job", cmd.Run.Job, "broker", t.name)
 			a.ring()
 		case protocol.CommandCancel:
 			a.cancel(ctx, *cmd.Cancel)
@@ -541,9 +602,9 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 // publishHealth sends one beat to every broker and updates the local gauges.
 func (a *Agent) publishHealth(ctx context.Context) {
 	h := a.health(ctx)
-	for _, b := range a.brokers {
-		if err := b.Heartbeat(ctx, h); err != nil {
-			a.log.Warn("heartbeat", "err", err)
+	for _, t := range a.brokers {
+		if err := t.b.Heartbeat(ctx, h); err != nil {
+			a.log.Warn("heartbeat", "broker", t.name, "err", err)
 		}
 	}
 	a.recordHealth(h)

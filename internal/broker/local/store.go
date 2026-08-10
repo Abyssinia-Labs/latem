@@ -36,8 +36,15 @@ type Store interface {
 	Claim(ctx context.Context, runID string) error
 
 	Transition(ctx context.Context, runID string, to protocol.RunState, u protocol.Update) error
-	MarkReported(ctx context.Context, runID string, state protocol.RunState) error
-	SetLastAckedSeq(ctx context.Context, runID string, seq uint64) error
+
+	// The broker_state trio (amendment A28). Each takes the key of the
+	// transport asking, and this package always passes [store.BrokerLocal]:
+	// what the local transport has accepted is a different fact from what a
+	// control plane has accepted, and before the key existed the two were one
+	// column that the local broker always won.
+	MarkReported(ctx context.Context, brk, runID string, state protocol.RunState) error
+	SetLastAckedSeq(ctx context.Context, brk, runID string, seq uint64) error
+	LastAckedSeq(ctx context.Context, brk, runID string) (uint64, error)
 
 	// The A8 setters. See the type comment.
 	SetRunner(ctx context.Context, runID, runner string) error

@@ -315,13 +315,16 @@ type LogSink interface {
     // Write submits a batch. Frames carry monotonic sequence numbers.
     Write(ctx context.Context, frames []protocol.LogFrame) error
 
-    // Acked is the highest sequence durably accepted for this run.
-    // The agent persists it and resumes from Acked()+1.
+    // Acked is the highest sequence THIS TRANSPORT'S far side has durably
+    // accepted for this run. The transport persists it under its own key in
+    // broker_state (§22) and resumes from Acked()+1.
     Acked() uint64
 
     Close(ctx context.Context) error
 }
 ```
+
+**The ack position belongs to a transport, not to a machine** (amendment A28). Both implementations satisfy one interface and the agent fans every run's frames out to all of them, so two sinks are live for one run at once and they are at different positions: the local one is at whatever this disk holds, the remote one at whatever the network has confirmed. §22 originally gave the machine one `last_acked_seq`, which made the higher of the two win — silently, and in the direction that loses the frames covering an outage. `broker_state` keys both the resume point and `reported_state` by transport; see §22.
 
 ### 7.1 Inbound — the complete trust boundary
 
@@ -425,7 +428,9 @@ type MachineHealth struct {
 }
 ```
 
-**Why sequence numbers.** The remote broker buffers logs to disk across a partition and flushes on reconnect, and the agent is required to tolerate replays. State transitions are idempotent by `(runID, state)`, so replaying them is free. Log lines are idempotent by nothing — replaying them duplicates output, and the duplicated region is exactly the interesting part of a build that was happening when the network dropped. `(run_id, seq)` gives the server a dedupe key and the agent a resume point. The server keeps the first frame it sees for a given pair and discards later ones.
+**Why sequence numbers.** The remote broker buffers logs across a partition and flushes on reconnect, and the agent is required to tolerate replays. State transitions are idempotent by `(runID, state)`, so replaying them is free. Log lines are idempotent by nothing — replaying them duplicates output, and the duplicated region is exactly the interesting part of a build that was happening when the network dropped. `(run_id, seq)` gives the server a dedupe key and the agent a resume point. The server keeps the first frame it sees for a given pair and discards later ones.
+
+Sequence numbers are assigned once per run, by the emitter, before fan-out (§16), so every transport sees the same numbering. Resume *points* are per transport (§22): the numbers are machine-wide, the positions in them are not.
 
 ### 7.3 Local broker
 
@@ -444,7 +449,7 @@ Cancel arrives on the local broker as the same `protocol.Command`, emitted by `l
 WebSocket to the control plane. `Authorization: Bearer <machine-token>`.
 
 - Reconnect with exponential backoff: 1s → 2s → 4s … capped at 60s, ±20% jitter.
-- On reconnect the agent sends a resume frame carrying, for every non-terminal run it owns, `{run_id, state, last_acked_seq}`. The server replays commands the agent missed and resumes log ingestion from `last_acked_seq + 1`. Every handler is idempotent by run id.
+- On reconnect the agent sends a resume frame carrying, for every non-terminal run it owns, `{run_id, state, last_acked_seq}`. The server replays commands the agent missed and resumes log ingestion from `last_acked_seq + 1`. Every handler is idempotent by run id. The `last_acked_seq` in that frame is **this transport's own** — the live sink's position when there is one, and `broker_state` under `broker = 'remote'` otherwise (§22, amendment A28). It is never the machine's high-water mark, which a local broker writing to the same disk keeps far ahead of any network.
 - Log frames buffer to disk while disconnected, bounded at 50 MB per run; beyond that, drop and emit one marker frame recording how many lines were lost. Sequence numbers keep incrementing across the gap so the gap is visible rather than silent.
 - If the token is rejected (`401`), stop retrying, log loudly, and continue serving the local broker. A revoked token must never disable local operation.
 - `[agent] remote_logs = "always" | "on_failure"` (default `always`) controls whether frames ship live or are buffered and sent only if the run reaches a failing terminal state. `on_failure` exists for verbose Gradle output; it trades live viewing for bandwidth.
@@ -1085,7 +1090,7 @@ Items 2 and 3 are what draft 01 was missing. Lines shorter than the minimum leng
 ### Redactor contents
 
 - Every resolved secret value, expanded per the four rules above.
-- The machine token, and the contents of `CancelRequest.Reason` are redacted before that string is logged or persisted.
+- The machine token, and the contents of `CancelRequest.Reason` are redacted before that string is logged or persisted. The token is **not** a declared secret — nothing in `internal/secrets` resolves it, because it is the credential that authenticates the machine rather than anything a job asks for — so the agent registers it explicitly, at startup, with both the store's redactor and every run's (amendment A28). Registering only declared secrets left it unregistered entirely, and a build that printed the file wrote the token to `~/.latem/logs/<run-id>.log` and shipped it to the control plane over the link it authenticates. A rotation takes effect on the transport at the next reconnect and on redaction at the next restart; the previous value stays registered, which is the safe direction.
 - Always-on patterns: AWS keys `AKIA[0-9A-Z]{16}`, PEM delimiters `-----BEGIN [A-Z ]*PRIVATE KEY-----`, GitHub tokens `gh[pousr]_[A-Za-z0-9]{36,}`, Slack tokens `xox[baprs]-`, JWTs `eyJ[A-Za-z0-9_-]{10,}\.`.
 - Replacement is `***` plus a stable 6-char hash of the matched value, so `***a3f9c1` lets an operator correlate occurrences without learning the secret. The hash is over the value, so the same secret reads the same everywhere.
 - **Values shorter than 6 characters are not redacted** — matching them produces log soup where every occurrence of `true` or `dev` becomes `***`. Warn at config load when a declared secret resolves to a short value, naming the secret and not the value.
@@ -1276,8 +1281,6 @@ CREATE TABLE runs (
   started_at        INTEGER,
   finished_at       INTEGER,
   expires_at        INTEGER,        -- approval_ttl / queue_ttl deadline (§11)
-  reported_state    TEXT,           -- last state acked by the broker
-  last_acked_seq    INTEGER NOT NULL DEFAULT 0,  -- log resume point (§7.2)
   approved_at       INTEGER,        -- local `latem approve` (INV-5, amendment A27)
   approved_sha      TEXT,           -- the commit that approval pinned
   UNIQUE(id)
@@ -1287,6 +1290,15 @@ CREATE INDEX runs_state_idx ON runs(state) WHERE state NOT IN
 CREATE INDEX runs_repo_created_idx ON runs(repo, created_at DESC);
 CREATE INDEX runs_expiry_idx ON runs(expires_at)
   WHERE state IN ('queued','awaiting_approval');
+
+-- What each transport has acknowledged about each run (amendment A28).
+CREATE TABLE broker_state (
+  run_id          TEXT NOT NULL REFERENCES runs(id),
+  broker          TEXT NOT NULL,  -- "local" | "remote"
+  reported_state  TEXT,           -- last state THIS transport acked
+  last_acked_seq  INTEGER NOT NULL DEFAULT 0,  -- THIS transport's resume point (§7.2)
+  PRIMARY KEY (run_id, broker)
+);
 
 CREATE TABLE queue (
   run_id      TEXT PRIMARY KEY REFERENCES runs(id),
@@ -1311,9 +1323,17 @@ CREATE TABLE cache_meta (
 );
 ```
 
-`reported_state` is what makes broker reporting recoverable: on reconnect, replay every run where `reported_state != state`.
+`broker_state` is keyed by `(run_id, broker)`, and the key is the whole point (amendment A28). Draft 02 put `reported_state` and `last_acked_seq` on `runs`, one of each for the machine, which is correct for a machine with one broker and wrong for a machine with two — and §7 defines two.
 
-`last_acked_seq` is the log equivalent, and it is why §7 returns a `LogSink` rather than an `io.WriteCloser`. On reconnect the agent resumes streaming from `last_acked_seq + 1` instead of re-sending a buffer the server already has. Persisting it means the resume point survives an agent restart, not just a reconnect.
+`reported_state` is what makes broker reporting recoverable: on reconnect, replay every run where that transport's `reported_state != runs.state`. The two transports mean different things by the word. The local broker's honest meaning is "persisted on this disk", and it marks a transition reported the moment `Transition` returns; the remote broker's is "the control plane has durably accepted it", which a partition can leave arbitrarily far behind. Sharing a column meant the local broker satisfied the remote transport's replay condition on every transition, so a run that finished while the network was down was never reported to anybody, and the control plane showed it as running forever.
+
+`last_acked_seq` is the log equivalent, and it is why §7 returns a `LogSink` rather than an `io.WriteCloser`. On reconnect the agent resumes streaming from that transport's `last_acked_seq + 1` instead of re-sending a buffer the server already has. Persisting it means the resume point survives an agent restart, not just a reconnect. Here the shared column was worse than merely wrong: the write is monotonic, the local broker advances it on every batch it writes to disk, and the remote transport is behind by however much the network is — so the resume frame told the server "you already have everything up to N" for an N it had never seen, and ingestion restarted past exactly the frames covering the outage. That is the failure `LogSink` and finding F6 exist to prevent, reintroduced by the schema.
+
+Each transport writes and reads only its own row, and nothing else chooses a key for it: "what has this transport acknowledged" is a question only that transport can answer. A row is created lazily, because a run nobody has reported and nobody has streamed reads identically whether the row is absent or present and zero.
+
+A keyed table rather than `reported_state_local` / `reported_state_remote` columns: per-transport columns do not scale past two and encode the list of transports in the schema, where adding one is a migration rather than a constant.
+
+Migration `0003` moves the existing values under `broker = 'local'` — the only transport that ever wrote them — and then **drops** the two columns. Leaving them would be a second source of truth for exactly the values a partition depends on, and no reader could tell which was live.
 
 `ref_normalized` is stored separately from `ref` because policy was evaluated against the normalized form (INV-5). Keeping both makes an audit answerable — "this run was requested as `main` and matched `refs/heads/main`" — without re-deriving it from a mirror that has since moved on.
 
@@ -1505,7 +1525,7 @@ Three of these (A7, A9, A11) describe things that could not have worked as writt
 
 ### Amendments from Wave 2
 
-Four more implementations — the orchestrator, the local broker, the CLI, and the native executor — against the same contracts.
+Four more implementations — the orchestrator, the local broker, the CLI, and the native executor — against the same contracts. A28 is the odd one out and came later, from the first integration in which both transports were live at the same time; it is the only amendment so far that changes the §22 schema of an already-shipped table.
 
 | # | Section | Change | Why it surfaced |
 |---|---|---|---|
@@ -1520,6 +1540,8 @@ Four more implementations — the orchestrator, the local broker, the CLI, and t
 | A25 | §5 (INV-1) | The INV-1 test recipe carries the Darwin caveat | `SO_ACCEPTCONN` returns `ENOPROTOOPT` on macOS for a real listening socket, so the obvious detector reports the invariant clean having enumerated nothing |
 | A26 | §19 | `config.DerivePaths` exported | `doctor` exists for the machine whose config does not parse, and `Load` returns nil on failure — taking the paths with it |
 | A27 | §5 (INV-5), §10, §11, §22 | **Approval is implemented, and bound to a commit.** `runs` gains `approved_at` and `approved_sha`; `store.Store` gains `Approve`; `registry.AdmitRef` gains an approval input; gates 8 and 9 swap so the SHA is resolved before the policy decision; gate 4 no longer parks | **`latem approve` did nothing.** It moved a parked run to `queued`; the run was claimed, prepared, and parked again by the same gate 8, having paid for another mirror fetch and clone. Nothing recorded that a human had said yes — §22 had no column for it and `AdmitRef` had no input for it — so the loop never terminated and INV-5's second sentence was unimplemented. The fix could not be "approved runs skip gate 8": approval had to name a *commit*, because INV-5 exists precisely because a `ref` can point at a branch a contributor controls, and a ref-scoped approval is spent by force-pushing after it is granted. Pinning the commit forced the rest: the SHA must exist before a run is parked (so 9 moves ahead of 8), gate 4 cannot park at all (nothing is fetched yet, so it has no commit), gate 10 must check out the SHA gate 8 admitted rather than resolving again, and parking must clear any earlier approval |
+
+| A28 | §7, §7.2, §7.4, §16, §22 | **Reporting state becomes per transport.** `runs.reported_state` and `runs.last_acked_seq` are replaced by a `broker_state` table keyed `(run_id, broker)`; migration `0003` moves the old values under `broker = 'local'` and drops the columns. `store.Store`'s `Unreported`, `MarkReported` and `SetLastAckedSeq` each take a broker key, `LastAckedSeq` is added so a transport can read its own position back, and `store.Run` loses both fields. `internal/run` takes `Brokers []broker.Broker` instead of one, and the agent consumes commands from every transport. Separately, §16's machine token is now actually registered with the redactor | **Two transports existed and the schema had room for one.** The two mean different things by both words. `internal/broker/local` marks `reported_state` the moment a transition is persisted — the honest local meaning of "durably accepted", where the far side is the same disk — and advances `last_acked_seq` on every batch it writes. `internal/broker/remote` needs both to mean "what the control plane has accepted", which a partition leaves arbitrarily far behind. With both live they collided in the direction that loses data: `store.Unreported` came back empty for the remote transport on every machine that had a local broker, so a run that finished during an outage was never reported to anybody; and the resume frame claimed the control plane held frames it had never seen, so ingestion restarted **past the gap**. The lost region is precisely the output covering the outage — the failure `LogSink` and finding F6 exist to prevent, reintroduced by the schema. The agent's consequence was visible in the code: it did not read the remote command stream and did not fan reports or log frames out to it, because accepting a run from a control plane it could not report back to would leave that run showing as queued forever. Per-transport columns were rejected as the fix: they do not scale past two and put the list of transports in the schema |
 
 **A27 is a security fix, not a feature.** The half of INV-5 that worked — parking — is the half that costs nothing to get right. The half that did not is the one an operator relies on, and the obvious implementation of it, a boolean "approved" consulted by gate 8, would have been worse than none: it reads as a control, and it grants execution of whatever a branch points at whenever a runner gets round to the run. The whole design follows from refusing that. F5's ordering (normalize → match → resolve) is corrected to normalize → resolve → match; matching still happens against the ref *name*, so no policy answer changes.
 

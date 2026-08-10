@@ -53,7 +53,11 @@ func (a *Agent) recordHealth(h protocol.MachineHealth) {
 		a.metrics.DiskFreeGB.Set(h.DiskFreeGB, r.Name)
 	}
 	a.metrics.BrokerUp.Set(boolGauge(a.localBrk != nil), "local")
-	a.metrics.BrokerUp.Set(0, "remote")
+	// §20 lists broker connection state among the counters, and this is the one
+	// that can be 0 on a healthy machine: a partition is normal, and the gauge
+	// going flat beside runs that keep succeeding is how an operator tells "the
+	// control plane cannot see us" from "the machine is down".
+	a.metrics.BrokerUp.Set(boolGauge(a.remoteBrk != nil && a.remoteBrk.Connected()), "remote")
 	a.recordRunners()
 	a.recordQueueDepth()
 }

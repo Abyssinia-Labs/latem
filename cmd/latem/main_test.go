@@ -103,47 +103,46 @@ func TestHelpDocumentsExitCodes(t *testing.T) {
 	}
 }
 
-// TestUnwiredCommandsRefuseClearly is the rule for everything still owned by a
-// workstream that has not landed: refuse, name the workstream, and never print
-// a plausible-looking empty result that somebody builds a script on.
+// TestEverySubcommandIsWired.
 //
-// WS-11 wired agent, run, list, logs, cancel, and approve, so they left this
-// table. `register` remains, because it needs WS-14's remote transport to
-// verify connectivity and a `register` that wrote a token file without ever
-// reaching the control plane would report success for a machine that cannot
-// talk to it.
-func TestUnwiredCommandsRefuseClearly(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"register", []string{"register", "--url", "wss://x/agent", "--token", "t"}},
+// This replaces TestUnwiredCommandsRefuseClearly, which held the rule for
+// commands still owned by a workstream that had not landed: refuse, name the
+// workstream, and never print a plausible-looking empty result somebody builds
+// a script on. `register` was the last entry in that table and WS-14 wired it,
+// so the table is empty and errNotWired has no callers.
+//
+// What is left is the regression guard: `register` must actually try to reach
+// the control plane. A future refactor that stubbed it back out — or that made
+// it write a token file before proving the URL — would produce a success, or a
+// refusal, instead of a connection failure.
+func TestEverySubcommandIsWired(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root := newRootCommand()
-			var out bytes.Buffer
-			root.SetOut(&out)
-			root.SetErr(&out)
-			root.SetArgs(tt.args)
 
-			err := root.Execute()
-			if err == nil {
-				t.Fatalf("%v exited 0; an unwired command must refuse", tt.args)
-			}
-			if exitCode(err) != ExitFailure {
-				t.Errorf("exit code = %d, want %d", exitCode(err), ExitFailure)
-			}
-			if !strings.Contains(err.Error(), "not wired up yet") {
-				t.Errorf("the refusal should say so plainly: %v", err)
-			}
-			if !strings.Contains(err.Error(), "WS-") {
-				t.Errorf("the refusal should name the workstream that will fill it: %v", err)
-			}
-			if out.Len() > 0 {
-				t.Errorf("an unwired command wrote output that could be mistaken for a result:\n%s", out.String())
-			}
-		})
+	root := newRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	// A literal loopback address with nothing behind it: no DNS, no waiting.
+	root.SetArgs([]string{"register", "--config-dir", dir, "--url", "ws://127.0.0.1:1/agent", "--token", "t"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("register exited 0 against a url nothing is listening on")
+	}
+	if strings.Contains(err.Error(), "not wired") {
+		t.Errorf("register has been stubbed out again: %v", err)
+	}
+	if !strings.Contains(err.Error(), "could not reach") {
+		t.Errorf("register did not try to reach the control plane: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nothing was written") {
+		t.Errorf("a failed registration must say that nothing was written: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agent.key")); statErr == nil {
+		t.Error("a failed registration wrote the machine token anyway")
 	}
 }
 

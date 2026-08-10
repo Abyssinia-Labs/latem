@@ -101,11 +101,33 @@ type Options struct {
 	Config *config.Config
 	// Store is local truth. Required.
 	Store Store
-	// Broker receives reports. A nil Broker means local-only operation: state
-	// still lands in the store, nothing is published. It is not an error
-	// because RUNNER_SPEC §7.3 has the agent doing useful work with no
-	// control plane at all.
-	Broker broker.Broker
+	// Brokers receive reports and log frames — all of them, every time.
+	//
+	// Empty means local-only operation: state still lands in the store, nothing
+	// is published. It is not an error because RUNNER_SPEC §7.3 has the agent
+	// doing useful work with no control plane at all. A nil entry is skipped.
+	//
+	// It is a slice rather than the single broker draft 02 wrote because a
+	// machine has two transports and both are entitled to the whole story. It
+	// could not be one until amendment A28: with one reported_state and one
+	// last_acked_seq for the machine, fanning out would have advanced the remote
+	// transport's resume point to everything this machine had emitted, which
+	// silently loses exactly the frames covering an outage.
+	//
+	// Every fan-out here is independent per broker. One transport failing,
+	// refusing, or taking thirty seconds to answer must not delay, fail, or
+	// alter what the others see; see [reporter] and [execution.openLogs].
+	Brokers []broker.Broker
+
+	// AlwaysRedact holds values registered into every run's redactor before the
+	// pipeline is built.
+	//
+	// §16's "redactor contents" lists the machine token, which is not a declared
+	// secret and so is registered by nothing in internal/secrets. Registering it
+	// is the caller's job because only the agent knows where the token file is;
+	// applying it to every run is this package's, because the per-run redactor
+	// is created here and INV-4 says registration happens before the first step.
+	AlwaysRedact [][]byte
 	// Source acquires workspaces. Wrap a *source.Manager with [SourceManager].
 	Source Source
 	// Secrets resolves the names a job declares. A *secrets.Chain satisfies it.
@@ -181,14 +203,15 @@ func NewRunner(c *config.Runner, ex executor.Executor) Runner {
 // execute at once, and [Orchestrator.Cancel] may arrive for any of them at any
 // moment from a different goroutine.
 type Orchestrator struct {
-	cfg       *config.Config
-	store     Store
-	brk       broker.Broker
-	src       Source
-	secrets   secrets.Provider
-	caches    cache.Manager
-	artifacts Collector
-	runners   []Runner
+	cfg          *config.Config
+	store        Store
+	brks         []broker.Broker
+	alwaysRedact [][]byte
+	src          Source
+	secrets      secrets.Provider
+	caches       cache.Manager
+	artifacts    Collector
+	runners      []Runner
 
 	logDir   string
 	ringSize int
@@ -221,10 +244,20 @@ func New(opts Options) (*Orchestrator, error) {
 		return nil, errors.New("run: New: no log directory (set Options.LogDir or Config.Paths.Logs)")
 	}
 
+	// A nil entry would be a nil-interface call on every report. Filtering here
+	// rather than at each call site keeps the fan-out loops unconditional.
+	brks := make([]broker.Broker, 0, len(opts.Brokers))
+	for _, b := range opts.Brokers {
+		if b != nil {
+			brks = append(brks, b)
+		}
+	}
+
 	o := &Orchestrator{
 		cfg:             opts.Config,
 		store:           opts.Store,
-		brk:             opts.Broker,
+		brks:            brks,
+		alwaysRedact:    opts.AlwaysRedact,
 		src:             opts.Source,
 		secrets:         opts.Secrets,
 		caches:          opts.Caches,
@@ -241,7 +274,7 @@ func New(opts Options) (*Orchestrator, error) {
 	if o.now == nil {
 		o.now = time.Now
 	}
-	o.reporter = newReporter(opts.Broker, opts.Store, opts.ReportAttempts, opts.ReportBackoff)
+	o.reporter = newReporter(brks, opts.ReportAttempts, opts.ReportBackoff)
 	return o, nil
 }
 

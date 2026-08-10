@@ -40,8 +40,6 @@ func TestCreateGet_RoundTripsEveryField(t *testing.T) {
 		StartedAt:     &started,
 		FinishedAt:    &finished,
 		ExpiresAt:     &expires,
-		ReportedState: protocol.StateRunning,
-		LastAckedSeq:  4211,
 	}
 	mustCreate(t, d, want)
 
@@ -88,9 +86,6 @@ func TestCreateGet_RoundTripsEveryField(t *testing.T) {
 	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(expires) {
 		t.Errorf("expires_at = %v, want %v", got.ExpiresAt, expires)
 	}
-	if got.ReportedState != want.ReportedState || got.LastAckedSeq != want.LastAckedSeq {
-		t.Errorf("report state = %q/%d", got.ReportedState, got.LastAckedSeq)
-	}
 }
 
 func TestCreate_EmptyOptionalsReadBackAsZero(t *testing.T) {
@@ -106,8 +101,6 @@ func TestCreate_EmptyOptionalsReadBackAsZero(t *testing.T) {
 		t.Errorf("unset text columns came back as %q/%q/%q", got.RefNormalized, got.SHA, got.Runner)
 	case got.ExitCode != nil, got.StartedAt != nil, got.FinishedAt != nil, got.ExpiresAt != nil:
 		t.Error("unset optional columns came back non-nil")
-	case got.ReportedState != "":
-		t.Errorf("reported_state = %q, want empty for a run nothing has acked", got.ReportedState)
 	case len(got.Inputs) != 0:
 		t.Errorf("inputs = %v, want empty", got.Inputs)
 	}
@@ -334,116 +327,6 @@ func TestNonTerminal(t *testing.T) {
 		if r.State.IsTerminal() {
 			t.Errorf("NonTerminal returned %s, which is terminal", r.State)
 		}
-	}
-}
-
-// TestUnreportedAndMarkReported is what makes broker reporting recoverable
-// across a restart (§22): replay every run whose reported_state lags.
-func TestUnreportedAndMarkReported(t *testing.T) {
-	d := newTestDB(t)
-	base := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
-
-	older := testRun("older", protocol.StateRunning)
-	older.CreatedAt = base
-	mustCreate(t, d, older)
-
-	newer := testRun("newer", protocol.StateSucceeded)
-	newer.CreatedAt = base.Add(time.Hour)
-	newer.ReportedState = protocol.StateSucceeded
-	mustCreate(t, d, newer)
-
-	// Nothing has acked `older`, so it lags even though reported_state is NULL.
-	got, err := d.Unreported(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ID != "older" {
-		t.Fatalf("Unreported = %+v, want just older", got)
-	}
-
-	if err := d.MarkReported(t.Context(), "older", protocol.StateRunning); err != nil {
-		t.Fatal(err)
-	}
-	if got, err = d.Unreported(t.Context()); err != nil || len(got) != 0 {
-		t.Fatalf("Unreported after ack = %+v, %v", got, err)
-	}
-
-	// A transition after the ack puts it back in the replay set, which is the
-	// property the reconnect path depends on.
-	if err := d.Transition(t.Context(), "older", protocol.StateCollecting, protocol.Update{}); err != nil {
-		t.Fatal(err)
-	}
-	if got, err = d.Unreported(t.Context()); err != nil || len(got) != 1 {
-		t.Fatalf("Unreported after a further transition = %+v, %v", got, err)
-	}
-}
-
-func TestUnreported_OrdersOldestFirst(t *testing.T) {
-	d := newTestDB(t)
-	base := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
-
-	for i, id := range []string{"third", "first", "second"} {
-		r := testRun(id, protocol.StateRunning)
-		r.CreatedAt = base.Add(time.Duration([]int{2, 0, 1}[i]) * time.Hour)
-		mustCreate(t, d, r)
-	}
-
-	got, err := d.Unreported(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"first", "second", "third"}
-	for i, r := range got {
-		if r.ID != want[i] {
-			t.Fatalf("Unreported = %+v, want replay in the order the runs happened %v", got, want)
-		}
-	}
-}
-
-func TestMarkReported_Rejects(t *testing.T) {
-	d := newTestDB(t)
-	mustCreate(t, d, testRun("r", protocol.StateRunning))
-
-	if err := d.MarkReported(t.Context(), "r", protocol.RunState("made_up")); err == nil {
-		t.Error("MarkReported accepted an unknown state")
-	}
-	if err := d.MarkReported(t.Context(), "ghost", protocol.StateRunning); !errors.Is(err, ErrNotFound) {
-		t.Errorf("MarkReported of an unknown run = %v, want ErrNotFound", err)
-	}
-}
-
-// TestSetLastAckedSeq_IsMonotonic: an out-of-order ack must not rewind the
-// resume point. Rewinding re-sends the frames covering the outage, which is
-// exactly the region a duplicate is most confusing in.
-func TestSetLastAckedSeq_IsMonotonic(t *testing.T) {
-	d := newTestDB(t)
-	mustCreate(t, d, testRun("seq", protocol.StateRunning))
-
-	for _, seq := range []uint64{10, 40, 25, 40} {
-		if err := d.SetLastAckedSeq(t.Context(), "seq", seq); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	got, err := d.Get(t.Context(), "seq")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.LastAckedSeq != 40 {
-		t.Errorf("last_acked_seq = %d after acks 10,40,25,40; want 40", got.LastAckedSeq)
-	}
-}
-
-func TestSetLastAckedSeq_Rejects(t *testing.T) {
-	d := newTestDB(t)
-	mustCreate(t, d, testRun("seq", protocol.StateRunning))
-
-	// sqlite integers are signed; storing this would read back negative.
-	if err := d.SetLastAckedSeq(t.Context(), "seq", 1<<63); err == nil {
-		t.Error("SetLastAckedSeq accepted a sequence past the sqlite integer range")
-	}
-	if err := d.SetLastAckedSeq(t.Context(), "ghost", 1); !errors.Is(err, ErrNotFound) {
-		t.Errorf("SetLastAckedSeq on an unknown run = %v, want ErrNotFound", err)
 	}
 }
 

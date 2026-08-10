@@ -147,7 +147,7 @@ func TestMetricsFollowTheQueueAndTheRunners(t *testing.T) {
 		t.Errorf("broker_up{local} = %v, want 1", got)
 	}
 	if got := m.BrokerUp.Value("remote"); got != 0 {
-		t.Errorf("broker_up{remote} = %v, want 0 — there is no remote transport yet", got)
+		t.Errorf("broker_up{remote} = %v, want 0 — no broker.remote is configured on this fixture", got)
 	}
 }
 

@@ -10,10 +10,17 @@
 // amendment — it has the widest surface and the least prior art in the spec.
 // Amending it is cheap and expected; diverging from it quietly is not.
 //
-// One amendment so far: A27 added [Store.Approve] and the two approval fields
-// on [Run]. INV-5 required a local approval the interface gave no way to
-// record, so the half of the invariant that says "and then it runs" could not
-// be implemented at all — see [Store.Approve].
+// Two amendments so far:
+//
+//   - A27 added [Store.Approve] and the two approval fields on [Run]. INV-5
+//     required a local approval the interface gave no way to record, so the half
+//     of the invariant that says "and then it runs" could not be implemented at
+//     all — see [Store.Approve].
+//   - A28 gave reporting state a transport dimension. [Store.Unreported],
+//     [Store.MarkReported] and [Store.SetLastAckedSeq] each take a broker key,
+//     [Store.LastAckedSeq] was added so a transport can read its own resume
+//     point back, and [Run] lost ReportedState and LastAckedSeq because they
+//     stopped being properties of a run. See [BrokerLocal].
 package store
 
 import (
@@ -72,13 +79,23 @@ type Run struct {
 	// only while the freshly resolved commit still equals this one.
 	ApprovedAt  *time.Time
 	ApprovedSHA string
-
-	// ReportedState is the last state a broker acknowledged. Replaying every
-	// run where ReportedState != State is what makes reporting recoverable.
-	ReportedState protocol.RunState
-	// LastAckedSeq is the log resume point (finding F6).
-	LastAckedSeq uint64
 }
+
+// The broker keys of the broker_state table (amendment A28).
+//
+// Each transport passes its own constant to [Store.MarkReported],
+// [Store.SetLastAckedSeq], [Store.LastAckedSeq] and [Store.Unreported], and
+// nothing else ever chooses one: "what has this transport acknowledged" is a
+// question only that transport can answer, so it is the only thing that writes
+// the answer down.
+//
+// They live here rather than in the broker packages because the table is this
+// package's, and because the two constants sitting side by side is what makes
+// the shape of the key obvious to whoever adds a third.
+const (
+	BrokerLocal  = "local"
+	BrokerRemote = "remote"
+)
 
 // Filter selects runs for listing.
 type Filter struct {
@@ -157,14 +174,33 @@ type Store interface {
 	// comes back to a queue full of runs nobody wants (RUNNER_SPEC §11).
 	SweepExpired(ctx context.Context, now time.Time) ([]Run, error)
 
-	// Unreported returns runs whose ReportedState lags State, for replay after
-	// a broker reconnect.
-	Unreported(ctx context.Context) ([]Run, error)
-	MarkReported(ctx context.Context, runID string, state protocol.RunState) error
+	// Unreported returns the runs whose state the named broker has not
+	// acknowledged, for replay after a reconnect.
+	//
+	// The broker key is amendment A28 and it is the whole point of the method.
+	// Draft 02 asked one column "has this been reported?", which two transports
+	// answer differently: the local one marks a transition reported the moment
+	// it is persisted, so a remote transport sharing that column would find
+	// nothing to replay and a run that finished during an outage would never be
+	// sent at all.
+	Unreported(ctx context.Context, brk string) ([]Run, error)
 
-	// SetLastAckedSeq persists the log resume point so it survives a restart
-	// and not merely a reconnect.
-	SetLastAckedSeq(ctx context.Context, runID string, seq uint64) error
+	// MarkReported records that one broker acknowledged one state.
+	MarkReported(ctx context.Context, brk, runID string, state protocol.RunState) error
+
+	// SetLastAckedSeq persists one broker's log resume point so it survives a
+	// restart and not merely a reconnect (finding F6). The write is monotonic.
+	SetLastAckedSeq(ctx context.Context, brk, runID string, seq uint64) error
+
+	// LastAckedSeq reads a broker's resume point back, returning 0 for a run
+	// that transport has never streamed.
+	//
+	// Added by A28 alongside the key. While the resume point was a column of
+	// runs, every caller already had it on the [Run] it was holding; keyed by
+	// transport it needs a read of its own, and without one a transport
+	// reopening a sink after a restart would begin at zero and re-send a
+	// build's whole log.
+	LastAckedSeq(ctx context.Context, brk, runID string) (uint64, error)
 
 	RecordArtifacts(ctx context.Context, runID string, refs []protocol.ArtifactRef) error
 	Artifacts(ctx context.Context, runID string) ([]protocol.ArtifactRef, error)
@@ -216,16 +252,20 @@ func (NotImplemented) SweepExpired(context.Context, time.Time) ([]Run, error) {
 	return nil, unsupported("SweepExpired")
 }
 
-func (NotImplemented) Unreported(context.Context) ([]Run, error) {
+func (NotImplemented) Unreported(context.Context, string) ([]Run, error) {
 	return nil, unsupported("Unreported")
 }
 
-func (NotImplemented) MarkReported(context.Context, string, protocol.RunState) error {
+func (NotImplemented) MarkReported(context.Context, string, string, protocol.RunState) error {
 	return unsupported("MarkReported")
 }
 
-func (NotImplemented) SetLastAckedSeq(context.Context, string, uint64) error {
+func (NotImplemented) SetLastAckedSeq(context.Context, string, string, uint64) error {
 	return unsupported("SetLastAckedSeq")
+}
+
+func (NotImplemented) LastAckedSeq(context.Context, string, string) (uint64, error) {
+	return 0, unsupported("LastAckedSeq")
 }
 
 func (NotImplemented) RecordArtifacts(context.Context, string, []protocol.ArtifactRef) error {

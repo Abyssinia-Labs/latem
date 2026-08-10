@@ -10,21 +10,30 @@ import (
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
-// brokerLogSink is the part of [broker.LogSink] this package holds on to after
-// the emitter has been given ownership of the writing side.
-type brokerLogSink interface {
-	Acked() uint64
-	Close(ctx context.Context) error
-}
-
 // openLogs builds this run's pipeline: split, redact, sequence, fan out (§16).
 //
 // The redactor is per run, because the values it holds are this run's secrets.
 // It is created before anything else so that [secrets.ResolveAll] has something
 // to register into, which is the ordering INV-4 turns on: registered before the
 // first step, and before the value is used for anything else.
+//
+// # One sink per broker, and each one optional
+//
+// Every configured transport gets its own [broker.LogSink] and its own batching
+// wrapper, so each keeps its own resume point and acknowledges on its own
+// schedule — which is the whole of amendment A28 seen from this end. A
+// transport that cannot open a sink is noted in the run's own log and skipped;
+// it does not fail the run, does not disturb the other transports, and does not
+// stop the file sink from holding the complete output. A control plane that is
+// unreachable, revoked, or broken must cost this machine a log destination and
+// nothing else.
 func (x *execution) openLogs(ctx context.Context) error {
 	x.red = logstream.NewRedactor()
+	for _, v := range x.o.alwaysRedact {
+		// §16's redactor contents, the machine-wide half: the machine token is
+		// not a declared secret, so nothing in internal/secrets registers it.
+		x.red.Register(v)
+	}
 
 	file, err := logstream.NewFileSink(x.o.logDir, x.run.ID)
 	if err != nil {
@@ -36,20 +45,18 @@ func (x *execution) openLogs(ctx context.Context) error {
 	x.h.attachRing(ring)
 	sinks = append(sinks, ring)
 
-	if x.o.brk != nil {
-		ls, lerr := x.o.brk.Logs(ctx, x.run.ID)
-		switch {
-		case lerr != nil:
+	for _, brk := range x.o.brks {
+		ls, lerr := brk.Logs(ctx, x.run.ID)
+		if lerr != nil {
 			// A control plane that will not take logs is not a reason to
 			// refuse to build. The file sink still has everything, and §7.2's
 			// resume point means the far side can catch up later.
 			x.emitLater("broker log sink unavailable, continuing locally: %v", lerr)
-		default:
-			x.logSink = ls
-			sinks = append(sinks, logstream.NewBatchSink(
-				&brokerSink{ctx: context.WithoutCancel(ctx), inner: ls},
-				logstream.DefaultBatchFrames, logstream.DefaultBatchDelay))
+			continue
 		}
+		sinks = append(sinks, logstream.NewBatchSink(
+			&brokerSink{ctx: context.WithoutCancel(ctx), inner: ls},
+			logstream.DefaultBatchFrames, logstream.DefaultBatchDelay))
 	}
 
 	x.emitter = logstream.NewEmitter(x.run.ID, x.red, sinks...)
@@ -71,25 +78,21 @@ func (x *execution) flushDeferred() {
 	x.deferred = nil
 }
 
-// closeLogs flushes every sink and records the log resume point.
+// closeLogs flushes every sink.
 //
-// LastAckedSeq is what makes resumption after a partition non-duplicating
-// (finding F6). Persisting it here rather than only holding it in the sink is
-// the difference between surviving a reconnect and surviving a restart.
-func (x *execution) closeLogs(ctx context.Context) {
+// It no longer writes the resume point itself, and that is amendment A28's doing
+// rather than a simplification. last_acked_seq is now keyed by transport, and
+// this package deliberately does not know which transport any of its sinks is —
+// that is the property that lets it fan out to N of them with no branch. Each
+// transport persists its own: internal/broker/local on every batch it takes,
+// internal/broker/remote on every acknowledgement the control plane sends. Both
+// writes are strictly earlier than this one was, so nothing that survived a
+// restart before stops surviving one now.
+func (x *execution) closeLogs(_ context.Context) {
 	if x.emitter == nil {
 		return
 	}
 	_ = x.emitter.Close()
-
-	if x.logSink == nil {
-		return
-	}
-	cctx, cancel := x.o.teardownContext(ctx)
-	defer cancel()
-	if seq := x.logSink.Acked(); seq > 0 {
-		_ = x.o.store.SetLastAckedSeq(cctx, x.run.ID, seq)
-	}
 }
 
 // note writes one agent-stream line: step boundaries, gate results, teardown.

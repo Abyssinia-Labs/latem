@@ -239,7 +239,7 @@ func TestStateMachine_PersistsBeforeReporting(t *testing.T) {
 	}
 
 	_ = o.Close()
-	unreported, err := h.db.Unreported(t.Context())
+	unreported, err := h.db.Unreported(t.Context(), store.BrokerLocal)
 	if err != nil {
 		t.Fatalf("Unreported: %v", err)
 	}

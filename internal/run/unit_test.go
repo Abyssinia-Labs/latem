@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/broker"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -223,15 +225,12 @@ func TestReporter_RetriesWithBackoffAndMarksReported(t *testing.T) {
 
 	h.run(o, h.request("test"))
 	waitFor(t, "the run to be reported despite two failures", func() bool {
-		r, err := h.db.Get(t.Context(), "run1")
-		return err == nil && r.ReportedState == protocol.StateSucceeded
+		rows, err := h.db.Unreported(t.Context(), store.BrokerLocal)
+		return err == nil && len(rows) == 0
 	})
 }
 
 func TestReporter_KeepsOneRunsUpdatesInOrder(t *testing.T) {
-	rep := newReporter(&fakeBroker{}, nil, 1, time.Millisecond)
-	_ = rep
-
 	h := newHarness(t)
 	o := h.build()
 	h.run(o, h.request("test"))
@@ -258,7 +257,7 @@ func TestReporter_KeepsOneRunsUpdatesInOrder(t *testing.T) {
 }
 
 func TestReporter_CloseIsIdempotentAndSilentAfterwards(t *testing.T) {
-	rep := newReporter(&fakeBroker{}, nil, 1, time.Millisecond)
+	rep := newReporter([]broker.Broker{&fakeBroker{}}, 1, time.Millisecond)
 	rep.close()
 	rep.close()
 	// An enqueue after close is dropped rather than panicking on a closed
@@ -268,8 +267,9 @@ func TestReporter_CloseIsIdempotentAndSilentAfterwards(t *testing.T) {
 }
 
 func TestReporter_WithoutABrokerDoesNothing(t *testing.T) {
-	rep := newReporter(nil, nil, 0, 0)
+	rep := newReporter(nil, 0, 0)
 	rep.enqueue("run1", protocol.Update{State: protocol.StateQueued})
+	rep.forget("run1")
 	rep.close()
 }
 

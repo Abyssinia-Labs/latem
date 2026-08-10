@@ -12,6 +12,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -370,14 +371,24 @@ func TestLogs_StdoutAndStderrAreDistinguished(t *testing.T) {
 	}
 }
 
+// TestLogs_SeqIsPersistedAsTheResumePoint is finding F6's durable half. Since
+// amendment A28 the persisting is the transport's, under its own key, and the
+// key is the assertion: a resume point written where nobody reads it is the same
+// as none at all.
 func TestLogs_SeqIsPersistedAsTheResumePoint(t *testing.T) {
 	h := newHarness(t)
 	o := h.build()
 	h.run(o, h.request("test"))
 
-	row := mustGet(t, h.db, "run1")
-	if row.LastAckedSeq == 0 {
+	seq, err := h.db.LastAckedSeq(t.Context(), store.BrokerLocal, "run1")
+	if err != nil {
+		t.Fatalf("LastAckedSeq: %v", err)
+	}
+	if seq == 0 {
 		t.Fatal("no log resume point was persisted (finding F6)")
+	}
+	if other, oerr := h.db.LastAckedSeq(t.Context(), store.BrokerRemote, "run1"); oerr != nil || other != 0 {
+		t.Errorf("last_acked_seq(remote) = %d, %v; a transport that never saw a frame was credited with %d of them", other, oerr, other)
 	}
 }
 

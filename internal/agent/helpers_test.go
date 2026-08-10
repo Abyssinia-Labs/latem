@@ -34,6 +34,9 @@ type configOptions struct {
 	repoURL     string
 	queueTTL    string
 	grace       string
+	// remoteURL turns on [broker.remote] and writes an agent.key beside the
+	// config, which the loader requires at mode 0600 when the transport is on.
+	remoteURL string
 }
 
 // newConfigDir writes a valid config directory and loads it.
@@ -85,13 +88,13 @@ metrics_addr   = %q
 
 [broker.local]
 enabled = true
-
+%s
 [repos.app]
 url          = %q
 allowed_refs = ["main"]
 require_approval_otherwise = true
 approval_ttl = "24h"
-%s`, opts.grace, opts.queueTTL, opts.metricsAddr, opts.repoURL, opts.runners)
+%s`, opts.grace, opts.queueTTL, opts.metricsAddr, remoteBlock(t, dir, opts.remoteURL), opts.repoURL, opts.runners)
 
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -107,6 +110,19 @@ approval_ttl = "24h"
 		t.Fatalf("loading the config this test just wrote: %v", err)
 	}
 	return cfg
+}
+
+// remoteBlock writes the machine token and returns the [broker.remote] table,
+// or nothing when the test did not ask for one.
+func remoteBlock(t *testing.T, dir, url string) string {
+	t.Helper()
+	if url == "" {
+		return ""
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent.key"), []byte("tok-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("\n[broker.remote]\nenabled = true\nurl     = %q\n", url)
 }
 
 // shortTempDir is t.TempDir() with a length budget.
@@ -157,6 +173,9 @@ type fakeEnv struct {
 
 func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, _ io.Writer) (int, error) {
 	_, _ = io.WriteString(stdout, "step "+step.Name+"\n")
+	if e.ex.emit != nil {
+		e.ex.emit(stdout)
+	}
 	if e.ex.hold > 0 {
 		select {
 		case <-time.After(e.ex.hold):
@@ -196,6 +215,10 @@ type fakeExecutor struct {
 	name     string
 	hold     time.Duration
 	exitCode int
+	// emit lets a test drive a step's stdout: how much, and when. It is what
+	// makes "the link partitions mid-run" mean mid-run rather than
+	// mid-scheduling. Set it before the agent starts.
+	emit func(stdout io.Writer)
 
 	mu           sync.Mutex
 	preflightErr error
