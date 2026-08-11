@@ -267,7 +267,7 @@ func TestIntegration_LatemEnv(t *testing.T) {
 // §13.1 forgoes `--rm` so that a failed step's output is still collectable.
 func TestIntegration_ArtifactsSurviveAFailingStep(t *testing.T) {
 	e := newIntegrationExecutor(t, nil)
-	env, _ := prepareRun(t, e, "int-artifacts", nil)
+	env, ws := prepareRun(t, e, "int-artifacts", nil)
 
 	code, out := run(t, env, "build-then-fail", strings.Join([]string{
 		"mkdir -p /workspace/dist/nested",
@@ -280,40 +280,21 @@ func TestIntegration_ArtifactsSurviveAFailingStep(t *testing.T) {
 		t.Fatalf("step exited %d, want 1: %s", code, out)
 	}
 
-	files, err := env.Fetch(context.Background(), "dist/**/*.apk")
-	if err != nil {
-		t.Fatalf("Fetch after a failed step: %v", err)
-	}
-	got := map[string]string{}
-	for _, f := range files {
-		body, readErr := io.ReadAll(f.Content)
-		_ = f.Content.Close()
-		if readErr != nil {
-			t.Fatalf("read %s: %v", f.Path, readErr)
+	// Read the host side of the bind mount, which is where collection actually
+	// happens: internal/artifact walks the workspace path directly, and does so
+	// during `collecting` — after this environment has been torn down
+	// (amendment A29 removed executor.Env.Fetch for exactly that reason).
+	for rel, want := range map[string]string{
+		"dist/app.apk":          "apk",
+		"dist/nested/other.apk": "deep",
+	} {
+		body, err := os.ReadFile(filepath.Join(ws, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("a failing step lost %s, which is when artifacts matter most: %v", rel, err)
 		}
-		got[f.Path] = strings.TrimSpace(string(body))
-	}
-	if got["dist/app.apk"] != "apk" || got["dist/nested/other.apk"] != "deep" {
-		t.Errorf("Fetch = %v, want both apks", got)
-	}
-}
-
-func TestIntegration_FetchRejectsASymlinkEscape(t *testing.T) {
-	e := newIntegrationExecutor(t, nil)
-	env, _ := prepareRun(t, e, "int-escape", nil)
-
-	code, out := run(t, env, "leak", strings.Join([]string{
-		"mkdir -p /workspace/dist",
-		"ln -s /etc/passwd /workspace/dist/leak.apk",
-	}, "\n"))
-	if code != 0 {
-		t.Fatalf("setup exited %d: %s", code, out)
-	}
-
-	if _, err := env.Fetch(context.Background(), "dist/*.apk"); err == nil {
-		t.Fatal("a symlink to /etc/passwd was collected as an artifact")
-	} else if got := CodeOf(err); got != protocol.ErrArtifact {
-		t.Errorf("error code = %q, want %q (%v)", got, protocol.ErrArtifact, err)
+		if strings.TrimSpace(string(body)) != want {
+			t.Errorf("%s = %q, want %q", rel, strings.TrimSpace(string(body)), want)
+		}
 	}
 }
 

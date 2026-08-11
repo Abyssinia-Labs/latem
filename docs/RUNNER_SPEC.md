@@ -1103,6 +1103,12 @@ Retention: `agent.log_retention` (default 14d), enforced by the daily ticker. Lo
 ## 17. Artifacts
 
 - Globs are relative to the workspace root and MUST NOT escape it. Resolve, then verify the result is within the workspace; reject symlinks pointing outside (`E_ARTIFACT`).
+- **Glob semantics match the ref policy globs of §5**, so a job author learns one set of rules: `*` matches within a single path segment and does not cross a `/`; `**` matches zero or more whole segments.
+- **A declaration naming a directory is `E_BAD_REGISTRY`** (amendment A30). `artifacts: [dist]` is refused, and the message names the two spellings that work — `dist/**` for everything beneath, `dist/*` for the immediate children.
+
+  Both silent alternatives are worse than failing. Expanding a directory is unbounded against the artifact budget below, which is evicted oldest-first — so one `artifacts: [dist]` pointed at a directory of build intermediates quietly deletes *other runs'* artifacts, and the cost lands somewhere the author never looks. Matching nothing leaves an operator believing a release was collected when it was not. The author's intent is unknowable from `dist` alone; asking, in seconds, beats guessing.
+
+  This applies only to a **literal path**. A pattern that matches a directory simply does not collect it — a directory is not an artifact — which is what makes `*` stop at one segment.
 - Copied to `~/.latem/artifacts/<run-id>/`, preserving relative paths.
 - Retention per declaration, enforced daily.
 - Only `ArtifactRef{name, size, sha256}` is reported to a broker. Content never crosses the boundary (§5).
@@ -1462,7 +1468,9 @@ Draft 01 carried six. Two are now decided and moved into the body: step-level ti
 3. **Windows.** No current need. The executor interface should not acquire assumptions that make it impossible, but no work until someone asks.
 4. **Approval UX.** INV-5 requires local approval, which is safe but awkward when travelling — precisely the case the hosted layer exists for. A signed approval from an authenticated session may be acceptable, but it weakens the rule and needs a written threat model before it ships. Note that granting approval remotely would require a third inbound command kind, which §7.1 declares closed; that is the size of the change, and it is the right size.
 5. **Non-Expo mobile projects.** §18 is written entirely around `eas build --local`, while the product describes itself as building iOS and Android applications generally. Nothing in the agent is Expo-specific — steps are shell — but `examples/` currently would be. A bare `xcodebuild` + Gradle example is cheap insurance against the wedge being narrower than the pitch. Decide by M5.
-6. **Control plane licence.** The runner is Apache-2.0. The hosted layer is a separate decision and does not have to match; making it deliberately, before there is a public repo with an implied answer, is easier than making it later.
+6. ~~**Control plane licence.**~~ **Closed.** The hosted layer now lives in its own repository. This one is Apache-2.0 throughout, and the hosted layer's licence is that repository's decision rather than a question this one has to hold open. The worry recorded here — "a public repo with an implied answer" — is exactly what a commercial layer sitting inside an Apache-2.0 tree would have produced, so the split is the answer rather than a deferral of it.
+
+   One consequence is worth naming: the two halves can now drift. `pkg/protocol` and [`docs/PROTOCOL.md`](./PROTOCOL.md) are the contract between them, and `docs/PROTOCOL.md` is descriptive of `internal/broker/remote` rather than aspirational — where it and this document disagree, the Go side is what ships.
 
 ---
 
@@ -1545,7 +1553,19 @@ Four more implementations — the orchestrator, the local broker, the CLI, and t
 
 **A27 is a security fix, not a feature.** The half of INV-5 that worked — parking — is the half that costs nothing to get right. The half that did not is the one an operator relies on, and the obvious implementation of it, a boolean "approved" consulted by gate 8, would have been worse than none: it reads as a control, and it grants execution of whatever a branch points at whenever a runner gets round to the run. The whole design follows from refusing that. F5's ordering (normalize → match → resolve) is corrected to normalize → resolve → match; matching still happens against the ref *name*, so no policy answer changes.
 
+### Amendment from the integration suite
+
+| # | Section | Change | Why it surfaced |
+|---|---|---|---|
+| A29 | §13, §17 | **`executor.Env.Fetch` and `executor.File` removed** | `Fetch` had no production caller and never had one: artifacts are collected by `internal/artifact` against the host workspace path, and all three executors share that path — docker bind-mounts it, native uses the clone directly, and §13.2 shares it into the VM with `--dir`, which is why that section's own Fetch line says "rsync from the shared dir". So two implementations of glob resolution and symlink containment existed, ran never, and disagreed with the one that does run. Removing them deleted ~1,240 lines and resolved the §17 divergence below by construction |
+
+| A30 | §17, §21 | **A literal artifact path naming a directory is `E_BAD_REGISTRY`**; a glob matching one collects nothing rather than expanding | `artifacts: [dist]` had no defensible silent meaning. Expanding is unbounded against a 50 GB budget evicted oldest-first, so it deletes other runs' artifacts; matching nothing tells an operator a release was collected when it was not. Removing the expansion also made `*` stop crossing a `/`, which §17 had claimed all along and this package had never done |
+
+A29 is worth stating as a rule rather than an incident: **an abstraction with no caller is not "ready for the third implementation", it is untested code that has already drifted.** Both copies had containment checks written for a workspace sitting next to `~/.ssh` and `~/Library/Keychains`, and neither was the code protecting anything.
+
+A29 left one question behind — what a bare directory in `artifacts:` *should* mean — and **A30 answers it: nothing, loudly.** The two are worth reading together. A29 removed the disagreement between implementations; A30 chose the behaviour. Neither would have been safe alone: settling the policy while two globbers still existed would have settled it in only one of them.
+
 Two further items are recorded but **not** amended, because neither is a contract defect:
 
 - **`$LATEM_ENV` parsing, artifact containment, and the error triple are duplicated verbatim across the docker and native executors**, and will be a third copy with Tart — while §9 requires the step contract be identical across all three. The shared code has nowhere to live because `internal/executor` is frozen. This is tech debt with a known trigger point (the Tart executor), not a gap, and refactoring two working packages now buys nothing.
-- **Artifact glob semantics diverge**: `internal/artifact.Resolve` expands a directory to the regular files beneath it; the docker executor's collector returns nothing for a directory, and its test asserts that. `artifacts: [dist]` therefore collects different files depending on which path runs. §17 does not say which is right, and it should before M3 closes.
+- ~~**Artifact glob semantics diverge**~~ — **resolved by A29.** The divergence existed because two glob implementations lived in the executors and never ran. With `Env.Fetch` removed there is one, so `artifacts: [dist]` has one meaning. What §17 still owes an answer to is whether that meaning is the right one; see A29.

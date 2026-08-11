@@ -83,9 +83,9 @@ func TestValidateInterpolation_ActionsSyntaxIsNamed(t *testing.T) {
 	}
 }
 
-// steps[].run is literal. An expansion there means the author expected
-// substitution that will not happen, and passing "${input.X}" through to bash
-// is the confusion that leads people to reach for eval.
+// steps[].run is a shell command, so the shell's own expansions belong there
+// and this system's do not. Refusing ${input.X} stops a literal reaching bash;
+// refusing ${HOME} would have failed the first real build script that used it.
 func TestRejectInterpolation_InRun(t *testing.T) {
 	for _, v := range []string{
 		"./ci/build.sh ${input.CHANNEL}",
@@ -94,6 +94,20 @@ func TestRejectInterpolation_InRun(t *testing.T) {
 	} {
 		if err := rejectInterpolation(v); err == nil {
 			t.Errorf("accepted an expansion in run: %q", v)
+		}
+	}
+	// POSIX parameter expansion is the shell's business. `run` is a shell
+	// command, and §9 confines only the ${input.NAME} syntax to steps[].env.
+	for _, v := range []string{
+		"echo ${HOME}",
+		"echo ${FOO:-default}",
+		"echo ${VAR%%.*}",
+		"echo ${#items[@]}",
+		"echo ${VAR#prefix}",
+		"tar -C ${BUILD_DIR} -cf out.tar .",
+	} {
+		if err := rejectInterpolation(v); err != nil {
+			t.Errorf("rejected ordinary shell expansion %q: %v", v, err)
 		}
 	}
 	for _, v := range []string{

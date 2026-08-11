@@ -441,18 +441,6 @@ func buildEnviron(base []string, env map[string]string) []string {
 	return append(out, overlay...)
 }
 
-// Fetch resolves an artifact glob and opens what it matches (§17).
-//
-// It reads the workspace directly, which on this executor is the only thing it
-// could do — there is no "out of the environment" to copy from — and which is
-// also what the docker executor does through the host side of its bind mount.
-// The consequence worth naming is that Fetch keeps working after [runEnv.Close]:
-// the workspace outlives the environment, and artifacts matter most exactly
-// when a step has failed.
-func (e *runEnv) Fetch(_ context.Context, glob string) ([]executor.File, error) {
-	return collectArtifacts(e.workspace, glob)
-}
-
 // Close tears the environment down.
 //
 // Two things, in order. Any step still running is stopped as a process group,

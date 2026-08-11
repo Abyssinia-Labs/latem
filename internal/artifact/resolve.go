@@ -38,8 +38,18 @@ type Match struct {
 // Semantics, matching the ref policy globs in RUNNER_SPEC §5 so that a job
 // author learns one set of rules: a single star matches within one path
 // segment and does not cross a "/", a double star matches zero or more whole
-// segments. A pattern naming a directory expands to every regular file beneath
-// it.
+// segments.
+//
+// A *pattern* that matches a directory expands to the regular files beneath it.
+// A *literal path* that names a directory does not: it is E_BAD_REGISTRY, and
+// the message names the two spellings that would have worked (amendment A30).
+// The difference is what the author wrote. "dist/**" describes a set and a
+// directory in it is unremarkable; "dist" names one thing, and if that thing is
+// a directory the declaration cannot be honoured as written. Guessing between
+// "collect everything under it" and "collect nothing" is the choice this
+// refuses to make silently — the first is unbounded against a 50 GB budget
+// evicted oldest-first, and the second leaves an operator believing a release
+// was collected when it was not.
 //
 // Nothing outside the workspace can be returned, and an attempt to leave it is
 // an error rather than an omission:
@@ -72,6 +82,7 @@ func Resolve(workspace, pattern string) ([]Match, error) {
 	r := &resolver{
 		root:    root,
 		pattern: strings.Split(pat, "/"),
+		literal: !strings.ContainsAny(pat, "*?["),
 		seen:    map[string]bool{},
 	}
 	if err := r.walk(root, "", 0); err != nil {
@@ -148,14 +159,14 @@ func realRoot(workspace string) (string, error) {
 type resolver struct {
 	root    string
 	pattern []string
+	// literal is true when the declaration contained no glob metacharacter, so
+	// it named one path rather than describing a set. A literal that turns out
+	// to be a directory is E_BAD_REGISTRY (amendment A30).
+	literal bool
 	// seen holds resolved directories already walked, so a symlink loop inside
 	// the workspace terminates instead of recursing until the stack runs out.
 	seen map[string]bool
-	// matched holds slash-separated relative paths of directories the pattern
-	// named. Everything beneath one of them is an artifact, which is how a
-	// pattern like "build/outputs" expands.
-	matched []string
-	out     []Match
+	out  []Match
 }
 
 func (r *resolver) walk(dir, rel string, depth int) error {
@@ -173,8 +184,7 @@ func (r *resolver) walk(dir, rel string, depth int) error {
 			childRel = rel + "/" + e.Name()
 		}
 		segs := strings.Split(childRel, "/")
-		inMatched := r.underMatched(childRel)
-		matched := inMatched || matchSegments(r.pattern, segs)
+		matched := matchSegments(r.pattern, segs)
 		descend := matched || canDescend(r.pattern, segs)
 
 		switch {
@@ -187,9 +197,24 @@ func (r *resolver) walk(dir, rel string, depth int) error {
 			}
 
 		case e.IsDir():
-			if matched && !inMatched {
-				r.matched = append(r.matched, childRel)
+			if matched && r.literal {
+				// The author named a path, and it is a directory. Neither
+				// available silence is acceptable: expanding it is unbounded
+				// against a 50 GB budget evicted oldest-first, so one
+				// `artifacts: [dist]` over a directory of build intermediates
+				// quietly deletes *other runs'* artifacts; and matching
+				// nothing leaves an operator believing a release was
+				// collected when it was not. Say so in seconds instead
+				// (amendment A30).
+				return registryErr(
+					"artifact path %q names a directory, not a file; write %q to collect "+
+						"the files beneath it, or %q for its immediate children",
+					childRel, childRel+"/**", childRel+"/*")
 			}
+			// A glob that matched a directory contributes nothing of its own:
+			// a directory is not an artifact. Whether the walk continues into
+			// it is `descend`'s business, which is what makes "*" stop at one
+			// segment and "**" not.
 			if !descend {
 				continue
 			}
@@ -255,8 +280,11 @@ func (r *resolver) follow(link, rel string, matched bool, depth int) error {
 			return nil
 		}
 		r.seen[resolved] = true
-		if matched && !r.underMatched(rel) {
-			r.matched = append(r.matched, rel)
+		if matched && r.literal {
+			return registryErr(
+				"artifact path %q names a directory, not a file; write %q to collect "+
+					"the files beneath it, or %q for its immediate children",
+				rel, rel+"/**", rel+"/*")
 		}
 		return r.walk(resolved, rel, depth+1)
 
@@ -275,15 +303,6 @@ func (r *resolver) escape(rel, target string) error {
 
 func (r *resolver) add(m Match) {
 	r.out = append(r.out, m)
-}
-
-func (r *resolver) underMatched(rel string) bool {
-	for _, dir := range r.matched {
-		if strings.HasPrefix(rel, dir+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // display renders an absolute path relative to the workspace for messages, so

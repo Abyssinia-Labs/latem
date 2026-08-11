@@ -352,9 +352,14 @@ func TestM6_CommandsAreConsumedFromTheRemoteTransport(t *testing.T) {
 	if !cp.HasState(runID, protocol.StateRunning) {
 		t.Error("the control plane never saw the run start; it would show as queued until it finished")
 	}
-	if len(cp.Seqs(runID)) == 0 {
-		t.Error("no log frames reached the control plane for a run it started")
-	}
+	// Waited for, not sampled. The terminal state arriving does not mean the
+	// log frames have: the sink batches at 100 frames or 250 ms (§16) and the
+	// tail of a build flushes after the transition that ended it. Reading the
+	// count here made this fail roughly one run in four under -race, for a
+	// reason that had nothing to do with the remote command stream it tests.
+	waitFor(t, "the control plane to receive the run's log frames", 60*time.Second, func() bool {
+		return len(cp.Seqs(runID)) > 0
+	})
 
 	// A delivered transition has to be recorded under this transport's key, or
 	// the run never leaves store.Unreported(remote) and every reconnect replays

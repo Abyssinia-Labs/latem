@@ -12,16 +12,29 @@ import (
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
-// Collector copies a run's declared outputs into ~/.latem/artifacts/<run-id>/.
+// Collector copies a run's declared outputs into <dir>/<run-id>/.
 type Collector struct {
-	root string
-	now  func() time.Time
+	dir string
+	now func() time.Time
 }
 
-// NewCollector builds a collector storing under root/artifacts, where root is
-// the agent home (~/.latem).
-func NewCollector(root string) *Collector {
-	return &Collector{root: root, now: time.Now}
+// NewCollector builds a collector storing each run under dir/<run-id>/, where
+// dir is the artifact directory itself — config.Paths.Artifacts.
+//
+// It takes the artifact directory rather than the agent home, and that is the
+// fix for a real bug. This constructor used to take the home and append
+// "artifacts" itself, while every caller passed config.Paths.Artifacts, which
+// already ends in "artifacts". Files landed in
+// ~/.latem/artifacts/artifacts/<run-id>/ — and the daily retention sweep
+// pruned ~/.latem/artifacts, one level above anything ever written. So §17's
+// retention and the 50 GB budget silently reclaimed nothing, on a machine
+// whose .ipa files are 50-300 MB each.
+//
+// config.DerivePaths is the single authority on the layout (amendment A26).
+// Re-deriving one segment of it here is what let the two disagree, so this
+// package no longer knows the name of its own directory.
+func NewCollector(dir string) *Collector {
+	return &Collector{dir: dir, now: time.Now}
 }
 
 // WithClock replaces the collector's clock, for tests and for a caller that
@@ -30,7 +43,7 @@ func (c *Collector) WithClock(now func() time.Time) *Collector {
 	if now == nil {
 		return c
 	}
-	return &Collector{root: c.root, now: now}
+	return &Collector{dir: c.dir, now: now}
 }
 
 // Dir is where a run's artifacts live.
@@ -43,7 +56,7 @@ func (c *Collector) Dir(runID string) (string, error) {
 	if err := protocol.ValidateID(runID); err != nil {
 		return "", artifactErr(err, "refusing to build an artifact path from an invalid run id")
 	}
-	base := filepath.Join(c.root, "artifacts")
+	base := c.dir
 	dir := filepath.Join(base, runID)
 
 	// Belt and braces, as in logstream.NewFileSink: whatever the id was, the

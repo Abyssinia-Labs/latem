@@ -89,11 +89,6 @@ type Env interface {
 	// executor package to get it right, defeating the interface (amendment A9).
 	EnvFile() string
 
-	// Fetch copies paths matching glob out of the environment, for artifact
-	// collection. The glob is relative to the workspace root and must not
-	// escape it.
-	Fetch(ctx context.Context, glob string) ([]File, error)
-
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM carrying an Xcode image costs ~90 GB.
@@ -162,15 +157,6 @@ type Resources struct {
 	CPUs   float64
 	Memory string // "8g"
 	GPU    bool
-}
-
-// File is one artifact retrieved by [Env.Fetch].
-type File struct {
-	// Path is relative to the workspace root.
-	Path      string
-	SizeBytes int64
-	Mode      uint32
-	Content   io.ReadCloser
 }
 
 // NotImplemented satisfies [Executor] by refusing every call. See

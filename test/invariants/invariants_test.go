@@ -4,14 +4,17 @@
 // before anyone opens a file. A pull request that weakens one of these is
 // rejected regardless of its other merits.
 //
-// Every test here starts skipped. That is deliberate: a skipped test is
+// Every test here started skipped. That was deliberate: a skipped test is
 // visible debt that shows up on every `go test ./...`, whereas a test that
 // does not exist yet is invisible and gets written late, or not at all. Each
-// is unskipped by the workstream that makes it pass, in the same pull request
-// that makes it pass — never separately.
+// was unskipped by the workstream that made it pass, in the same pull request
+// that made it pass — never separately. As of WS-16 none of the five is
+// skipped, and a skip reappearing here is a regression rather than a plan.
 //
-// These are not build-tagged. They must run in the default `go test ./...` so
-// their skip lines stay in front of people.
+// These are not build-tagged. They must run in the default `go test ./...`.
+// The three cross-cutting ones need a real agent, a real sqlite database and a
+// real git repository, all of which this suite builds for itself; none of them
+// needs a daemon, so the default gate stays runnable on a laptop.
 package invariants
 
 import (
@@ -35,34 +38,19 @@ import (
 
 // INV-2 — The broker supplies names, never definitions.
 //
-// Fuzz both command kinds with hostile values in every field; assert no
-// execution occurs outside the registry-declared command set, and that the
-// decoder rejects any kind outside the closed set rather than defaulting.
-//
-// Two thirds are already covered at the unit level:
-// pkg/protocol/command_test.go pins the closed command set, and
-// internal/registry/admission_test.go pins that a hostile input reaches only
-// an environment map and never a command string. What remains is the
-// end-to-end claim — that no execution occurs outside the registry-declared
-// command set — which needs a real executor to assert against.
-func TestINV2_NamesNotDefinitions(t *testing.T) {
-	t.Skip("registry half done in WS-01; execution half needs WS-10 (run orchestration)")
-}
+// Unskipped by WS-16 and moved to inv2_test.go. The end-to-end half it was
+// waiting for — that no execution occurs outside the registry-declared command
+// set — needs a broker, an admission chain and an executor in one process, so
+// it lives with the harness in harness_test.go rather than here.
 
 // INV-3 — Broker-supplied values are never interpolated into a shell.
 //
-// The validation table — --upload-pack=/bin/sh, "; rm -rf /", $(id),
-// ../../etc/passwd, embedded newlines, 10 KB refs, unicode homoglyphs — lives
-// in internal/registry/ref_test.go and passes.
-//
-// What is left is the claim validation exists to back up: that every git
-// invocation passes argv as a slice with "--" before user-influenced
-// arguments, and that nothing anywhere reaches `sh -c`. That is a property of
-// the call sites, not of the validator, and the call sites are in
-// internal/source.
-func TestINV3_NoShellInterpolation(t *testing.T) {
-	t.Skip("validation done in WS-01; git call sites need WS-06 (source acquisition)")
-}
+// Unskipped by WS-16 and split in two. inv3_test.go is portable and holds the
+// structural half — no file in the tree may build a shell invocation outside
+// the four sanctioned step-execution sites. inv3_unix_test.go carries a
+// `//go:build unix` tag and holds the behavioural half, because its detector is
+// a shell planted on PATH and the negative control that proves the detector
+// works has to execute one.
 
 // INV-4 — Secrets never leave the machine.
 //
@@ -77,9 +65,11 @@ func TestINV3_NoShellInterpolation(t *testing.T) {
 //
 // This covers the log path end to end: a real emitter, a real on-disk file
 // sink, and a sink standing in for the broker. Two further surfaces named by
-// the invariant — inputs_json in the store and Update.ErrorMsg — do not exist
-// yet; WS-05 and WS-10 extend this test when they land. What is asserted here
-// is the dominant leak path and the one §16 is written about.
+// the invariant — inputs_json in the store and Update.ErrorMsg — did not exist
+// when it was written. They do now, and inv4_e2e_test.go is the extension:
+// a whole job through a real agent, with every byte the agent wrote to disk
+// swept afterwards. What is asserted here is the dominant leak path and the
+// one §16 is written about.
 func TestINV4_SecretsNeverLeave(t *testing.T) {
 	const p8 = `-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj
@@ -88,10 +78,31 @@ NMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s+CLOyS56YyCFGeJZ
 qgtzJ6GR3eqoYSW9b9UMvkBpZODSctWSNGj3P7jRFDO5VoTwCQAWbFnOjDfH5Ulg
 -----END PRIVATE KEY-----`
 
+	// A multi-line secret that is not a PEM, added by WS-16, and the reason is
+	// worth stating because it is the difference between this test working and
+	// this test looking like it works.
+	//
+	// The emitter carries a second defence beyond §16's registration rules: a
+	// guard that suppresses every line between "-----BEGIN … PRIVATE KEY-----"
+	// and its END, for undeclared keys a build prints by accident. It is a good
+	// guard. It also means the PEM above is protected whether or not the
+	// redactor registered the value's individual lines — so with only a PEM
+	// here, reverting finding F3 in internal/logstream leaves this test green.
+	// Verified by doing it. That is precisely the regression §5 says this test
+	// exists to catch, so the fixture set needs a multi-line secret with no
+	// guard standing behind it.
+	const serviceAccountJSON = `{
+  "type": "service_account",
+  "project_id": "latem-releases",
+  "private_key_id": "8f2c1a9e4b7d0c3a5e6f8091a2b3c4d5e6f70819",
+  "client_email": "releases@latem-releases.iam.gserviceaccount.com"
+}`
+
 	secrets := map[string]string{
-		"APP_STORE_CONNECT_KEY_P8":  p8,
-		"MATCH_PASSWORD":            "correct-horse-battery-staple",
-		"ANDROID_KEYSTORE_PASSWORD": "hunter2-but-longer",
+		"APP_STORE_CONNECT_KEY_P8":    p8,
+		"GOOGLE_SERVICE_ACCOUNT_JSON": serviceAccountJSON,
+		"MATCH_PASSWORD":              "correct-horse-battery-staple",
+		"ANDROID_KEYSTORE_PASSWORD":   "hunter2-but-longer",
 	}
 
 	dir := t.TempDir()
@@ -181,13 +192,8 @@ func (s *recordingSink) lines() []string {
 
 // INV-5 — The registry comes from disk, at the pinned commit.
 //
-// The policy half passes in internal/registry/ref_test.go: normalization
-// before matching, refs/heads/main and main receiving the same answer, tags
-// requiring an explicit entry, and refs/pull/* failing by construction.
-//
-// Still outstanding: that jobs.yaml is read from the checked-out workspace at
-// the resolved commit and never from a broker, and that approval is a local
-// action no inbound command can grant. Both are orchestration properties.
-func TestINV5_RegistryFromDisk(t *testing.T) {
-	t.Skip("policy half done in WS-01; disk read and approval need WS-10 (run orchestration)")
-}
+// Unskipped by WS-16 and moved to inv5_test.go. Both outstanding halves —
+// that jobs.yaml is read from the checked-out workspace at the resolved
+// commit, and that approval is a local action bound to a commit (amendment
+// A27) — are orchestration properties and need the harness in
+// harness_test.go.

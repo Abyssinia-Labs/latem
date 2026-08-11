@@ -191,8 +191,6 @@ func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, _ io.Wri
 
 func (e *fakeEnv) EnvFile() string { return filepath.Join(e.ex.dir, e.runID+".env") }
 
-func (e *fakeEnv) Fetch(context.Context, string) ([]executor.File, error) { return nil, nil }
-
 func (e *fakeEnv) Close(context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

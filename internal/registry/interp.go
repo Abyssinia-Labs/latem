@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -40,24 +41,59 @@ func eachExpansion(s string) ([]string, error) {
 	return found, nil
 }
 
-// rejectInterpolation fails if s contains any expansion at all.
+// rejectInterpolation fails if s reaches for one of this system's namespaces.
 //
 // Applied to steps[].run. RUNNER_SPEC §9 confines ${input.NAME} to env values
-// and never substitutes into a command, so an expansion appearing in run means
-// the author expected something that will not happen. Rejecting is kinder than
-// passing a literal "${input.CHANNEL}" to bash.
+// and never substitutes into a command, so ${input.CHANNEL} appearing in a
+// command means the author expected something that will not happen. Rejecting
+// is kinder than passing a literal "${input.CHANNEL}" to bash.
+//
+// It used to reject *every* ${...}, which was wrong and would have hit the
+// first real repository: `run` is a shell command, and ${HOME},
+// ${FOO:-default} and ${VAR%%.*} are the shell's, not this system's. The
+// distinction is [namespacedRef].
 func rejectInterpolation(s string) error {
 	found, err := eachExpansion(s)
 	if err != nil {
 		return err
 	}
-	if len(found) > 0 {
+	for _, inner := range found {
+		if !namespacedRef.MatchString(inner) {
+			// Anything else belongs to the shell, and `run` is a shell command.
+			// ${HOME}, ${FOO:-default}, ${VAR%%.*}, ${#items[@]} are ordinary
+			// POSIX parameter expansion. Refusing them made this validator fail
+			// working build scripts with E_BAD_REGISTRY, and §9 confines only
+			// this system's ${input.NAME} *syntax* to steps[].env — it says
+			// nothing about what a shell may do with a command.
+			continue
+		}
+		if strings.EqualFold(inner[:len(inputPrefix)], inputPrefix) {
+			return fmt.Errorf(
+				"${%s} is not substituted into run, only into steps[].env — "+
+					"declare it in env and reference the variable instead", inner)
+		}
 		return fmt.Errorf(
-			"${%s} is not substituted into run, only into steps[].env — "+
-				"declare it in env and reference the variable instead", found[0])
+			"${%s} is not a thing this system substitutes; the only expansion is "+
+				"${input.NAME}, and only in steps[].env. Secrets are never "+
+				"interpolated — a declared secret arrives as an environment "+
+				"variable of that name (§15)", inner)
 	}
 	return nil
 }
+
+// namespacedRef matches a bare dotted identifier chain: input.CHANNEL,
+// secret.KEY, INPUT.X.
+//
+// That shape is this project's namespace syntax being reached for, and it can
+// be nothing else — a dot is not legal in a POSIX parameter name, so no shell
+// would have expanded it either. Requiring the *whole* expansion to match is
+// what keeps real shell out of it: ${VAR%%.*} contains a dot but also an
+// operator, so it is the shell's business and passes through.
+//
+// The case-insensitivity is for the near-miss. ${INPUT.CHANNEL} is somebody
+// reaching for this feature and getting the case wrong; without this they would
+// get a step that silently ran with a literal "${INPUT.CHANNEL}" in the command.
+var namespacedRef = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`)
 
 // validateInterpolation checks every expansion in an env value.
 func validateInterpolation(s string, inputs map[string]*Input) error {

@@ -164,8 +164,6 @@ func (e *fakeEnv) EnvFile() string {
 	return e.envFile
 }
 
-func (e *fakeEnv) Fetch(context.Context, string) ([]executor.File, error) { return nil, nil }
-
 func (e *fakeEnv) Close(context.Context) error {
 	e.mu.Lock()
 	e.closes++

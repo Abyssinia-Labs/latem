@@ -148,7 +148,7 @@ func TestResolve_RejectsSymlinksLeavingTheWorkspace(t *testing.T) {
 		},
 		{
 			name:    "escape inside a matched directory",
-			pattern: "build",
+			pattern: "build/**",
 			build: func(t *testing.T, root, outside string) {
 				symlink(t, filepath.Join(outside, "loot.txt"), filepath.Join(root, "build", "leak.txt"))
 			},
@@ -332,13 +332,21 @@ func TestResolve_GlobSemantics(t *testing.T) {
 			want:    []string{"app.ipa"},
 		},
 		{
-			name:    "a directory expands to everything beneath it",
-			pattern: "build/outputs",
+			// A double star reaches nested files; a single star does not, which
+			// is the rule the doc comment has always stated and which amendment
+			// A30 made true.
+			name:    "a double star reaches nested files",
+			pattern: "build/outputs/**",
 			want:    []string{"build/outputs/bundle/app.aab"},
 		},
 		{
-			name:    "a trailing slash names the same directory",
-			pattern: "coverage/",
+			name:    "a single star does not cross a separator",
+			pattern: "build/outputs/*",
+			want:    nil,
+		},
+		{
+			name:    "a star matches the immediate children only",
+			pattern: "coverage/*",
 			want:    []string{"coverage/lcov.info"},
 		},
 		{
@@ -458,5 +466,46 @@ func TestWithin(t *testing.T) {
 		if got := within(tc.root, tc.path); got != tc.want {
 			t.Errorf("within(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
 		}
+	}
+}
+
+// A bare directory names one thing that is not a file, so it cannot be honoured
+// as written (amendment A30). Both silent readings were worse: expanding is
+// unbounded against a 50 GB budget evicted oldest-first, and matching nothing
+// leaves an operator believing a release was collected when it was not.
+func TestResolve_ABareDirectoryIsARegistryError(t *testing.T) {
+	ws := t.TempDir()
+	write(t, filepath.Join(ws, "dist", "one.txt"), "one")
+	write(t, filepath.Join(ws, "dist", "sub", "two.txt"), "two")
+	write(t, filepath.Join(ws, "app.ipa"), "ipa")
+
+	for _, pattern := range []string{"dist", "dist/", "dist/sub"} {
+		t.Run(pattern, func(t *testing.T) {
+			got, err := Resolve(ws, pattern)
+			if err == nil {
+				t.Fatalf("Resolve(%q) = %v, want a refusal", pattern, rels(got))
+			}
+			// E_BAD_REGISTRY, not E_ARTIFACT: the fix is a line in jobs.yaml,
+			// and a control plane offering a retry for this would be wrong.
+			if Code(err) != protocol.ErrBadRegistry {
+				t.Errorf("Code = %q, want %s", Code(err), protocol.ErrBadRegistry)
+			}
+			// The message has to carry the fix, or it just moves the confusion.
+			for _, want := range []string{"names a directory", "/**", "/*"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error does not mention %q: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// A literal path that names a *file* is untouched: naming one artifact is
+	// the ordinary case and must keep working.
+	got, err := Resolve(ws, "app.ipa")
+	if err != nil {
+		t.Fatalf("Resolve of a literal file: %v", err)
+	}
+	if !equal(rels(got), []string{"app.ipa"}) {
+		t.Errorf("Resolve(\"app.ipa\") = %v", rels(got))
 	}
 }

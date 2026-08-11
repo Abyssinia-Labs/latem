@@ -126,9 +126,17 @@ func TestClose_IsIdempotentAndRemovesTheEnvDirectory(t *testing.T) {
 	}
 }
 
-// Close tears down the environment, not the run's clone: §12 owns the
-// workspace, Fetch still needs it, and an executor that deleted it would take
-// the artifacts with it.
+// Close tears down the environment, not the run's clone.
+//
+// §12 owns the workspace and §11 collects artifacts during `collecting`, which
+// runs after the environment is torn down — so an executor that deleted the
+// workspace on Close would take the artifacts with it, and it would do so most
+// often on exactly the runs where they matter, the failed ones.
+//
+// Asserted against the filesystem rather than through the executor. That is
+// the property internal/artifact actually depends on: it reads the host
+// workspace path directly, which is why executor.Env.Fetch was removable at all
+// (amendment A29).
 func TestClose_LeavesTheWorkspaceAlone(t *testing.T) {
 	ws := workspace(t, map[string]string{"dist/app.apk": "apk"})
 	e := newExecutor(t, Options{})
@@ -140,14 +148,13 @@ func TestClose_LeavesTheWorkspaceAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := env.Fetch(t.Context(), "dist/*.apk")
+	body, err := os.ReadFile(filepath.Join(ws, "dist", "app.apk"))
 	if err != nil {
-		t.Fatalf("Fetch after Close: %v", err)
+		t.Fatalf("the workspace did not survive Close, so its artifacts did not either: %v", err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("got %d artifacts after Close, want 1 — artifacts matter most when a step failed", len(files))
+	if string(body) != "apk" {
+		t.Errorf("artifact contents changed across Close: %q", body)
 	}
-	_ = files[0].Content.Close()
 }
 
 func TestExec_AfterCloseIsRefused(t *testing.T) {
@@ -480,4 +487,23 @@ func mustReap(t *testing.T, e *Executor, live func(runID string) bool) error {
 	t.Helper()
 	_, err := e.Reap(t.Context(), live)
 	return err
+}
+
+// workspace builds a directory tree for a test.
+//
+// It moved here when artifact_test.go was deleted with executor.Env.Fetch
+// (amendment A29); this is its last caller.
+func workspace(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for rel, body := range files {
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
 }

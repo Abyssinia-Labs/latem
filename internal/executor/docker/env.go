@@ -255,20 +255,6 @@ func envSlice(env map[string]string) []string {
 	return out
 }
 
-// Fetch resolves an artifact glob and opens what it matches (§17).
-//
-// It reads the host side of the bind mount rather than copying out of the
-// container, for three reasons. The workspace is the same filesystem seen from
-// both sides, so there is nothing to reconcile. The host's own symlink
-// resolution can then be used for the escape check, instead of trusting a
-// path walk performed by a process inside the container being inspected. And
-// it works after the container has stopped or been killed — which is exactly
-// when artifacts matter most, since §13.1 forgoes `--rm` so that a failed
-// step's output is still collectable.
-func (e *runEnv) Fetch(_ context.Context, glob string) ([]executor.File, error) {
-	return collectArtifacts(e.spec.Workspace, glob)
-}
-
 // Close removes the run's container.
 //
 // Idempotent, and it retries after a failure: the second call is not a no-op

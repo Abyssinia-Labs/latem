@@ -44,7 +44,7 @@ func TestCollect_CopiesPreservingRelativePaths(t *testing.T) {
 		t.Errorf("ExpiresAt = %v, want nil for a declaration with no retain", ref.ExpiresAt)
 	}
 
-	stored := filepath.Join(root, "artifacts", "run_1", "build", "outputs", "app.ipa")
+	stored := filepath.Join(root, "run_1", "build", "outputs", "app.ipa")
 	body, err := os.ReadFile(stored)
 	if err != nil {
 		t.Fatalf("artifact was not stored at the expected path: %v", err)
@@ -52,7 +52,7 @@ func TestCollect_CopiesPreservingRelativePaths(t *testing.T) {
 	if string(body) != "payload" {
 		t.Errorf("stored content = %q", body)
 	}
-	if _, err := os.Stat(filepath.Join(root, "artifacts", "run_1", "build", "reports")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "run_1", "build", "reports")); !os.IsNotExist(err) {
 		t.Error("an undeclared directory was collected")
 	}
 }
@@ -161,7 +161,7 @@ func TestCollect_EmptyResultLeavesNoDirectory(t *testing.T) {
 	if refs != nil {
 		t.Errorf("refs = %+v, want none", refs)
 	}
-	if _, err := os.Stat(filepath.Join(root, "artifacts", "run_1")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "run_1")); !os.IsNotExist(err) {
 		t.Error("an empty run directory was left behind")
 	}
 }
@@ -180,7 +180,7 @@ func TestCollect_PropagatesEscapeRejection(t *testing.T) {
 	if err == nil {
 		t.Fatal("Collect copied an artifact that escapes the workspace")
 	}
-	if _, statErr := os.Stat(filepath.Join(root, "artifacts", "run_1", "build", "leak.ipa")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(root, "run_1", "build", "leak.ipa")); statErr == nil {
 		t.Error("the escaping file was written to the artifact store")
 	}
 }
@@ -211,7 +211,7 @@ func TestCollect_StoresOwnerOnly(t *testing.T) {
 
 	// An .ipa embeds a provisioning profile and an .aab is what ships to
 	// users. On a machine with more than one login, they are nobody else's.
-	info, err := os.Stat(filepath.Join(root, "artifacts", "run_1", "build", "app.ipa"))
+	info, err := os.Stat(filepath.Join(root, "run_1", "build", "app.ipa"))
 	if err != nil {
 		t.Fatal(err)
 	}

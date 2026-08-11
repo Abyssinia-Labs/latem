@@ -41,19 +41,33 @@ import (
 // of nightly releases is most of the budget.
 const DefaultBudgetBytes int64 = 50 << 30
 
-// Error carries protocol.ErrArtifact alongside a human explanation. Every
-// failure in this package is E_ARTIFACT: the glob escaped the workspace, or
-// collection failed (§21).
+// Error carries a §21 code alongside a human explanation.
+//
+// Almost everything here is E_ARTIFACT: the glob escaped the workspace, or
+// collection failed. The exception is a declaration that cannot be satisfied by
+// any workspace — a bare directory — which is E_BAD_REGISTRY, because the fix
+// is a line in jobs.yaml rather than anything about this run (amendment A30).
 type Error struct {
-	Msg string
-	Err error
+	// ErrCode is the §21 code. The zero value means E_ARTIFACT, so every
+	// existing construction keeps its meaning.
+	ErrCode protocol.ErrorCode
+	Msg     string
+	Err     error
+}
+
+// code returns the effective §21 code.
+func (e *Error) code() protocol.ErrorCode {
+	if e.ErrCode == "" {
+		return protocol.ErrArtifact
+	}
+	return e.ErrCode
 }
 
 func (e *Error) Error() string {
 	if e.Err != nil {
-		return fmt.Sprintf("%s: %s: %v", protocol.ErrArtifact, e.Msg, e.Err)
+		return fmt.Sprintf("%s: %s: %v", e.code(), e.Msg, e.Err)
 	}
-	return fmt.Sprintf("%s: %s", protocol.ErrArtifact, e.Msg)
+	return fmt.Sprintf("%s: %s", e.code(), e.Msg)
 }
 
 func (e *Error) Unwrap() error { return e.Err }
@@ -63,13 +77,20 @@ func (e *Error) Unwrap() error { return e.Err }
 func Code(err error) protocol.ErrorCode {
 	var e *Error
 	if errors.As(err, &e) {
-		return protocol.ErrArtifact
+		return e.code()
 	}
 	return ""
 }
 
 func artifactErr(err error, format string, args ...any) *Error {
 	return &Error{Msg: fmt.Sprintf(format, args...), Err: err}
+}
+
+// registryErr is for a declaration no workspace could satisfy. It reports
+// E_BAD_REGISTRY so the run reads as "fix your jobs.yaml" rather than as a
+// collection failure the operator might retry.
+func registryErr(format string, args ...any) *Error {
+	return &Error{ErrCode: protocol.ErrBadRegistry, Msg: fmt.Sprintf(format, args...)}
 }
 
 // Declaration is one artifacts[] entry from the job registry: a glob relative
