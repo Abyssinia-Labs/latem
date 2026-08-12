@@ -117,6 +117,7 @@ func newRootCommand() *cobra.Command {
 	})
 
 	root.AddCommand(
+		newInitCommand(),
 		newAgentCommand(),
 		newRunCommand(),
 		newListCommand(),
