@@ -1,13 +1,22 @@
 # iOS on a self-hosted Mac
 
-> **Status: UNVERIFIED.** Nothing here has been executed on the target
-> hardware. The failure table's first four rows are transcribed from
-> [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §18.1; everything else is reasoned from
-> the spec and from Apple's and fastlane's documented behaviour, not observed.
-> Rows marked *(inferred)* are the ones most likely to be wrong. Correct them
-> from [`manual-baseline.md`](./manual-baseline.md) §7.5 as real failures
-> happen — a symptom string you can paste into a search engine is the whole
-> value of this page.
+> **Status: PARTLY VERIFIED, 2026-08-11.** A full pipeline — archive, sign,
+> upload, TestFlight — ran on a MacBook Pro M4 Max with Xcode 26.0.1, first by
+> hand and then under a `latem` agent. Rows marked **VERIFIED** carry the
+> literal error text observed; rows marked *(inferred)* are still reasoned from
+> [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §18.1 and from Apple's and fastlane's
+> documented behaviour, and are the ones most likely to be wrong.
+>
+> **The unverified half is the important half.** Everything so far ran from an
+> interactive shell, which has a live user session and an unlocked keychain.
+> §2, §3 and §4 below — LaunchAgent context, keychain unlocking under launchd,
+> and FileVault — are exactly what that setup cannot test, and they are what
+> §13.3 names as the most common install failure. Treat them as unproven until
+> a mini runs a build after a reboot with nobody logged in.
+>
+> Correct rows from [`manual-baseline.md`](./manual-baseline.md) §7.5 as real
+> failures happen — a symptom string you can paste into a search engine is the
+> whole value of this page.
 
 Three things make iOS CI on your own hardware different from every other
 platform, and all three are about **the machine being a real logged-in Mac**
@@ -70,6 +79,7 @@ Everything below follows from those.
 | **VERIFIED** `'weak' must be a mutable variable, because it may change at runtime` — 31 of them, all in `expo-modules-jsi` | Expo SDK 57.0.12 does not compile against Swift 6.2 (Xcode 26.0.1) | `weak let` → `weak var` via a committed `pnpm patch` clears all 31, then two further classes of Swift 6 strictness appear. Not fully solved; use `examples/ios-native/` or pin an older Xcode |
 | **VERIFIED** `Unicode Normalization not appropriate for ASCII-8BIT (Encoding::CompatibilityError)` from `pod install` | `LANG` is unset. A step is a new process with only the environment the agent gives it (§9); CocoaPods aborts on a non-UTF-8 locale. The error names Unicode, not the locale, so it reads as a corrupt-file problem | `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8`. Amendment A33 moves this into the executor's base environment |
 | **VERIFIED** `xcodebuild: error: The project named "X" does not contain a scheme named "X"` on the runner, works locally | The scheme lives in `xcuserdata/` and was never committed. §12 gives every run a fresh clone, so the runner never has it | Commit the scheme under `<project>.xcodeproj/xcshareddata/xcschemes/`. Amendment A34; `latem doctor` checks it |
+| **VERIFIED** `Invalid password passed via 'MATCH_PASSWORD'` — while `match` with the variable *unset* succeeds | `MATCH_PASSWORD` outranks match's keychain cache (`fetch_password!` reads ENV first). A machine that has run match interactively has the passphrase cached as an **internet** password `match_login.keychain`, masking a wrong variable | Get the real passphrase — Keychain Access → login → `match_login.keychain` → Show password — or re-key with `fastlane match change_password`. A LaunchAgent-started runner has no cache, so the variable must be right |
 | **VERIFIED** `error: exportArchive No Team Found in Archive` (exit 70) | Archive built unsigned, or `DEVELOPMENT_TEAM` empty | Set `DEVELOPMENT_TEAM` on the `archive` invocation, not only on the export |
 | Archive uploads, then App Store Connect rejects it hours later | The archive contains a **simulator** binary. `xcodebuild` exits 0 either way | `otool -l …/LatemExample \| grep -A2 LC_BUILD_VERSION` — platform 2 is a device, 7 is the simulator. Assert it in the build script |
 | Build hangs at the end, no output | `--non-interactive` missing; EAS is waiting on a prompt nobody can see | Add it. On a headless runner a prompt is an invisible hang until the step timeout |

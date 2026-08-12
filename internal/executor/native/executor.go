@@ -3,6 +3,7 @@ package native
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -295,9 +296,27 @@ func validateCacheMounts(caches []executor.CacheMount, workspace string) error {
 				"cache %q source %q is not an absolute path; the native executor has no volumes, "+
 					"so a cache source must be the host directory §14.2 names", c.Name, c.Source)
 		}
-		if !filepath.IsAbs(c.Target) {
+		// Expand a leading ~ to this executor's home before demanding an
+		// absolute path (amendment A38).
+		//
+		// A cache target cannot be written absolutely in a committed jobs.yaml:
+		// "/Users/abyssinian/Library/..." is correct on exactly one machine, and
+		// §12 hands the same commit to every runner. ~ is the only portable way
+		// to say "the Xcode cache", which is why §9's own example uses it — and
+		// why every one of those examples failed at mount time until now.
+		//
+		// It is expanded HERE, per executor, rather than centrally, because ~
+		// means a different directory in each: the agent user's home natively,
+		// and the container's runner home under docker (§13.1). Resolving it
+		// once in internal/cache would have to pick one and be wrong elsewhere.
+		expanded, err := expandHome(c.Target)
+		if err != nil {
+			return codeErr(protocol.ErrCache, "cache %q target %q: %v", c.Name, c.Target, err)
+		}
+		if !filepath.IsAbs(expanded) {
 			return codeErr(protocol.ErrCache, "cache %q target %q is not an absolute path", c.Name, c.Target)
 		}
+		c.Target = expanded
 		target := filepath.Clean(c.Target)
 		if target == string(filepath.Separator) {
 			return codeErr(protocol.ErrCache, "cache %q would take over /", c.Name)
@@ -495,4 +514,28 @@ func (e *Executor) Reap(_ context.Context, live func(runID string) bool) ([]exec
 		reaped = append(reaped, executor.Reaped{RunID: runID, Kind: "workspace", Ref: ent.Name()})
 	}
 	return reaped, firstErr
+}
+
+// expandHome resolves a leading "~/" to the current user's home directory.
+//
+// Only a leading "~/" (or a bare "~") is special. "~user/..." is deliberately
+// NOT supported: on the native executor a step already runs as one specific
+// user, so naming a different one would produce a path that user cannot write,
+// and the failure would arrive as a permission error on a cache mount rather
+// than as anything mentioning ~.
+func expandHome(p string) (string, error) {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot expand ~: %w", err)
+	}
+	if home == "" {
+		return "", fmt.Errorf("cannot expand ~: $HOME is empty")
+	}
+	if p == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, p[2:]), nil
 }

@@ -7,10 +7,15 @@
 # │ ios-release → signed .ipa → TestFlight → installed on a physical iPhone.  │
 # │               App REDACTED-APP-ID, build 1.0 (1), 17:53:16.                    │
 # │                                                                           │
-# │ What has NOT run is an agent executing them. Every step here was invoked  │
-# │ from a shell; the timeouts below are still estimates, and the two `env    │
-# │ -i` rehearsals of ci/ios/build-simulator.sh are the closest thing to      │
-# │ proof that a stripped runner environment is enough.                       │
+# │ AND AN AGENT HAS NOW RUN THEM, same machine, same day:                   │
+# │   ios-smoke    22s                                                        │
+# │   ios-release  2m25s → build 1786500336 distributed to internal testers   │
+# │ Secrets resolved through §15's chain from secrets.env, and INV-4 was      │
+# │ checked against that run: no secret in any log or in sqlite.              │
+# │                                                                           │
+# │ Still untested: a LaunchAgent-STARTED agent. Everything above ran from an │
+# │ interactive shell, which has a live keychain session — §13.3 calls that   │
+# │ the single most common install failure, and it is still ahead of us.      │
 # │                                                                           │
 # │ docs/manual-baseline.md §7 has the session and the eleven defects it      │
 # │ surfaced.                                                                 │

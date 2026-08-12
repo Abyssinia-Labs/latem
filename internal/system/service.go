@@ -361,8 +361,31 @@ func (s *System) WriteService(spec ServiceSpec) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return "", fmt.Errorf("system: creating %s: %w", filepath.Dir(path), err)
 	}
+	// The log directory too, and this is not housekeeping. launchd does not
+	// create the parent of StandardOutPath: if it is missing the job fails to
+	// spawn, and the diagnostic for that failure is written to the file it
+	// could not open. On a machine that has never run the agent — which is
+	// every machine at first install, and the Mac mini this targets — the
+	// directory does not exist yet, so `service install` before a first `agent`
+	// run produced a service that silently never started.
+	if dir := s.logDirFor(spec); dir != "" {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return "", fmt.Errorf("system: creating %s: %w", dir, err)
+		}
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil { //nolint:gosec // a service definition must be readable by the service manager
 		return "", fmt.Errorf("system: writing %s: %w", path, err)
 	}
 	return path, nil
+}
+
+// logDirFor reports the directory the service will write stdout and stderr to,
+// after the same defaulting Render applies. Empty when the platform's service
+// definition does not redirect output (systemd journals it instead).
+func (s *System) logDirFor(spec ServiceSpec) string {
+	spec = spec.normalize()
+	if !s.IsMacOS() {
+		return ""
+	}
+	return spec.LogDir
 }

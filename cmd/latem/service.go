@@ -188,6 +188,17 @@ func serviceSpec(sys *system.System, execPath string) (system.ServiceSpec, error
 	if dir := configDir(); dir != filepath.Join(sys.Home(), config.DirName) {
 		spec.ConfigDir = dir
 	}
+	// The service's stdout and stderr must follow the config directory too.
+	//
+	// Without this the plist carried LATEM_CONFIG_DIR=<relocated> while pointing
+	// StandardOutPath at ~/.latem/logs — two different trees in one file. §8
+	// says --config-dir relocates the lock, socket, sqlite, work dir and caches
+	// *together*, and the service definition was the one place that did not.
+	//
+	// DerivePaths rather than a loaded config on purpose (amendment A26): this
+	// has to work on the machine whose config does not parse yet, which is
+	// every machine at first install.
+	spec.LogDir = config.DerivePaths(configDir()).Logs
 	// The agent's own shutdown grace plus a margin, when a config exists to
 	// read it from. A service manager that kills the agent partway through
 	// tearing down a Tart VM leaks 90 GB.
