@@ -104,3 +104,37 @@ func TestJDKRejectsBothTooOldAndTooNew(t *testing.T) {
 		})
 	}
 }
+
+// The simulator-runtime check must catch BOTH "none installed" and the case
+// that actually happened on the mini: runtimes present, none matching the SDK.
+//
+// A check written only for the first would have passed on the machine that
+// failed — it had an iOS 17.2 runtime and an iOS 26 SDK.
+func TestSimulatorRuntimeMatchesSDK(t *testing.T) {
+	const sdk = "26.0\n"
+	runtimes := func(json string) map[string]fakeCmd {
+		return map[string]fakeCmd{
+			"xcrun --sdk iphonesimulator --show-sdk-version": {out: sdk},
+			"xcrun simctl list runtimes -j":                  {out: json},
+		}
+	}
+	for _, tc := range []struct {
+		name, json string
+		wantPass   bool
+	}{
+		{"matching runtime", `{"runtimes":[{"platform":"iOS","version":"26.0","buildversion":"23A343","isAvailable":true}]}`, true},
+		{"the mini: only 17.2", `{"runtimes":[{"platform":"iOS","version":"17.2","buildversion":"21C62","isAvailable":true}]}`, false},
+		{"none at all", `{"runtimes":[]}`, false},
+		{"right version but unavailable", `{"runtimes":[{"platform":"iOS","version":"26.0","buildversion":"23A343","isAvailable":false}]}`, false},
+		{"only watchOS", `{"runtimes":[{"platform":"watchOS","version":"26.0","buildversion":"23A343","isAvailable":true}]}`, false},
+		{"several, one matches", `{"runtimes":[{"platform":"iOS","version":"18.5","buildversion":"22F77","isAvailable":true},{"platform":"iOS","version":"26.0","buildversion":"23A343","isAvailable":true}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &doctor{sys: newSystemForTest("darwin", t.TempDir(), runtimes(tc.json), "xcrun")}
+			got := d.checkSimulatorRuntime(context.Background())
+			if pass := got.Level == levelPass; pass != tc.wantPass {
+				t.Errorf("level=%v (pass=%v), want pass=%v — %q", got.Level, pass, tc.wantPass, got.Detail)
+			}
+		})
+	}
+}

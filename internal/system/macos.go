@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -321,4 +322,69 @@ func (s *System) TartImage(ctx context.Context, name string) TartImage {
 		}
 	}
 	return img
+}
+
+// SimRuntime is one installed simulator runtime.
+type SimRuntime struct {
+	Platform  string // "iOS", "watchOS", …
+	Version   string // "26.0"
+	Build     string // "23A343"
+	Available bool
+}
+
+// Major is the leading component of Version, or 0 when it cannot be read.
+func (r SimRuntime) Major() int {
+	v, _ := ParseVersion(r.Version)
+	return v.Major
+}
+
+// SimulatorRuntimes lists the runtimes `simctl` reports.
+//
+// A runtime is a separate download from Xcode itself, and Xcode ships with
+// none: a machine with a perfectly good Xcode 26 can have only an iOS 17
+// runtime left over from an older install. Nothing warns about that until a
+// build fails inside actool with
+//
+//	No simulator runtime version from ["21C62"] available to use with
+//	iphonesimulator SDK version 23A339
+//
+// which names two build numbers and neither the SDK version nor the runtime
+// that is missing.
+func (s *System) SimulatorRuntimes(ctx context.Context) ([]SimRuntime, error) {
+	out, err := s.Exec(ctx, "xcrun", "simctl", "list", "runtimes", "-j")
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Runtimes []struct {
+			Platform     string `json:"platform"`
+			Version      string `json:"version"`
+			BuildVersion string `json:"buildversion"`
+			IsAvailable  bool   `json:"isAvailable"`
+		} `json:"runtimes"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return nil, fmt.Errorf("system: parsing simctl runtimes: %w", err)
+	}
+	rts := make([]SimRuntime, 0, len(doc.Runtimes))
+	for _, r := range doc.Runtimes {
+		rts = append(rts, SimRuntime{
+			Platform: r.Platform, Version: r.Version,
+			Build: r.BuildVersion, Available: r.IsAvailable,
+		})
+	}
+	return rts, nil
+}
+
+// SimulatorSDKVersion is the iphonesimulator SDK the selected Xcode carries.
+func (s *System) SimulatorSDKVersion(ctx context.Context) (Version, error) {
+	out, err := s.Exec(ctx, "xcrun", "--sdk", "iphonesimulator", "--show-sdk-version")
+	if err != nil {
+		return Version{}, err
+	}
+	v, ok := ParseVersion(firstLine(out))
+	if !ok {
+		return Version{}, fmt.Errorf("system: could not read an SDK version from %q", firstLine(out))
+	}
+	return v, nil
 }

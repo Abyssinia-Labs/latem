@@ -1061,12 +1061,16 @@ const jdkForAndroid = 17
 // ("is ruby present?", "does java run?") passes on a machine that cannot build.
 func (d *doctor) checkMobileToolchain(ctx context.Context) []check {
 	rubyCheck, rubyBin := d.checkRuby(ctx)
-	return []check{
+	out := []check{
 		rubyCheck,
 		d.checkBundler(ctx, rubyBin),
 		d.checkJDK(ctx),
 		d.checkAndroidSDK(),
 	}
+	if d.sys.IsMacOS() {
+		out = append(out, d.checkSimulatorRuntime(ctx))
+	}
+	return out
 }
 
 // kegOnlyRubies are Homebrew's installation prefixes. Homebrew's ruby is
@@ -1226,4 +1230,61 @@ func (d *doctor) checkAndroidSDK() check {
 	return warn("android.sdk", "Android SDK", "not found",
 		"install via Android Studio, or brew install --cask android-commandlinetools").
 		withNotes("Only needed for Android jobs.")
+}
+
+// checkSimulatorRuntime is the Mobile toolchain section's macOS-only member.
+//
+// A simulator runtime is a separate download from Xcode and Xcode ships with
+// none, so a machine with a current Xcode can carry only a runtime left over
+// from an older one. Nothing warns about it until a build dies inside actool:
+//
+//	No simulator runtime version from ["21C62"] available to use with
+//	iphonesimulator SDK version 23A339
+//
+// which names two build numbers, neither of which is the version an operator
+// would search for, and does not say that anything needs downloading. Found on
+// a Mac mini whose Xcode 26 had only an iOS 17.2 runtime — the machine the
+// examples were developed on happened to have a matching one, so the whole
+// failure mode was invisible there.
+func (d *doctor) checkSimulatorRuntime(ctx context.Context) check {
+	sdk, err := d.sys.SimulatorSDKVersion(ctx)
+	if err != nil {
+		return skip("xcode.simruntime", "simulator runtime", "no iphonesimulator SDK to compare against")
+	}
+	rts, err := d.sys.SimulatorRuntimes(ctx)
+	if err != nil {
+		return warn("xcode.simruntime", "simulator runtime",
+			"could not list runtimes: "+err.Error(),
+			"xcrun simctl list runtimes")
+	}
+
+	var installed []string
+	for _, r := range rts {
+		if r.Platform != "iOS" || !r.Available {
+			continue
+		}
+		installed = append(installed, r.Version)
+		if r.Major() == sdk.Major {
+			return pass("xcode.simruntime", "simulator runtime",
+				fmt.Sprintf("iOS %s installed, matching SDK %s", r.Version, sdk))
+		}
+	}
+
+	// Both halves, deliberately: none at all, and some-but-none-matching. The
+	// second is the one that actually happens, and a check written only for the
+	// first would have passed on the machine that failed.
+	if len(installed) == 0 {
+		return warn("xcode.simruntime", "simulator runtime",
+			fmt.Sprintf("none installed; the iphonesimulator SDK is %s", sdk),
+			"xcodebuild -downloadPlatform iOS").
+			withNotes("Any simulator build fails without one, including the credential-free " +
+				"smoke job. The download is several GB.")
+	}
+	return warn("xcode.simruntime", "simulator runtime",
+		fmt.Sprintf("installed: iOS %s — none matches the iphonesimulator SDK %s",
+			strings.Join(installed, ", "), sdk),
+		"xcodebuild -downloadPlatform iOS").
+		withNotes("actool reports this as \"No simulator runtime version from [<build>] available " +
+			"to use with iphonesimulator SDK version <build>\", naming two build numbers and " +
+			"not saying that a download is needed.")
 }
