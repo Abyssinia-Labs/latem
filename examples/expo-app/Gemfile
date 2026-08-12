@@ -1,0 +1,18 @@
+# Ruby tooling for the iOS pipeline, pinned here rather than installed globally.
+#
+# manual-baseline.md §1: prefer `bundle exec fastlane` over a global `fastlane`
+# everywhere, including in ci/. A global gem that drifts is a build that changes
+# behaviour without a commit — and on the native executor (§13.3) there is no VM
+# resetting the machine between runs, so a `gem update` someone ran in March is
+# still in effect in September.
+#
+# Requires Homebrew Ruby. macOS ships 2.6, which modern fastlane refuses to
+# install against; the failure is a wall of native-extension compile errors that
+# names neither Ruby nor its version.
+source "https://rubygems.org"
+
+ruby ">= 3.1"
+
+gem "fastlane"
+# expo prebuild generates ios/ and runs `pod install` into it.
+gem "cocoapods"

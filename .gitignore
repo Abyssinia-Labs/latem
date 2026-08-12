@@ -26,3 +26,57 @@ secrets.env
 # Go workspace files are per-developer
 go.work
 go.work.sum
+
+# The reference Expo app (examples/expo-app) is a real, buildable app, so it
+# drags in the whole JS/iOS toolchain's output. What is committed is the source,
+# app.json, eas.json, the lockfiles, and ci/ — everything below is regenerated
+# by `pnpm install` and `expo prebuild`.
+node_modules/
+.expo/
+*.ipa
+*.app.zip
+# Build output for the example apps: .app bundles, .xcarchive, DerivedData, the
+# exported ipa, and Gradle's apk/aab all land here. Scoped to examples/ so it
+# cannot swallow a directory called build/ elsewhere in the tree.
+examples/*/build/
+examples/*/*/build/
+
+# Gradle. .gradle/ is per-project daemon and cache state; local.properties
+# records this machine's SDK path and must never be committed — a runner would
+# inherit a path that does not exist on it. ci/lib/env.sh sets ANDROID_HOME
+# instead, which is the reproducible form.
+.gradle/
+local.properties
+# The wrapper JAR is committed on purpose: ./gradlew must work on a fresh clone
+# with no Gradle installed, which is exactly what a runner has every run (§12).
+!gradle/wrapper/gradle-wrapper.jar
+# `expo prebuild` generates ios/ and android/ from app.json. Committing them is
+# a supported Expo workflow ("bare"), but it means app.json stops being the
+# source of truth and every SDK upgrade becomes a manual merge. Keep them
+# generated; ci/install.sh runs prebuild.
+examples/expo-app/ios/
+examples/expo-app/android/
+# Fastlane's per-run output, not its config. Fastfile/Appfile/Matchfile are
+# committed; these three are logs, temp keys, and a local state cache.
+# NOTE THE **/ PREFIX. A gitignore pattern containing a slash is anchored to the
+# directory holding the .gitignore, so `fastlane/report.xml` would match only
+# <root>/fastlane/ and never examples/ios-native/fastlane/ — which is the only
+# place these files actually appear. Verified with `git check-ignore -v`.
+#
+# fastlane/metadata/ is the Android changelog tree: ci/android/build.sh writes it
+# per run keyed by versionCode and removes it on exit, so ignoring it means a
+# killed run cannot leave a stray changelog to be committed.
+**/fastlane/metadata/
+**/fastlane/report.xml
+**/fastlane/Preview.html
+**/fastlane/test_output/
+# Bundler installs gems here when configured with --path; the Gemfile and
+# Gemfile.lock are what pin versions.
+#
+# `vendor/bundle/` alone does NOT work: a pattern with an internal slash is
+# anchored to the directory holding this file, so it matched only <root>/vendor/
+# while the gems actually live in examples/*/vendor/bundle/ — about 9,000 files
+# that `git add .` would have happily staged. `.bundle/` works by accident,
+# because a pattern whose only slash is trailing matches at any depth.
+.bundle/
+**/vendor/bundle/

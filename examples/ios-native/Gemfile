@@ -1,0 +1,6 @@
+# See examples/expo-app/Gemfile for why this is a Gemfile and not global gems.
+# This example has no JavaScript and no CocoaPods: a plain Xcode project needs
+# neither, which is most of the point of it existing.
+source "https://rubygems.org"
+ruby ">= 3.1"
+gem "fastlane"

@@ -111,8 +111,9 @@ produce failures that look like code bugs.
 ## M2. Tart VM lifecycle
 
 `Close` must be idempotent and must leave nothing behind — §13.2 requires
-`tart delete` to run even when `tart stop` fails. A leaked VM carrying an Xcode
-image costs ~90 GB, which §14.4 names as the fastest way to fill a Mac mini.
+`tart delete` to run even when `tart stop` fails. A leaked VM grows toward its
+image's provisioned 140 GB, which §14.4 names as the fastest way to fill a Mac
+mini.
 
 ### M2.1 — Clean lifecycle
 

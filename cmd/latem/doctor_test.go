@@ -584,6 +584,35 @@ func TestDoctorTartRequiredButAbsent(t *testing.T) {
 	}
 }
 
+// The default macOS deployment since amendment A31: a native runner, and no
+// tart anywhere. This is the branch every stock install takes, and until A31 it
+// was the only one with no test — it warned, describing the shipped default as
+// a fallback that "has no isolation".
+//
+// A warning here is worse than merely wrong. `doctor` earns its exit code by
+// only speaking when something is actionable, and a line that fires on every
+// correctly-configured Mac is how an operator learns to skim past the ones that
+// matter. Whether native is right for a given machine is §13.0's question about
+// who can influence its refs, which is not knowable from the machine.
+func TestDoctorTartAbsentAndUnusedIsNotAWarning(t *testing.T) {
+	dir := privateDir(t)
+	cfg := testConfig(dir)
+	cfg.Runners = []*config.Runner{{
+		Name: "ios", Executor: config.ExecutorNative, Concurrency: 1,
+		Native: &config.NativeRunner{MinFreeGB: 60},
+	}}
+	d := newTestDoctor("darwin", dir, map[string]fakeCmd{}, cfg, nil)
+	d.sys = newSystemForTest("darwin", dir, nil) // nothing on PATH
+
+	got := d.checkTart(context.Background())
+	if got.Level != levelSkip {
+		t.Fatalf("tart absent with no tart runner = %v, want skip", got.Level)
+	}
+	if len(got.Fix) != 0 {
+		t.Errorf("nothing is broken, so there is nothing to fix: %v", got.Fix)
+	}
+}
+
 func TestDoctorClockSkew(t *testing.T) {
 	dir := privateDir(t)
 	cfg := testConfig(dir)

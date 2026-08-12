@@ -71,12 +71,17 @@ const (
 
 // Per-executor disk floors from §13 and §14.4. Draft 01's single global 20 GB
 // was sized for a container host and would admit an iOS build onto a machine
-// that cannot hold one — a Tart image carrying Xcode is around 90 GB before
-// the VM diverges and DerivedData lands on top of it.
+// that cannot hold one.
+//
+// The Tart floor is 200 rather than draft 02's 150 (amendment A31). That figure
+// came from an estimate of "around 90 GB" for an Xcode image; measured, the
+// image is 68.8 GB compressed and **140 GB provisioned**, so 150 left under
+// 10 GB of headroom above a single image — before the clone diverges and
+// DerivedData lands on top of it.
 const (
 	DefaultDockerMinFreeGB float64 = 40
 	DefaultNativeMinFreeGB float64 = 60
-	DefaultTartMinFreeGB   float64 = 150
+	DefaultTartMinFreeGB   float64 = 200
 )
 
 // TartMaxConcurrency is Apple's licence ceiling: two guest VMs per host
@@ -305,7 +310,13 @@ type TartRunner struct {
 	DerivedData DerivedData `toml:"derived_data"`
 }
 
-// NativeRunner is §13.3 — no isolation, a convenience mode.
+// NativeRunner is §13.3 — the default macOS executor since amendment A31, and
+// the one with no isolation of any kind.
+//
+// Those two facts belong in one sentence. It is the default because on a Mac
+// that already has Xcode it costs nothing to run, and it is correct only while
+// the machine builds refs the operator's own team controls; §13.0 states the
+// criterion and §13.2 is the upgrade when it stops holding.
 //
 // The block exists so the disk floor is settable; everything else about the
 // native executor is determined by the host.

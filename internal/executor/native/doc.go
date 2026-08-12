@@ -13,10 +13,23 @@
 // by silently dropping the limits without saying so is how an operator ends up
 // believing a native runner is bounded.
 //
-// It exists because §13.3 asks for a fallback for when Tart is unavailable or
-// the base image is not built. It is a convenience mode. On a machine that runs
-// jobs from a repository the operator does not fully control, use §13.2's tart
-// executor instead — that is what it is for.
+// Since amendment A31 this is the **default** macOS executor, not a fallback,
+// and the paragraph above is therefore what a stock install gets. That is a
+// deliberate choice rather than a compromise: on a Mac that already has Xcode
+// it needs nothing installed and no disk, where §13.2's tart executor is a
+// 68.8 GB pull and 140 GB provisioned to isolate against a threat that a
+// single-team runner does not have.
+//
+// The criterion for when it stops being the right default is in §13.0, and it
+// is one question — whose code runs on this machine? Refs the operator's own
+// team controls, this is correct. A fork, a pull request, any ref a contributor
+// can move, and the machine wants §13.2's tart executor, because everything the
+// paragraph above lists then applies to code the operator has not written. On a
+// Mac doing iOS work that includes the keychain holding the signing identities.
+//
+// INV-5 is unchanged by any of this and still gates what runs at all. What
+// changes with the executor is not whether an unapproved commit can run, but
+// what a wrongly-approved one reaches.
 //
 // # concurrency MUST be 1
 //

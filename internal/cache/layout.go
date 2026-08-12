@@ -61,7 +61,7 @@ const (
 
 // Per-runner disk floors from RUNNER_SPEC §13 and finding F12. Draft 01's
 // single global 20 GB was sized for containers and would admit an iOS build
-// onto a machine that cannot hold one — a Tart image carrying Xcode is ~90 GB
+// onto a machine that cannot hold one — a Tart image carrying Xcode is 140 GB
 // before the build writes a byte.
 const (
 	DockerMinFreeGB float64 = 40

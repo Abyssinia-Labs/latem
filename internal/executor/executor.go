@@ -33,7 +33,7 @@ type Executor interface {
 	//
 	// This is RUNNER_SPEC §6 step 5, which says plainly that it is not
 	// optional: a leaked container is untidy, a leaked Tart VM carrying an
-	// Xcode image costs ~90 GB. live reports whether a run id is still in a
+	// Xcode image is 140 GB provisioned. live reports whether a run id is still in a
 	// non-terminal state; anything managed by this executor whose run id is
 	// not live is removed.
 	//
@@ -91,7 +91,7 @@ type Env interface {
 
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
-	// untidy, a leaked Tart VM carrying an Xcode image costs ~90 GB.
+	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
 	Close(ctx context.Context) error
 }
 

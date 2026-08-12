@@ -1,0 +1,12 @@
+app_identifier("com.abyssinialabs.latemexample")
+
+# The 10-character Apple team id, read from the signing certificate's OU field
+# and confirmed by Xcode accepting it. It is not a secret — it appears in every
+# signed binary — so it is committed here and in project.pbxproj rather than
+# arriving through the environment.
+#
+# An earlier draft wrote `team_id(ENV["DEVELOPMENT_TEAM"])`. That broke the
+# moment DEVELOPMENT_TEAM stopped being injected as a secret: the lookup returns
+# nil, and fastlane then either prompts (hanging a runner) or guesses from the
+# account's first team, which is wrong for anyone in more than one.
+team_id(ENV["DEVELOPMENT_TEAM"] || "C8M8H6M43X")

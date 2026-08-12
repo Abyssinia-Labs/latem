@@ -59,15 +59,26 @@ Everything below follows from those.
 
 ### 1.3 Expanded — EAS and the build itself
 
+> Rows marked **VERIFIED** were reproduced by hand on 2026-08-11 (Xcode 26.0.1,
+> macOS 26.5.2, M4 Max) and the symptom column is the literal error text. Rows
+> marked *(inferred)* are still read off the spec and have not been seen.
+> `manual-baseline.md` §7 has the full session.
+
 | Symptom | Cause | Fix |
 |---|---|---|
+| **VERIFIED** `EAS project not configured. Must configure EAS project by running 'eas init' before this command can be run in non-interactive mode.` | `eas build --local` requires an **Expo account**. The build is local; the authorisation is not | None that keeps "no account required". Build with `xcodebuild` directly — `examples/ios-native/`. See §18.3 / amendment A32 |
+| **VERIFIED** `'weak' must be a mutable variable, because it may change at runtime` — 31 of them, all in `expo-modules-jsi` | Expo SDK 57.0.12 does not compile against Swift 6.2 (Xcode 26.0.1) | `weak let` → `weak var` via a committed `pnpm patch` clears all 31, then two further classes of Swift 6 strictness appear. Not fully solved; use `examples/ios-native/` or pin an older Xcode |
+| **VERIFIED** `Unicode Normalization not appropriate for ASCII-8BIT (Encoding::CompatibilityError)` from `pod install` | `LANG` is unset. A step is a new process with only the environment the agent gives it (§9); CocoaPods aborts on a non-UTF-8 locale. The error names Unicode, not the locale, so it reads as a corrupt-file problem | `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8`. Amendment A33 moves this into the executor's base environment |
+| **VERIFIED** `xcodebuild: error: The project named "X" does not contain a scheme named "X"` on the runner, works locally | The scheme lives in `xcuserdata/` and was never committed. §12 gives every run a fresh clone, so the runner never has it | Commit the scheme under `<project>.xcodeproj/xcshareddata/xcschemes/`. Amendment A34; `latem doctor` checks it |
+| **VERIFIED** `error: exportArchive No Team Found in Archive` (exit 70) | Archive built unsigned, or `DEVELOPMENT_TEAM` empty | Set `DEVELOPMENT_TEAM` on the `archive` invocation, not only on the export |
+| Archive uploads, then App Store Connect rejects it hours later | The archive contains a **simulator** binary. `xcodebuild` exits 0 either way | `otool -l …/LatemExample \| grep -A2 LC_BUILD_VERSION` — platform 2 is a device, 7 is the simulator. Assert it in the build script |
 | Build hangs at the end, no output | `--non-interactive` missing; EAS is waiting on a prompt nobody can see | Add it. On a headless runner a prompt is an invisible hang until the step timeout |
 | Hangs even **with** `--non-interactive` *(inferred)* | EAS is trying to manage credentials itself and reaching for an Expo login | Configure the project so credentials are local; do not let EAS fetch its own — it races `match` |
 | `xcrun: error: SDK "iphoneos" cannot be located` | Xcode CLT selected instead of full Xcode | `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` |
 | Xcode licence prompt in the log *(inferred)* | Licence not accepted after an Xcode upgrade | `sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch`. Bake into the Tart image |
 | `pod install` fails on native extensions *(inferred)* | System Ruby 2.6 | Homebrew Ruby, first on `PATH`. See `manual-baseline.md` §1 |
 | Build much slower in the VM than on the host *(inferred, and the point of the measurement)* | DerivedData over VirtioFS | This is the §13.2 question. Measure it; set `derived_data = "vm"` if the share loses |
-| Disk full mid-build | Base image ~90 GB, DerivedData tens of GB more | `min_free_gb = 150` for tart. Check for leaked `latem-run-*` VMs |
+| Disk full mid-build | Base image 140 GB provisioned, DerivedData tens of GB more | `min_free_gb = 200` for tart, 60 for the default native runner. Check for leaked `latem-run-*` VMs |
 | Two iOS builds fail intermittently and differently *(inferred)* | Parallel Xcode builds contending on DerivedData and the keychain | `concurrency = 1` and `concurrency_group: ios` |
 
 ### 1.4 Expanded — upload
@@ -337,7 +348,7 @@ sorted by how often each is the answer, not by how interesting it is.
    `Apple Distribution` identity? (§3, §5)
 4. `xcode-select -p` — full Xcode, not CLT? (§6)
 5. `df -h /` — above `min_free_gb`? Any leaked `latem-run-*` VMs? (§13.2)
-6. `tart list` — leaked clones eating ~90 GB each?
+6. `tart list` — leaked clones diverging toward 140 GB each?
 7. Only then read the build log.
 
 `latem doctor` is meant to collapse steps 1–6 into one command (§19). Until it

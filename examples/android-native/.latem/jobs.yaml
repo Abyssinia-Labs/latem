@@ -1,0 +1,104 @@
+# Job registry for a plain Gradle Android application — RUNNER_SPEC §9, §18.2.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ BOTH JOBS HAVE RUN, end to end, by hand, 2026-08-11.                      │
+# │                                                                           │
+# │ JDK 17.0.20, AGP 9.3.1, Gradle 9.7, SDK 36, on a MacBook Pro M4 Max.      │
+# │   android-smoke   → assembleDebug → app-debug.apk (853K), no credential   │
+# │   android-release → signed .aab → Play internal track, 21:07:34           │
+# │                     signed by CN=Latem Upload Key, O=Abyssinia Labs       │
+# │                                                                           │
+# │ What has NOT run is an agent executing them. Every step was invoked from  │
+# │ a shell; the timeouts below are still estimates.                          │
+# │                                                                           │
+# │ docs/manual-baseline.md §7.3 has the session.                             │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# Why this exists alongside examples/expo-app: that one does not build at all
+# (A32). This registry needs no Expo, no Node, and no hosted account to reach a
+# release bundle.
+
+version: 1
+
+defaults:
+  timeout: 30m
+  shell: bash
+
+# Gradle's own caches, which are where essentially all the reuse is. Unlike the
+# iOS example there is no DerivedData question here: these are ordinary
+# directories on local disk under the native executor (§13.3), and under docker
+# they are volumes (§14.1). Nothing is shared into a VM, so §13.2's VirtioFS
+# measurement does not apply to Android at all.
+caches:
+  - name: gradle
+    path: ~/.gradle
+  - name: android-build-cache
+    path: ~/.android/build-cache
+
+jobs:
+  # No Google account, no keystore, no service account — so it runs on a fresh
+  # runner before any credential exists and tells you whether the MACHINE is
+  # right. The Android analogue of ios-smoke.
+  android-smoke:
+    description: Assemble a debug APK — proves the runner with no credential
+    runs_on: [macos, xcode]
+    timeout: 20m
+    caches: [gradle, android-build-cache]
+    concurrency_group: android
+    artifacts:
+      - path: build/*.apk
+        retain: 3d
+    steps:
+      - name: Install
+        run: ./ci/install.sh
+        timeout: 5m
+      - name: Assemble debug
+        run: ./ci/android/build-debug.sh
+        timeout: 15m
+
+  android-release:
+    description: Build a signed AAB and upload it to Play internal testing
+    # §18.2 puts Android on a linux/docker runner, and that is right for a fleet
+    # — Android needs no macOS. It is declared for macos here because that is
+    # the machine this example was verified on, and a runs_on nobody has ever
+    # matched is a guess. Change to [linux, docker] once a Linux runner exists.
+    runs_on: [macos, xcode]
+    timeout: 60m
+    caches: [gradle, android-build-cache]
+    concurrency_group: android
+    inputs:
+      track:
+        type: enum
+        values: [internal, alpha, beta]
+        default: internal
+      notes:
+        type: string
+        max_length: 500
+        default: ""
+    # Names only, never values (INV-2).
+    #
+    # ANDROID_KEYSTORE_B64 is the upload keystore itself, base64 so a binary can
+    # travel as one line. It is the single most damaging secret here: whoever
+    # holds it and its password can sign an update to this app. Play App Signing
+    # limits the blast radius — Google holds the real signing key and this only
+    # gets a build as far as their door — but it is still the credential to
+    # rotate first if a runner is ever compromised.
+    secrets:
+      - ANDROID_KEYSTORE_B64
+      - ANDROID_KEYSTORE_PASSWORD
+      - ANDROID_KEY_ALIAS
+      - ANDROID_KEY_PASSWORD
+      - PLAY_SERVICE_ACCOUNT_JSON
+    artifacts:
+      - path: build/*.aab
+        retain: 7d
+    steps:
+      - name: Install
+        run: ./ci/install.sh
+        timeout: 5m
+      - name: Build and upload
+        run: ./ci/android/build.sh
+        timeout: 45m
+        env:
+          RELEASE_TRACK: ${input.track}
+          RELEASE_NOTES: ${input.notes}

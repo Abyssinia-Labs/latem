@@ -1,0 +1,113 @@
+# Job registry for a plain Xcode application — RUNNER_SPEC §9, §18.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ BOTH JOBS HAVE RUN, end to end, by hand, 2026-08-11.                      │
+# │                                                                           │
+# │ ios-smoke   → .app in 20.2s cold, no Apple credential of any kind.        │
+# │ ios-release → signed .ipa → TestFlight → installed on a physical iPhone.  │
+# │               App REDACTED-APP-ID, build 1.0 (1), 17:53:16.                    │
+# │                                                                           │
+# │ What has NOT run is an agent executing them. Every step here was invoked  │
+# │ from a shell; the timeouts below are still estimates, and the two `env    │
+# │ -i` rehearsals of ci/ios/build-simulator.sh are the closest thing to      │
+# │ proof that a stripped runner environment is enough.                       │
+# │                                                                           │
+# │ docs/manual-baseline.md §7 has the session and the eleven defects it      │
+# │ surfaced.                                                                 │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# Why this example exists alongside examples/expo-app: that one does not build.
+# Expo SDK 57 does not compile against Swift 6.2 (Xcode 26), and `eas build
+# --local` additionally requires an Expo account, which is a hosted dependency
+# the project's whole pitch is about not having. This registry needs neither.
+# docs/ios.md has both findings in full.
+
+version: 1
+
+defaults:
+  timeout: 30m
+  shell: bash
+
+# Xcode's DerivedData is the only cache worth mounting here. There is no
+# node_modules and no Pods, so the pnpm and cocoapods caches the Expo example
+# declares have nothing to hold.
+#
+# On the native executor (§13.3, the default since A31) this is a host directory
+# used in place — local APFS, no VirtioFS — which is the configuration measured
+# at 2.8x faster warm than cold (§13.2). There is no trade-off to weigh here;
+# the open question in §13.2 is about Tart only.
+caches:
+  - name: derived-data
+    path: ~/Library/Developer/Xcode/DerivedData
+
+jobs:
+  # The smoke test. No Apple account, no certificate, no profile, no key — so it
+  # can run on a freshly-installed Mac runner before any credential exists, and
+  # tell you whether the MACHINE is right. If this fails the problem is the box;
+  # if this passes and ios-release fails, the problem is credentials.
+  ios-smoke:
+    description: Build for the simulator — proves the runner without any Apple credential
+    runs_on: [macos, xcode]
+    timeout: 20m
+    caches: [derived-data]
+    concurrency_group: ios
+    artifacts:
+      - path: build/*.zip
+        retain: 3d
+    steps:
+      - name: Install
+        run: ./ci/install.sh
+        timeout: 5m
+      - name: Build for simulator
+        run: ./ci/ios/build-simulator.sh
+        timeout: 15m
+
+  ios-release:
+    description: Archive, sign, and upload to TestFlight
+    runs_on: [macos, xcode]
+    timeout: 90m
+    caches: [derived-data]
+    concurrency_group: ios
+    inputs:
+      channel:
+        type: enum
+        values: [internal, external]
+        default: internal
+      notes:
+        type: string
+        max_length: 500
+        default: ""
+    # Names only, never values (INV-2). Resolved by §15's chain and registered
+    # with the redactor before the first step starts.
+    #
+    # DEVELOPMENT_TEAM is deliberately NOT here. It is a 10-character id visible
+    # in every signed binary, so it is not a secret, and it lives in
+    # project.pbxproj where a fork can change it in one place. Declaring it as a
+    # secret would only redact it out of logs, making signing failures harder to
+    # read for no gain.
+    secrets:
+      - MATCH_PASSWORD
+      - MATCH_GIT_URL
+      - APP_STORE_CONNECT_KEY_ID
+      - APP_STORE_CONNECT_ISSUER_ID
+      - APP_STORE_CONNECT_KEY_P8
+      - KEYCHAIN_PASSWORD
+    artifacts:
+      - path: build/*.ipa
+        retain: 7d
+    steps:
+      - name: Install
+        run: ./ci/install.sh
+        timeout: 5m
+      - name: Unlock keychain
+        run: ./ci/ios/unlock-keychain.sh
+        timeout: 2m
+      - name: Sync certificates
+        run: ./ci/ios/match.sh
+        timeout: 5m
+      - name: Archive and upload
+        run: ./ci/ios/build.sh
+        timeout: 70m
+        env:
+          RELEASE_CHANNEL: ${input.channel}
+          RELEASE_NOTES: ${input.notes}

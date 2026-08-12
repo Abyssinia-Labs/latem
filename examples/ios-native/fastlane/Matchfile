@@ -1,0 +1,27 @@
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+type("appstore")
+app_identifier(["com.abyssinialabs.latemexample"])
+
+# match still defaults to "master"; GitHub has defaulted to "main" for years.
+# Left alone, match pushes certificates to a master branch in a repo whose
+# default branch is main — everything works, and anyone who later opens the repo
+# to check sees an empty main and concludes it failed.
+git_branch("main")
+
+# readonly is deliberately NOT set here.
+#
+# An earlier draft pinned `readonly(true)` in this file, which made the one run
+# that must not be read-only — the first, the one that CREATES the certificate
+# and profile — impossible: match would refuse and report only that nothing
+# matched, without saying that this file was why.
+#
+# So it is controlled by the flag instead, at the two call sites that differ:
+#
+#   first run, once, by a human:  bundle exec fastlane match appstore
+#   every run after, incl. CI:    bundle exec fastlane match appstore --readonly
+#
+# ci/ios/match.sh passes --readonly and must keep doing so. Without it match
+# creates NEW certificates on every build; an account has a hard cap on how many
+# distribution certificates can exist, and a runner that burns one per run
+# exhausts it and then breaks code signing for every developer on the team.

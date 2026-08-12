@@ -243,11 +243,17 @@ func (d *doctor) checkTart(ctx context.Context) check {
 			fmt.Sprintf("not on PATH, but runner %q uses the tart executor", tartRunners[0].Name),
 			"brew install cirruslabs/cli/tart")
 	default:
-		return warn("tart.present", "tart",
-			"not installed — Xcode jobs will fall back to the native executor, which has no isolation",
-			"brew install cirruslabs/cli/tart").
-			withNotes("The native executor runs builds directly on this host as the logged-in user " +
-				"and at concurrency 1 (§13.3). It is a convenience mode, not an isolation story.")
+		// No tart runner is configured and tart is not installed. Since
+		// amendment A31 that is the default configuration, not a degraded one,
+		// so this is a skip rather than a warning: there is no tart runner, so
+		// there is nothing here to check. Warning on the shipped default is how
+		// operators learn to read past warnings.
+		//
+		// Whether native is the *right* executor for this machine is a question
+		// about who can influence the refs it builds (§13.0), which doctor
+		// cannot answer by inspecting the machine. It belongs in the spec and
+		// the README, not in a check that would fire identically on every host.
+		return skip("tart.present", "tart", "not installed, and no runner uses it")
 	}
 }
 

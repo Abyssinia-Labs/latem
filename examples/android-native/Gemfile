@@ -1,0 +1,5 @@
+# fastlane only — `supply` is the Play upload. Gradle comes from the committed
+# wrapper, not from a gem and not from Homebrew.
+source "https://rubygems.org"
+ruby ">= 3.1"
+gem "fastlane"

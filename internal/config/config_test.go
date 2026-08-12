@@ -330,7 +330,7 @@ labels   = ["macos", "xcode"]
 		t.Errorf("derived_data = %q, want %q — the VM's own disk is the option that cannot be pathologically slow", tart.DerivedData, DerivedDataVM)
 	}
 	if got := cfg.Runners[0].MinFreeGB(); got != DefaultTartMinFreeGB {
-		t.Errorf("min_free_gb = %v, want %v (a base image with Xcode is ~90 GB)", got, DefaultTartMinFreeGB)
+		t.Errorf("min_free_gb = %v, want %v (a base image with Xcode is 140 GB provisioned)", got, DefaultTartMinFreeGB)
 	}
 }
 

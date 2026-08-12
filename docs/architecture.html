@@ -469,7 +469,7 @@ code,.mono{font-family:var(--mono);font-size:.88em}
       <ul class="plist">
         <li><span class="k">agent</span><span class="v"><b>Outbound daemon</b><span>Holds one connection to a queue. No ports to open, no dynamic DNS, works behind any NAT.</span></span></li>
         <li><span class="k">jobs.yaml</span><span class="v"><b>Local job registry</b><span>Named jobs, defined in your repo, on your disk. The only jobs that can ever run.</span></span></li>
-        <li><span class="k">exec</span><span class="v"><b>Executors</b><span>Docker on Linux, Docker on Apple silicon, and native macOS through ephemeral Tart VMs for Xcode work.</span></span></li>
+        <li><span class="k">exec</span><span class="v"><b>Executors</b><span>Docker on Linux, and two ways to do Xcode: the Mac's own OS by default, or an ephemeral Tart VM when the machine builds code you do not control.</span></span></li>
         <li><span class="k">cache</span><span class="v"><b>Mounted cache volumes</b><span>Gradle, CocoaPods, DerivedData, pnpm and Cargo live in named volumes. No save step, no restore step, no size ceiling.</span></span></li>
         <li><span class="k">mobile</span><span class="v"><b>Expo build pipeline</b><span>Local EAS builds wrapped in fastlane lanes, with match handling certificates from your own private repo.</span></span></li>
         <li><span class="k">trigger</span><span class="v"><b>Local trigger</b><span>CLI, file watcher, or a git hook from your own Forgejo. No account required.</span></span></li>
@@ -532,7 +532,7 @@ code,.mono{font-family:var(--mono);font-size:.88em}
     <div class="step"><span class="step__n">02</span><span class="step__where">Control plane</span><span class="step__b"><b>A row lands in the queue.</b><span>State <code>queued</code>, stamped with your account, the machine id, and the job name. That is the entire payload.</span></span></div>
     <div class="step"><span class="step__n">03</span><span class="step__where">Agent</span><span class="step__b"><b>The subscription fires.</b><span>No polling delay. The agent claims the row, moving it to <code>claimed</code>, which also stops a second agent taking it.</span></span></div>
     <div class="step"><span class="step__n">04</span><span class="step__where">Agent</span><span class="step__b"><b>The name is resolved locally.</b><span>Unknown name, or a job not allowed on this machine's labels, and it is rejected here — before anything executes.</span></span></div>
-    <div class="step"><span class="step__n">05</span><span class="step__where">Executor</span><span class="step__b"><b>A clean environment comes up.</b><span>A container on Linux, a fresh Tart VM for anything touching Xcode. Cache volumes mount in; the workspace itself is disposable.</span></span></div>
+    <div class="step"><span class="step__n">05</span><span class="step__where">Executor</span><span class="step__b"><b>A clean workspace comes up.</b><span>A container on Linux; on a Mac, the host's own toolchain or a fresh Tart VM. Caches mount in; the workspace itself is disposable either way.</span></span></div>
     <div class="step"><span class="step__n">06</span><span class="step__where">Executor</span><span class="step__b"><b>The build runs.</b><span>Your scripts, your toolchain. Logs stream out redacted, line by line, so a phone can watch a twenty-minute iOS build.</span></span></div>
     <div class="step"><span class="step__n">07</span><span class="step__where">Executor</span><span class="step__b"><b>Artifacts land on your disk.</b><span>Or go straight to TestFlight and Play from the machine that signed them. They do not route through the control plane.</span></span></div>
     <div class="step"><span class="step__n">08</span><span class="step__where">Both</span><span class="step__b"><b>Environment torn down, result recorded.</b><span>The row closes at <code>passed</code> or <code>failed</code>, a notification goes out, and the caches survive for the next run.</span></span></div>
@@ -549,14 +549,15 @@ code,.mono{font-family:var(--mono);font-size:.88em}
   <div class="machines">
     <div class="mach">
       <p class="mach__tag">Mac mini · runner <code>ios</code></p>
-      <h3>Tart, for Xcode</h3>
+      <h3>Xcode, on the host</h3>
       <p class="mach__hw">macOS · LaunchAgent, auto-login on</p>
       <ul>
         <li><b>iOS builds</b> through local EAS and fastlane</li>
-        <li><b>Ephemeral Tart VM</b> cloned per build, discarded after</li>
+        <li><b>The Mac's own OS</b> by default — your Xcode, your simulators, no image to pull</li>
         <li><b>Keychain unlocked</b> as an explicit step — signing needs a real user session</li>
         <li><b>Concurrency 1.</b> Parallel Xcode builds fight over DerivedData</li>
         <li><b>FileVault is a decision.</b> On, and an unattended reboot never reaches login</li>
+        <li><b>Swap in an ephemeral Tart VM</b> when this box starts building refs your team does not control — no isolation is the price of the default</li>
       </ul>
     </div>
     <div class="mach">

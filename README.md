@@ -8,17 +8,28 @@ to you.
 
 ### 1. Xcode is an executor, not a shell script
 
-An iOS build gets an ephemeral macOS VM — `tart clone`, boot, run, delete —
-with a real user session, an unlocked keychain, and code signing that works.
-Not a `runs-on: macos` label pointing at a machine somebody set up by hand, and
-not a container pretending Xcode fits in one.
+An iOS build gets a real user session, an unlocked keychain, and code signing
+that works. Not a `runs-on: macos` label pointing at a machine somebody set up
+by hand, and not a container pretending Xcode fits in one.
 
-Latem ships three executors behind one interface: Docker for Linux work, Tart
-for isolated macOS work, and a native executor for the case where a VM is not
-available. A job picks one by label. The step contract is identical across all
-three — each step is a new process, the filesystem persists, `$LATEM_ENV`
-carries variables between them — so a job that works on one works on the
-others.
+Latem ships three executors behind one interface: Docker for Linux, and two for
+macOS — **native**, which runs on the Mac's own OS, and **Tart**, which gives
+each build an ephemeral VM (`tart clone`, boot, run, delete).
+
+**Native is the default**, because on a Mac you already own it needs nothing
+installed and no disk: your Xcode, your keychain, your simulators. Tart is one
+uncommented config block away, and it costs a 69 GB image pull and 140 GB of
+disk. The question that decides which you want is not how big your team is —
+it is **whose code runs on this machine**. Your own repositories, native is
+right. Anything a contributor outside the team can influence, you want the VM,
+because native runs steps as you, with your keychain and your signing
+certificates. `docs/RUNNER_SPEC.md` §13.0 is the long version.
+
+A job picks a runner by label, not by executor, so switching a machine between
+the two is a config edit and touches no repository. The step contract is
+identical across all three — each step is a new process, the filesystem
+persists, `$LATEM_ENV` carries variables between them — so a job that works on
+one works on the others.
 
 ### 2. Caches are mounted, not archived
 
@@ -92,11 +103,10 @@ $ latem doctor
 Tooling
   [ ok ] git                     git version 2.50.1 (Apple Git-155)
   [ ok ] docker daemon           reachable
-  [FAIL] tart                    not on PATH, but runner "ios" uses the tart executor
-         fix: brew install cirruslabs/cli/tart
+  [skip] tart                    not installed, and no runner uses it
 
 Disk
-  [ ok ] free disk / ios         394.7 GB free, floor 150 GB (tart)
+  [ ok ] free disk / ios         394.7 GB free, floor 60 GB (native)
   [ ok ] mirrors and work_dir    one filesystem, so clones hardlink
 
 Executors
@@ -110,7 +120,7 @@ macOS session
          fix: sudo fdesetup authrestart
          fix: sudo fdesetup disable
 
-18 passed, 2 warning(s), 5 failed, 2 skipped
+18 passed, 2 warning(s), 4 failed, 3 skipped
 ```
 
 Among the checks worth knowing about:
@@ -190,18 +200,17 @@ require_approval_otherwise = true
 
 [[runner]]
 name        = "ios"
-executor    = "tart"
+executor    = "native"           # the default; Tart is the isolation upgrade
 labels      = ["macos", "arm64", "xcode", "ios"]
-concurrency = 1                  # Apple's licence caps this at 2
+concurrency = 1                  # enforced — parallel Xcode builds contend
 
-  [runner.tart]
-  base_image  = "latem-xcode-26"
-  min_free_gb = 150              # a base image is ~90 GB
+  [runner.native]
+  min_free_gb = 60
 ```
 
 Every rule is validated at load and fatal there: a runner that starts on a
 broken config does not fail at startup, it fails forty minutes into somebody's
-build. Disk floors are per runner — 40 GB for docker, 60 for native, 150 for
+build. Disk floors are per runner — 40 GB for docker, 60 for native, 200 for
 tart — because a global 20 GB admits an iOS build the machine cannot finish.
 
 Jobs live in `.latem/jobs.yaml` in your own repository:

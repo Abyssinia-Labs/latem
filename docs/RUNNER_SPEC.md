@@ -465,7 +465,7 @@ schema_version = 1
 
 [machine]
 name  = "mac-mini"                 # display only
-id    = "mch_01H..."               # assigned at register; stable
+id    = "mch_01HQZX3N8G4K2MVBWT"  # assigned at register; stable
 labels = ["macos", "arm64", "xcode-16", "ios"]
 
 [agent]
@@ -523,36 +523,44 @@ concurrency = 1
   gpu           = true
   memory        = "32g"
 
+# The default macOS runner: the host's own OS, no VM (§13.3). This is what
+# `latem init` writes, and it needs nothing installed that a Mac with Xcode on
+# it does not already have. Read §13's opening before deploying it — it has no
+# isolation, and that is a decision about whose code you let run here, not a
+# detail.
 [[runner]]
 name        = "ios"
-executor    = "tart"
-labels      = ["macos", "arm64", "xcode", "ios"]
-concurrency = 1                     # hard ceiling is 2 — Apple's licence, §13.2
-
-  [runner.tart]
-  base_image   = "latem-xcode-26"
-  cpus         = 6
-  memory_gb    = 16
-  ssh_user     = "admin"
-  boot_timeout = "3m"
-  min_free_gb  = 150                # a base image is ~90 GB; §13.2
-  derived_data = "vm"               # "vm" | "shared" — set by measurement, §13.2
-
-# Fallback when Tart is unavailable or the base image is not built (§13.3).
-# Draft 02 described this executor and its 60 GB floor in §13.3 but gave the
-# schema no block to express either — amendment A14.
-[[runner]]
-name        = "ios-native"
 executor    = "native"
-labels      = ["macos", "arm64", "xcode", "ios", "native"]
+labels      = ["macos", "arm64", "xcode", "ios"]
 concurrency = 1                     # enforced; §13.3
 
   [runner.native]
   min_free_gb = 60
-  shell       = "bash"
+
+# The isolation upgrade (§13.2). Uncomment — and delete the native block above,
+# since both carry the same labels — when this machine builds a ref anyone
+# outside your team can influence. It costs a ~69 GB image pull, ~140 GB of
+# disk, and 30–60s of boot per run.
+#
+# [[runner]]
+# name        = "ios"
+# executor    = "tart"
+# labels      = ["macos", "arm64", "xcode", "ios"]
+# concurrency = 1                   # hard ceiling is 2 — Apple's licence, §13.2
+#
+#   [runner.tart]
+#   base_image   = "latem-xcode-26"
+#   cpus         = 6
+#   memory_gb    = 16
+#   ssh_user     = "admin"
+#   boot_timeout = "3m"
+#   min_free_gb  = 200              # provisioned size is ~140 GB; §13.2
+#   derived_data = "vm"             # "vm" | "shared" — set by measurement, §13.2
 ```
 
-**One agent, several runners.** The example above is one machine — a Mac mini — hosting three execution slots, one of which is a Tart VM and one of which is Docker. That is the model: an agent owns a config directory, a machine id, and a set of labelled runners. "Two roles on one box" does **not** mean two agents; it means two `[[runner]]` blocks with different labels, and Apple work never lands on the container runner because the labels do not match.
+**One agent, several runners.** The example above is one machine — a Mac mini — hosting three execution slots, one of them Docker and one of them the host's own macOS. That is the model: an agent owns a config directory, a machine id, and a set of labelled runners. "Two roles on one box" does **not** mean two agents; it means two `[[runner]]` blocks with different labels, and Apple work never lands on the container runner because the labels do not match.
+
+**On the two macOS blocks carrying identical labels.** That is deliberate: a job asking for `[macos, xcode]` should not have to know which executor answers, so switching a machine from native to Tart is a config edit and not a change to every repo's `jobs.yaml`. Gate 13 picks the first runner in config order whose labels match, so enabling both is not ambiguous — it is worse than ambiguous. The second block never runs, and reads in the config file as though it does. Enable one.
 
 Running two agents on one machine is possible and unsupported-by-default: pass `--config-dir` or set `LATEM_CONFIG_DIR`, which relocates the lock, socket, sqlite, work dir, and caches together. Each such agent is a distinct machine to the control plane, with its own token. Reach for it only when the two agents genuinely need different owners, which N4 says they should not.
 
@@ -902,6 +910,20 @@ type Step struct {
 
 **Every `Env` implementation obeys the same step contract (§9).** A step is a new process: no working directory, exported variable, or shell function survives it. The filesystem persists for the run. `Exec` starts each step in the workspace root with `Spec.Env` overlaid by `Step.Env`, plus whatever previous steps wrote to `$LATEM_ENV`. Implementations that cannot honour this — by, say, reusing a persistent shell — are not conformant, because job authors would then get different behaviour per executor.
 
+### 13.0 Choosing one
+
+Linux is not a choice: it is Docker (§13.1). macOS is, and the spec ships a default.
+
+**The default for macOS is `native` (§13.3) — the host's own OS, no VM.** It requires nothing beyond a Mac that already has Xcode on it, adds no boot latency, and costs no disk. `latem init` writes it.
+
+**One question decides whether that default is wrong for a given machine: whose code runs on it?**
+
+If the answer is "repositories my team controls, and nothing else", native is correct and the rest of this section is a v2 concern. If the answer includes a fork, a pull request from outside the team, or any ref a contributor can move, native is not defensible and the machine needs `tart` (§13.2).
+
+The reason is that native's blast radius is the operator's account. A step runs as the logged-in user with that user's keychain — which on a Mac mini doing iOS work is the machine holding the signing certificates and the App Store Connect key. INV-5's approval mechanism (§5, §10) still applies under native and still stops unapproved code from running at all, but it is the *only* thing standing there: once a commit is approved, native gives it everything. Under Tart the same commit gets a VM that is deleted afterwards. The invariant is unchanged; what changes is the cost of it being wrong once.
+
+This is a deliberate reversal of draft 02, which made Tart the default and described native as a fallback. See amendment A31 for why the ordering was wrong: Tart is a ~69 GB pull and ~140 GB of provisioned disk to isolate against a threat that a single-team, self-hosted runner does not have, and making it the default meant every operator paid for a boundary most of them did not need before their first green build. The section numbers are unchanged — 54 code comments cite `§13.2` and `§13.3` by number, and renumbering to reflect precedence would be churn with real regression risk in comments for a purely cosmetic gain.
+
 ### 13.1 Docker executor
 
 Target: Linux x86_64 (desktop) and Linux arm64 (Mac mini container role).
@@ -927,7 +949,7 @@ On Linux the agent additionally passes `--user $(id -u):$(id -g)` so bind-mounte
 
 ### 13.2 Tart executor (macOS, ephemeral)
 
-Target: any job touching Xcode. This is the isolation story for the Mac mini.
+Target: a Mac building refs the team does not control. This is the isolation upgrade over §13.3, not the default — see §13.0 for which one a given machine wants.
 
 ```
 Prepare:
@@ -952,28 +974,50 @@ Close:
 - Caches cannot be Docker volumes here. Use host directories shared with `--dir`, one per cache name (§14.2) — with the exception below.
 - The base image (`latem-xcode-*`) is built once by a documented Packer-style script in `examples/`: Xcode, command-line tools, Homebrew, Node, fastlane, CocoaPods. Rebuilding on Xcode upgrades is a documented operator task.
 - Boot cost is real (30–60s). Acceptable against a 20-minute iOS build; do not use tart for short jobs.
-- **Disk.** A Tart image carrying Xcode is on the order of 90 GB. `tart clone` is an APFS copy-on-write clone, so it is fast and initially near-free, but a running VM diverges and DerivedData is tens of gigabytes on its own. `min_free_gb` defaults to **150** for a tart runner; draft 01's global 20 was sized for a container host and would let a machine accept an iOS build it cannot finish. `latem doctor` reports the base image's real size rather than assuming this number.
+- **Disk.** Draft 02's "on the order of 90 GB" was a single number standing in for two that differ by a factor of two, and it was wrong in both directions. Measured against `cirruslabs/macos-tahoe-xcode:latest`:
 
-#### The DerivedData question — measure before implementing
+  | Quantity | Measured | What it costs you |
+  |---|---|---|
+  | Compressed download | **68.8 GB** (261 layers) | One-time, per image version, over your network |
+  | Provisioned disk | **140 GB** (`org.cirruslabs.tart.uncompressed-disk-size`) | Permanent, on the runner |
+  | Base image, no Xcode | 27.1 GB | The floor if you build your own |
 
-`--dir` is VirtioFS, and Xcode's DerivedData over VirtioFS is materially slower than the VM's own disk. §18.1 asserts DerivedData is "the largest single win" from shared cache directories. Both things cannot be true: if the share is slow enough, a warm cache over VirtioFS loses to a cold build on local disk, and the entire iOS caching story inverts.
+  The 113 GB between the base image and the full one is mostly simulator runtimes — iOS 18.5 is 19 GB and iOS 26.0 is 15 GB installed, against 4.6 GB for Xcode.app itself. An image carrying one runtime instead of four is dramatically smaller, which is the main lever if the number matters to you.
 
-This is the one number in this document that changes an architecture rather than a constant, so it is settled by measurement, not by argument. Before the tart executor is written, time the same iOS build three ways on the target hardware:
+  `tart clone` is an APFS copy-on-write clone, so cloning is fast and initially near-free, but a running VM diverges and DerivedData is tens of gigabytes on its own. `min_free_gb` therefore defaults to **200**, not draft 02's 150: that figure was derived from the wrong 90 GB and left under 10 GB of headroom above a single provisioned image. `latem doctor` reports the base image's real size rather than assuming any of this.
 
-| Configuration | What it tells you |
+  If the download rather than the disk is what you object to, `tart create --from-ipsw` builds the image locally from a ~15 GB restore image and you install Xcode into it yourself. Same end state, a fifth of the transfer, several hours of your time.
+
+#### The DerivedData question — measure before implementing the tart executor
+
+`--dir` is VirtioFS, and Xcode's DerivedData over VirtioFS is materially slower than the VM's own disk. §18.1 asserted DerivedData was "the largest single win" from shared cache directories. Both things cannot be true: if the share is slow enough, a warm cache over VirtioFS loses to a cold build on local disk, and the iOS caching story inverts.
+
+**This no longer blocks M5.** It blocks the tart executor, and only that. Native is the default (§13.0) and has no VirtioFS anywhere in it — the workspace is the clone and DerivedData sits on local APFS — so a machine running the default never meets this question. Draft 02 put this measurement on the critical path because it assumed every macOS deployment was a VM.
+
+**Half of it is now measured.** The native baseline, on an M4 Max with DerivedData on local APFS, building a 900-file SwiftUI/UIKit target for the iOS simulator:
+
+| | Wall clock |
 |---|---|
-| Cold VM, no shared caches | The floor. What every run costs if caching loses. |
-| DerivedData shared via `--dir` | Draft 01's assumption. |
-| DerivedData on the VM disk, CocoaPods + pnpm shared | The hedge: share the cheap, keep the expensive local. |
+| Cold (DerivedData removed) | **13.79 s** |
+| Warm (one file touched) | **4.97 s** (4.91 / 5.05 / 4.96) |
 
-`derived_data = "vm" | "shared"` (§8) exists so the answer is a config value rather than a rewrite. The default ships as whatever the measurement says. If option 3 wins, keeping DerivedData warm across runs additionally requires snapshotting the VM rather than cloning from a clean base — that is a real scope change to this section, and knowing about it before M5 rather than during it is the entire point of measuring first.
+DerivedData was 651 MB across 13,975 files. The cache is worth **2.8×** on this workload, which is the number the remaining measurement has to beat:
+
+> **VirtioFS must be less than 2.8× slower than local APFS, or `derived_data = "shared"` is the wrong default.**
+
+Stated that way it is one comparison rather than draft 02's three-way table, and it can be run on any Mac with Tart installed rather than on the target hardware specifically — the ratio is what matters, not the absolute times. Method and environment are in `docs/manual-baseline.md` §5; the harness is a generated Swift project rather than a real app, chosen so the result is reproducible and not a statement about one codebase's module graph.
+
+`derived_data = "vm" | "shared"` (§8) exists so the answer is a config value rather than a rewrite. If `"vm"` wins, keeping DerivedData warm across runs additionally requires snapshotting the VM rather than cloning from a clean base — a real scope change to this section, and still worth knowing before the tart executor is written rather than during it.
 
 ### 13.3 Native executor (macOS, no VM)
 
-Fallback when Tart is unavailable or the base image is not built.
+**The default macOS executor** (§13.0). The host's own macOS, running steps as the logged-in user. Correct when this machine builds only refs your team controls; wrong when it does not, and §13.0 is the decision.
 
-- Runs directly on the host as the logged-in user. **No isolation.** Document this plainly; it is a convenience mode.
-- `concurrency` MUST be 1. Parallel Xcode builds contend on DerivedData and the keychain and produce failures that look like code bugs.
+Being the default raises the stakes on everything below rather than lowering them. Draft 02 wrote these as caveats on a fallback nobody was expected to run; they are now the operating conditions of the shipped configuration, and every one of them is a `latem doctor` check for that reason.
+
+- Runs directly on the host as the logged-in user. **There is no isolation of any kind** — no filesystem, network, process, or resource boundary. A job's `run` can read `~/.ssh`, delete `~/Library`, install a launch agent, or use every core. On a Mac doing iOS work that includes the keychain holding the signing certificates. This is not a caveat to be softened in the README; it is the thing the operator is agreeing to, and §13.0 states the criterion for when agreeing is reasonable.
+- `concurrency` MUST be 1. Parallel Xcode builds contend on DerivedData and the keychain and produce failures that look like code bugs. This is the one respect in which the default is *less* capable than Tart, which permits 2 — a machine that needs macOS throughput needs §13.2, or a second machine.
+- **Nothing resets between runs.** A VM is cloned from a base image and is identical every time; this host accumulates — Homebrew upgrades, keychain state, a `xcode-select` someone changed weeks ago, files a previous job left outside the workspace. §12 makes the *workspace* clean per run, and that is the boundary: everything outside it persists. A build that passes here and fails elsewhere is usually this.
 - Requires a **LaunchAgent under an auto-login user**, not a LaunchDaemon. `codesign` needs a real user session with keychain access; daemon contexts fail with errors that point nowhere useful. This is the single most common install failure — `latem doctor` must detect and name it.
 - Requires **auto-login enabled**, and auto-login is defeated by FileVault. See §23 — this interacts badly enough with "survives reboots" that it is a `latem doctor` check, not a footnote.
 - Every step runs `bash -lc` as a **new process**, so the login environment (Homebrew paths, rbenv, nvm) is present and, per §9, nothing else carries between steps.
@@ -1020,7 +1064,7 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 - Cache volumes exceeding `max_size` (default 25 GB per volume): evict by atime, oldest first, down to 80% of the cap.
 - Workspaces under `work/` older than 24h with no live run: delete. Nothing else to clean — §12's clones leave no administrative state behind in the mirror.
 - Mirror maintenance: `git gc --prune=30.days.ago` per mirror, skipped for any mirror a live run is reading, since automatic gc is disabled there (§12).
-- Tart: `tart list` for VMs matching `latem-run-*` with no live run; delete. A leaked VM carrying an Xcode image costs ~90 GB, which is the fastest way to fill a Mac mini.
+- Tart: `tart list` for VMs matching `latem-run-*` with no live run; delete. A leaked VM starts as a near-free copy-on-write clone and grows toward the image's provisioned 140 GB (§13.2) as the build writes, which is the fastest way to fill a Mac mini.
 - Mirrors untouched for 90 days: report in `latem doctor`, never auto-delete (a mirror may be the only local copy).
 - When free disk drops below the runner's `min_free_gb`, prune aggressively and refuse new runs with `E_DISK` rather than failing halfway through a build. The floor is **per runner**, not global — 40 GB for docker, 150 GB for tart, 60 GB for native (§13). Draft 01's single global 20 GB was sized for containers and would admit an iOS build onto a machine that cannot hold one.
 
@@ -1122,7 +1166,13 @@ The wedge feature. Everything here lives in the repo's own `ci/` directory — t
 
 ### 18.1 iOS
 
-Runner: `ios` (tart, concurrency 1).
+Runner: `ios` (native by default, concurrency 1 — §13.0). Nothing below changes if that machine is switched to `tart`: the job matches on labels, and both blocks in §8 carry the same ones.
+
+> **This section describes the Expo pipeline, which has never run** — see §18.3
+> and amendment A32. The pipeline that *has* run end to end, to a TestFlight
+> build installed on a physical device, is `examples/ios-native/`: plain
+> `xcodebuild archive` → `-exportArchive` → `fastlane pilot upload`, no Expo and
+> no hosted account. Where the two disagree, the one that ran wins.
 
 **Credentials via fastlane match.** Certificates and profiles live encrypted in a private repo the operator controls. The agent supplies `MATCH_PASSWORD`; nothing else about signing touches the agent, and nothing at all touches a control plane.
 
@@ -1147,7 +1197,9 @@ bundle exec fastlane pilot upload --ipa build/app.ipa \
 
 Required environment: `MATCH_PASSWORD`, `MATCH_GIT_URL`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_P8`, `KEYCHAIN_PASSWORD`.
 
-Caches: `cocoapods` and `pnpm` unconditionally — both are content-addressed, cheap to share, and unambiguously a win. `derived-data` is conditional on `runner.tart.derived_data`, because whether sharing it helps or hurts is a VirtioFS throughput question that §13.2 requires be answered by measurement before the tart executor is written. Draft 01 asserted DerivedData was "the largest single win"; it is the largest *potential* win and also the one most exposed to the share being slow. Do not design around either answer until the number exists.
+Caches: `cocoapods` and `pnpm` unconditionally — both are content-addressed, cheap to share, and unambiguously a win.
+
+`derived-data` depends on the executor, and under the default it is no longer a question. **Native** mounts nothing: the cache is a host directory on local APFS (§14.2), which is the configuration the §13.2 baseline measured at **2.8× faster warm than cold**, so it is on and there is no trade-off to weigh. **Tart** puts it behind VirtioFS, which is where draft 01's claim that DerivedData was "the largest single win" collides with the share possibly being slower than the win — that is `runner.tart.derived_data`, and §13.2 requires it be settled by measurement before the tart executor is written. Do not design around either answer for Tart until that number exists.
 
 **Known failure modes to document in `docs/ios.md`:**
 
@@ -1175,9 +1227,25 @@ Caches: `gradle` (largest win), `pnpm`, and the Android SDK baked into the image
 
 Emulator tests need `/dev/kvm` — add `--device /dev/kvm` and confirm in preflight. This is a capability the hosted services largely do not offer, and worth calling out in the README.
 
-### 18.3 Why `--local` is safe to depend on
+### 18.3 What depending on `--local` actually costs
 
-`eas build --local` is a supported Expo flag running the same pipeline on the local machine. The runner invokes it as an ordinary command; there is no reverse engineering and no private API. If Expo changes the flag, the blast radius is one shell script in `ci/`, not the agent.
+Draft 02 titled this section "Why `--local` is safe to depend on" and argued: it is a supported Expo flag running the same pipeline locally, the runner invokes it as an ordinary command, there is no reverse engineering and no private API, and if Expo changes the flag the blast radius is one shell script in `ci/` rather than the agent.
+
+**All of that is true and it answered the wrong question.** Running it found two exposures the argument does not cover (amendment A32):
+
+1. **`eas build --local` requires an Expo account.** It fails before compiling anything with `EAS project not configured. Must configure EAS project by running 'eas init'`, and `eas init` requires a login. So a "local" build has a hosted dependency and a login the operator must hold — on a runner whose entire pitch is that it works with no account. That is not a flag-compatibility risk, which is what the original argument bounded; it is a second service in the critical path of every iOS build.
+2. **The Expo SDK constrains the Xcode version.** SDK 57.0.12 does not compile against Swift 6.2 (Xcode 26.0.1): 31 errors inside `expo-modules-jsi`, in three distinct classes of Swift 6 strictness. Xcode on a macOS runner is a shared, slow-moving, operator-managed resource — §13.3's whole point is that nothing resets it between runs — so "upgrade Xcode" and "upgrade the SDK" are coupled in a way a single `ci/` script cannot absorb.
+
+Neither makes Expo a wrong choice for a repository that already uses it. Both mean **the mobile story cannot rest on Expo alone**, so §18 now carries two reference examples:
+
+| Example | Builds today | Needs an account | Toolchain surface |
+|---|---|---|---|
+| `examples/ios-native/` | **yes** — 20.2 s to a simulator `.app`, archives to arm64 | no | `xcodebuild` + `fastlane` |
+| `examples/expo-app/` | no — blocked on the SDK/Xcode incompatibility above | yes, an Expo account | `xcodebuild` + `fastlane` + Node + pnpm + CocoaPods + EAS |
+
+`examples/ios-native/` is the one to bring a new Mac runner up on, because it isolates the question. It needs no Apple credential either — a simulator build is unsigned — so it answers "is this machine configured correctly?" without waiting on the credential lead times in `manual-baseline.md` §2. If it passes and the signed job fails, the problem is credentials, not the machine.
+
+The original argument survives for what it did cover: the runner still invokes `eas` as an ordinary command, and there is still no private API anywhere in this.
 
 ---
 
@@ -1491,7 +1559,7 @@ Fourteen findings, all resolved in the text above. Recorded here because several
 | F9 | §8 | Two machine "roles" implying two agents | One agent, several labelled runners. `LATEM_CONFIG_DIR` for the rare exception | The architecture overview and the spec described different deployment models |
 | F10 | §15 | Secrets "zeroed where the language allows" | `[]byte` inside `internal/secrets`, converted to `string` once at env-build | Go strings cannot be zeroed; the guarantee was unenforceable |
 | F11 | §12, §14.4 | `fetch --prune` on mirrors | Plus `gc.auto 0`, with explicit gc from the daily ticker | Automatic gc could collect the run's commit mid-build after a force-push |
-| F12 | §8, §13, §14.4 | Global `min_free_gb = 20` | Per-runner floors: docker 40, native 60, tart 150 | A Tart Xcode image is ~90 GB; 20 admitted builds the machine could not finish |
+| F12 | §8, §13, §14.4 | Global `min_free_gb = 20` | Per-runner floors: docker 40, native 60, tart 150 — **tart revised to 200 by A31**, once the image was measured rather than estimated | A Tart Xcode image was believed to be ~90 GB (it is 140 GB provisioned); 20 admitted builds the machine could not finish |
 | F13 | §19, §23 | LaunchAgent + auto-login | Plus FileVault status and the two options it forces | FileVault stops an unattended reboot before login, so "survives reboots" was false on any encrypted machine |
 | F14 | §8, §13.2 | Tart `concurrency = 1` "see §13.3" | Ceiling is 2 (§13.2); §13.3 is the native executor's separate constraint | Wrong cross-reference on a licence-derived limit |
 
@@ -1569,3 +1637,34 @@ Two further items are recorded but **not** amended, because neither is a contrac
 
 - **`$LATEM_ENV` parsing, artifact containment, and the error triple are duplicated verbatim across the docker and native executors**, and will be a third copy with Tart — while §9 requires the step contract be identical across all three. The shared code has nowhere to live because `internal/executor` is frozen. This is tech debt with a known trigger point (the Tart executor), not a gap, and refactoring two working packages now buys nothing.
 - ~~**Artifact glob semantics diverge**~~ — **resolved by A29.** The divergence existed because two glob implementations lived in the executors and never ran. With `Env.Fetch` removed there is one, so `artifacts: [dist]` has one meaning. What §17 still owes an answer to is whether that meaning is the right one; see A29.
+
+### Amendment from deployment
+
+| # | Section | Change | Why it surfaced |
+|---|---|---|---|
+| A31 | §8, §13, §18.1 | **Native becomes the default macOS executor; Tart becomes the isolation upgrade.** New §13.0 states the choice and the criterion that decides it. §8's reference config ships the native block enabled and the tart block commented. §13.2's disk figures are replaced with measured ones and `min_free_gb` goes 150 → 200. §13.2's DerivedData measurement is taken off M5's critical path and given a decision threshold from the measured native baseline | **The default cost 69 GB of download and 140 GB of disk to defend a boundary the first user does not have.** Draft 02 made Tart the default because it is the stronger configuration, which is true and was the wrong basis for the decision: a self-hosted runner's first deployment builds the operator's own repositories, where the threat Tart defends against — a contributor moving a ref you do not control — does not yet exist. Nothing in the code had to change; the native executor was already built, tested, and at 90.5% coverage, which is itself the evidence that the ordering was a documentation decision rather than an engineering one. The consequence that made it worth doing now is scheduling: §13.2's VirtioFS measurement was the last open question capable of changing an architecture, and it is a question only Tart asks — native has no VirtioFS, the workspace is the clone and DerivedData is on local APFS. Making native the default retires it from the critical path, unblocks M5, and moves WS-13 to v2 |
+
+**Promoting the block found it was broken.** §8's `[runner.native]` carried `shell = "bash"`, and no runner schema has ever had a `shell` key — decoding is strict, so the reference config a new operator is told to start from would have been rejected at load, with an unknown-key error whose remedy text points back at §8. `machine.id = "mch_01H..."` failed the ID pattern for the same reason. Both had been wrong since draft 02 and neither could be caught, because no test had ever read the spec. `TestSpecReferenceConfigParses` (`internal/config/spec_test.go`) now extracts §8's fenced TOML and puts it through `config.Parse`, and additionally asserts *which* executor is enabled — "the reference config parses" would also hold for a file where the wrong block had been commented out, and which executor an operator gets by default is the substance of A31 rather than a detail of it. `native.Options.Shell` remains an internal seam with no config surface, which is what it always was.
+
+### Amendments from the first real iOS build
+
+| # | Section | Change | Why it surfaced |
+|---|---|---|---|
+| A32 | §18, §18.3 | **§18.3 is rewritten and §18 gains a second, Expo-free reference example** (`examples/ios-native/`, verified building). §18.1's runner line and cache list are split by example | **The first attempt to run §18.1 never reached a compiler.** `eas build --local` requires an Expo account — a hosted dependency in the critical path of every iOS build, on a runner that advertises working with no account — and §18.3's argument for depending on the flag had bounded the wrong risk: it reasoned about Expo *changing* the flag, not about what invoking it already requires. Separately, Expo SDK 57.0.12 does not compile against Swift 6.2 (Xcode 26.0.1) — 31 errors in `expo-modules-jsi` across three classes of Swift 6 strictness, of which mechanical patches fixed 30. Neither is a defect in this project, and that is the point: §18 had staked the wedge on a dependency whose failure modes it did not enumerate |
+| A33 | §9, §13.3, §20 | **A step's environment must set `LANG`**, and `latem doctor` checks it on macOS runners | `pod install` aborts with `Unicode Normalization not appropriate for ASCII-8BIT`, which names Unicode rather than the locale. §9 says a step is a new process with the environment the agent hands it, and that environment had no `LANG` — correct per §9 and wrong in practice, because the interactive shell every operator tests in has one. The class is larger than CocoaPods: Ruby, Python, and Java tools all read it. It belongs in the executor's base environment rather than in each `ci/` script, which is where it currently is |
+| A34 | §12, §20 | **A committed shared Xcode scheme is a hard requirement**, checked by `latem doctor` for macOS runners | `xcodebuild -scheme X` fails with "scheme not found" on a fresh clone unless the `.xcscheme` is committed under `xcodeproj/xcshareddata/xcschemes/`. Xcode auto-creates schemes into `xcuserdata/`, which nobody commits — so this works on every developer's machine and fails on every runner, and §12 guarantees a fresh clone every run, which guarantees the failure. It is the cheapest possible check and it fails a 90-minute job in the first ten seconds |
+
+| A35 | §19, §20 | **`latem doctor` gains credential-agreement checks**, not just presence checks | Every value in an App Store Connect key can be individually valid while the set is unusable: the JWT's `kid` names one key and the signature comes from another, and Apple answers 401 without naming either. Verified 2026-08-11 — four `AuthKey_*.p8` files on one laptop, all 257 bytes, all valid, one of them the right one. `doctor` must check *relationships* (does this key id match this private key? does this key see this bundle id?) and not merely that each variable is set. `examples/ios-native/ci/ios/check-credentials.sh` is the working implementation; it answers in a second where the build answers in two minutes |
+| A36 | §18.1, §22 | **A release job must derive its build number from the run, not the project** | App Store Connect rejects a build number it has already accepted for a marketing version, so a project with `CURRENT_PROJECT_VERSION` pinned uploads exactly once and then fails forever — after archiving, exporting, and uploading. The example now takes `LATEM_BUILD_NUMBER`, defaulting to Unix time. The agent should supply the run counter instead: §22 already stores it, and a TestFlight build traceable to the run that produced it is the whole point of an audit trail |
+
+| A37 | §24, §25 | **A shell assertion must not put a producer into `grep -q` under `pipefail`**, and `latem doctor`'s own checks are covered by the same rule | Measured, not theorised: `unzip -l file \| grep -q PATTERN` under `set -o pipefail` returned a false negative **17 times in 200 runs**. `grep -q` exits at the first match, the producer takes SIGPIPE, and the pipeline reports failure on input that matched. It is timing-dependent, so it passes every hand test and fails on a loaded machine — which is exactly what a runner is. The project already had one instance, fixed, with an explanatory comment; the comment did not stop the identical bug being written again two hours later in a sibling script. Capture to a variable, or use a tool that answers the question directly (`jarsigner -verify` rather than grepping a zip listing) |
+
+**A37 generalises past shell.** The rule is that *a fix recorded only as a comment is not a fix* — if a hazard can recur it needs something mechanical: a shared helper, a lint rule, or a test. The same reasoning is why §24's invariant suite exists rather than a document describing the invariants.
+
+**A32 is the "Expo coupling" risk in PLAN.md §11 arriving on schedule**, not a surprise. That row said the response was to add a bare `xcodebuild` + Gradle example in WS-09 before M5; the row was right, and the example now exists and builds. What the row underestimated is that the coupling is not only about how *narrow* the wedge is — an Expo-only mobile story also inherits an account requirement that contradicts the project's own first sentence.
+
+**A33 and A34 are the same shape and worth stating as a rule:** *the runner's environment is not the operator's shell, and its workspace is not the operator's checkout.* Both failures are invisible locally and certain on a runner, both were found within an hour of running a real build, and neither would ever have been found by testing the agent against itself. That is the argument for M0 existing.
+
+**A31 is a decision about who the first user is, not about which executor is better.** Tart is better. It is also a boundary you buy before you need it, and defaults are what an operator gets when they have not yet formed an opinion — so the default should be the configuration that is correct for the deployment they actually have, with the stronger one one uncomment away and a stated criterion for when to reach for it. §13.0 is that criterion, and it is a question about provenance ("whose code runs here?") rather than about scale or hardware, because provenance is what actually changes the answer.
+
+The invariants are untouched. INV-5 in particular means exactly what it did: unapproved code does not run. What native changes is not whether the invariant holds but what it costs when an approval is granted wrongly — under Tart, a VM that is deleted; under native, the operator's keychain. That is stated in §13.0 rather than left for an operator to infer, because it is the only part of this amendment that can hurt someone.
