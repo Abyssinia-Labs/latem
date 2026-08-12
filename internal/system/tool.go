@@ -3,6 +3,8 @@ package system
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -138,6 +140,37 @@ func (s *System) Tool(ctx context.Context, name string, versionArgs ...string) T
 		versionArgs = []string{"--version"}
 	}
 	out, err := s.Exec(ctx, name, versionArgs...)
+	t.Banner = firstLine(out)
+	if err != nil && t.Banner == "" {
+		t.Err = err
+		return t
+	}
+	if v, ok := ParseVersion(t.Banner); ok {
+		t.Version = v
+	} else if err != nil {
+		t.Err = err
+	}
+	return t
+}
+
+// ToolAt probes a program at an exact path rather than whatever PATH resolves.
+//
+// It exists because the interesting case on macOS is a *usable* tool that is
+// deliberately not on PATH. Homebrew keeps ruby and openjdk keg-only, so
+// `which ruby` reports Apple's 2.6 on a machine that also has 3.4 installed —
+// and a check that only asks PATH reports "too old" when the honest answer is
+// "the right one is here, it is just not first".
+func (s *System) ToolAt(ctx context.Context, path string, versionArgs ...string) Tool {
+	t := Tool{Name: filepath.Base(path), Path: path}
+	if st, err := os.Stat(path); err != nil || st.IsDir() || st.Mode()&0o111 == 0 {
+		return t
+	}
+	t.Found = true
+
+	if len(versionArgs) == 0 {
+		versionArgs = []string{"--version"}
+	}
+	out, err := s.Exec(ctx, path, versionArgs...)
 	t.Banner = firstLine(out)
 	if err != nil && t.Banner == "" {
 		t.Err = err

@@ -111,6 +111,7 @@ func (d *doctor) run(ctx context.Context) report {
 
 	var rep report
 	rep.section("Tooling", d.checkTooling(ctx)...)
+	rep.section("Mobile toolchain", d.checkMobileToolchain(ctx)...)
 	rep.section("Configuration", d.checkConfiguration(ctx)...)
 	rep.section("Disk", d.checkDisk(ctx)...)
 	rep.section("Executors", d.checkExecutors(ctx)...)
@@ -1033,4 +1034,183 @@ func portOf(addr string) string {
 		return addr[i+1:]
 	}
 	return "9838"
+}
+
+// -------------------------------------------------------- mobile toolchain
+
+// rubyMinimum is the Gemfile floor for both examples. Modern fastlane will not
+// install against macOS's 2.6.
+var rubyMinimum = [3]int{3, 1, 0}
+
+// jdkForAndroid is what AGP 9 accepts. A newer JDK is not "more compatible":
+// `brew install gradle` pulls in the current one as a dependency, Gradle picks
+// it as the daemon JVM, and AGP rejects it — so installing Gradle can break an
+// Android build that worked the day before.
+const jdkForAndroid = 17
+
+// checkMobileToolchain covers what the iOS and Android pipelines need and
+// nothing else does.
+//
+// Every check here exists because it cost real time on 2026-08-11
+// (manual-baseline.md §7.5). They are warnings rather than failures: a macOS
+// runner might build Go, and doctor cannot know what jobs a repo declares —
+// jobs.yaml lives in the repo at the resolved commit (§9), not on this machine.
+//
+// The shape they share is the interesting part. In each case a working tool IS
+// installed and the one on PATH is the wrong one, so every naive check
+// ("is ruby present?", "does java run?") passes on a machine that cannot build.
+func (d *doctor) checkMobileToolchain(ctx context.Context) []check {
+	rubyCheck, rubyBin := d.checkRuby(ctx)
+	return []check{
+		rubyCheck,
+		d.checkBundler(ctx, rubyBin),
+		d.checkJDK(ctx),
+		d.checkAndroidSDK(),
+	}
+}
+
+// kegOnlyRubies are Homebrew's installation prefixes. Homebrew's ruby is
+// keg-only and never on PATH by itself, which is the entire trap: `which ruby`
+// returns /usr/bin/ruby (2.6) after you have "installed Ruby".
+var kegOnlyRubies = []string{
+	"/opt/homebrew/opt/ruby/bin/ruby",
+	"/usr/local/opt/ruby/bin/ruby",
+}
+
+// checkRuby also returns the bin directory of the Ruby a step should use, so
+// the bundler check can probe the same one. Empty when there is none.
+func (d *doctor) checkRuby(ctx context.Context) (check, string) {
+	rb := d.sys.Tool(ctx, "ruby", "--version")
+
+	// A usable Ruby off PATH is the common state and the confusing one, so
+	// look for it before reporting on whatever PATH resolved.
+	var kegPath, kegBanner string
+	for _, p := range kegOnlyRubies {
+		if t := d.sys.ToolAt(ctx, p, "--version"); t.Found && t.Version.AtLeast(rubyMinimum[0], rubyMinimum[1], rubyMinimum[2]) {
+			kegPath, kegBanner = p, t.Banner
+			break
+		}
+	}
+
+	switch {
+	case !rb.Found && kegPath == "":
+		return warn("ruby.version", "ruby", "not on PATH",
+			"brew install ruby").
+			withNotes("Only needed for fastlane — the iOS and Android release jobs. " +
+				"A runner that builds neither does not need it."), ""
+
+	case rb.Found && rb.Version.AtLeast(rubyMinimum[0], rubyMinimum[1], rubyMinimum[2]):
+		return pass("ruby.version", "ruby", rb.Banner), filepath.Dir(rb.Path)
+
+	case kegPath != "":
+		// The trap, named precisely.
+		found := "not on PATH"
+		if rb.Found {
+			found = rb.Banner + " at " + rb.Path
+		}
+		return warn("ruby.version", "ruby",
+			fmt.Sprintf("PATH gives %s, but %s is installed", found, kegBanner),
+			`export PATH="`+filepath.Dir(kegPath)+`:$PATH"`).
+			withNotes("Homebrew's ruby is keg-only, so installing it does not put it on PATH. " +
+				"macOS ships 2.6 at /usr/bin/ruby and fastlane will not run on it — the failure is a " +
+				"wall of native-extension compile errors naming neither Ruby nor its version. " +
+				"A step gets the environment the agent hands it (§9), not an interactive shell's, " +
+				"so this must be in the service environment or in the repo's ci/ scripts."), filepath.Dir(kegPath)
+
+	default:
+		return warn("ruby.version", "ruby",
+			rb.Banner+" — too old; fastlane needs "+fmt.Sprintf("%d.%d+", rubyMinimum[0], rubyMinimum[1]),
+			"brew install ruby"), ""
+	}
+}
+
+// checkBundler probes bundler belonging to the Ruby a step will actually use,
+// not whatever PATH resolves.
+//
+// The distinction is not pedantic. On a machine whose PATH ruby is macOS's 2.6
+// while a usable 3.4 sits keg-only, `bundle --version` reports 2.6's bundler —
+// so the naive check PASSES, directly beneath a line saying the Ruby is
+// unusable. It reports a working toolchain on a machine that cannot build, and
+// it does so more confidently the more broken the machine is.
+func (d *doctor) checkBundler(ctx context.Context, rubyBin string) check {
+	b := d.sys.Tool(ctx, "bundle", "--version")
+	if rubyBin != "" {
+		if at := d.sys.ToolAt(ctx, filepath.Join(rubyBin, "bundle"), "--version"); at.Found {
+			b = at
+		} else if b.Found && filepath.Dir(b.Path) != rubyBin {
+			return warn("ruby.bundler", "bundler",
+				b.Banner+" at "+b.Path+" — belongs to a different Ruby than "+rubyBin,
+				"gem install bundler").
+				withNotes("This bundler runs under the Ruby on PATH, which the check above " +
+					"reported as the wrong one. `bundle install` under it either fails or " +
+					"installs gems fastlane cannot load.")
+		}
+	}
+	if !b.Found {
+		return warn("ruby.bundler", "bundler", "not on PATH",
+			"gem install bundler").
+			withNotes("`bundle install` can succeed and `bundle exec fastlane` still report " +
+				"\"command not found: fastlane\" when the gem's binstub lands outside bundler's " +
+				"executable directory. Both examples pin gems to vendor/bundle for that reason.")
+	}
+	return pass("ruby.bundler", "bundler", b.Banner)
+}
+
+func (d *doctor) checkJDK(ctx context.Context) check {
+	java := d.sys.Tool(ctx, "java", "-version")
+
+	// macOS ships a stub at /usr/bin/java that prints "Unable to locate a Java
+	// Runtime" and exits non-zero. It is on PATH and it is not a JDK, so
+	// presence alone proves nothing.
+	if java.Found && java.Version.IsZero() {
+		return warn("java.version", "JDK",
+			"java is on PATH but reports no version — on macOS that is Apple's stub, not a JDK",
+			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
+			withNotes("Only needed for Android. openjdk is keg-only like ruby, so " +
+				"JAVA_HOME must be set explicitly; Gradle otherwise picks whatever java resolves to.")
+	}
+	if !java.Found {
+		return warn("java.version", "JDK", "not on PATH",
+			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
+			withNotes("Only needed for Android release jobs.")
+	}
+	if maj := java.Version.Major; maj > jdkForAndroid {
+		return warn("java.version", "JDK",
+			fmt.Sprintf("%s — AGP 9 wants %d; a newer JDK is rejected, not tolerated", java.Banner, jdkForAndroid),
+			fmt.Sprintf("brew install openjdk@%d, then set JAVA_HOME to it", jdkForAndroid)).
+			withNotes("`brew install gradle` pulls in the current JDK as a dependency and Gradle " +
+				"selects it as the daemon JVM, so installing Gradle can break a working Android build.")
+	}
+	return pass("java.version", "JDK", java.Banner)
+}
+
+// androidSDKs are where an SDK lands, in the order the examples' ci/lib/env.sh
+// looks. platform-tools is the marker: an SDK root without it is a partial
+// install that fails much later.
+var androidSDKs = []string{
+	"Library/Android/sdk",
+}
+
+func (d *doctor) checkAndroidSDK() check {
+	if env := d.sys.Getenv("ANDROID_HOME"); env != "" {
+		if _, err := os.Stat(filepath.Join(env, "platform-tools")); err == nil {
+			return pass("android.sdk", "Android SDK", env+" (ANDROID_HOME)")
+		}
+		return warn("android.sdk", "Android SDK",
+			"ANDROID_HOME is "+env+" but it has no platform-tools/")
+	}
+	for _, rel := range androidSDKs {
+		p := filepath.Join(d.sys.Home(), rel)
+		if _, err := os.Stat(filepath.Join(p, "platform-tools")); err == nil {
+			return warn("android.sdk", "Android SDK",
+				"found at "+p+", but ANDROID_HOME is not set",
+				`export ANDROID_HOME="`+p+`"`).
+				withNotes("Gradle's own advice is to write the path into local.properties. Do not: " +
+					"that file is per-machine and must not be committed, so a runner would need it " +
+					"generated per run. The environment variable is the reproducible form.")
+		}
+	}
+	return warn("android.sdk", "Android SDK", "not found",
+		"install via Android Studio, or brew install --cask android-commandlinetools").
+		withNotes("Only needed for Android jobs.")
 }
