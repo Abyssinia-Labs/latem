@@ -237,6 +237,19 @@ func TestEveryGitInvocationSeparatesOptionsFromArguments(t *testing.T) {
 			}
 		}
 		for i, a := range body {
+			// A resolved object name needs no terminator, and on git 2.43
+			// cannot have one: `checkout --detach --end-of-options <sha>` fails
+			// there with "--detach does not take a path argument" (A40).
+			//
+			// Exempt by SHAPE. ^[0-9a-f]{40}$ cannot begin with a dash, so git
+			// cannot read it as an option wherever it sits, and validateSHA
+			// enforces exactly that pattern before the value reaches an argv.
+			// A ref, a URL or a path is a string whose characters an attacker
+			// chooses — "--upload-pack=/bin/sh" is not hex — so none of those
+			// are exempt and all still fail here without a separator.
+			if shaPattern.MatchString(a) {
+				continue
+			}
 			for _, value := range external {
 				if !strings.Contains(a, value) {
 					continue

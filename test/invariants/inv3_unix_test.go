@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -327,6 +328,11 @@ func TestINV3_HostileValuesReachNoShell(t *testing.T) {
 // It is asserted from outside internal/source through the [source.Config]
 // GitBinary seam, which already exists for the LFS tests, so no new export was
 // needed to see the argv.
+// resolvedSHA mirrors internal/source's validateSHA. Kept as a literal here
+// rather than imported: a test that shares the constant with the code it checks
+// stops catching a change to that constant.
+var resolvedSHA = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
+
 func TestINV3_EveryGitArgumentFromOutsideSitsAfterATerminator(t *testing.T) {
 	requireGit(t)
 
@@ -396,6 +402,28 @@ func TestINV3_EveryGitArgumentFromOutsideSitsAfterATerminator(t *testing.T) {
 				sawTerminator = true
 			}
 			if !isExternal(arg, external) {
+				continue
+			}
+			// A resolved object name needs no terminator, and on some git
+			// versions cannot have one (amendment A40).
+			//
+			// The exemption is by SHAPE, not by position or by command, which
+			// is what keeps it honest: ^[0-9a-f]{40}$ cannot begin with a dash,
+			// so git cannot read it as an option however the argv is arranged.
+			// internal/source enforces exactly this pattern with validateSHA
+			// before the value reaches any argv, so the guarantee INV-3 wants
+			// is provided by validation instead of by punctuation.
+			//
+			// Nothing else is exempt. A ref, a URL and a path are all strings
+			// an attacker picks the characters of — "--upload-pack=/bin/sh" is
+			// not hex — so they still require a terminator and still fail here
+			// without one.
+			//
+			// The narrowness matters: `git checkout --detach --end-of-options
+			// <sha>` fails on git 2.43 with "--detach does not take a path
+			// argument", so requiring the terminator there made every runner
+			// with an older git unable to check out at all.
+			if resolvedSHA.MatchString(arg) {
 				continue
 			}
 			if !terminatedBefore(body, i) {

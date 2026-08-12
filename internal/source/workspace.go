@@ -110,7 +110,23 @@ func (mi *Mirror) Checkout(ctx context.Context, runID, normalizedRef, sha string
 	if _, err := m.run(ctx, "", "clone", "--local", "--no-checkout", "--", mi.path, path); err != nil {
 		return nil, gitErr(err, "cloning %s into %s", mi.repo.Key, path)
 	}
-	if _, err := m.run(ctx, path, "checkout", "--detach", "--end-of-options", sha); err != nil {
+	// No options terminator here, deliberately, and this is the one argv in the
+	// package without one (amendment A40).
+	//
+	// `git checkout --detach --end-of-options <sha>` works on git 2.50 and FAILS
+	// on 2.43 with "--detach does not take a path argument '--end-of-options'":
+	// checkout's own path/revision disambiguation did not learn the terminator
+	// until somewhere between those releases. A7 recorded the terminator as
+	// required, having verified it on 2.50.1 alone, and that made every runner
+	// with an older git unable to check anything out.
+	//
+	// Dropping it is safe *here specifically* because sha is not a
+	// broker-supplied string. validateSHA at the top of this function has
+	// already required ^[0-9a-f]{40}$ or ^[0-9a-f]{64}$, so the value provably
+	// cannot begin with a dash and cannot be read as an option. The terminator
+	// stays on every argv carrying a ref, a URL or a path, where the value is
+	// genuinely attacker-influenced — see git.go and mirror.go.
+	if _, err := m.run(ctx, path, "checkout", "--detach", sha); err != nil {
 		return nil, gitErr(err, "checking out %s in %s", sha, path)
 	}
 	if _, err := m.run(ctx, path, "remote", "set-url", "origin", "--", mi.repo.URL); err != nil {
