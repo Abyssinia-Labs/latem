@@ -23,7 +23,9 @@ disk. The question that decides which you want is not how big your team is —
 it is **whose code runs on this machine**. Your own repositories, native is
 right. Anything a contributor outside the team can influence, you want the VM,
 because native runs steps as you, with your keychain and your signing
-certificates. `docs/RUNNER_SPEC.md` §13.0 is the long version.
+certificates. `docs/RUNNER_SPEC.md` §13.0 is the long version, and
+[`docs/deploy.md`](docs/deploy.md) is the ordered runbook for bringing up a Mac
+from scratch.
 
 A job picks a runner by label, not by executor, so switching a machine between
 the two is a config edit and touches no repository. The step contract is
