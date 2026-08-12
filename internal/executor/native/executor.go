@@ -240,10 +240,24 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		return nil, codeErr(protocol.ErrExecutor, "workspace %q is not a directory", spec.Workspace)
 	}
 
-	if err := validateCacheMounts(spec.Caches, spec.Workspace); err != nil {
+	// Expand ~ ONCE, here, and use the result for both validation and linking.
+	//
+	// The first version of amendment A38 expanded inside validateCacheMounts,
+	// which takes its mounts by value — so validation saw an absolute path and
+	// passed, while linkCaches still received "~/Library/...". filepath.Clean
+	// leaves that relative, so MkdirAll created a literal "~" directory under
+	// the AGENT'S WORKING DIRECTORY and symlinked into it. Every run reported
+	// "mounted 1 cache(s)" and no cache was ever mounted; the real
+	// ~/Library/Developer/Xcode/DerivedData was never touched, which is also
+	// why nothing looked wrong.
+	caches, err := expandCacheTargets(spec.Caches)
+	if err != nil {
 		return nil, err
 	}
-	if err := linkCaches(spec.Caches); err != nil {
+	if err := validateCacheMounts(caches, spec.Workspace); err != nil {
+		return nil, err
+	}
+	if err := linkCaches(caches); err != nil {
 		return nil, err
 	}
 
@@ -296,27 +310,10 @@ func validateCacheMounts(caches []executor.CacheMount, workspace string) error {
 				"cache %q source %q is not an absolute path; the native executor has no volumes, "+
 					"so a cache source must be the host directory §14.2 names", c.Name, c.Source)
 		}
-		// Expand a leading ~ to this executor's home before demanding an
-		// absolute path (amendment A38).
-		//
-		// A cache target cannot be written absolutely in a committed jobs.yaml:
-		// "/Users/abyssinian/Library/..." is correct on exactly one machine, and
-		// §12 hands the same commit to every runner. ~ is the only portable way
-		// to say "the Xcode cache", which is why §9's own example uses it — and
-		// why every one of those examples failed at mount time until now.
-		//
-		// It is expanded HERE, per executor, rather than centrally, because ~
-		// means a different directory in each: the agent user's home natively,
-		// and the container's runner home under docker (§13.1). Resolving it
-		// once in internal/cache would have to pick one and be wrong elsewhere.
-		expanded, err := expandHome(c.Target)
-		if err != nil {
-			return codeErr(protocol.ErrCache, "cache %q target %q: %v", c.Name, c.Target, err)
-		}
-		if !filepath.IsAbs(expanded) {
+		// Targets arrive already expanded, from expandCacheTargets in Prepare.
+		if !filepath.IsAbs(c.Target) {
 			return codeErr(protocol.ErrCache, "cache %q target %q is not an absolute path", c.Name, c.Target)
 		}
-		c.Target = expanded
 		target := filepath.Clean(c.Target)
 		if target == string(filepath.Separator) {
 			return codeErr(protocol.ErrCache, "cache %q would take over /", c.Name)
@@ -538,4 +535,32 @@ func expandHome(p string) (string, error) {
 		return home, nil
 	}
 	return filepath.Join(home, p[2:]), nil
+}
+
+// expandCacheTargets resolves a leading ~ in every cache target, returning a
+// new slice so no caller can accidentally work from the unexpanded originals.
+//
+// A cache target cannot be written absolutely in a committed jobs.yaml:
+// "/Users/someone/Library/..." is correct on exactly one machine, and §12 hands
+// the same commit to every runner. ~ is the only portable spelling, which is
+// why §9's own example uses it (amendment A38).
+//
+// Expansion is per-executor rather than central because ~ denotes a different
+// directory in each — the agent user's home natively, the container's runner
+// home under docker (§13.1) — so resolving it once in internal/cache would have
+// to pick one and be wrong in the other.
+func expandCacheTargets(in []executor.CacheMount) ([]executor.CacheMount, error) {
+	if len(in) == 0 {
+		return in, nil
+	}
+	out := make([]executor.CacheMount, len(in))
+	copy(out, in)
+	for i := range out {
+		expanded, err := expandHome(out[i].Target)
+		if err != nil {
+			return nil, codeErr(protocol.ErrCache, "cache %q target %q: %v", out[i].Name, out[i].Target, err)
+		}
+		out[i].Target = expanded
+	}
+	return out, nil
 }

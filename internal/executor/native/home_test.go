@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Abyssinia-Labs/latem/internal/executor"
 )
 
 // Amendment A38. A committed jobs.yaml runs on every machine (§12), so a cache
@@ -48,23 +50,75 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
-// The expansion must be reachable from the cache mount path, not merely exist.
-// A helper with a passing unit test and no caller is the A29 pattern; this
-// asserts the wiring by mounting a cache whose target is written with a tilde.
-func TestCacheTargetExpandsTilde(t *testing.T) {
-	home, err := os.UserHomeDir()
+// The expansion must reach the code that MOUNTS the cache, through Prepare.
+//
+// This test has now been wrong twice, in the same way, and the reason is worth
+// keeping. Version one called expandHome a second time and declared the wiring
+// proven — asserting the helper twice. Version two called expandCacheTargets
+// and linkCaches itself, in the right order, and passed while Prepare still
+// handed linkCaches the UNEXPANDED slice: it tested the test's composition, not
+// the production one, and a mutation to Prepare could not fail it.
+//
+// The bug both versions missed: filepath.Clean leaves "~/Library/..." relative,
+// so MkdirAll created a literal "~" directory under the agent's working
+// directory and symlinked into it. Every run logged "mounted 1 cache(s)"; no
+// cache was mounted; the real directory was never touched. It reached a
+// developer's checkout on disk before anything noticed.
+//
+// So: call Prepare, and assert on the filesystem.
+func TestPrepareExpandsTildeCacheTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	source := filepath.Join(root, "caches", "runner", "derived-data")
+	ws := filepath.Join(root, "ws")
+	for _, d := range []string{home, source, ws, filepath.Join(root, "env")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+
+	// A working directory that would collect a stray "~", as the agent has.
+	cwd := filepath.Join(root, "cwd")
+	if err := os.MkdirAll(cwd, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	prev, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := expandHome("~/Library/Caches/CocoaPods")
-	if err != nil {
+	if err := os.Chdir(cwd); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, "Library/Caches/CocoaPods")
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	e, err := New(Options{EnvFileDir: filepath.Join(root, "env")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if !filepath.IsAbs(got) {
-		t.Errorf("%q is not absolute; the mount check would still reject it", got)
+	env, err := e.Prepare(t.Context(), executor.Spec{
+		RunID:     "r_0000000000000000000000ff",
+		Workspace: ws,
+		Caches: []executor.CacheMount{{
+			Name:   "derived-data",
+			Source: source,
+			Target: "~/Library/Developer/Xcode/DerivedData",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	t.Cleanup(func() { _ = env.Close(t.Context()) })
+
+	want := filepath.Join(home, "Library/Developer/Xcode/DerivedData")
+	dest, err := os.Readlink(want)
+	if err != nil {
+		t.Fatalf("Prepare did not link the cache under HOME: no symlink at %s: %v", want, err)
+	}
+	if dest != source {
+		t.Errorf("symlink points at %q, want %q", dest, source)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "~")); err == nil {
+		t.Error(`Prepare created a literal "~" directory in the working directory`)
 	}
 }
