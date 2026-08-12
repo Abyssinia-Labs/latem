@@ -1174,7 +1174,20 @@ func (d *doctor) checkJDK(ctx context.Context) check {
 			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
 			withNotes("Only needed for Android release jobs.")
 	}
-	if maj := java.Version.Major; maj > jdkForAndroid {
+	// BOTH bounds. The first version of this check tested only `> 17` and
+	// therefore passed JDK 11 — reported "ok" on a Mac mini that cannot build
+	// an Android release at all. A one-sided range check on a value with a
+	// floor and a ceiling is the same defect as an assertion that cannot fail:
+	// it is most confident exactly where it is least correct.
+	switch maj := java.Version.Major; {
+	case maj > 0 && maj < jdkForAndroid:
+		return warn("java.version", "JDK",
+			fmt.Sprintf("%s — too old; AGP 9 needs %d", java.Banner, jdkForAndroid),
+			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
+			withNotes("Gradle fails with a message about an unsupported class file version, " +
+				"which names a number rather than a JDK. openjdk is keg-only, so installing it " +
+				"is not enough — JAVA_HOME must point at it, and the examples' ci/lib/env.sh does that.")
+	case maj > jdkForAndroid:
 		return warn("java.version", "JDK",
 			fmt.Sprintf("%s — AGP 9 wants %d; a newer JDK is rejected, not tolerated", java.Banner, jdkForAndroid),
 			fmt.Sprintf("brew install openjdk@%d, then set JAVA_HOME to it", jdkForAndroid)).

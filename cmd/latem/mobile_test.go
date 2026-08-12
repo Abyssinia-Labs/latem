@@ -74,3 +74,33 @@ func touchExec(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// The JDK check must have BOTH bounds.
+//
+// The first version tested only `> 17` and passed JDK 11 — reported "ok" on a
+// Mac mini that could not build an Android release at all. Found by running
+// doctor on a second machine, which is the only reason it was found: the
+// machine it was written on happened to have a JDK that was too new, so the
+// one branch that existed was the one being exercised.
+func TestJDKRejectsBothTooOldAndTooNew(t *testing.T) {
+	for _, tc := range []struct {
+		name, banner string
+		wantPass     bool
+	}{
+		{"the mini's JDK 11", `java version "11.0.20" 2023-07-18 LTS`, false},
+		{"ancient 8", `java version "1.8.0_402"`, false},
+		{"exactly 17", `openjdk version "17.0.20" 2026-07-21`, true},
+		{"too new 26", `openjdk version "26.0.2" 2026-01-20`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cmds := map[string]fakeCmd{"java -version": {out: tc.banner}}
+			d := &doctor{sys: newSystemForTest("darwin", dir, cmds, "java")}
+			got := d.checkJDK(context.Background())
+			if pass := got.Level == levelPass; pass != tc.wantPass {
+				t.Errorf("%s: level=%v (pass=%v), want pass=%v — %q",
+					tc.banner, got.Level, pass, tc.wantPass, got.Detail)
+			}
+		})
+	}
+}
