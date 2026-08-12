@@ -1,11 +1,20 @@
 # Bringing up a Mac runner
 
-> **Status.** Every command here was run on a MacBook Pro (M4 Max, macOS 26.5.2,
-> Xcode 26.0.1) on 2026-08-11, most of them more than once and several of them
-> wrong the first time. What has **not** been done is [§9](#9-surviving-a-reboot):
-> no machine has yet built after a reboot with nobody logged in. That step is
-> marked, and it is the only one written from the spec rather than from a
-> terminal.
+> **Status.** §1–§7 have been followed end to end on **two** machines: the
+> MacBook Pro this was written on (M4 Max, Xcode 26.0.1) and a Mac mini that had
+> never seen the software, on 2026-08-12. The mini reached a green
+> credential-free build from a bare `git clone`.
+>
+> That second machine found three defects the first could not, and all three
+> are now fixed: `git checkout --detach --end-of-options` fails on git 2.43 and
+> works on 2.50; the JDK check had no lower bound and passed JDK 11; and Xcode
+> ships with no simulator runtime, so a current Xcode with an old runtime dies
+> inside actool naming two build numbers and no fix. Expect a fresh machine to
+> find more — that is what §6 and §7 are for.
+>
+> What has **not** been done is [§9](#9-surviving-a-reboot): no machine has yet
+> built after a reboot with nobody logged in. That step is marked, and it is the
+> only one written from the spec rather than from a terminal.
 >
 > The failures behind each instruction are in
 > [`manual-baseline.md`](./manual-baseline.md) §7.5. If something here goes
