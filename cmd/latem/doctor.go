@@ -3,9 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -231,8 +229,9 @@ func printReport(w io.Writer, rep report, showFix, color bool) {
 		}
 	}
 
+	st := styler{color: color}
 	for _, s := range rep.Sections {
-		printf(w, "\n%s\n", s.Name)
+		printf(w, "\n%s\n", st.heading(s.Name))
 		for _, c := range s.Checks {
 			printf(w, "  %s %-*s  %s\n", paint(c.Level, c.Level.marker()), width, c.Title, c.Detail)
 			for _, n := range c.Notes {
@@ -264,52 +263,6 @@ func printReport(w io.Writer, rep report, showFix, color bool) {
 	if failed > 0 && !showFix {
 		printf(w, "\nrun `latem doctor --fix` for a consolidated list of the commands above.\n")
 	}
-}
-
-// useColor reports whether the destination is an interactive terminal.
-//
-// The check is a stat on the file rather than a terminal library, because
-// adding a dependency to colour four words is not a trade worth making in a
-// module whose dependency list is a reviewed part of the spec (§3).
-func useColor(w io.Writer) bool {
-	if global.noColor || os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
-}
-
-// wrapLines breaks a note into terminal-width lines on word boundaries.
-func wrapLines(s string, width int) []string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return nil
-	}
-	var (
-		lines []string
-		cur   strings.Builder
-	)
-	for _, word := range words {
-		if cur.Len() > 0 && cur.Len()+1+len(word) > width {
-			lines = append(lines, cur.String())
-			cur.Reset()
-		}
-		if cur.Len() > 0 {
-			cur.WriteByte(' ')
-		}
-		cur.WriteString(word)
-	}
-	if cur.Len() > 0 {
-		lines = append(lines, cur.String())
-	}
-	return lines
 }
 
 // sortedStrings is used where a check iterates a map, so two runs of doctor on

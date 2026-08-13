@@ -78,12 +78,16 @@ func watchRun(cmd *cobra.Command, st *state, runID string, follow bool) error {
 // Stop" as success will deploy something nobody built.
 func terminalStatus(cmd *cobra.Command, r store.Run) error {
 	out := cmd.ErrOrStderr()
+	st := newStyler(out)
 	if r.State == protocol.StateSucceeded {
-		printf(out, "%s succeeded in %s\n", r.ID, runDuration(r))
+		printf(out, "%s %s in %s\n", st.dim(r.ID), st.ok("succeeded"), runDuration(r))
 		return nil
 	}
 
-	msg := fmt.Sprintf("%s %s", r.ID, r.State)
+	// The state keeps its word as well as its colour: this line is read as
+	// often from a CI transcript as from a terminal, and one of those has no
+	// colour at all.
+	msg := fmt.Sprintf("%s %s", st.dim(r.ID), st.bad(string(r.State)))
 	if r.ErrorCode != "" {
 		msg += " (" + string(r.ErrorCode) + ")"
 	}
@@ -94,7 +98,9 @@ func terminalStatus(cmd *cobra.Command, r store.Run) error {
 		msg += ": " + r.ErrorMsg
 	}
 	if r.ErrorCode.Retryable() {
-		msg += "\n\nthis one is retryable — the machine, not the commit, is what failed"
+		// Dimmed: it is advice, not the failure. The eye should land on the
+		// error above it first.
+		msg += "\n\n" + st.dim("this one is retryable — the machine, not the commit, is what failed")
 	}
 	return &ExitError{Code: ExitFailure, Err: errors.New(msg)}
 }

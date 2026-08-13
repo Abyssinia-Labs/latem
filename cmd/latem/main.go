@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -48,9 +49,15 @@ func run() int {
 
 	// Cobra has already printed nothing (SilenceErrors), so this is the only
 	// place an error reaches the operator.
-	printf(os.Stderr, "latem: %v\n", err)
+	//
+	// The prefix carries the colour, not the message. An error is frequently
+	// several lines — a remediation, a fix command, a spec reference — and
+	// painting all of it red makes the part that matters no easier to find
+	// while making the whole thing harder to read.
+	st := newStyler(os.Stderr)
+	printf(os.Stderr, "%s %v\n", st.bad("latem:"), err)
 	if isUsage(err) {
-		printf(os.Stderr, "\nRun `latem %s --help` for usage.\n", commandPath(root))
+		printf(os.Stderr, "\n%s\n", st.dim(fmt.Sprintf("Run `latem %s --help` for usage.", commandPath(root))))
 	}
 	return exitCode(err)
 }

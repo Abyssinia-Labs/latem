@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -236,14 +237,63 @@ func listRuns(cmd *cobra.Command, f listFilter) error {
 		return nil
 	}
 
-	printf(out, "RUN ID\tSTATE\tREPO\tJOB\tREF\tSTARTED\tDURATION\n")
+	rows := make([][]string, 0, len(runs))
 	for _, r := range runs {
 		started := "-"
 		if r.StartedAt != nil {
 			started = formatAge(*r.StartedAt)
 		}
-		printf(out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.ID, r.State, r.Repo, r.Job, refOf(r), started, runDuration(r))
+		rows = append(rows, []string{
+			r.ID, string(r.State), r.Repo, r.Job, refOf(r), started, runDuration(r),
+		})
+	}
+	header := []string{"RUN ID", "STATE", "REPO", "JOB", "REF", "STARTED", "DURATION"}
+
+	st2 := newStyler(out)
+	if !st2.color {
+		// Piped, redirected, or NO_COLOR. Stay exactly as before: raw tabs, so
+		// the output still composes with cut and awk as the help promises. A
+		// tabwriter's padding would make every column position depend on the
+		// longest value in it, which is the opposite of machine-readable.
+		printf(out, "%s\n", strings.Join(header, "\t"))
+		for _, row := range rows {
+			printf(out, "%s\n", strings.Join(row, "\t"))
+		}
+		return nil
+	}
+
+	// A terminal. Align the columns and colour the state, because a human
+	// scanning twenty runs is looking for the failed one and nothing else.
+	// State keeps its word as well as its colour: colour is decoration here,
+	// never the only carrier of meaning.
+	widths := make([]int, len(header))
+	for i, h := range header {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if n := len(cell); n > widths[i] {
+				widths[i] = n
+			}
+		}
+	}
+
+	var b strings.Builder
+	for i, h := range header {
+		b.WriteString(st2.column(st2.dim(h), widths[i]+2))
+	}
+	printf(out, "%s\n", strings.TrimRight(b.String(), " "))
+
+	for _, row := range rows {
+		b.Reset()
+		for i, cell := range row {
+			text := cell
+			if i == 1 {
+				text = st2.paintState(protocol.RunState(cell))
+			}
+			b.WriteString(st2.column(text, widths[i]+2))
+		}
+		printf(out, "%s\n", strings.TrimRight(b.String(), " "))
 	}
 	return nil
 }
