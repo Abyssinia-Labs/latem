@@ -7,12 +7,16 @@
 > [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §18.1 and from Apple's and fastlane's
 > documented behaviour, and are the ones most likely to be wrong.
 >
-> **The unverified half is the important half.** Everything so far ran from an
-> interactive shell, which has a live user session and an unlocked keychain.
-> §2, §3 and §4 below — LaunchAgent context, keychain unlocking under launchd,
-> and FileVault — are exactly what that setup cannot test, and they are what
-> §13.3 names as the most common install failure. Treat them as unproven until
-> a mini runs a build after a reboot with nobody logged in.
+> **§2 and §3 are now verified; §4 is not, and it is the one that matters.**
+> The build did not only run from an interactive shell: launchd started the
+> agent (`launchctl managername` = `Aqua`, parent PID 1) and `codesign` reached
+> the login keychain from that context, which is §13.3's central claim tested
+> rather than argued. What remains unproven is narrower and harder — **a reboot
+> with nobody logged in.** A LaunchAgent needs a user session, so auto-login
+> and FileVault (§4) decide whether the machine comes back on its own, and no
+> machine has yet been rebooted to find out. `doctor` reports both as failing,
+> correctly. [`deploy.md`](./deploy.md) §9 is the procedure, and it is the only
+> section of that runbook still written from the spec.
 >
 > Correct rows from [`manual-baseline.md`](./manual-baseline.md) §7.5 as real
 > failures happen — a symptom string you can paste into a search engine is the
@@ -77,8 +81,8 @@ Everything below follows from those.
 |---|---|---|
 | **VERIFIED** `EAS project not configured. Must configure EAS project by running 'eas init' before this command can be run in non-interactive mode.` | `eas build --local` requires an **Expo account**. The build is local; the authorisation is not | None that keeps "no account required". Build with `xcodebuild` directly — `examples/ios-native/`. See §18.3 / amendment A32 |
 | **VERIFIED** `'weak' must be a mutable variable, because it may change at runtime` — 31 of them, all in `expo-modules-jsi` | Expo SDK 57.0.12 does not compile against Swift 6.2 (Xcode 26.0.1) | `weak let` → `weak var` via a committed `pnpm patch` clears all 31, then two further classes of Swift 6 strictness appear. Not fully solved; use `examples/ios-native/` or pin an older Xcode |
-| **VERIFIED** `Unicode Normalization not appropriate for ASCII-8BIT (Encoding::CompatibilityError)` from `pod install` | `LANG` is unset. A step is a new process with only the environment the agent gives it (§9); CocoaPods aborts on a non-UTF-8 locale. The error names Unicode, not the locale, so it reads as a corrupt-file problem | `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8`. Amendment A33 moves this into the executor's base environment |
-| **VERIFIED** `xcodebuild: error: The project named "X" does not contain a scheme named "X"` on the runner, works locally | The scheme lives in `xcuserdata/` and was never committed. §12 gives every run a fresh clone, so the runner never has it | Commit the scheme under `<project>.xcodeproj/xcshareddata/xcschemes/`. Amendment A34; `latem doctor` checks it |
+| **VERIFIED** `Unicode Normalization not appropriate for ASCII-8BIT (Encoding::CompatibilityError)` from `pod install` | `LANG` is unset. A step is a new process with only the environment the agent gives it (§9); CocoaPods aborts on a non-UTF-8 locale. The error names Unicode, not the locale, so it reads as a corrupt-file problem | `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8`. Amendment A33 requires this in the executor's base environment instead of in each `ci/` script; **not yet implemented**, so the `export` is still load-bearing |
+| **VERIFIED** `xcodebuild: error: The project named "X" does not contain a scheme named "X"` on the runner, works locally | The scheme lives in `xcuserdata/` and was never committed. §12 gives every run a fresh clone, so the runner never has it | Commit the scheme under `<project>.xcodeproj/xcshareddata/xcschemes/`. Amendment A34 requires `latem doctor` to check this; **the check is not implemented yet**, so committing it is currently the operator's job |
 | **VERIFIED** `Invalid password passed via 'MATCH_PASSWORD'` — while `match` with the variable *unset* succeeds | `MATCH_PASSWORD` outranks match's keychain cache (`fetch_password!` reads ENV first). A machine that has run match interactively has the passphrase cached as an **internet** password `match_login.keychain`, masking a wrong variable | Get the real passphrase — Keychain Access → login → `match_login.keychain` → Show password — or re-key with `fastlane match change_password`. A LaunchAgent-started runner has no cache, so the variable must be right |
 | **VERIFIED** `error: exportArchive No Team Found in Archive` (exit 70) | Archive built unsigned, or `DEVELOPMENT_TEAM` empty | Set `DEVELOPMENT_TEAM` on the `archive` invocation, not only on the export |
 | Archive uploads, then App Store Connect rejects it hours later | The archive contains a **simulator** binary. `xcodebuild` exits 0 either way | `otool -l …/LatemExample \| grep -A2 LC_BUILD_VERSION` — platform 2 is a device, 7 is the simulator. Assert it in the build script |

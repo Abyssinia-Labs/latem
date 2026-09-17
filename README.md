@@ -77,6 +77,18 @@ regardless of its other merits. The full statement is
 
 ## Install
 
+**No release is tagged yet, so the installer has nothing to download** — it
+fails on the checksum fetch rather than installing a broken binary. The release
+pipeline is the last open item before v0.1 (see [Status](#status)). Until it
+lands, build from source with Go 1.25 or newer:
+
+```console
+$ git clone https://github.com/Abyssinia-Labs/latem && cd latem
+$ make latem && ./bin/latem doctor
+```
+
+Once a release exists, installing is one line:
+
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install.sh | sh
 ```
@@ -84,9 +96,10 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 Never as root. The script detects your OS and architecture, verifies a
 checksum, installs to `~/.local/bin`, and runs `latem doctor`.
 
-Then:
+Then, either way:
 
 ```console
+$ latem init --repo myapp=git@github.com:me/myapp.git   # write a config.toml
 $ latem doctor            # check the machine; every failure names its fix
 $ latem service install   # run the agent at boot
 $ latem run myapp test    # trigger a build
@@ -238,6 +251,7 @@ jobs:
 ## Commands
 
 ```
+latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
@@ -247,9 +261,15 @@ latem approve <run-id>               Local only; pins that run's commit (INV-5)
 latem register --url U --token T
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
-latem service install | uninstall | status
+latem service install [--print] | uninstall | status
 latem version
 ```
+
+`--print` on `service install` renders the unit or plist to stdout without
+installing it. Read it before you install it: that flag is what caught a
+LaunchAgent pointing its log destination at a directory nothing created, which
+launchd reports by failing to start and writing the reason to the file it could
+not open.
 
 Exit codes are contract:
 
@@ -278,16 +298,61 @@ frames.
 
 ## Status
 
-Under active development toward v0.1. `latem doctor`, `latem cache`, `latem
-service`, and `latem version` are wired. `agent`, `run`, `list`, `logs`,
-`cancel`, `approve`, and `register` have their flags, output shape, and exit
-codes settled and refuse with a message naming what is still missing — rather
-than printing a plausible-looking empty result somebody would build a script
-on.
+Under active development toward v0.1. Every command above is wired and does
+what it says.
+
+The claim this project exists to make has been tested rather than argued: on
+2026-08-11 the agent, started by launchd rather than by a shell, took
+`ios-release` from a bare clone to a signed build in TestFlight, with `codesign`
+reaching the login keychain from a launchd-spawned process. INV-4 was then
+checked against that run and not against a fixture — neither signing password,
+nor the issuer id, nor any interior line of the App Store Connect PEM appears
+in the run log, in any other log, or in the sqlite store. The same sequence has
+since been run on a second machine that had never seen the software
+([`docs/deploy.md`](docs/deploy.md)), which found three defects the first could
+not.
+
+Built: the Docker and native executors, mirror-and-hardlink source acquisition,
+the registry and its admission gates, commit-pinned approval, the secrets chain
+and the redactor, mounted caches and artifact collection, the run state machine,
+the agent and its local broker, and the remote broker. All five invariants have
+tests named after them and all five are green.
+
+Not built, and honestly named:
+
+- **The release pipeline** — signed binaries and minisign self-update. It is
+  why the installer above has nothing to fetch, and it is the last thing
+  between here and v0.1.
+- **The Tart executor**, deferred to v2 by amendment A31. Native is the default
+  because the first deployment builds repositories its operator controls; Tart
+  is the isolation upgrade for when that stops being true, and `RUNNER_SPEC`
+  §13.0 is the criterion rather than a preference.
+- **A reboot with nobody logged in.** [`docs/deploy.md`](docs/deploy.md) §1–§8
+  have been followed end to end on two machines; §9 is the one section still
+  written from the spec rather than from a terminal, because a LaunchAgent
+  needs a user session and auto-login and FileVault decide whether one exists.
+- **The far end of the remote broker.** The control plane lives in its own
+  repository now, so nothing here exercises a real server. What pins the wire
+  is [`docs/PROTOCOL.md`](docs/PROTOCOL.md) and `test/conformance`, which
+  replays recorded frames in both directions against committed fixtures.
+- **Four amendments the spec records and the code has not caught up with** —
+  `LANG` in the executor's base environment rather than in each `ci/` script,
+  `doctor` checking for a committed Xcode scheme, `doctor` checking that a
+  credential *set* agrees with itself rather than that each value is present,
+  and the agent supplying a run-derived build number. All four came out of the
+  first real iOS build; [`docs/PLAN.md` §0](docs/PLAN.md) has the table and
+  says why leaving them in the spec is not the same as fixing them.
 
 - [`docs/RUNNER_SPEC.md`](docs/RUNNER_SPEC.md) — the specification, including
-  §5's invariants and the amendments each implementation wave produced.
-- [`docs/PLAN.md`](docs/PLAN.md) — workstreams and file ownership.
+  §5's invariants and the forty amendments the implementation waves produced.
+  The amendments are the interesting part: each one names the defect that
+  forced it.
+- [`docs/PLAN.md`](docs/PLAN.md) — workstreams, file ownership, and where each
+  one stands.
+- [`docs/deploy.md`](docs/deploy.md) — the ordered runbook for bringing up a
+  Mac runner, written from two machines rather than from the spec.
+- [`docs/manual-baseline.md`](docs/manual-baseline.md) — every command that
+  actually worked, and the twenty-five defects found on the way.
 - [`docs/ios.md`](docs/ios.md), [`docs/android.md`](docs/android.md) — the
   mobile pipelines, including the failure table `doctor` turns into a
   self-service fix.

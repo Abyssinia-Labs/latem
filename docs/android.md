@@ -1,9 +1,21 @@
 # Android on a self-hosted runner
 
-> **Status: UNVERIFIED.** Nothing here has been executed. It is written from
-> [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §18.2 and from Google's documented
-> behaviour, as scaffolding for the M0 manual baseline. Correct it from
-> [`manual-baseline.md`](./manual-baseline.md) §7 once real builds have run.
+> **Status: partly verified, and the split matters.** On **2026-08-11** a signed
+> `.aab` from `examples/android-native/` reached **Play internal testing**
+> (21:07:34), so §1, §2 and the upload path have been run end to end and their
+> failure rows in §5 are real error text —
+> [`manual-baseline.md`](./manual-baseline.md) §7.3 has the session.
+>
+> **That run was Gradle on macOS, by hand, not the container this document
+> describes.** Everything specific to the Linux docker runner — the container
+> image, `/dev/kvm`, emulator tests — remains written from
+> [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §18.2 and Google's documentation, and has
+> never been executed. Correct it from a real run rather than from here.
+>
+> Two things in §2 are worth reading before you trust any other guide: Play
+> Console's API-access flow has been restructured and most instructions for it
+> are stale, and a service account key may be blocked by an organization policy
+> that has nothing to do with Play.
 
 Android is the easier platform, and it is worth being clear about why: it runs
 in a **container** on the Linux runner (`runs_on: [linux, docker]`), so there is
@@ -100,15 +112,33 @@ bundle exec fastlane run validate_play_store_json_key \
   json_key:~/keys/play-service-account.json
 ```
 
-Two rules that will otherwise cost you a scheduling surprise:
+Four things that will otherwise cost you a scheduling surprise, two of them
+contradicting advice you will find repeated everywhere:
 
-- **The first upload of an app must be manual.** The Play API refuses a package
-  it has never seen. Upload one `.aab` by hand in the console, then `supply`
-  works from then on. Plan for this rather than discovering it as a failure.
+- ~~**The first upload of an app must be manual.**~~ **Not observed.** The
+  widely-repeated rule is that the Play API refuses a package it has never seen.
+  On 2026-08-11 the *first* `.aab` for a Draft app uploaded through the API with
+  no manual bundle first. Plan for the manual upload anyway — it costs nothing
+  if it turns out to be unnecessary — but do not treat a successful first API
+  upload as evidence that something is misconfigured.
 - `supply` pushes to a **track**. It does not promote to production, and the job
-  in `examples/expo-app/.latem/jobs.yaml` deliberately offers only
+  in `examples/android-native/.latem/jobs.yaml` deliberately offers only
   `internal`/`alpha`/`beta` as enum values. A production rollout is a human
   decision made in the console, not a CI input.
+- **A service account key may be refused by policy, not by Play.**
+  `An Organization Policy that blocks service accounts key creation has been
+  enforced` comes from Google Cloud's `iam.disableServiceAccountKeyCreation`,
+  which is enforced by default on new organizations. Override it per project,
+  create the key, then re-enable it. Nothing about the message mentions Play,
+  and it is the first wall a new org hits.
+- **Play Console's API-access flow has been restructured, so most instructions
+  for it are stale** — including, for a while, this document's. There is no "API
+  access" page and `/developers/<id>/api-access` redirects to the app list. The
+  flow verified on **2026-08-11**: create any Cloud project, enable the Google
+  Play Android Developer API, create a service account, download a JSON key,
+  then **Play Console → Users and permissions → Invite new users** with that
+  service account's address. Anything here reproducing a vendor's web UI needs
+  the date it was checked beside it.
 
 The JSON key is multi-line. Same warning as the iOS `.p8`: §16 registers every
 individual line of a multi-line secret with the redactor, because registering
@@ -206,8 +236,10 @@ wearing a costume.
 
 ## 5. Failure table
 
-Everything here is *(inferred)* — no Android build has been run. Replace rows
-with observed symptoms as they occur.
+Rows marked **(observed)** carry real error text from the 2026-08-11 session;
+[`manual-baseline.md`](./manual-baseline.md) §7.5 has the verbatim output and
+what fixed each one. The rest are still *(inferred)* — replace them with
+observed symptoms as they occur.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -221,6 +253,12 @@ with observed symptoms as they occur.
 | Gradle daemon OOM-killed | Container memory limit below the daemon's heap | Raise `memory` in `[runner.docker]`, or set `org.gradle.jvmargs` |
 | Intermittent, irreproducible Gradle corruption | Two runs sharing one cache without a lock | §14.3; check the flock is actually being taken |
 | Build works locally, fails in the container | `$HOME` unset or unwritable for uid 1000 | §13.1 base image contract |
+| **(observed)** `The operation couldn't be completed. Unable to locate a Java Runtime.` from `keytool` or `java` | `/usr/bin/java` and `/usr/bin/keytool` are Apple stubs. A keg-only openjdk is installed but invisible — so `java -version` succeeding proves nothing about what Gradle will use | Pin `JAVA_HOME` explicitly; `examples/android-native/ci/lib/env.sh` finds it |
+| **(observed)** Gradle selects JDK 26 as the daemon JVM and AGP rejects it | `brew install gradle` pulls the *current* openjdk as a dependency, so installing Gradle can break an Android build that worked before | Pin `JAVA_HOME` to 17 in the job's environment, not in the machine's |
+| **(observed)** `The 'org.jetbrains.kotlin.android' plugin is no longer required for Kotlin support since AGP 9.0.` | AGP 9 has Kotlin built in; applying both is a hard error | Remove the Kotlin plugin |
+| **(observed)** `SDK location not found. Define a valid SDK location with an ANDROID_HOME environment variable or by setting the sdk.dir path in ... local.properties` | `ANDROID_HOME` unset. The suggested fix is the wrong one — `local.properties` is per-machine and must never be committed, so following it makes the runner *less* reproducible | Set `ANDROID_HOME` in the job's environment |
+| **(observed)** `An Organization Policy that blocks service accounts key creation has been enforced` | Google Cloud's `iam.disableServiceAccountKeyCreation`, on by default for new orgs. Nothing to do with Play | §2 |
+| **(observed)** `ERROR: bundle carries no signature block` on a correctly signed `.aab`, **intermittently** | The assertion, not the bundle: `unzip -l \| grep -q` under `set -o pipefail`. grep exits at the first match, unzip takes SIGPIPE, and the pipeline reports failure on input that matched. **Measured at 17 false negatives in 200 runs** | `jarsigner -verify` with its output captured to a variable; never a producer piped into `grep -q` (A37) |
 
 ---
 

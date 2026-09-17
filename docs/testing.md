@@ -1,10 +1,19 @@
 # Manual test matrix
 
-> **Status: UNVERIFIED — and this document is unusual in that it will stay
-> that way.** These are the tests that *cannot* be automated. Nothing here has
-> been executed; the procedures are drafted from
-> [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §24 and the sections they exercise.
-> Correct them as you run them, and record results in the tables.
+> **Status: mostly unverified, and this document is unusual in that it will
+> stay that way.** These are the tests that *cannot* be automated, so a full
+> pass will always be the most recent operator's word rather than a green CI
+> job. Two cases have now been run for real — **M1.1** on 2026-08-11 (the agent
+> under launchd took `ios-release` to TestFlight) and its redaction check
+> against that run's log — and they are in the [results log](#results-log).
+> Everything under **M2** needs Tart, which is not installed. Everything under
+> **M4** is still drafted, and **M4.3/M4.4 are the gap that matters**: no
+> machine has yet built after a reboot with nobody logged in
+> ([`deploy.md`](./deploy.md) §9).
+>
+> The procedures are drafted from [`RUNNER_SPEC.md`](./RUNNER_SPEC.md) §24 and
+> the sections they exercise. Correct them as you run them, and record results
+> in the tables.
 
 §24 splits testing four ways: unit, integration, invariant, and this. The first
 three live in Go and run on every commit. This one exists because four things
@@ -13,12 +22,12 @@ about the system are only true on real hardware, in ways no CI job can assert:
 | Why it cannot be automated | Cases |
 |---|---|
 | Needs credentials that must not live in a test | iOS end-to-end with real signing |
-| Needs a hypervisor and a 90 GB image | Tart VM lifecycle |
+| Needs a hypervisor and a 140 GB image | Tart VM lifecycle |
 | Needs physical hardware | GPU passthrough |
 | Needs the machine to actually stop and start | Reboot recovery |
 
 **When to run this matrix:** before any release, after a macOS or Xcode upgrade,
-after any change to the executors or to `examples/expo-app/ci/**`, and after
+after any change to the executors or to `examples/*/ci/**`, and after
 touching the LaunchAgent or the install script. It is not a per-commit gate. It
 is the gate on the things that break silently between commits.
 
@@ -301,8 +310,8 @@ Fill in per execution of the matrix. A row with no date has not been run.
 
 | Case | Date | Result | Notes |
 |---|---|---|---|
-| M1.1 iOS happy path | | | |
-| M1.2 multi-line secret redaction | | | |
+| M1.1 iOS happy path | 2026-08-11 | **pass** | Agent started by launchd (`managername` = `Aqua`), `ios-release` → TestFlight build 1786501043, `codesign` reaching the login keychain from a launchd-spawned process. [`manual-baseline.md`](./manual-baseline.md) §7.5 |
+| M1.2 multi-line secret redaction | 2026-08-11 | **pass, by absence** | Checked against that real run rather than by a deliberate leak step: neither signing password, nor the issuer id, nor any of three interior lines of the App Store Connect PEM appears in the 148-line run log, in any other log, or in the sqlite store. The deliberate-leak form is automated in `test/invariants` against a PEM fixture; this row is the version with a real credential |
 | M1.3 step timeout | | | |
 | M1.4 cancel mid-build | | | |
 | M1.5 concurrency group | | | |
