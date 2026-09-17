@@ -41,8 +41,8 @@ var shellCFlag = regexp.MustCompile(`^-[a-z]*c$`)
 // This is an allowlist rather than a count because a count tells a reviewer
 // that something moved and not what. Adding an entry here is the moment to ask
 // the INV-3 question — can any part of that argv come from outside the trust
-// boundary? — and the answer for all four of these is no: three build fixed
-// literals, and the fourth passes a registry-declared step body as a single
+// boundary? — and the answer for all of these is no: four build fixed
+// literals, and the fifth passes a registry-declared step body as a single
 // argv element, which RUNNER_SPEC §9 requires and §5 explicitly permits
 // because the registry is read off disk at the resolved commit (INV-5) and
 // never from a broker (INV-2).
@@ -54,6 +54,11 @@ var shellCallSites = map[string]string{
 	"internal/executor/docker/image.go": "a fixed image-probe script, no interpolation",
 	"internal/executor/docker/executor.go": "two fixed literals: the idle entrypoint and the " +
 		"/dev/kvm readability probe",
+	"cmd/latem/checks_locale.go": "A33's locale probe: `env LANG=… bash -lc <fixed script>`, " +
+		"every element a compile-time constant. It runs the step's own shell deliberately, " +
+		"because a login shell's profile is what can overrule the locale and only the shell " +
+		"can report the result — but nothing from any run reaches this argv, and `doctor` " +
+		"takes no broker input at all",
 }
 
 // TestINV3_NoUnexpectedShellInvocation walks every non-test Go file in the
@@ -110,7 +115,7 @@ func TestINV3_NoUnexpectedShellInvocation(t *testing.T) {
 	}
 
 	for _, o := range offences {
-		t.Errorf("a shell invocation outside the four sanctioned step-execution sites (INV-3): %s\n"+
+		t.Errorf("a shell invocation outside the sanctioned sites (INV-3): %s\n"+
 			"if this is legitimate, add it to shellCallSites with the reason no part of its argv "+
 			"can come from outside the trust boundary", o)
 	}

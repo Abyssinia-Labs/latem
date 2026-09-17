@@ -674,6 +674,7 @@ The accurate contract, identical across all three executors:
 - **Each step is a new process.** Docker runs a fresh `exec` into the same container; Tart opens a fresh `ssh` session; native spawns a fresh `bash -lc`. Working directory, exported variables, shell functions, and `trap`s do not survive the end of a step.
 - **The filesystem persists** for the whole run. Tools installed in step 1 are on `PATH` in step 3, files written are still there, and caches mounted at `preparing` stay mounted through `collecting`.
 - **Every step starts in the workspace root** with the same environment: the run environment (§15 secrets, `LATEM_*`, `steps[].env`), regardless of what the previous step did.
+- **The environment carries a locale.** `LANG` is set to `en_US.UTF-8` beneath everything else, so `steps[].env` and the run's own variables both override it. It is a default rather than an assertion, unlike `LATEM_*`, which a job may not redefine. **Amendment A33**, and the reason it is spelled out here: a step is a new process with only the environment the agent hands it, which is correct and was missing something every interactive shell has. `pod install` aborts with `Unicode Normalization not appropriate for ASCII-8BIT` — a message naming Unicode rather than the locale — and Ruby, Python and Java tools each fail differently for the same cause. The macOS executor (§13.3) supplies it; the Docker executor does not, because an image brings its own locale and forcing one an image never generated makes glibc worse rather than better.
 
 This is GitHub Actions' model, so it is already what people expect; it just has to be written down. The consequence for job authors is the obvious one: if two commands must share shell state, they are one step, and the sequencing belongs in the shell script. That is N1 working as intended.
 
@@ -864,6 +865,7 @@ Three requirements make the hardlinking safe and keep it fast:
 - Credentials are the machine's own — SSH agent or a credential helper. The agent never receives, stores, or forwards git credentials.
 - The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, and `LATEM_JOB` into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
 - Startup reconciliation deletes `work/<run-id>` for any run id not in a non-terminal state. With clones there is no worktree administrative state in the mirror, so there is nothing to prune and nothing to leak — one of the smaller reasons this model is easier to make crash-safe.
+- **An Xcode scheme must be committed, and `latem doctor` checks it** (amendment A34). This section guarantees a fresh clone for every run, which turns an uncommitted scheme from a machine quirk into a certainty: `xcodebuild -scheme X` fails with "does not contain a scheme named X" because Xcode auto-creates schemes into `xcuserdata/`, which nobody commits. It must be under `<project>.xcodeproj/xcshareddata/xcschemes/`. `doctor` reads it from the repo's own bare mirror rather than from a checkout, since between runs that is the only copy this machine has; before the first fetch it reports that it has nothing to read yet rather than passing.
 
 ---
 
@@ -1021,6 +1023,7 @@ Being the default raises the stakes on everything below rather than lowering the
 - Requires a **LaunchAgent under an auto-login user**, not a LaunchDaemon. `codesign` needs a real user session with keychain access; daemon contexts fail with errors that point nowhere useful. This is the single most common install failure — `latem doctor` must detect and name it.
 - Requires **auto-login enabled**, and auto-login is defeated by FileVault. See §23 — this interacts badly enough with "survives reboots" that it is a `latem doctor` check, not a footnote.
 - Every step runs `bash -lc` as a **new process**, so the login environment (Homebrew paths, rbenv, nvm) is present and, per §9, nothing else carries between steps.
+- **`LANG=en_US.UTF-8` is set in the step's environment** (§9, amendment A33), below the run environment so a job can override it. The hole this leaves is worth stating: `-lc` is a *login* shell, and a profile runs after execve, so an `export LC_ALL=C` in `~/.bash_profile` still wins. `latem doctor` therefore probes the locale by running this same shell the same way rather than by reading the executor's code — the only answer that accounts for the profile is the one the shell gives.
 - Workspace is the run's clone directly; no copy. Because §12 produces a self-contained repository, the workspace looks identical here and inside a container.
 - Disk floor defaults to 60 GB.
 
@@ -1275,6 +1278,9 @@ latem version
 - **Mirrors and `work_dir` are on the same filesystem** — if not, §12's clones silently stop hardlinking and every run gets slower for no visible reason
 - Every configured repo reachable with current credentials
 - Every declared secret resolvable (names only), with a warning for any resolving shorter than 6 characters (§16)
+- **App Store Connect credential *agreement*, not presence** (amendment A35). Under `--secrets`, and only when all three of `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and `APP_STORE_CONNECT_KEY_P8` resolve: the key id's shape, the issuer id being a UUID rather than a key id pasted into the wrong field, the `.p8` parsing as EC P-256, whether the key material fingerprints to an `AuthKey_*.p8` on this machine whose name *disagrees* with the key id, and finally a read-only `GET /v1/apps` with both token forms so Apple can say which kind of key this is. Every one of those failures is the same 401 from `fastlane pilot upload`, two minutes into an upload, after a full build. Diagnostics print key ids, fingerprints and bundle ids and never key material (INV-4)
+- **The locale a step's shell resolves to**, on macOS runners (amendment A33), probed through the same `bash -lc` a step gets
+- **A committed shared Xcode scheme**, per repo with a mirror, on macOS runners (amendment A34)
 - Disk headroom against each runner's own `min_free_gb`
 - `~/.latem` is mode `0700`; `token_file` and `secrets.env` are `0600`
 - `metrics_addr` is loopback (INV-1)

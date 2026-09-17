@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/appstore"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
@@ -74,6 +75,11 @@ type doctor struct {
 	newDocker  func(docker.Options) (dockerProbe, error)
 	newSecrets func(secrets.Options) (secretResolver, error)
 	sameFS     func(mirrorDir, workDir string) error
+	// newAppStore and clock exist for A35's checks: one talks to Apple and the
+	// other signs a token, and neither should need a real credential or the
+	// wall clock to be covered by a test.
+	newAppStore func() *appstore.Client
+	clock       func() time.Time
 }
 
 func newDoctor() *doctor {
@@ -96,7 +102,8 @@ func newDoctor() *doctor {
 		newSecrets: func(opts secrets.Options) (secretResolver, error) {
 			return secrets.New(opts)
 		},
-		sameFS: source.CheckSameFilesystem,
+		newAppStore: func() *appstore.Client { return &appstore.Client{} },
+		sameFS:      source.CheckSameFilesystem,
 	}
 }
 
@@ -639,7 +646,8 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 				"agent. A deploy key in ~/.ssh with an ssh config entry works from both; a forwarded "+
 				"agent works from neither."))
 	}
-	return out
+	// A34, per repo and from the mirror rather than the remote.
+	return append(out, d.checkSchemes(ctx)...)
 }
 
 // ----------------------------------------------------------------- secrets
@@ -705,7 +713,9 @@ func (d *doctor) checkSecrets(ctx context.Context) []check {
 		}
 		value.Zero()
 	}
-	return out
+	// A35: a set whose members each resolve can still be unusable, and that is
+	// a different question from the one above.
+	return append(out, d.checkCredentials(ctx)...)
 }
 
 // knownSecretNames is every secret name this machine can enumerate locally.
@@ -762,6 +772,9 @@ func (d *doctor) checkMacOS(ctx context.Context) []check {
 		d.checkFileVault(ctx),
 		d.checkKeychain(ctx),
 		d.checkXcode(ctx),
+		// A33. Last in this section because it is the only one that probes the
+		// shell a step will actually get rather than the machine's state.
+		d.checkLocale(ctx),
 	}
 }
 

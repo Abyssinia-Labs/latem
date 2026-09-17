@@ -127,6 +127,7 @@ func healthyRunner(goos string) map[string]fakeCmd {
 		cmds["xcodebuild -checkFirstLaunchStatus"] = fakeCmd{}
 		cmds["xcodebuild -version"] = fakeCmd{out: "Xcode 26.0.1"}
 		cmds["launchctl print gui/501/com.latem.agent"] = fakeCmd{out: "com.latem.agent = {\n\tstate = running\n"}
+		cmds[localeProbe] = fakeCmd{out: "en_US.UTF-8\t\tUTF-8\n"}
 	} else {
 		cmds["id -nG"] = fakeCmd{out: "tester docker"}
 		cmds["loginctl show-user tester --property=Linger"] = fakeCmd{out: "Linger=yes"}
@@ -176,7 +177,7 @@ func testConfig(dir string) *config.Config {
 func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config, cfgErr error) *doctor {
 	onPath := []string{"git", "docker", "id", "loginctl", "systemctl"}
 	if goos == "darwin" {
-		onPath = []string{"git", "docker", "tart", "fdesetup", "defaults", "launchctl", "security", "xcode-select", "xcodebuild"}
+		onPath = []string{"git", "docker", "tart", "fdesetup", "defaults", "launchctl", "security", "xcode-select", "xcodebuild", "env", "bash"}
 	}
 	return &doctor{
 		sys: system.New(system.Options{
@@ -261,4 +262,17 @@ func newSystemForTest(goos, home string, cmds map[string]fakeCmd, onPath ...stri
 		Getenv:   func(string) string { return "" },
 		Getuid:   func() int { return 501 },
 	})
+}
+
+// localeProbe is the [fakeRunner] key for A33's locale probe.
+//
+// Spelled out rather than rebuilt from the check's own constants: if the argv
+// changes, the fake machine should stop answering and a test should say so,
+// because the argv *is* the contract with the shell.
+const localeProbe = "env LANG=en_US.UTF-8 bash -lc " +
+	`printf '%s\t%s\t%s\n' "${LANG-}" "${LC_ALL-}" "$(locale charmap 2>/dev/null)"`
+
+// localeAnswer builds one canned answer for that probe.
+func localeAnswer(lang, lcAll, charmap string) fakeCmd {
+	return fakeCmd{out: lang + "\t" + lcAll + "\t" + charmap + "\n"}
 }

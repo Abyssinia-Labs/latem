@@ -152,7 +152,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		e.mu.Unlock()
 		return -1, codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
 	}
-	env := mergeEnv(e.spec.Env, e.carried, step.Env)
+	// [baseEnv] first, so the run's own variables and the step's both override
+	// it. Amendment A33: the locale is a default the agent supplies, not an
+	// assertion it enforces.
+	env := mergeEnv(baseEnv(), e.spec.Env, e.carried, step.Env)
 	env[EnvFileVar] = e.envFile
 	e.mu.Unlock()
 

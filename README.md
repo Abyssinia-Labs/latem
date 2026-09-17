@@ -154,6 +154,20 @@ Among the checks worth knowing about:
   An agent started by launchd does not inherit your interactive ssh agent.
 - **Clock skew against the broker**, because token validation fails
   confusingly otherwise.
+- **Whether an App Store Connect credential set agrees with itself**, under
+  `--secrets`. Not whether each value is present — whether the key id names the
+  key that signs the token, and whether Apple accepts it. Every way of getting
+  that wrong produces the same 401 from `fastlane pilot upload`, two minutes
+  in, after a full archive and export. Verified on a laptop holding four
+  `AuthKey_*.p8` files, all valid, one of them the right one.
+- **The locale a step's shell actually resolves to.** The agent sets
+  `LANG=en_US.UTF-8`, and a login shell's profile can still overrule it, so
+  `doctor` asks the shell rather than trusting the executor. Without it
+  `pod install` aborts naming Unicode instead of the locale.
+- **A committed Xcode scheme**, read from the repo's bare mirror. Xcode writes
+  schemes to `xcuserdata/` by default and nobody commits that, so this works on
+  every developer's machine and fails on every runner — where every run is a
+  fresh clone.
 
 `latem doctor --secrets` also resolves every locally-known secret name — names
 only, never values — and warns about any short enough that the redactor will
@@ -335,13 +349,13 @@ Not built, and honestly named:
   repository now, so nothing here exercises a real server. What pins the wire
   is [`docs/PROTOCOL.md`](docs/PROTOCOL.md) and `test/conformance`, which
   replays recorded frames in both directions against committed fixtures.
-- **Four amendments the spec records and the code has not caught up with** —
-  `LANG` in the executor's base environment rather than in each `ci/` script,
-  `doctor` checking for a committed Xcode scheme, `doctor` checking that a
-  credential *set* agrees with itself rather than that each value is present,
-  and the agent supplying a run-derived build number. All four came out of the
-  first real iOS build; [`docs/PLAN.md` §0](docs/PLAN.md) has the table and
-  says why leaving them in the spec is not the same as fixing them.
+- **A run-derived build number.** Amendment A36: App Store Connect rejects a
+  build number it has already accepted, so a project with
+  `CURRENT_PROJECT_VERSION` pinned uploads exactly once and then fails forever.
+  The example defaults to Unix time; the agent should supply the run counter it
+  already stores, because a TestFlight build traceable to the run that made it
+  is the point of an audit trail. It is the last of the four amendments the
+  first real iOS build produced — the other three landed on 2026-09-17.
 
 - [`docs/RUNNER_SPEC.md`](docs/RUNNER_SPEC.md) — the specification, including
   §5's invariants and the forty amendments the implementation waves produced.
