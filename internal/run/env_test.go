@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -409,4 +411,55 @@ func TestLogs_BrokerSinkFailureIsNotFatal(t *testing.T) {
 
 func registryStep(env map[string]string) registry.ResolvedStep {
 	return registry.ResolvedStep{Name: "s", Run: "./s.sh", Env: env}
+}
+
+// A36: a TestFlight build has to name the run that produced it.
+//
+// The value comes off the claimed row rather than from a counter this package
+// keeps, so the assertion is that Execute carries the store's number through to
+// the step rather than that a number exists.
+func TestEnv_CarriesTheRunNumberAsTheBuildNumber(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = `
+version: 1
+jobs:
+  release:
+    runs_on: [linux]
+    steps:
+      - name: archive
+        run: ./ci/ios/build.sh
+`
+	o := h.build()
+
+	res := h.run(o, h.request("release"))
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("state = %s (%s)", res.State, res.ErrorMsg)
+	}
+
+	stored, err := h.db.Get(t.Context(), "run1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Number == 0 {
+		t.Fatal("the store issued no number, so this test would pass on an empty environment")
+	}
+
+	spec := h.env.runSpec()
+	if got, want := spec.Env[BuildNumberVar], strconv.FormatInt(stored.Number, 10); got != want {
+		t.Fatalf("%s = %q, want %q — the run's own number", BuildNumberVar, got, want)
+	}
+}
+
+// A run created before migration 0004 has no number, and a job's
+// `${LATEM_BUILD_NUMBER:-$(date +%s)}` fallback cannot fire on a variable that
+// is set — so an unnumbered run must leave it unset rather than export "0".
+func TestEnv_AnUnnumberedRunExportsNothing(t *testing.T) {
+	x := &execution{
+		run:      store.Run{ID: "run1"},
+		resolved: &registry.Resolved{JobName: "release"},
+		ws:       &source.Workspace{},
+	}
+	if v, ok := x.buildEnv()[BuildNumberVar]; ok {
+		t.Fatalf("%s = %q, want it absent", BuildNumberVar, v)
+	}
 }

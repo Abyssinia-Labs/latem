@@ -19,7 +19,7 @@ import (
 const runColumns = `id, repo, job, ref, ref_normalized, sha, runner, state,
 	exit_code, error_code, error_message, origin_kind, origin_actor,
 	cancel_reason, inputs_json, created_at, started_at, finished_at,
-	expires_at, approved_at, approved_sha`
+	expires_at, approved_at, approved_sha, number`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows.
 type scanner interface {
@@ -53,7 +53,7 @@ func scanRun(s scanner) (Run, error) {
 		&r.ID, &r.Repo, &r.Job, &r.Ref, &refNorm, &sha, &runner, &r.State,
 		&exitCode, &errCode, &errMsg, &r.OriginKind, &originActor,
 		&cancelReason, &inputsJSON, &createdAt, &startedAt, &finishedAt,
-		&expiresAt, &approvedAt, &approvedSHA,
+		&expiresAt, &approvedAt, &approvedSHA, &r.Number,
 	)
 	if err != nil {
 		return Run{}, err
@@ -147,6 +147,11 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 		return errors.New("store: Create: ref is empty")
 	case !r.State.Valid():
 		return fmt.Errorf("store: Create: unknown state %q", r.State)
+	case r.Number != 0:
+		// Refused rather than ignored. A caller that set this believes it
+		// chose the build number, and silently overwriting it would leave the
+		// upload carrying a value nobody in the code chose (A36).
+		return fmt.Errorf("store: Create: Number is assigned by the store, not supplied (got %d)", r.Number)
 	}
 	if err := checkErrorCode(r.ErrorCode); err != nil {
 		return fmt.Errorf("store: Create: %w", err)
@@ -172,20 +177,28 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 			return fmt.Errorf("store: Create: %w", err)
 		}
 
-		_, err := t.ExecContext(ctx, `
+		// The run's number, issued inside the same transaction as the row so a
+		// crash between the two is not a possible state. BEGIN IMMEDIATE makes
+		// the read-modify-write safe against a concurrent Create (A36).
+		number, err := nextSequence(ctx, t, seqRunNumber)
+		if err != nil {
+			return err
+		}
+
+		_, err = t.ExecContext(ctx, `
 			INSERT INTO runs (
 			  id, repo, job, ref, ref_normalized, sha, runner, state,
 			  exit_code, error_code, error_message, origin_kind, origin_actor,
 			  cancel_reason, inputs_json, created_at, started_at, finished_at,
-			  expires_at, approved_at, approved_sha
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			  expires_at, approved_at, approved_sha, number
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Repo, r.Job, r.Ref, nullString(r.RefNormalized), nullString(r.SHA),
 			nullString(r.Runner), string(r.State),
 			nullInt(r.ExitCode), nullString(string(r.ErrorCode)), nullString(d.red.Redact(r.ErrorMsg)),
 			r.OriginKind, nullString(r.OriginActor),
 			nullString(d.red.Redact(r.CancelReason)), inputs, toUnix(r.CreatedAt),
 			nullTime(r.StartedAt), nullTime(r.FinishedAt), nullTime(r.ExpiresAt),
-			nullTime(r.ApprovedAt), nullString(r.ApprovedSHA),
+			nullTime(r.ApprovedAt), nullString(r.ApprovedSHA), number,
 		)
 		if err != nil {
 			return fmt.Errorf("store: Create %s: %w", r.ID, err)

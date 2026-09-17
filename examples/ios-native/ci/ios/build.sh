@@ -51,9 +51,16 @@ RELEASE_NOTES="${RELEASE_NOTES:-}"
 # Unix time is monotonic, needs no state on disk, and stays inside the unsigned
 # 32-bit range a CFBundleVersion component must fit until 2106.
 #
-# LATEM_BUILD_NUMBER overrides it. That is the seam for the agent: a build
-# traceable to the run that produced it is worth more than a timestamp, so this
-# should eventually be the run counter (§22). Not wired up yet.
+# LATEM_BUILD_NUMBER overrides it, and under the agent it is always set: it is
+# the run's own number from §22, so a build in TestFlight names the run that
+# produced it (amendment A36). `latem list` prints the same number in its #
+# column, which is the lookup in the other direction. The Unix-time default
+# below is for running this script by hand.
+#
+# Moving an app from time-based numbers to run numbers means the number goes
+# *down*, and Apple wants the newest build in a train to be the highest — so
+# bump the marketing version, or keep overriding this for that app until its
+# version changes. §18.1.
 BUILD_NUMBER="${LATEM_BUILD_NUMBER:-$(date +%s)}"
 
 PROJECT=LatemExample.xcodeproj

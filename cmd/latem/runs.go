@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,7 +49,11 @@ func newListCommand() *cobra.Command {
 
 Output is one run per line, tab-separated, so it composes with cut and awk:
 
-  RUN ID    STATE      REPO    JOB           REF               STARTED    DURATION
+  RUN ID    #    STATE      REPO    JOB          REF          STARTED    DURATION
+
+# is the run's number on this machine, which a release job passes to the build
+as LATEM_BUILD_NUMBER — so a build in TestFlight can be traced back to the run
+that made it (amendment A36). A dash means the run predates that column.
 
 By default only non-terminal runs are listed — the ones something might still
 happen to. Pass --all for the history, which sqlite keeps until log retention
@@ -212,6 +217,18 @@ func (f listFilter) states() []protocol.RunState {
 // Raw tabs rather than an aligned table, because the help promises output that
 // composes with cut and awk and a tabwriter's padding would make every column
 // position depend on the longest value in it.
+// runNumber renders [store.Run.Number] for the list.
+//
+// A dash rather than 0 for a run created before migration 0004: zero is a
+// number, and printing it would claim this run was the one that produced build
+// 0 somewhere.
+func runNumber(r store.Run) string {
+	if r.Number <= 0 {
+		return "-"
+	}
+	return strconv.FormatInt(r.Number, 10)
+}
+
 func listRuns(cmd *cobra.Command, f listFilter) error {
 	ctx := cmd.Context()
 	st, closeState, err := openState(ctx)
@@ -244,10 +261,10 @@ func listRuns(cmd *cobra.Command, f listFilter) error {
 			started = formatAge(*r.StartedAt)
 		}
 		rows = append(rows, []string{
-			r.ID, string(r.State), r.Repo, r.Job, refOf(r), started, runDuration(r),
+			r.ID, runNumber(r), string(r.State), r.Repo, r.Job, refOf(r), started, runDuration(r),
 		})
 	}
-	header := []string{"RUN ID", "STATE", "REPO", "JOB", "REF", "STARTED", "DURATION"}
+	header := []string{"RUN ID", "#", "STATE", "REPO", "JOB", "REF", "STARTED", "DURATION"}
 
 	st2 := newStyler(out)
 	if !st2.color {

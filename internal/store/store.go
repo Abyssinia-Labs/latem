@@ -45,6 +45,18 @@ type Run struct {
 	Repo string
 	Job  string
 
+	// Number is this run's position in the machine's own sequence, assigned by
+	// [Store.Create] and monotonic across retention (amendment A36). It is the
+	// agent's LATEM_BUILD_NUMBER, so a build in TestFlight names the run that
+	// produced it.
+	//
+	// Assigned, not supplied: Create refuses a Run that arrives with one set,
+	// because a caller choosing its own would be choosing a build number, and
+	// two callers choosing the same one is the defect this exists to prevent.
+	// A Run read back from the store carries it; the value a caller passed to
+	// Create does not.
+	Number int64
+
 	// Ref is as supplied, after INV-3 validation. RefNormalized is the
 	// fully-qualified name policy was actually matched against — keeping both
 	// makes an audit answerable ("requested as main, matched refs/heads/main")

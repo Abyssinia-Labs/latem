@@ -349,13 +349,8 @@ Not built, and honestly named:
   repository now, so nothing here exercises a real server. What pins the wire
   is [`docs/PROTOCOL.md`](docs/PROTOCOL.md) and `test/conformance`, which
   replays recorded frames in both directions against committed fixtures.
-- **A run-derived build number.** Amendment A36: App Store Connect rejects a
-  build number it has already accepted, so a project with
-  `CURRENT_PROJECT_VERSION` pinned uploads exactly once and then fails forever.
-  The example defaults to Unix time; the agent should supply the run counter it
-  already stores, because a TestFlight build traceable to the run that made it
-  is the point of an audit trail. It is the last of the four amendments the
-  first real iOS build produced — the other three landed on 2026-09-17.
+
+Where to read further, in the order a new operator needs them:
 
 - [`docs/RUNNER_SPEC.md`](docs/RUNNER_SPEC.md) — the specification, including
   §5's invariants and the forty amendments the implementation waves produced.

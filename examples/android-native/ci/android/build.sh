@@ -33,8 +33,13 @@ RELEASE_NOTES="${RELEASE_NOTES:-}"
 
 # Play rejects a versionCode it has already accepted, so a pinned value uploads
 # exactly once and then fails forever — the same trap as CFBundleVersion on iOS
-# (amendment A36). Unix time is monotonic and fits Play's 2100000000 ceiling
-# until 2036.
+# (amendment A36). Under the agent LATEM_BUILD_NUMBER is the run's own number
+# from §22, which makes a release traceable to the run that built it; the
+# Unix-time default is for running this by hand, and it fits Play's 2100000000
+# ceiling until 2036.
+#
+# Play enforces strictly increasing versionCodes, so an app that has already
+# uploaded time-based ones needs the override kept until it is retired.
 VERSION_CODE="${LATEM_BUILD_NUMBER:-$(date +%s)}"
 
 # The keystore is a binary and arrives base64 so it can travel as one line

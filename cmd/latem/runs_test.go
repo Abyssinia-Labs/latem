@@ -227,8 +227,16 @@ func TestListFiltersAndFormat(t *testing.T) {
 	}
 
 	header := strings.SplitN(stdout, "\n", 2)[0]
-	if fields := strings.Split(header, "\t"); len(fields) != 7 {
-		t.Errorf("header has %d tab-separated fields, want 7: %q", len(fields), header)
+	if fields := strings.Split(header, "\t"); len(fields) != 8 {
+		t.Errorf("header has %d tab-separated fields, want 8: %q", len(fields), header)
+	}
+	// Every row must have as many fields as the header, or `cut -f` reads a
+	// different column per line — which is worse than a missing column,
+	// because it still produces output.
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if got := len(strings.Split(line, "\t")); got != 8 {
+			t.Errorf("row has %d fields, want 8: %q", got, line)
+		}
 	}
 
 	all, _, err := execCommand(t, "list", "--all")

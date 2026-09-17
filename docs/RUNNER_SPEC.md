@@ -863,7 +863,7 @@ Three requirements make the hardlinking safe and keep it fast:
 - LFS: `git lfs fetch --all` in the mirror, `git lfs checkout` in the workspace, only when `.gitattributes` mentions LFS.
 - A per-repo mutex serialises fetches into one mirror; concurrent `fetch` into a bare repo is not reliably safe. Clones out of the mirror are reads and need no lock, so parallel runs on the same repo do not queue behind each other.
 - Credentials are the machine's own — SSH agent or a credential helper. The agent never receives, stores, or forwards git credentials.
-- The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, and `LATEM_JOB` into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
+- The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, `LATEM_JOB`, and `LATEM_BUILD_NUMBER` (§22's run counter, amendment A36) into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
 - Startup reconciliation deletes `work/<run-id>` for any run id not in a non-terminal state. With clones there is no worktree administrative state in the mirror, so there is nothing to prune and nothing to leak — one of the smaller reasons this model is easier to make crash-safe.
 - **An Xcode scheme must be committed, and `latem doctor` checks it** (amendment A34). This section guarantees a fresh clone for every run, which turns an uncommitted scheme from a machine quirk into a certainty: `xcodebuild -scheme X` fails with "does not contain a scheme named X" because Xcode auto-creates schemes into `xcuserdata/`, which nobody commits. It must be under `<project>.xcodeproj/xcshareddata/xcschemes/`. `doctor` reads it from the repo's own bare mirror rather than from a checkout, since between runs that is the only copy this machine has; before the first fetch it reports that it has nothing to read yet rather than passing.
 
@@ -1204,10 +1204,18 @@ Caches: `cocoapods` and `pnpm` unconditionally — both are content-addressed, c
 
 `derived-data` depends on the executor, and under the default it is no longer a question. **Native** mounts nothing: the cache is a host directory on local APFS (§14.2), which is the configuration the §13.2 baseline measured at **2.8× faster warm than cold**, so it is on and there is no trade-off to weigh. **Tart** puts it behind VirtioFS, which is where draft 01's claim that DerivedData was "the largest single win" collides with the share possibly being slower than the win — that is `runner.tart.derived_data`, and §13.2 requires it be settled by measurement before the tart executor is written. Do not design around either answer for Tart until that number exists.
 
+**The build number comes from the run, not the project** (amendment A36). The agent exports `LATEM_BUILD_NUMBER` into every step — the run's own number from §22 — and a release job passes it as `CURRENT_PROJECT_VERSION`. A project that keeps its build number in the `.xcodeproj` uploads once and then fails forever, because App Store Connect refuses a build number it has already accepted for a marketing version, and it refuses it *after* the archive, the export and the upload.
+
+Two things an operator needs to know before the first upload, because both fail at the end of a long build rather than the start:
+
+- **It counts runs on one machine.** Two agents building the same app both count from 1. Release from one machine, or set the value in the job's own `steps[].env`, which overrides the agent's (§9).
+- **It goes down, not up, on an app that has already uploaded time-based numbers.** A machine that uploaded build `1786501043` cannot then upload build `7`: Apple wants the newest build in a train to be the highest. Bump the marketing version, or override for that app until its version changes. This is the one-time cost of moving from a value that was unique to a value that means something.
+
 **Known failure modes to document in `docs/ios.md`:**
 
 | Symptom | Cause |
 |---|---|
+| `The build number must be higher than the previously uploaded build` | The app already carries a larger, time-based build number; see above |
 | `User interaction is not allowed` | Keychain locked, or running under a LaunchDaemon rather than a LaunchAgent |
 | `No signing certificate "iOS Distribution" found` | `match` not run, or wrong `MATCH_GIT_URL` |
 | Build hangs at the end | `--non-interactive` missing; EAS is waiting on a prompt |
@@ -1363,6 +1371,7 @@ CREATE TABLE runs (
   expires_at        INTEGER,        -- approval_ttl / queue_ttl deadline (§11)
   approved_at       INTEGER,        -- local `latem approve` (INV-5, amendment A27)
   approved_sha      TEXT,           -- the commit that approval pinned
+  number            INTEGER NOT NULL DEFAULT 0,  -- this machine's run counter (amendment A36)
   UNIQUE(id)
 );
 CREATE INDEX runs_state_idx ON runs(state) WHERE state NOT IN
@@ -1378,6 +1387,12 @@ CREATE TABLE broker_state (
   reported_state  TEXT,           -- last state THIS transport acked
   last_acked_seq  INTEGER NOT NULL DEFAULT 0,  -- THIS transport's resume point (§7.2)
   PRIMARY KEY (run_id, broker)
+);
+
+-- Monotonic counters, none of which retention may prune (amendment A36).
+CREATE TABLE sequences (
+  name  TEXT PRIMARY KEY,   -- "run_number"
+  value INTEGER NOT NULL    -- the highest value ever issued on this machine
 );
 
 CREATE TABLE queue (
@@ -1420,6 +1435,12 @@ Migration `0003` moves the existing values under `broker = 'local'` — the only
 `expires_at` is set when a run enters `queued` or `awaiting_approval` and cleared when it leaves. The partial index over it makes the TTL sweep a single indexed scan rather than a table walk.
 
 `approved_at` and `approved_sha` are what a local `latem approve` recorded (amendment A27), and `approved_sha` is a commit rather than a ref on purpose — see INV-5. They are written together with the `awaiting_approval` → `queued` transition and the queue row, in one transaction, because reading the commit and pinning it must not be separable: a sequence that read `sha` and then wrote it back as approved would have a window in it, and that window is the one a force-push exploits. Entering `awaiting_approval` clears both. Nothing on the wire carries them; approval is local-only (INV-2, INV-5), and a broker learns only that the run reached `queued`.
+
+`number` is this machine's run counter, and the agent exports it to every step as `LATEM_BUILD_NUMBER` (amendment A36, §9). App Store Connect refuses a build number it has already accepted for a marketing version, so a project with `CURRENT_PROJECT_VERSION` pinned uploads exactly once and fails forever afterwards — after archiving, exporting and uploading. Unix time solves that and says nothing: a build in TestFlight cannot be traced back to the run that produced it, which is most of what this table is for.
+
+It is issued from the `sequences` table rather than derived from the rows, and the difference is retention. §14.4 deletes old runs, so `MAX(number) + 1` — and sqlite's implicit rowid, which reuses the largest deleted value without `AUTOINCREMENT` — both reissue a number after a prune. The reissued value is precisely the one an upload already carries, and the rejection arrives months later from Apple rather than from a test. The sequence row is never pruned, so it holds the highest number ever issued rather than the highest currently stored. Issuing happens inside the same `BEGIN IMMEDIATE` transaction as the insert, so two concurrent creates cannot be given one number and a crash between the two is not a reachable state.
+
+**It is unique on this machine and nowhere else.** Two agents building the same app both count from 1 and collide at upload. That is a deployment question rather than a schema one — §18.1 states it where an operator meets it — and the answer is to release from one machine, or to set the build number in the job's own `steps[].env`, which overrides the agent's (§9).
 
 They are nullable with no default, so migration `0002` applies forward over an existing history: every run already on disk reads as never approved, which is what it is. A row left in `awaiting_approval` by a pre-A27 agent has no `sha` and cannot be approved — there is nothing to pin — and the honest answer is to cancel it and submit the run again.
 

@@ -104,6 +104,12 @@ func TestMigrate_RunsColumns(t *testing.T) {
 		// would have left a second source of truth for exactly the values a
 		// partition depends on.
 		"approved_at", "approved_sha",
+		// 0004, amendment A36: the run's own number, which becomes
+		// LATEM_BUILD_NUMBER. Appended for the same reason, and the projection
+		// below appends it too — the two lists are compared in order, so a
+		// column added to one and not the other is a failure here rather than a
+		// mis-scanned row somewhere else.
+		"number",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("runs columns =\n %v\nwant\n %v", got, want)

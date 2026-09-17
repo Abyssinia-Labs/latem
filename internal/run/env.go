@@ -1,6 +1,8 @@
 package run
 
 import (
+	"strconv"
+
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 )
 
@@ -9,6 +11,12 @@ import (
 // path for docker, a guest path for tart and a host path for native, and only
 // the executor knows which (amendment A9).
 const LatemEnvVar = "LATEM_ENV"
+
+// BuildNumberVar carries [store.Run.Number] into a step (amendment A36).
+//
+// Named here rather than in the executors because it is a property of the run,
+// like LATEM_SHA, and not of the environment a step happens to run in.
+const BuildNumberVar = "LATEM_BUILD_NUMBER"
 
 // buildEnv assembles the run environment (RUNNER_SPEC §9, §15).
 //
@@ -19,9 +27,9 @@ const LatemEnvVar = "LATEM_ENV"
 //     inside internal/secrets so they can be zeroed when the run ends, which a
 //     string cannot be — the conversion happens here, at the last moment, into
 //     a map that is dropped with the run (finding F10).
-//  2. LATEM_* from the workspace, plus the job name. They are the agent's own
-//     variables and they win, so a job cannot make LATEM_SHA mean something
-//     other than the commit it is building.
+//  2. LATEM_* from the workspace, plus the job name and the run's number. They
+//     are the agent's own variables and they win, so a job cannot make
+//     LATEM_SHA mean something other than the commit it is building.
 //  3. steps[].env, which is per step and therefore not here — it is merged by
 //     the executor over this map for one step only. Its ${input.NAME}
 //     references were substituted by Registry.Admit; nothing in this package
@@ -45,6 +53,23 @@ func (x *execution) buildEnv() map[string]string {
 		env[k] = v
 	}
 	env["LATEM_JOB"] = x.resolved.JobName
+
+	// The run's own number, which the reference jobs use as the build number
+	// (amendment A36). App Store Connect refuses a build number it has already
+	// accepted for a marketing version, so a project with
+	// CURRENT_PROJECT_VERSION pinned uploads exactly once and fails forever
+	// after — having archived, exported and uploaded first. The examples worked
+	// around it by defaulting to Unix time, which is unique and anonymous: it
+	// cannot be traced back to the run that produced the build, which is most
+	// of what §22's history is for.
+	//
+	// Zero means the row predates migration 0004 and was never backfilled.
+	// Exporting "0" would be worse than exporting nothing, because a job's
+	// `${LATEM_BUILD_NUMBER:-$(date +%s)}` fallback cannot fire on a variable
+	// that is set.
+	if x.run.Number > 0 {
+		env[BuildNumberVar] = strconv.FormatInt(x.run.Number, 10)
+	}
 
 	return env
 }
