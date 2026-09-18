@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"encoding/hex"
 	"errors"
 	"slices"
 	"strings"
@@ -8,7 +9,7 @@ import (
 )
 
 func TestKeychainProvider_Resolve(t *testing.T) {
-	runner := answering("hunter2\n")
+	runner := answeringStderr(`password: "hunter2"` + "\n")
 	p, err := NewKeychainProvider("", runner)
 	if err != nil {
 		t.Fatal(err)
@@ -22,8 +23,8 @@ func TestKeychainProvider_Resolve(t *testing.T) {
 		t.Errorf("value = %q", got)
 	}
 
-	// The exact invocation RUNNER_SPEC §15 documents, as an argv slice.
-	want := []string{"security", "find-generic-password", "-s", "latem", "-a", "MATCH_PASSWORD", "-w"}
+	// -g rather than -w: only -g marks a hex-encoded value as such.
+	want := []string{"security", "find-generic-password", "-s", "latem", "-a", "MATCH_PASSWORD", "-g"}
 	if call := runner.lastCall(); !slices.Equal(call, want) {
 		t.Errorf("ran %q, want %q", call, want)
 	}
@@ -68,25 +69,62 @@ func TestKeychainProvider_Outcomes(t *testing.T) {
 	}
 }
 
-// `security -w` prints the password and then a newline, so the last newline is
-// the tool's and any before it are the secret's. Trimming greedily would
-// silently corrupt a PEM.
-func TestKeychainProvider_TrimsExactlyOneTrailingNewline(t *testing.T) {
+// `security -w` prints a value containing any non-printable byte as bare hex
+// with nothing marking it, so a PEM read back through -w is indistinguishable
+// from a secret whose literal value is that hex string. -g marks it `0x`, and
+// these are the forms this provider has to read.
+func TestKeychainProvider_DecodesWhatSecurityActuallyPrints(t *testing.T) {
+	// The bytes of pemFixture, as `security -g` renders them.
+	pemHex := strings.ToUpper(hex.EncodeToString([]byte(pemFixture)))
+
 	tests := []struct {
-		name string
-		out  string
-		want string
+		name   string
+		stderr string
+		want   string
 	}{
-		{"single line", "hunter2\n", "hunter2"},
-		{"crlf", "hunter2\r\n", "hunter2"},
-		{"no trailing newline at all", "hunter2", "hunter2"},
-		{"a value that genuinely ends in a newline", "hunter2\n\n", "hunter2\n"},
-		{"a PEM keeps every internal newline", pemFixture + "\n", pemFixture},
+		{
+			"a plain value comes back quoted",
+			`password: "hunter2"` + "\n",
+			"hunter2",
+		},
+		{
+			// The regression: a PEM in the keychain used to resolve to the
+			// literal string "2d2d2d2d2d424547494e…" and reach the build as a
+			// key that is not a key.
+			"a multi-line PEM comes back as 0x hex",
+			"password: 0x" + pemHex + `  "…"` + "\n",
+			pemFixture,
+		},
+		{
+			// The reason -w cannot be salvaged: this value and the four bytes
+			// DE AD BE EF print identically under -w.
+			"a value that is literally hex digits is not decoded",
+			`password: "deadbeef"` + "\n",
+			"deadbeef",
+		},
+		{
+			// security does not escape an embedded quote, so unescaping would
+			// be wrong; stripping exactly one from each end is right.
+			"embedded quotes survive",
+			`password: "he said "hi" to me"` + "\n",
+			`he said "hi" to me`,
+		},
+		{
+			// A trailing newline is part of the value and OpenSSL cares.
+			"a trailing newline is preserved",
+			"password: 0x" + strings.ToUpper(hex.EncodeToString([]byte("abc\n"))) + `  "abc\012"` + "\n",
+			"abc\n",
+		},
+		{
+			"the password line need not be the only line",
+			"keychain: \"login\"\n" + `password: "hunter2"` + "\n",
+			"hunter2",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := NewKeychainProvider("", answering(tc.out))
+			p, err := NewKeychainProvider("", answeringStderr(tc.stderr))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -101,19 +139,37 @@ func TestKeychainProvider_TrimsExactlyOneTrailingNewline(t *testing.T) {
 	}
 }
 
+// A value that cannot be read is an error, never a silently wrong secret.
+func TestKeychainProvider_RefusesOutputItCannotParse(t *testing.T) {
+	for _, stderr := range []string{
+		"",
+		"keychain: \"login\"\n",
+		"password: 0xZZZZ  \"…\"\n",
+		"password: unquoted\n",
+	} {
+		p, err := NewKeychainProvider("", answeringStderr(stderr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := p.Resolve(t.Context(), "A"); err == nil {
+			t.Errorf("stderr %q resolved to %q, want an error", stderr, got)
+		}
+	}
+}
+
 func TestNewKeychainProvider_RejectsAServiceThatWouldBecomeAnOption(t *testing.T) {
 	for _, service := range []string{"-w", "a b", "", "with/slash", strings.Repeat("x", 100)} {
 		if service == "" {
 			continue // empty means "use the default"
 		}
-		if _, err := NewKeychainProvider(service, answering("")); err == nil {
+		if _, err := NewKeychainProvider(service, answeringStderr("")); err == nil {
 			t.Errorf("service %q was accepted", service)
 		}
 	}
 }
 
 func TestKeychainProvider_RejectsABadName(t *testing.T) {
-	p, err := NewKeychainProvider("", answering("x"))
+	p, err := NewKeychainProvider("", answeringStderr(`password: "x"`))
 	if err != nil {
 		t.Fatal(err)
 	}

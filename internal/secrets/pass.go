@@ -95,7 +95,7 @@ func (p *PassProvider) Resolve(ctx context.Context, name string) (Value, error) 
 	}
 
 	argv := []string{p.binary, "show", p.prefix + name}
-	out, err := p.runner.Run(ctx, argv)
+	out, _, err := p.runner.Run(ctx, argv)
 	if err != nil {
 		return nil, fmt.Errorf("pass: %s is not readable: %w: %w", p.prefix+name, ErrNotFound, err)
 	}

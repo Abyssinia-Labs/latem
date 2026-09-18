@@ -27,7 +27,7 @@ const DefaultTimeout = 30 * time.Second
 // failure path allocate proportionally to how badly it is behaving.
 const maxStderr = 8 << 10
 
-// Runner executes an external program and returns its standard output.
+// Runner executes an external program and returns its output.
 //
 // It is an interface for one reason: the chain has to be testable without a
 // real Keychain, a real `pass` store, or a real 1Password session. Every test
@@ -35,11 +35,16 @@ const maxStderr = 8 << 10
 // exercises the found, not-found, not-installed, non-zero-exit, and timeout
 // paths without installing anything.
 //
+// Stderr is returned on success as well as on failure, which only the keychain
+// provider uses: `security -g` prints the item's attributes to stdout and the
+// password itself to stderr, and it is the only invocation that distinguishes a
+// hex-encoded value from a literal one. See [KeychainProvider.Resolve].
+//
 // The argument is an argv slice, and there is no overload taking a command
 // string. That is where INV-3 lives: a signature that cannot express
 // `sh -c "…"` cannot be talked into it later.
 type Runner interface {
-	Run(ctx context.Context, argv []string) (stdout []byte, err error)
+	Run(ctx context.Context, argv []string) (stdout, stderr []byte, err error)
 }
 
 // ExecRunner is the production [Runner].
@@ -51,7 +56,7 @@ type ExecRunner struct {
 	Environ []string
 }
 
-// Run executes argv and returns its standard output.
+// Run executes argv and returns its standard output and standard error.
 //
 // The child inherits the agent's environment because the tools here need it —
 // `pass` reads GNUPGHOME and HOME, `op` reads OP_SERVICE_ACCOUNT_TOKEN — with
@@ -59,9 +64,9 @@ type ExecRunner struct {
 // configured to fetch MATCH_PASSWORD has no business being handed
 // APP_STORE_CONNECT_KEY_P8, and the cheapest way to guarantee it never leaks
 // one secret into the process that fetches another is to not pass it.
-func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, error) {
+func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, error) {
 	if len(argv) == 0 {
-		return nil, errors.New("secrets: cannot run an empty argv")
+		return nil, nil, errors.New("secrets: cannot run an empty argv")
 	}
 
 	timeout := r.Timeout
@@ -94,7 +99,7 @@ func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, error) {
 	// Checked before the exit status because a killed process also reports a
 	// non-zero exit, and "op exited 1" would hide "op never answered".
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, &CommandError{
+		return nil, nil, &CommandError{
 			Program:  argv[0],
 			ExitCode: -1,
 			Stderr:   clampStderr(stderr.Bytes()),
@@ -107,7 +112,7 @@ func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, error) {
 		if errors.As(runErr, &exitErr) {
 			code = exitErr.ExitCode()
 		}
-		return nil, &CommandError{
+		return nil, nil, &CommandError{
 			Program:  argv[0],
 			ExitCode: code,
 			Stderr:   clampStderr(stderr.Bytes()),
@@ -115,7 +120,14 @@ func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, error) {
 		}
 	}
 
-	return stdout.Bytes(), nil
+	// Unclamped, unlike the failure paths above. There the stderr is a
+	// diagnostic from a tool that misbehaved and [maxStderr] bounds how badly
+	// it can make us allocate. Here it is a value the caller asked for:
+	// `security -g` prints a secret there, and truncating it at 8 KiB would
+	// hand back a silently corrupted key rather than an error. A 1.6 KiB PEM
+	// already renders to 5.7 KiB, because -g prints the bytes as hex *and*
+	// again as an escaped string.
+	return stdout.Bytes(), stderr.Bytes(), nil
 }
 
 func (r ExecRunner) environ() []string {

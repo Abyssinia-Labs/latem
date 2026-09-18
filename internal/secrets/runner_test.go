@@ -17,20 +17,20 @@ import (
 type fakeRunner struct {
 	mu    sync.Mutex
 	calls [][]string
-	fn    func(argv []string) ([]byte, error)
+	fn    func(argv []string) (stdout, stderr []byte, err error)
 }
 
-func (f *fakeRunner) Run(ctx context.Context, argv []string) ([]byte, error) {
+func (f *fakeRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, slices.Clone(argv))
 	fn := f.fn
 	f.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if fn == nil {
-		return nil, errors.New("fakeRunner: no behaviour configured")
+		return nil, nil, errors.New("fakeRunner: no behaviour configured")
 	}
 	return fn(argv)
 }
@@ -45,11 +45,19 @@ func (f *fakeRunner) lastCall() []string {
 }
 
 func answering(out string) *fakeRunner {
-	return &fakeRunner{fn: func([]string) ([]byte, error) { return []byte(out), nil }}
+	return &fakeRunner{fn: func([]string) ([]byte, []byte, error) { return []byte(out), nil, nil }}
+}
+
+// answeringStderr stands in for `security -g`, which prints the item's
+// attributes to stdout and the password itself to stderr.
+func answeringStderr(stderr string) *fakeRunner {
+	return &fakeRunner{fn: func([]string) ([]byte, []byte, error) {
+		return []byte("attributes...\n"), []byte(stderr), nil
+	}}
 }
 
 func failing(err error) *fakeRunner {
-	return &fakeRunner{fn: func([]string) ([]byte, error) { return nil, err }}
+	return &fakeRunner{fn: func([]string) ([]byte, []byte, error) { return nil, nil, err }}
 }
 
 func exited(program string, code int) error {
@@ -74,7 +82,7 @@ func requireBinary(t *testing.T, name string) {
 func TestExecRunner_CapturesStdout(t *testing.T) {
 	requireBinary(t, "echo")
 
-	out, err := ExecRunner{}.Run(t.Context(), []string{"echo", "hunter2"})
+	out, _, err := ExecRunner{}.Run(t.Context(), []string{"echo", "hunter2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +96,7 @@ func TestExecRunner_CapturesStdout(t *testing.T) {
 func TestExecRunner_ReportsExitCode(t *testing.T) {
 	requireBinary(t, "false")
 
-	_, err := ExecRunner{}.Run(t.Context(), []string{"false"})
+	_, _, err := ExecRunner{}.Run(t.Context(), []string{"false"})
 	if err == nil {
 		t.Fatal("a non-zero exit was reported as success")
 	}
@@ -107,7 +115,7 @@ func TestExecRunner_ReportsExitCode(t *testing.T) {
 // `security` does not exist on Linux and `pass` does not exist on most Macs.
 // A provider whose binary is absent is not configured, not broken.
 func TestExecRunner_ReportsAMissingBinary(t *testing.T) {
-	_, err := ExecRunner{}.Run(t.Context(), []string{"latem-no-such-program-9f3a"})
+	_, _, err := ExecRunner{}.Run(t.Context(), []string{"latem-no-such-program-9f3a"})
 	var ce *CommandError
 	if !errors.As(err, &ce) {
 		t.Fatalf("err = %v (%T), want *CommandError", err, err)
@@ -123,7 +131,7 @@ func TestExecRunner_TimesOut(t *testing.T) {
 	requireBinary(t, "sleep")
 
 	start := time.Now()
-	_, err := ExecRunner{Timeout: 50 * time.Millisecond}.Run(t.Context(), []string{"sleep", "30"})
+	_, _, err := ExecRunner{Timeout: 50 * time.Millisecond}.Run(t.Context(), []string{"sleep", "30"})
 	elapsed := time.Since(start)
 
 	var ce *CommandError
@@ -151,7 +159,7 @@ func TestExecRunner_StripsOtherSecretsFromTheChildEnvironment(t *testing.T) {
 		"LATEM_SECRET_MATCH_PASSWORD=hunter2",
 		"OP_SERVICE_ACCOUNT_TOKEN=needed-by-op",
 	}}
-	out, err := r.Run(t.Context(), []string{"env"})
+	out, _, err := r.Run(t.Context(), []string{"env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +178,7 @@ func TestExecRunner_StripsOtherSecretsFromTheChildEnvironment(t *testing.T) {
 func TestExecRunner_KeepsStderrOutOfTheErrorString(t *testing.T) {
 	requireBinary(t, "ls")
 
-	_, err := ExecRunner{}.Run(t.Context(), []string{"ls", "/latem-no-such-path-9f3a"})
+	_, _, err := ExecRunner{}.Run(t.Context(), []string{"ls", "/latem-no-such-path-9f3a"})
 	var ce *CommandError
 	if !errors.As(err, &ce) {
 		t.Fatalf("err = %v (%T), want *CommandError", err, err)
@@ -187,7 +195,7 @@ func TestExecRunner_KeepsStderrOutOfTheErrorString(t *testing.T) {
 }
 
 func TestExecRunner_RefusesAnEmptyArgv(t *testing.T) {
-	if _, err := (ExecRunner{}).Run(t.Context(), nil); err == nil {
+	if _, _, err := (ExecRunner{}).Run(t.Context(), nil); err == nil {
 		t.Error("an empty argv was accepted")
 	}
 }
@@ -198,7 +206,7 @@ func TestExecRunner_HonoursACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err := ExecRunner{}.Run(ctx, []string{"sleep", "30"})
+	_, _, err := ExecRunner{}.Run(ctx, []string{"sleep", "30"})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}

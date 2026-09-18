@@ -86,7 +86,7 @@ func (p *CommandProvider) Resolve(ctx context.Context, name string) (Value, erro
 	// means "this is not a Mac"; here it means the operator named a program
 	// that is not installed, which is a configuration they have to fix and not
 	// a provider to skip past.
-	out, err := p.runner.Run(ctx, argv)
+	out, _, err := p.runner.Run(ctx, argv)
 	if err != nil {
 		return nil, fmt.Errorf("command: %s: %w", name, err)
 	}
