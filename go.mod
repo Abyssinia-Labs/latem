@@ -7,6 +7,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/crypto v0.53.0
 	modernc.org/sqlite v1.56.0
 	sigs.k8s.io/yaml v1.6.0
 )

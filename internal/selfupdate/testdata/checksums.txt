@@ -1,0 +1,4 @@
+a2f9c1e0b7d4835a6c1f0e9d8b7a6534210fedcba9876543210fedcba9876543  latem_0.1.0_darwin_arm64.tar.gz
+b3e8d2f1c6a5946b7d2e1f0a9c8b7645321fedcba9876543210fedcba98765432  latem_0.1.0_darwin_amd64.tar.gz
+c4d7e3a2b5964a7c8e3f2a1b0d9c8756432fedcba9876543210fedcba987654321  latem_0.1.0_linux_arm64.tar.gz
+d5c6f4b3a48759b8d4a3b2c1e0f9a867543fedcba9876543210fedcba9876543210  latem_0.1.0_linux_amd64.tar.gz
