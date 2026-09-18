@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -82,10 +83,18 @@ func TestKill9AgentChild(t *testing.T) {
 // kill9_docker_test.go, behind the integration build tag, so the default gate
 // stays daemon-free.
 //
-// The step's own process is also not reaped by reconciliation, and that is a
-// genuine gap rather than a test artefact: §6's reap covers containers, VMs
-// and workspaces, and a native step's children are reparented to init by the
-// kill. The test tells the stray to exit rather than pretending the agent did.
+// What *was* written here, and was true when it was written, is that the step's
+// own process survives reconciliation. It does not any more: the native
+// executor records each step's process group before the step starts, and Reap
+// signals those groups for runs that are no longer live. So the stray is
+// asserted rather than described — the step writes its process group id down,
+// and the restart has to kill it.
+//
+// What remains genuinely outside the reap is a process that *left* its group:
+// a step that calls `setsid`, or a daemon deliberately detached from the build.
+// §13.3 says so in its own words — a surviving daemon is usually the point on a
+// host that is not ephemeral — and no bookkeeping can find something that has
+// removed itself from the only record of its existence.
 func TestKill9LeavesNoOrphansAfterRestart(t *testing.T) {
 	if !hasGit(t) {
 		t.Skip("git is not installed; the registry is read from a real checkout (INV-5)")
@@ -99,6 +108,10 @@ func TestKill9LeavesNoOrphansAfterRestart(t *testing.T) {
 	signals := shortTempDir(t)
 	stop := filepath.Join(signals, "stop")
 	started := filepath.Join(signals, "started")
+	// `$$` in the step's shell is the process group leader, because the
+	// executor starts every step with Setpgid. Written down so the reap can be
+	// checked rather than assumed.
+	pgidFile := filepath.Join(signals, "pgid")
 
 	// The step announces itself, then waits for the parent to release it. A
 	// plain `sleep` would leave a stray process for its whole duration after
@@ -112,8 +125,8 @@ jobs:
     timeout: 5m
     steps:
       - name: hold
-        run: 'touch %s; for i in $(seq 1 1800); do [ -f %s ] && exit 0; sleep 0.1; done; exit 0'
-`, started, stop)
+        run: 'echo $$ > %s; touch %s; for i in $(seq 1 1800); do [ -f %s ] && exit 0; sleep 0.1; done; exit 0'
+`, pgidFile, started, stop)
 
 	repo := shortTempDir(t)
 	newRepo(t, repo, jobs)
@@ -153,6 +166,12 @@ jobs:
 	if !hasEnvDir(t, envDir, "r_kill9") {
 		t.Fatal("the crash left no executor resource, so this test cannot fail")
 	}
+	// The build is still running: SIGKILL to the agent reached nothing else, so
+	// an abandoned `xcodebuild` would keep the machine busy while the next run
+	// started beside it. Captured here, as a control — asserting the reap after
+	// the restart means nothing unless there was something to reap.
+	strayGroup := livingStepGroup(t, pgidFile)
+
 	before := runRow(t, cfg, "r_kill9")
 	if before.State.IsTerminal() {
 		t.Fatalf("the run was already %s when the agent was killed; nothing was in flight", before.State)
@@ -186,6 +205,54 @@ jobs:
 	if hasEnvDir(t, envDir, "r_kill9") {
 		t.Error("the orphaned executor resource survived the restart (M4)")
 	}
+
+	// And the step itself, which is the claim this test used to describe as an
+	// open gap. Reconciliation signals the process group the executor recorded
+	// before the step started; without it the abandoned build keeps running.
+	assertGroupReaped(t, strayGroup)
+}
+
+// livingStepGroup reads the process group the step wrote down and requires it
+// to still exist.
+//
+// `kill(-pgid, 0)` asks "is there anything in this group" without signalling
+// it.
+func livingStepGroup(t *testing.T, pgidFile string) int {
+	t.Helper()
+
+	raw, err := os.ReadFile(pgidFile) //nolint:gosec // a path this test constructed
+	if err != nil {
+		t.Fatalf("the step never recorded its process group, so the reap cannot be checked: %v", err)
+	}
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pgid <= 1 {
+		t.Fatalf("the step recorded %q as its process group", strings.TrimSpace(string(raw)))
+	}
+	if syscall.Kill(-pgid, 0) != nil {
+		t.Fatalf("the crashed step's process group %d is already gone, so the reap assertion "+
+			"below would pass against an agent that reaped nothing. The step polls for a file "+
+			"this test has not written yet, so it should still be running here.", pgid)
+	}
+	return pgid
+}
+
+// assertGroupReaped waits for a process group to stop existing.
+//
+// Generous, because the reap sends SIGTERM and escalates to SIGKILL after a
+// grace: the answer that matters is whether the group goes at all.
+func assertGroupReaped(t *testing.T, pgid int) {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(-pgid, 0) != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Errorf("the crashed step's process group %d is still running after the restart: "+
+		"reconciliation reaped the workspace and the executor resource but left the build "+
+		"itself on the machine (§6, §13.3)", pgid)
 }
 
 // startChildAgent re-execs this test binary as an agent and waits for it to
