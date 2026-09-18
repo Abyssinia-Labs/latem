@@ -89,11 +89,19 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 Never as root. The script detects your OS and architecture, verifies the
 download, installs to `~/.local/bin`, and runs `latem doctor`.
 
-**v0.1.0 is released, and this repository is private**, so that line returns
-404 today — for the script itself, for the release assets, and for anything
-else anonymous. It is one line and it works; there is simply nobody it works
-*for* until the repository is public. With a token, `gh release download v0.1.0`
-gets the same archives, and their signature is checked the same way (below).
+**The current release is v0.1.1, and this repository is private**, so that line
+returns 404 today — for the script itself, for the release assets, and for
+anything else anonymous. It is one line and it works; there is simply nobody it
+works *for* until the repository is public. With a token,
+`gh release download v0.1.1` gets the same archives, and their signature is
+checked the same way (below).
+
+**Take v0.1.1 rather than v0.1.0 even though both are tagged.** A multi-line
+secret held in the macOS Keychain — an App Store Connect `.p8` above all —
+resolved to hex rather than to a key on v0.1.0, silently, with `doctor`
+reporting it `[ ok ]` and the failure arriving much later as a 401 from
+`fastlane pilot upload`. [Where secret values live](#where-secret-values-live)
+has the detail.
 
 Otherwise, build from source with Go 1.25 or newer:
 
@@ -464,11 +472,22 @@ succeeded or failed needs `--all`, which is how you confirm a build worked:
 
 ```console
 $ latem list --all
-RUN ID                      STATE      REPO   JOB   REF              STARTED   DURATION
-r_a0d1c0b8aae59b84287b3729  succeeded  myapp  test  refs/heads/main  just now  1s
+RUN ID                      #   STATE      REPO   JOB   REF              STARTED   DURATION
+r_a0d1c0b8aae59b84287b3729  42  succeeded  myapp  test  refs/heads/main  just now  1s
 ```
 
 `--limit` caps the number printed and defaults to 50.
+
+**`#` is the build number**, and a job gets it as `$LATEM_BUILD_NUMBER` so that
+an artefact in TestFlight can be traced back to the run that produced it. It
+comes from a sequence rather than a row count, so it is never reused even after
+old runs are pruned — reissuing a build number App Store Connect has already
+accepted is the failure that rule exists to prevent (amendment A36).
+
+The columns above are aligned because this was a terminal. **Piped or
+redirected, the same command emits raw tab-separated fields** — no padding, no
+colour — so `latem list --all | cut -f3` is the state of every run and stays
+that way whatever the values are.
 
 ### Run states
 
@@ -562,12 +581,12 @@ are green.
 
 Not built, and honestly named:
 
-- **A public release.** v0.1.0 **is** tagged, and the signed archives are on it
-  — the pipeline, the signing key (`D73938C642AD64D3`, which `latem version`
-  reports), and the verification the installer and the agent both perform are
-  all in place and exercised. What has not happened is making the repository
-  public, so the installer above has nothing it can fetch anonymously and no
-  stranger has yet installed this.
+- **A public release.** v0.1.0 and v0.1.1 **are** tagged, and the signed
+  archives are on them — the pipeline, the signing key (`D73938C642AD64D3`,
+  which `latem version` reports), and the verification the installer and the
+  agent both perform are all in place and exercised. What has not happened is
+  making the repository public, so the installer above has nothing it can fetch
+  anonymously and no stranger has yet installed this.
 - **The Tart executor**, deferred to v2 by amendment A31. Native is the default
   because the first deployment builds repositories its operator controls; Tart
   is the isolation upgrade for when that stops being true, and `RUNNER_SPEC`
