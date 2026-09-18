@@ -209,10 +209,13 @@ type Agent struct {
 	// that to somebody's build machine without being asked is not a default
 	// anyone should have to discover (§20).
 	//
-	// **Setting it is currently a load error**, not a no-op: the release feed
-	// and the signature verification §20 requires do not exist, so the only
-	// thing true of `auto_update = true` today is that nothing happens. See
-	// validateAgent.
+	// When on: the agent checks the release feed daily, verifies a minisign
+	// signature over the release's checksums manifest against the key embedded
+	// in this binary, and replaces itself only while no run is in flight.
+	//
+	// **A build with no embedded signing key refuses the value at load**
+	// rather than accepting it and declining every release in a log nobody
+	// reads. See validateAgent.
 	AutoUpdate bool       `toml:"auto_update"`
 	RemoteLogs RemoteLogs `toml:"remote_logs"`
 	// MetricsAddr must be a loopback address or empty (INV-1). Absent means

@@ -38,18 +38,6 @@ labels = ["linux"]
 			want: "",
 		},
 		{
-			// A knob that cannot work is refused at load rather than accepted
-			// and ignored. Before this, `auto_update = true` parsed, defaulted,
-			// and was read by nothing: the agent never updated itself and said
-			// nothing about why.
-			name: "auto_update is refused while self-update does not exist",
-			toml: minimalValid + `
-[agent]
-auto_update = true
-`,
-			want: "self-update is not implemented",
-		},
-		{
 			name: "unknown key is an error, not a warning",
 			toml: minimalValid + `
 [agent]
@@ -861,4 +849,68 @@ func TestParse_SkipsFilesystemChecks(t *testing.T) {
 	if _, err := Parse([]byte("schema_version = 1\n"), opts); err == nil {
 		t.Error("Parse accepted a config with no repos and no runners")
 	}
+}
+
+// §20's `auto_update` rule, both ways.
+//
+// Not a case in [TestLoad_InvalidConfigs], and the reason is the whole point of
+// the rule: whether the value is refused depends on whether *this binary*
+// embeds a release signing key, which is a property of how the tree was built
+// rather than of the config being loaded. A table case would pass today, when
+// internal/selfupdate/trusted.pub is the placeholder, and fail on the day
+// somebody pastes a real key into it — for no reason connected to a defect.
+//
+// So the seam is controlled explicitly here, and both directions are asserted.
+// The accepted one matters most: a mistake there means every signed build in
+// the field refuses a config its operator was told to write, and nothing in
+// the tree would notice until someone installed a release.
+func TestAutoUpdateDependsOnAnEmbeddedSigningKey(t *testing.T) {
+	const withAutoUpdate = minimalValid + `
+[agent]
+auto_update = true
+`
+	prev := haveTrustedKey
+	t.Cleanup(func() { haveTrustedKey = prev })
+
+	t.Run("a build with no key refuses it", func(t *testing.T) {
+		haveTrustedKey = func() bool { return false }
+		f := newFixture(t, withAutoUpdate)
+		_, err := Load(f.Opts)
+		if err == nil {
+			t.Fatal("a build that can verify nothing accepted auto_update")
+		}
+		// §8's argument is that a message has to say what to change. "invalid
+		// configuration" would satisfy err != nil and help nobody.
+		if !strings.Contains(err.Error(), "trusts no release signing key") {
+			t.Errorf("the refusal does not say why: %v", err)
+		}
+	})
+
+	t.Run("a signed build accepts it", func(t *testing.T) {
+		haveTrustedKey = func() bool { return true }
+		f := newFixture(t, withAutoUpdate)
+		cfg, err := Load(f.Opts)
+		if err != nil {
+			t.Fatalf("a signed build refused auto_update: %v", err)
+		}
+		if !cfg.Agent.AutoUpdate {
+			t.Error("auto_update loaded as false")
+		}
+	})
+
+	// And the default is off, whatever the build. §20 is explicit that this is
+	// opt-in, and a machine that starts updating itself because it was
+	// installed from a signed release is the surprise the default exists to
+	// prevent.
+	t.Run("the default is off in a signed build", func(t *testing.T) {
+		haveTrustedKey = func() bool { return true }
+		f := newFixture(t, minimalValid)
+		cfg, err := Load(f.Opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agent.AutoUpdate {
+			t.Error("auto_update defaulted to true")
+		}
+	})
 }

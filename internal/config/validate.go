@@ -14,8 +14,16 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
+
+// haveTrustedKey reports whether this build can verify a release. Indirected
+// through a variable for one reason: the accepted direction of the
+// `auto_update` rule is unreachable from a test otherwise, because the answer
+// comes from a file embedded at build time and this tree's copy is the
+// placeholder. A rule with only its refusal tested is half a rule.
+var haveTrustedKey = selfupdate.HaveTrustedKey
 
 // validate applies every rule in §8, filling defaults as it goes, and returns
 // all the problems rather than the first.
@@ -104,27 +112,30 @@ func validateAgent(cfg *Config, md *toml.MetaData, opts Options) []error {
 	}
 
 	/*
-	 * `auto_update = true` is refused rather than accepted and ignored.
+	 * `auto_update = true` is accepted only by a build that could act on it.
 	 *
-	 * §20 describes self-update as opt-in: check a release feed daily, verify
-	 * a minisign signature, atomic rename, re-exec only when no run is
-	 * active. None of that exists — there is no release feed, no signature to
-	 * verify, and no update code. The field parsed, defaulted, and was read by
-	 * nothing, so an operator who set it got an agent that never updated and
-	 * nothing to tell them why.
+	 * §20's self-update now exists — internal/selfupdate checks a release
+	 * feed, verifies a minisign signature over the checksums manifest, and
+	 * internal/agent replaces the binary and re-execs when no run is active.
+	 * What a *particular binary* may still lack is the trust root: the
+	 * signing key is embedded at build time from
+	 * internal/selfupdate/trusted.pub, and a build made before that file was
+	 * populated can verify nothing.
 	 *
-	 * That is the shape of defect this project keeps naming: A27's `latem
-	 * approve` moved a row and recorded nothing, A38's documented `~` was
+	 * So the refusal narrowed rather than disappeared, and the reason it did
+	 * not simply disappear is the one this project keeps naming: A27's `latem
+	 * approve` moved a row and recorded nothing; A38's documented `~` was
 	 * accepted by no executor. A control that reads as a control and does
-	 * nothing is worse than an absent one, because the operator stops looking.
-	 * Refusing at load is the cheap honest answer until M7 ships the feed and
-	 * the verification; then this block goes and the field starts working.
+	 * nothing is worse than an absent one, because the operator stops
+	 * looking. An agent that checked a feed daily and declined every release
+	 * for want of a key would be exactly that — and it would do it in a log
+	 * nobody is reading, which is worse than a load error nobody can miss.
 	 */
-	if cfg.Agent.AutoUpdate {
-		add("agent.auto_update is true, and self-update is not implemented (§20, M7): " +
-			"there is no release feed and no minisign verification yet, so the agent would " +
-			"never update itself and nothing would say so — remove the line, and update by " +
-			"replacing the binary")
+	if cfg.Agent.AutoUpdate && !haveTrustedKey() {
+		add("agent.auto_update is true, and this build trusts no release signing key (§20): " +
+			"it was built with an unpopulated internal/selfupdate/trusted.pub, so it could " +
+			"verify no release and would decline every one — remove the line, or install a " +
+			"signed build from a release")
 	}
 
 	// Absent means the documented default; an explicit "" disables metrics.
