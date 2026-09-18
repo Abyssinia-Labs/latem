@@ -35,17 +35,17 @@ func (d *doctor) checkCredentials(ctx context.Context) []check {
 		return nil // checkSecrets has already reported the chain itself
 	}
 
-	creds, present, missing := resolveAppStore(ctx, chain)
+	creds, resolved, missing, unreadable := resolveAppStore(ctx, chain)
 	defer creds.zero()
 
 	switch {
-	case len(present) == 0:
+	case len(resolved) == 0 && len(unreadable) == 0:
 		// No iOS signing credentials on this machine. Not a fault: a Linux
 		// runner, or a Mac that only builds simulator smoke jobs.
 		return nil
-	case len(missing) > 0:
+	case len(missing) > 0 || len(unreadable) > 0:
 		return []check{fail("secret.asc.set", "App Store Connect set",
-			fmt.Sprintf("%s resolve, %s do not", strings.Join(present, ", "), strings.Join(missing, ", ")),
+			appStoreSetDetail(resolved, missing, unreadable),
 			fmt.Sprintf("# add the missing names to %s", d.cfg.Paths.SecretsEnv)).
 			withNotes("All three are needed together. A partial set fails at upload with the same " +
 				"generic authentication error as a wrong one, having first spent the build.")}
@@ -57,6 +57,28 @@ func (d *doctor) checkCredentials(ctx context.Context) []check {
 			"not contacting Apple while the values above are wrong"))
 	}
 	return append(out, d.appStoreAuth(ctx, creds.credentials())...)
+}
+
+// appStoreSetDetail states each name once, under the one heading that is true
+// of it.
+//
+// The three lists are disjoint, which is the fix: a name whose provider errored
+// used to be appended to both "present" and "missing" so that a broken backend
+// could not make the set look complete. The intent was right and the sentence
+// it produced was not — with one unparseable secrets.env every name appeared on
+// both sides, and the check read "A, B, C resolve, A, B, C do not".
+func appStoreSetDetail(resolved, missing, unreadable []string) string {
+	var parts []string
+	if len(resolved) > 0 {
+		parts = append(parts, fmt.Sprintf("%s resolve", strings.Join(resolved, ", ")))
+	}
+	if len(missing) > 0 {
+		parts = append(parts, fmt.Sprintf("%s do not", strings.Join(missing, ", ")))
+	}
+	if len(unreadable) > 0 {
+		parts = append(parts, fmt.Sprintf("%s could not be read (see above)", strings.Join(unreadable, ", ")))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // appStoreShape is everything knowable without a network: the two identifiers'
@@ -228,22 +250,23 @@ func (a *appStoreSecrets) zero() {
 // machine with no iOS credentials is a supported machine, and the difference
 // between all-three-absent and one-absent is the whole point of the caller's
 // first switch.
-func resolveAppStore(ctx context.Context, chain secretResolver) (out appStoreSecrets, present, missing []string) {
+func resolveAppStore(ctx context.Context, chain secretResolver) (out appStoreSecrets, resolved, missing, unreadable []string) {
 	for _, name := range []string{appstore.SecretKeyID, appstore.SecretIssuerID, appstore.SecretP8} {
 		value, err := chain.Resolve(ctx, name)
 		if err != nil || len(value) == 0 {
 			value.Zero()
 			if err != nil && !errors.Is(err, secrets.ErrNotFound) {
 				// A backend that is broken rather than empty — a locked
-				// keychain, say. Present, and checkSecrets reports the cause.
-				present = append(present, name)
-				missing = append(missing, name)
+				// keychain, or a secrets.env that does not parse. Its own
+				// category: it is neither held nor absent, and counting it as
+				// both produced "A, B, C resolve, A, B, C do not".
+				unreadable = append(unreadable, name)
 				continue
 			}
 			missing = append(missing, name)
 			continue
 		}
-		present = append(present, name)
+		resolved = append(resolved, name)
 		out.held = append(out.held, value)
 		switch name {
 		case appstore.SecretKeyID:
@@ -254,9 +277,7 @@ func resolveAppStore(ctx context.Context, chain secretResolver) (out appStoreSec
 			out.p8 = value
 		}
 	}
-	// A name counted in both lists above is present-but-unresolvable; it must
-	// not make the set look complete.
-	return out, present, missing
+	return out, resolved, missing, unreadable
 }
 
 func anyFailed(checks []check) bool {

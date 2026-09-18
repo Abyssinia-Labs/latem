@@ -388,3 +388,45 @@ func assertNoKeyMaterial(t *testing.T, rep report, p8 string) {
 		}
 	}
 }
+
+// TestAppStoreSetDetail: the three lists are disjoint, so no name appears
+// twice. A broken backend used to be counted as both present and missing, so
+// that it could not make the set look complete — right intent, and it rendered
+// as "A, B, C resolve, A, B, C do not".
+func TestAppStoreSetDetail(t *testing.T) {
+	tests := []struct {
+		name                          string
+		resolved, missing, unreadable []string
+		want                          string
+	}{
+		{
+			name:     "a partial set",
+			resolved: []string{"A"}, missing: []string{"B", "C"},
+			want: "A resolve; B, C do not",
+		},
+		{
+			name:       "every name behind a backend that errored",
+			unreadable: []string{"A", "B", "C"},
+			want:       "A, B, C could not be read (see above)",
+		},
+		{
+			name:     "all three categories at once",
+			resolved: []string{"A"}, missing: []string{"B"}, unreadable: []string{"C"},
+			want: "A resolve; B do not; C could not be read (see above)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := appStoreSetDetail(tc.resolved, tc.missing, tc.unreadable)
+			if got != tc.want {
+				t.Errorf("detail = %q, want %q", got, tc.want)
+			}
+			// The property that failed before: no name on both sides.
+			for _, n := range tc.resolved {
+				if strings.Count(got, n) > 1 {
+					t.Errorf("%q appears more than once in %q", n, got)
+				}
+			}
+		})
+	}
+}
