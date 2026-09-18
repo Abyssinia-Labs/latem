@@ -77,24 +77,43 @@ regardless of its other merits. The full statement is
 
 ## Install
 
-**No release is tagged yet, so the installer has nothing to download** — it
-fails on the checksum fetch rather than installing a broken binary. The release
-pipeline is the last open item before v0.1 (see [Status](#status)). Until it
-lands, build from source with Go 1.25 or newer:
+```console
+$ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install.sh | sh
+```
+
+Never as root. The script detects your OS and architecture, verifies the
+download, installs to `~/.local/bin`, and runs `latem doctor`.
+
+**No release is tagged yet**, so that line has nothing to download today — it
+fails on the checksum fetch rather than installing a broken binary. The
+pipeline that publishes one is built and rehearsable
+([`docs/release.md`](./docs/release.md)); what it waits on is a signing key,
+which is one command and a person. Until then, build from source with Go 1.25
+or newer:
 
 ```console
 $ git clone https://github.com/Abyssinia-Labs/latem && cd latem
 $ make latem && ./bin/latem doctor
 ```
 
-Once a release exists, installing is one line:
+### What "verifies the download" means
 
-```console
-$ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install.sh | sh
-```
+Two checks, and they prove different things:
 
-Never as root. The script detects your OS and architecture, verifies a
-checksum, installs to `~/.local/bin`, and runs `latem doctor`.
+- The **sha256** against the release's checksums manifest. Not optional, and
+  there is no flag to skip it. It proves the file arrived intact.
+- The **minisign signature** over that manifest, when `minisign` is installed.
+  This is the one that proves who produced it — the manifest comes from the
+  same server as the binary, so a checksum match alone says nothing about who
+  served either. When the tool is missing the script says so and what it did
+  not check, rather than implying more than it did.
+
+An agent with `[agent] auto_update = true` performs the same two checks for
+itself, daily, against a key compiled into the binary, and replaces itself only
+while no build is in flight (RUNNER_SPEC §20). A binary built from a tree with
+no signing key in it refuses that setting at load, because an agent that
+declined every release into a log nobody reads would be worse than one that
+never offered to update.
 
 Then, either way:
 
@@ -329,14 +348,18 @@ not.
 Built: the Docker and native executors, mirror-and-hardlink source acquisition,
 the registry and its admission gates, commit-pinned approval, the secrets chain
 and the redactor, mounted caches and artifact collection, the run state machine,
-the agent and its local broker, and the remote broker. All five invariants have
-tests named after them and all five are green.
+the agent and its local broker, the remote broker, and the release pipeline —
+four cross-compiled targets, a signed checksums manifest, a smoke job that runs
+the result on a real machine, and self-update that replaces the binary only
+between builds. All five invariants have tests named after them and all five
+are green.
 
 Not built, and honestly named:
 
-- **The release pipeline** — signed binaries and minisign self-update. It is
-  why the installer above has nothing to fetch, and it is the last thing
-  between here and v0.1.
+- **A tagged release.** The pipeline exists and can be rehearsed without
+  secrets; what it waits on is a signing keypair, which is one `minisign -G`
+  and a person ([`docs/release.md`](docs/release.md) §2). Until then the
+  installer above has nothing to fetch.
 - **The Tart executor**, deferred to v2 by amendment A31. Native is the default
   because the first deployment builds repositories its operator controls; Tart
   is the isolation upgrade for when that stops being true, and `RUNNER_SPEC`
@@ -353,7 +376,8 @@ Not built, and honestly named:
 Where to read further, in the order a new operator needs them:
 
 - [`docs/RUNNER_SPEC.md`](docs/RUNNER_SPEC.md) — the specification, including
-  §5's invariants and the forty amendments the implementation waves produced.
+  §5's invariants and the forty-one amendments the implementation waves
+  produced.
   The amendments are the interesting part: each one names the defect that
   forced it.
 - [`docs/PLAN.md`](docs/PLAN.md) — workstreams, file ownership, and where each

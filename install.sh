@@ -22,6 +22,17 @@ VERSION="${LATEM_VERSION:-latest}"
 INSTALL_DIR="${LATEM_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${LATEM_BASE_URL:-https://github.com/$REPO/releases/download}"
 
+# The release signing key, as `minisign -G` printed it. Empty means this
+# repository has not generated one yet, and the signature check below is
+# skipped with a warning rather than silently.
+#
+# It is the same key as internal/selfupdate/trusted.pub, which is the copy the
+# agent embeds and verifies its own updates against. Two copies of a key that
+# have to agree is a drift waiting to happen, so a test asserts they do
+# (test/scripts/install_test.go, amendment A37's rule about hazards that can
+# recur).
+PUBKEY=""
+
 # ---------------------------------------------------------------- output
 
 # Colour only when stdout is a terminal. A `curl | sh` transcript pasted into
@@ -102,9 +113,11 @@ info "  $OS/$ARCH"
 
 if [ "$VERSION" = "latest" ]; then
 	step "Resolving the latest release"
-	# The redirect target of /releases/latest carries the tag. It needs no API
-	# token and is not rate-limited the way api.github.com is, which matters
-	# for a script people run from a machine behind a shared NAT.
+	# api.github.com, whose answer to /releases/latest excludes drafts and
+	# prereleases. It needs no token, and it is rate-limited by IP (60 an hour
+	# unauthenticated), which a machine behind a shared NAT can exhaust without
+	# having run this script at all. LATEM_VERSION is the way past that, and
+	# the error below says so.
 	VERSION=$($FETCH_STDOUT "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
 		sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n 1 || true)
 	[ -n "$VERSION" ] || die "could not determine the latest release; set LATEM_VERSION explicitly"
@@ -127,10 +140,51 @@ $FETCH "$TMP/$ASSET" "$URL" || die "download failed: $URL"
 # ---------------------------------------------------------------- verify
 
 # The checksum is not optional and there is no flag to skip it. This script is
-# piped into a shell over the network; a corrupted or substituted archive is
-# the one failure mode where "carry on and see" is unacceptable.
-step "Verifying checksum"
+# piped into a shell over the network, and "carry on and see" is not an
+# acceptable answer to a damaged download.
+#
+# Be precise about what it proves, though, because the stronger claim is the
+# tempting one: the checksums file comes from the same place as the archive, so
+# a sha256 match means the file arrived intact from whoever served it. It says
+# nothing about who that was. The minisign signature is what says that, and it
+# is checked below when `minisign` is installed — which is also exactly what an
+# agent with auto_update does for itself, on every release, with the key
+# compiled into it (RUNNER_SPEC §20).
+step "Verifying the download"
 $FETCH "$TMP/checksums.txt" "$SUMS_URL" || die "could not download checksums: $SUMS_URL"
+
+# The signature first, then the manifest it authenticates, then the archive
+# that manifest names. In that order, because a checksum read out of a file
+# whose signature has not been checked is a checksum from whoever served it.
+if [ -z "$PUBKEY" ]; then
+	warn "this installer carries no release signing key, so nothing here proves
+who built the binary — only that it arrived intact. That is a gap in this
+repository rather than in your install; see docs/release.md."
+elif ! command -v minisign >/dev/null 2>&1; then
+	# Not fatal. Requiring minisign would turn a one-line install into a
+	# package-manager detour on every machine, and the checksum still catches
+	# every damaged download. Say plainly what was not checked, and how to.
+	warn "minisign is not installed, so the release signature was not checked.
+The checksum still proves this download is intact, not who produced it. To
+check the rest by hand:
+
+  brew install minisign        # or: sudo apt-get install minisign
+  minisign -V -P '$PUBKEY' -m latem_${VERSION#v}_checksums.txt"
+else
+	$FETCH "$TMP/checksums.txt.minisig" "$SUMS_URL.minisig" ||
+		die "could not download the signature: $SUMS_URL.minisig
+
+Every release carries one. A release that does not is not one to install."
+	minisign -V -P "$PUBKEY" \
+		-m "$TMP/checksums.txt" \
+		-x "$TMP/checksums.txt.minisig" >/dev/null 2>&1 ||
+		die "the checksums file is not signed by Latem's release key.
+
+Do not use this download. Either it was altered in transit, or the release was
+signed with a key this installer does not know — report it at
+https://github.com/$REPO/issues"
+	info "  signature ok"
+fi
 
 expected=$(grep " $ASSET\$" "$TMP/checksums.txt" | awk '{print $1}' | head -n 1)
 [ -n "$expected" ] || die "$ASSET is not listed in the checksum file"
@@ -150,7 +204,7 @@ if [ "$expected" != "$actual" ]; then
 
 Do not use this file. Report it at https://github.com/$REPO/issues"
 fi
-info "  ok"
+info "  checksum ok"
 
 # --------------------------------------------------------------- install
 
