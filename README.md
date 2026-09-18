@@ -84,11 +84,13 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 Never as root. The script detects your OS and architecture, verifies the
 download, installs to `~/.local/bin`, and runs `latem doctor`.
 
-**No release is tagged yet**, so that line has nothing to download today — it
-fails on the checksum fetch rather than installing a broken binary. The
-pipeline that publishes one is built, rehearsed and signed
-([`docs/release.md`](./docs/release.md)): `git push origin v0.1.0` is what
-remains. Until then, build from source with Go 1.25 or newer:
+**v0.1.0 is released, and this repository is private**, so that line returns
+404 today — for the script itself, for the release assets, and for anything
+else anonymous. It is one line and it works; there is simply nobody it works
+*for* until the repository is public. With a token, `gh release download v0.1.0`
+gets the same archives, and their signature is checked the same way (below).
+
+Otherwise, build from source with Go 1.25 or newer:
 
 ```console
 $ git clone https://github.com/Abyssinia-Labs/latem && cd latem
@@ -113,6 +115,10 @@ while no build is in flight (RUNNER_SPEC §20). A binary built from a tree with
 no signing key in it refuses that setting at load, because an agent that
 declined every release into a log nobody reads would be worse than one that
 never offered to update.
+
+The same privacy caveat applies: the release feed is `api.github.com`, the agent
+sends no token, and a private repository answers 404. `latem doctor` says so
+rather than leaving it to a daily line in a log.
 
 Then, either way:
 

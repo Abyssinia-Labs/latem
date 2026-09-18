@@ -1305,6 +1305,7 @@ latem version
 - `~/.latem` is mode `0700`; `token_file` and `secrets.env` are `0600`
 - `metrics_addr` is loopback (INV-1)
 - Clock skew against the broker (token validation fails confusingly otherwise)
+- **The release feed, when and only when `auto_update` is on** (amendment A41). It is the one setting whose failure mode is silence: everything it needs is off the machine, and when any of it is unreachable the agent does the correct thing — warns, once a day, into a log nobody is reading. The config loaded, the value was accepted, and nothing happens for months. doctor therefore asks the question the agent's ticker will ask, through the same code, at the moment somebody is watching the answer. Measured on this repository: a **private** repo answers 404 to `releases/latest`, because the agent sends no credential to the feed and holds none — so a machine with `auto_update = true` on a private repo never updates and never says why
 
 ---
 

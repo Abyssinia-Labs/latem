@@ -12,6 +12,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
@@ -207,6 +208,13 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		// so "a 40 GB floor passes" held on a laptop and failed on every
 		// runner. A test that wants a full disk says so.
 		freeGB: func(context.Context) (float64, error) { return testFreeGB, nil },
+		// Offline by default. checkSelfUpdate only probes when auto_update is
+		// on, which no test config sets — but a future one that did and forgot
+		// this seam would reach api.github.com from the unit suite, which is
+		// the kind of thing that passes for a year and then fails on a plane.
+		latestRelease: func(context.Context) (selfupdate.Release, error) {
+			return selfupdate.Release{}, selfupdate.ErrUpToDate
+		},
 		// Nowhere, unless a test puts a ruby somewhere it controls. The real
 		// list is absolute paths under /opt, which system.ToolAt stats for
 		// real: inheriting them means reading whatever Homebrew this machine

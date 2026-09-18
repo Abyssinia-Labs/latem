@@ -18,6 +18,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
@@ -93,6 +94,10 @@ type doctor struct {
 	// that a 40 GB floor passes is asserting that the test machine has 40 GB
 	// free, which a developer's laptop does and a CI runner does not.
 	freeGB func(context.Context) (float64, error)
+	// latestRelease is §20's feed, injectable so the check can be tested
+	// without reaching api.github.com — and so a test can arrange the three
+	// answers that matter: current, newer, and unreachable.
+	latestRelease func(context.Context) (selfupdate.Release, error)
 	// kegRubies is [kegOnlyRubies], overridable.
 	//
 	// It is a list of absolute paths that [system.System.ToolAt] stats on the
@@ -155,6 +160,7 @@ func (d *doctor) run(ctx context.Context) report {
 	}
 	rep.section("Service", d.checkService(ctx)...)
 	rep.section("Broker", d.checkBroker(ctx)...)
+	rep.section("Updates", d.checkSelfUpdate(ctx)...)
 	return rep
 }
 
