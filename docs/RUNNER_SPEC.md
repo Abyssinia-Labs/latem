@@ -473,7 +473,7 @@ shutdown_grace = "30m"
 work_dir       = "~/.latem/work"
 log_retention  = "14d"
 queue_ttl      = "72h"              # queued longer than this → rejected
-auto_update    = false
+auto_update    = false   # true is refused at load until §20's self-update exists (M7)
 remote_logs    = "always"           # "always" | "on_failure"
 metrics_addr   = "127.0.0.1:9838"   # loopback only; "" disables (INV-1)
 
@@ -1303,6 +1303,8 @@ latem version
 **Preflight** runs at startup, per executor, and every 5 minutes thereafter. A runner failing preflight is marked unavailable and stops accepting runs; recovery is automatic when the check passes again. Never accept a run onto a runner that cannot execute it.
 
 **Self-update** is opt-in and off by default (`[agent] auto_update = false`). When enabled: check a release feed daily, verify a minisign signature, download to a temp path, atomic rename, re-exec only when no run is active. Never update mid-run.
+
+**Until that exists, `auto_update = true` is a load error.** There is no release feed and no signature to verify — M7 owns both — so the only thing true of enabling it was that nothing happened, silently, on a machine whose operator believed it would keep itself current. The config loader refuses the value and names M7; the refusal goes when the feature arrives. This is the same decision A27 made about an approval that recorded nothing and A38 made about a documented `~` no executor expanded: **a control that reads as a control and does nothing is worse than an absent one**, because it stops the operator looking.
 
 **Metrics.** INV-1 forbids binding a non-loopback listener; it does not forbid loopback. `metrics_addr` (default `127.0.0.1:9838`, empty to disable) serves counters and gauges — runs by terminal state, run duration, queue depth, cache volume sizes, disk free per runner, broker connection state, log frames dropped. The config loader rejects a non-loopback value, so the invariant is enforced where it cannot be forgotten. Anyone wanting these off-machine points a local Prometheus at it or tunnels; the agent does not grow a remote surface for observability.
 

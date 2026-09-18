@@ -38,6 +38,18 @@ labels = ["linux"]
 			want: "",
 		},
 		{
+			// A knob that cannot work is refused at load rather than accepted
+			// and ignored. Before this, `auto_update = true` parsed, defaulted,
+			// and was read by nothing: the agent never updated itself and said
+			// nothing about why.
+			name: "auto_update is refused while self-update does not exist",
+			toml: minimalValid + `
+[agent]
+auto_update = true
+`,
+			want: "self-update is not implemented",
+		},
+		{
 			name: "unknown key is an error, not a warning",
 			toml: minimalValid + `
 [agent]

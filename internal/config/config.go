@@ -208,6 +208,11 @@ type Agent struct {
 	// AutoUpdate is off by default. Self-update re-execs the agent, and doing
 	// that to somebody's build machine without being asked is not a default
 	// anyone should have to discover (§20).
+	//
+	// **Setting it is currently a load error**, not a no-op: the release feed
+	// and the signature verification §20 requires do not exist, so the only
+	// thing true of `auto_update = true` today is that nothing happens. See
+	// validateAgent.
 	AutoUpdate bool       `toml:"auto_update"`
 	RemoteLogs RemoteLogs `toml:"remote_logs"`
 	// MetricsAddr must be a loopback address or empty (INV-1). Absent means

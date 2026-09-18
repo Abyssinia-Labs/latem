@@ -103,6 +103,30 @@ func validateAgent(cfg *Config, md *toml.MetaData, opts Options) []error {
 			cfg.Agent.RemoteLogs, RemoteLogsAlways, RemoteLogsOnFailure)
 	}
 
+	/*
+	 * `auto_update = true` is refused rather than accepted and ignored.
+	 *
+	 * §20 describes self-update as opt-in: check a release feed daily, verify
+	 * a minisign signature, atomic rename, re-exec only when no run is
+	 * active. None of that exists — there is no release feed, no signature to
+	 * verify, and no update code. The field parsed, defaulted, and was read by
+	 * nothing, so an operator who set it got an agent that never updated and
+	 * nothing to tell them why.
+	 *
+	 * That is the shape of defect this project keeps naming: A27's `latem
+	 * approve` moved a row and recorded nothing, A38's documented `~` was
+	 * accepted by no executor. A control that reads as a control and does
+	 * nothing is worse than an absent one, because the operator stops looking.
+	 * Refusing at load is the cheap honest answer until M7 ships the feed and
+	 * the verification; then this block goes and the field starts working.
+	 */
+	if cfg.Agent.AutoUpdate {
+		add("agent.auto_update is true, and self-update is not implemented (§20, M7): " +
+			"there is no release feed and no minisign verification yet, so the agent would " +
+			"never update itself and nothing would say so — remove the line, and update by " +
+			"replacing the binary")
+	}
+
 	// Absent means the documented default; an explicit "" disables metrics.
 	// Deleting the line is how an operator gets §20's default, not how they
 	// turn the listener off, and conflating the two would silently open a
