@@ -31,7 +31,15 @@ BASE_URL="${LATEM_BASE_URL:-https://github.com/$REPO/releases/download}"
 # have to agree is a drift waiting to happen, so a test asserts they do
 # (test/scripts/install_test.go, amendment A37's rule about hazards that can
 # recur).
-PUBKEY=""
+#
+# It has to be the key itself and cannot be a path to that file, for two
+# reasons worth writing down because the path is the obvious thing to reach
+# for. This script is fetched with curl and piped into sh, so there is no
+# checkout on the machine running it and nothing at any repository-relative
+# path. And `minisign -P` takes the base64 key; the file form is `-p`, so a
+# path here fails with "base64 conversion failed - was an actual public key
+# given?" even where the file does exist.
+PUBKEY="RWTTZK1Cxjg51w6BUpg5KpkKhOHzUT+EDhgidVqHUHsiTr6nPjKC3esu"
 
 # ---------------------------------------------------------------- output
 
@@ -175,14 +183,24 @@ else
 		die "could not download the signature: $SUMS_URL.minisig
 
 Every release carries one. A release that does not is not one to install."
-	minisign -V -P "$PUBKEY" \
+	# minisign's own words are kept and printed on failure. Discarding them
+	# was the first version of this, and it makes two very different failures
+	# look identical: a signature that does not verify, and a PUBKEY above that
+	# minisign could not load at all ("base64 conversion failed — was an actual
+	# public key given?", which is what a path rather than a key produces).
+	# The first is somebody else's problem and the second is ours.
+	if ! sigout=$(minisign -V -P "$PUBKEY" \
 		-m "$TMP/checksums.txt" \
-		-x "$TMP/checksums.txt.minisig" >/dev/null 2>&1 ||
+		-x "$TMP/checksums.txt.minisig" 2>&1); then
 		die "the checksums file is not signed by Latem's release key.
+
+minisign said:
+  $sigout
 
 Do not use this download. Either it was altered in transit, or the release was
 signed with a key this installer does not know — report it at
 https://github.com/$REPO/issues"
+	fi
 	info "  signature ok"
 fi
 

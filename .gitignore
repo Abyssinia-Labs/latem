@@ -80,3 +80,19 @@ examples/expo-app/android/
 # because a pattern whose only slash is trailing matches at any depth.
 .bundle/
 **/vendor/bundle/
+
+# The release signing key (docs/release.md §2).
+#
+# Two patterns rather than one, because the cost of the miss is not recoverable
+# by a later commit: anything that reaches a published repository has to be
+# treated as disclosed, and the only remedy for a leaked signing key is a
+# rotation that strands every agent whose trusted.pub carries the old one.
+#
+# `latem.key` is the name docs/release.md tells you to generate, and
+# `*.minisign.key` / `minisign.key` catch the other spellings the tool itself
+# suggests. The *public* halves are deliberately not ignored — that key belongs
+# in the tree, in internal/selfupdate/trusted.pub, and ignoring `*.pub` would
+# have hidden the one file this feature requires to be committed.
+/latem.key
+minisign.key
+*.minisign.key

@@ -345,6 +345,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For the trusted key, which the notes quote literally. A reader on the
+      # release page has a tarball, not a checkout, so notes that told them to
+      # read a repository-relative file would be telling them to run a command
+      # they cannot run.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: dist
@@ -381,14 +388,21 @@ jobs:
           signature is what proves that, and checking it takes one command:
 
           ```sh
-          minisign -Vm latem___BARE___checksums.txt \
-            -P "$(sed -n 2p internal/selfupdate/trusted.pub)"
+          minisign -Vm latem___BARE___checksums.txt -P '__PUBKEY__'
           ```
+
+          That key is `__PUBKEY_ID__`. It is also in
+          [`internal/selfupdate/trusted.pub`](https://github.com/__REPO__/blob/main/internal/selfupdate/trusted.pub)
+          and compiled into every binary in this release — `latem version`
+          prints which one a binary trusts.
 
           An agent with `auto_update = true` does this for itself, daily,
           against the same key compiled into the binary (RUNNER_SPEC §20).
           EOF
-          sed -i "s|__REPO__|${GITHUB_REPOSITORY}|g; s|__BARE__|${BARE}|g" "$notes"
+          pubkey=$(grep -Ev '^(#|untrusted comment:|[[:space:]]*$)' internal/selfupdate/trusted.pub | head -n 1)
+          keyid=$(sed -n 's/^untrusted comment: minisign public key //p' internal/selfupdate/trusted.pub | head -n 1)
+          sed -i "s|__REPO__|${GITHUB_REPOSITORY}|g; s|__BARE__|${BARE}|g; \
+                  s|__PUBKEY__|${pubkey}|g; s|__PUBKEY_ID__|${keyid}|g" "$notes"
 
           gh release create "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \

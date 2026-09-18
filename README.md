@@ -86,10 +86,9 @@ download, installs to `~/.local/bin`, and runs `latem doctor`.
 
 **No release is tagged yet**, so that line has nothing to download today — it
 fails on the checksum fetch rather than installing a broken binary. The
-pipeline that publishes one is built and rehearsable
-([`docs/release.md`](./docs/release.md)); what it waits on is a signing key,
-which is one command and a person. Until then, build from source with Go 1.25
-or newer:
+pipeline that publishes one is built, rehearsed and signed
+([`docs/release.md`](./docs/release.md)): `git push origin v0.1.0` is what
+remains. Until then, build from source with Go 1.25 or newer:
 
 ```console
 $ git clone https://github.com/Abyssinia-Labs/latem && cd latem
@@ -356,10 +355,11 @@ are green.
 
 Not built, and honestly named:
 
-- **A tagged release.** The pipeline exists and can be rehearsed without
-  secrets; what it waits on is a signing keypair, which is one `minisign -G`
-  and a person ([`docs/release.md`](docs/release.md) §2). Until then the
-  installer above has nothing to fetch.
+- **A tagged release.** Everything a release needs is in place — the pipeline,
+  the signing key it will use (`D73938C642AD64D3`, which `latem version` now
+  reports), and the verification the installer and the agent both perform. What
+  has not happened is the tag, so the installer above has nothing to fetch and
+  no stranger has yet installed this.
 - **The Tart executor**, deferred to v2 by amendment A31. Native is the default
   because the first deployment builds repositories its operator controls; Tart
   is the isolation upgrade for when that stops being true, and `RUNNER_SPEC`

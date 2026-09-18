@@ -36,10 +36,15 @@ key compiled into the binary already running there. §20 has the full chain.
 
 ---
 
-## 2. The signing key — do this once
+## 2. The signing key — done
 
-No release can be cut until this is done, and nothing else in this document
-works before it. Two minutes.
+**This repository's releases are signed by key `D73938C642AD64D3`**, generated
+2026-09-18. Its public half is committed in the two places that need it and its
+secret half is the `MINISIGN_SECRET_KEY` Actions secret, so §3 and §4 work as
+written and nothing below is owed.
+
+The procedure is kept because it is what a rotation needs, and what anyone
+forking this repository needs. Two minutes.
 
 Generate a password-less keypair, on a machine you trust, not in CI:
 
@@ -62,6 +67,12 @@ Then three places, all of which must agree:
    `latem.pub` (the second line, not the comment). `install.sh` is POSIX sh and
    cannot read the embedded copy, so this is a second copy by necessity; the
    test named above is what keeps it honest.
+
+   **The key itself, not a path to the key file.** The obvious move is to point
+   `PUBKEY` at `internal/selfupdate/trusted.pub`, and it fails twice: this
+   script is fetched with `curl` and piped into `sh`, so there is no checkout on
+   the machine running it, and `minisign -P` takes base64 key material while the
+   file form is `-p`. The key-agreement test catches it either way.
 3. **The `MINISIGN_SECRET_KEY` Actions secret** — the whole contents of
    `latem.key`.
 
@@ -74,8 +85,12 @@ in two years — losing it does not break installed agents, but it does mean
 every future release is signed by a key they do not trust, and the only way out
 is a new release that nobody with `auto_update` can reach automatically.
 
-**Do not commit `latem.key`.** `.gitignore` does not know about it; nothing in
-the tree should.
+**Do not commit `latem.key`.** `.gitignore` covers that name and the two other
+spellings minisign suggests, because the cost of the miss is not recoverable by
+a later commit — anything that reaches a published repository is disclosed, and
+the only remedy for a leaked signing key is a rotation that strands every agent
+carrying the old one. The `.pub` halves are deliberately *not* ignored: that key
+belongs in the tree.
 
 ### Rotating it
 

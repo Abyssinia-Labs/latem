@@ -125,11 +125,20 @@ func runInstaller(t *testing.T, r *fakeRelease, installDir string) (string, erro
 		}
 	}
 
-	script := filepath.Join(moduleRoot(t), "install.sh")
+	// A copy with no key configured, which is what makes these three tests
+	// about the checksum path rather than about whichever key this repository
+	// currently ships. Running the real script would make them fail the moment
+	// a signing key landed — as they did — because a configured installer
+	// refuses an unsigned release, correctly. The signature path has its own
+	// tests below, with a keypair they control.
+	//
+	// It is also a real branch rather than a contrivance: a fork that has not
+	// generated a key runs exactly this.
+	script := installerWithKey(t, "")
 	// /bin/sh on purpose. The script's own header says it is POSIX sh because
 	// `curl | sh` runs under dash on Debian, and running it under bash here
 	// would be testing a shell nobody installs with.
-	cmd := exec.Command("/bin/sh", script) //nolint:gosec // a path inside this repository
+	cmd := exec.Command("/bin/sh", script) //nolint:gosec // a copy of this repository's own script
 	cmd.Env = append(os.Environ(),
 		"LATEM_VERSION="+r.version,
 		"LATEM_BASE_URL="+r.serve(t),
@@ -228,25 +237,33 @@ func TestInstallScript_SaysWhatItCouldNotDownload(t *testing.T) {
 
 // ---------------------------------------------------------------- signature
 
+// pubkeyLine is install.sh's key assignment, whatever it currently holds.
+var pubkeyLine = regexp.MustCompile(`(?m)^PUBKEY="([^"]*)"$`)
+
 // installerWithKey writes a copy of install.sh carrying a public key, so the
 // signature path can be exercised with a keypair the test controls.
 //
-// The substitution is asserted rather than assumed. If the `PUBKEY=""` line is
-// ever reshaped, a silent no-op here would leave this test running the
-// no-key branch and reporting success for a path it never entered.
+// It replaces whatever the line holds rather than an empty string. Matching
+// `PUBKEY=""` was the first version and it broke the day a real key landed —
+// the same mistake as a test written for one state of an embedded key, and the
+// reason [TestTrustedKey] in internal/selfupdate is written to assert whichever
+// state it finds.
+//
+// The substitution is asserted rather than assumed: a silent no-op would leave
+// this test running against the repository's own key, with no secret half to
+// sign with, and reporting success for a path it never entered.
 func installerWithKey(t *testing.T, pubkey string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join(moduleRoot(t), "install.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	const slot = "PUBKEY=\"\""
-	if n := strings.Count(string(body), slot); n != 1 {
-		t.Fatalf("install.sh has %d %s lines; this test patches exactly one", n, slot)
+	if n := len(pubkeyLine.FindAll(body, -1)); n != 1 {
+		t.Fatalf("install.sh has %d PUBKEY= lines; this test patches exactly one", n)
 	}
 	out := filepath.Join(t.TempDir(), "install.sh")
-	patched := strings.Replace(string(body), slot, "PUBKEY=\""+pubkey+"\"", 1)
-	if err := os.WriteFile(out, []byte(patched), 0o755); err != nil {
+	patched := pubkeyLine.ReplaceAll(body, []byte(`PUBKEY="`+pubkey+`"`))
+	if err := os.WriteFile(out, patched, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return out
@@ -400,7 +417,7 @@ func TestInstallScript_CarriesTheSameKeyTheAgentTrusts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^PUBKEY="([^"]*)"$`).FindSubmatch(script)
+	m := pubkeyLine.FindSubmatch(script)
 	if m == nil {
 		t.Fatal("install.sh has no PUBKEY= line; the agent's trusted key has no counterpart there")
 	}
@@ -429,5 +446,55 @@ func TestInstallScript_CarriesTheSameKeyTheAgentTrusts(t *testing.T) {
 			"An installer that cannot verify what it downloads, or an agent that refuses "+
 			"what the installer accepted — whichever way round, one of them is wrong.",
 			inScript, inAgent)
+	}
+}
+
+// The committed key, loaded by minisign rather than by this repository's own
+// parser.
+//
+// Every other test here patches PUBKEY, so none of them would notice that the
+// value actually shipped is unusable — and that is not hypothetical: PUBKEY was
+// once set to `internal/selfupdate/trusted.pub`, which is the obvious thing to
+// reach for and fails twice over (the script is piped from curl, so no checkout
+// exists on the machine running it, and `minisign -P` takes base64 key material
+// while the file form is `-p`).
+//
+// The agreement test above catches the two copies disagreeing, and
+// internal/selfupdate's TestTrustedKey catches a key this module cannot parse.
+// Neither catches both copies agreeing on something minisign cannot load. So
+// this runs the real script against a release signed by a key it does not
+// trust, and requires the refusal to be about the *signature* — which it can
+// only be if minisign read our key first.
+func TestInstallScript_TheCommittedKeyIsOneMinisignCanLoad(t *testing.T) {
+	root := moduleRoot(t)
+	script, err := os.ReadFile(filepath.Join(root, "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := pubkeyLine.FindSubmatch(script)
+	if m == nil {
+		t.Fatal("install.sh has no PUBKEY= line")
+	}
+	if len(m[1]) == 0 {
+		t.Skip("install.sh carries no key yet; docs/release.md §2 is how that ends")
+	}
+
+	_, otherSecret := minisignKeypair(t) // skips when minisign is absent
+	r := newFakeRelease(t, "v0.9.0", "latem v0.9.0")
+	signChecksums(t, r, otherSecret, "latem v0.9.0")
+
+	out, err := runInstallerScript(t, filepath.Join(root, "install.sh"), r,
+		filepath.Join(t.TempDir(), "bin"))
+	if err == nil {
+		t.Fatalf("the real installer accepted a release signed by an unknown key:\n%s", out)
+	}
+	if !strings.Contains(out, "not signed by Latem's release key") {
+		t.Errorf("the refusal is not about the signature, which means minisign could not load "+
+			"the committed PUBKEY at all:\n%s", out)
+	}
+	// And the tell of the specific mistake, in case the message above ever
+	// changes shape.
+	if strings.Contains(out, "base64 conversion failed") {
+		t.Error("minisign rejected the committed PUBKEY as not being a key: it is probably a path")
 	}
 }

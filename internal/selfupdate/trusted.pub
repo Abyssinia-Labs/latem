@@ -1,9 +1,2 @@
-# This build trusts no release signing key.
-#
-# Replace these lines with the two-line public key that `minisign -G -W`
-# printed for the release signing keypair, and `auto_update = true` becomes a
-# config the loader accepts rather than one it refuses.
-#
-# The secret key belongs in the `MINISIGN_SECRET_KEY` Actions secret and
-# nowhere else in this repository. docs/release.md §2 is the procedure, and it
-# is written to be followed once.
+untrusted comment: minisign public key D73938C642AD64D3
+RWTTZK1Cxjg51w6BUpg5KpkKhOHzUT+EDhgidVqHUHsiTr6nPjKC3esu
