@@ -1132,61 +1132,74 @@ func gitRemoteError(out string) string {
 func repoFailureAdvice(url, out string) (notes, fixes []string) {
 	seeFullError := fmt.Sprintf("git ls-remote %s   # to see the full error", url)
 
+	// Assigned rather than returned inline from each arm. A multi-value return
+	// of two composite literals is formatted differently by Go 1.26's gofmt and
+	// Go 1.27's, and this repository lints with a pinned golangci-lint in CI and
+	// whatever is installed locally — so the inline form is a file that is
+	// correctly formatted on one machine and not the other.
 	switch {
 	case strings.Contains(out, "Permission denied (publickey"):
-		return []string{
+		notes = []string{
 			"This machine has no ssh key the host accepts. A deploy key in ~/.ssh with an " +
 				"ssh config entry is the form that works from both an interactive shell and an " +
 				"agent started by launchd or systemd; a forwarded agent works from neither, " +
 				"because the service does not inherit your session.",
-		}, []string{
-			"gh auth login --git-protocol ssh   # or install a deploy key in ~/.ssh",
 		}
+		fixes = []string{"gh auth login --git-protocol ssh   # or install a deploy key in ~/.ssh"}
 
-	case strings.Contains(out, "Repository not found"), strings.Contains(out, "does not appear to be a git repository"):
-		return []string{
+	case strings.Contains(out, "Repository not found"),
+		strings.Contains(out, "does not appear to be a git repository"):
+		notes = []string{
 			"The credential worked and the repository did not answer to it. Either the URL " +
-				"names something that is not there, or the key reaching the host is not " +
-				"entitled to that repository — a private repo answers both the same way, on " +
-				"purpose, so that it does not confirm its own existence.",
-		}, []string{seeFullError}
+				"names something that is not there, or the key reaching the host is not entitled " +
+				"to that repository — a private repo answers both the same way, on purpose, so " +
+				"that it does not confirm its own existence.",
+		}
+		fixes = []string{seeFullError}
 
 	case strings.Contains(out, "Host key verification failed"):
-		return []string{
+		notes = []string{
 			"ssh has no accepted host key for this host and could not ask: an agent has no " +
-				"terminal to answer the prompt on. The key has to be in known_hosts before " +
-				"the first run rather than during it.",
-		}, []string{
-			fmt.Sprintf("ssh-keyscan %s >> ~/.ssh/known_hosts", sshHostOf(url)),
+				"terminal to answer the prompt on. The key has to be in known_hosts before the " +
+				"first run rather than during it.",
 		}
+		fixes = []string{fmt.Sprintf("ssh-keyscan %s >> ~/.ssh/known_hosts", sshHostOf(url))}
 
 	case strings.Contains(out, "Could not resolve hostname"):
-		return []string{
-			"Name resolution failed, so nothing was authenticated and nothing was refused. " +
-				"On a machine that builds unattended this is worth distinguishing from a " +
-				"credential problem, because it comes back on its own and a credential does not.",
-		}, []string{seeFullError}
+		notes = []string{
+			"Name resolution failed, so nothing was authenticated and nothing was refused. On " +
+				"a machine that builds unattended this is worth distinguishing from a credential " +
+				"problem, because it comes back on its own and a credential does not.",
+		}
+		fixes = []string{seeFullError}
 
 	case strings.Contains(out, "Authentication failed"):
-		return []string{
+		notes = []string{
 			"An https URL was refused. The credential comes from a helper rather than from " +
 				"~/.ssh, and a helper that can only answer by prompting cannot answer for a " +
 				"service — which is why this can work in your shell and fail in the agent.",
-		}, []string{seeFullError}
+		}
+		fixes = []string{seeFullError}
 
-	case strings.Contains(out, "Connection timed out"), strings.Contains(out, "Connection refused"),
+	case strings.Contains(out, "Connection timed out"),
+		strings.Contains(out, "Connection refused"),
 		strings.Contains(out, "Operation timed out"):
-		return []string{
-			"The host did not complete a connection. A firewall or a network that allows " +
-				"your workstation and not this machine presents exactly this way.",
-		}, []string{seeFullError}
+		notes = []string{
+			"The host did not complete a connection. A firewall or a network that allows your " +
+				"workstation and not this machine presents exactly this way.",
+		}
+		fixes = []string{seeFullError}
+
+	default:
+		notes = []string{
+			"An agent started by launchd or systemd does not inherit your interactive ssh " +
+				"agent. A deploy key in ~/.ssh with an ssh config entry works from both; a " +
+				"forwarded agent works from neither.",
+		}
+		fixes = []string{seeFullError}
 	}
 
-	return []string{
-		"An agent started by launchd or systemd does not inherit your interactive ssh " +
-			"agent. A deploy key in ~/.ssh with an ssh config entry works from both; a " +
-			"forwarded agent works from neither.",
-	}, []string{seeFullError}
+	return notes, fixes
 }
 
 // sshHostOf pulls the hostname out of an scp-style or ssh:// URL, for a
