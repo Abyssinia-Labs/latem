@@ -85,11 +85,28 @@ zero: "unknown" and "empty" lead to opposite eviction decisions, and printing
 				printf(w, "%s\t%s\t%s\t%s\t%s\n",
 					in.Name, in.Runner, formatBytes(in.SizeBytes), formatAge(in.LastUsedAt), in.Source)
 			}
-			printf(w, "\t\t\t\t\n")
-			printf(w, "%d caches\t\t%s\t\t\n", len(infos), formatBytes(total))
-			return w.Flush()
+			// Flushed before the summary, and the summary written to the
+			// underlying writer rather than through the tabwriter. Sent
+			// through it, a separator row of empty cells is padded to the
+			// table's full width — a line of trailing spaces — and the
+			// summary's own empty cells are padded to sit under columns it
+			// has no values for.
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			printf(cmd.OutOrStdout(), "\n%s, %s\n", countCaches(len(infos)), formatBytes(total))
+			return nil
 		},
 	}
+}
+
+// countCaches renders the cache count with a noun that agrees with it. The
+// summary used to read "1 caches".
+func countCaches(n int) string {
+	if n == 1 {
+		return "1 cache"
+	}
+	return fmt.Sprintf("%d caches", n)
 }
 
 func newCachePruneCommand() *cobra.Command {

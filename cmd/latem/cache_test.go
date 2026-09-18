@@ -90,6 +90,38 @@ func TestCacheLs_ListsDirectoryBackedCaches(t *testing.T) {
 			t.Errorf("listing does not mention %q:\n%s", want, stdout)
 		}
 	}
+
+	// F19: the summary went through the tabwriter, so a separator row of empty
+	// cells was padded into a line of trailing spaces and the summary's own
+	// empty cells were padded under columns it has no values for.
+	for i, line := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+		if line != "" && strings.TrimSpace(line) == "" {
+			t.Errorf("line %d is whitespace only: %q", i+1, line)
+		}
+		if line != strings.TrimRight(line, " ") {
+			t.Errorf("line %d has trailing padding: %q", i+1, line)
+		}
+	}
+	if !strings.Contains(stdout, "2 caches") {
+		t.Errorf("no summary line:\n%s", stdout)
+	}
+}
+
+// The summary read "1 caches".
+func TestCacheLs_SummaryAgreesWithTheCount(t *testing.T) {
+	dir := cacheConfigDir(t, "ios")
+	seedCache(t, dir, "ios", "derived-data")
+
+	stdout, _, err := execCommand(t, "cache", "ls")
+	if err != nil {
+		t.Fatalf("cache ls: %v", err)
+	}
+	if strings.Contains(stdout, "1 caches") {
+		t.Errorf("the summary does not agree with its own count:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 cache,") {
+		t.Errorf("no singular summary:\n%s", stdout)
+	}
 }
 
 func TestCacheRm_DeletesTheCacheAndNothingElse(t *testing.T) {
