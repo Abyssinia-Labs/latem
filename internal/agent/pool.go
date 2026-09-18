@@ -205,7 +205,10 @@ func (p *pool) end(runID string) {
 
 // accepts reports whether the pool may still claim.
 func (p *pool) accepts() bool {
-	if p.a.draining.Load() {
+	// Two flags rather than one, and both are checked here because this is the
+	// only place a run is taken on. draining is final; paused is self-update
+	// holding the door for a few minutes (§20).
+	if p.a.draining.Load() || p.a.paused.Load() {
 		return false
 	}
 	p.mu.Lock()

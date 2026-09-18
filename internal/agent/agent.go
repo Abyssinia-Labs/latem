@@ -161,6 +161,16 @@ type Options struct {
 	// touched.
 	Secrets secrets.Provider
 
+	// Releases is the source §20's self-update reads. Nil builds the real one
+	// from the embedded trusted key; a test supplies one that needs no
+	// network. It is consulted only when agent.auto_update is true.
+	Releases releaseSource
+
+	// Exec replaces this process image after an update. Nil uses syscall.Exec,
+	// which does not return — so a test that wants to observe the re-exec
+	// rather than become the new binary substitutes its own.
+	Exec func(path string, argv, env []string) error
+
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration
 	PreflightInterval   time.Duration
@@ -169,6 +179,8 @@ type Options struct {
 	SlotWait            time.Duration
 	PreflightTimeout    time.Duration
 	TeardownGrace       time.Duration
+	UpdateInterval      time.Duration
+	UpdateIdleWait      time.Duration
 
 	// ShutdownGrace overrides agent.shutdown_grace. Zero uses the config
 	// value, which itself defaults to 30 minutes because an iOS build is long.
@@ -190,6 +202,8 @@ type Agent struct {
 	preflightEvery   time.Duration
 	maintenanceEvery time.Duration
 	claimEvery       time.Duration
+	updateEvery      time.Duration
+	updateIdleWait   time.Duration
 	preflightTimeout time.Duration
 	shutdownGrace    time.Duration
 	teardownGrace    time.Duration
@@ -218,6 +232,12 @@ type Agent struct {
 	// draining is set once shutdown begins or --drain-after fires. It is read
 	// by the pool before every claim and by every heartbeat.
 	draining atomic.Bool
+
+	// paused stops the pool claiming without the one-way finality of
+	// draining. Self-update is its only user, and the difference matters:
+	// draining is a decision to stop for good, and this is a pause that has to
+	// end even when the thing it was waiting for failed (§20, selfupdate.go).
+	paused atomic.Bool
 
 	// wake is the doorbell: a run command arriving on a broker nudges the pool
 	// rather than handing it the work, because the work is already in sqlite.
@@ -269,6 +289,8 @@ func New(opts Options) (*Agent, error) {
 		preflightEvery:   orDuration(opts.PreflightInterval, DefaultPreflightInterval),
 		maintenanceEvery: orDuration(opts.MaintenanceInterval, DefaultMaintenanceInterval),
 		claimEvery:       orDuration(opts.ClaimInterval, DefaultClaimInterval),
+		updateEvery:      orDuration(opts.UpdateInterval, DefaultUpdateInterval),
+		updateIdleWait:   orDuration(opts.UpdateIdleWait, DefaultUpdateIdleWait),
 		preflightTimeout: orDuration(opts.PreflightTimeout, DefaultPreflightTimeout),
 		teardownGrace:    orDuration(opts.TeardownGrace, DefaultTeardownGrace),
 		shutdownGrace:    grace,
@@ -322,6 +344,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.spawn(&wg, func() { a.heartbeatLoop(workCtx) })
 	a.spawn(&wg, func() { a.preflightLoop(workCtx) })
 	a.spawn(&wg, func() { a.maintenanceLoop(workCtx) })
+	a.spawn(&wg, func() { a.updateLoop(workCtx) })
 
 	pool := a.startPool(workCtx)
 	a.markReady()
