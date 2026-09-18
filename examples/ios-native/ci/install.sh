@@ -31,4 +31,7 @@ bundle config set --local path vendor/bundle
 bundle install --quiet
 
 bundle exec fastlane --version >/dev/null
-echo "ruby $(ruby -e 'print RUBY_VERSION')  xcode $(xcodebuild -version | head -1 | cut -d' ' -f2)"
+# pipefail-safe: the version banner. `head -1` SIGPIPEs xcodebuild, so the
+# substitution is allowed to fail rather than taking the script with it (A37).
+xcode_version=$( (xcodebuild -version || true) | sed -n '1s/^Xcode //p')
+echo "ruby $(ruby -e 'print RUBY_VERSION')  xcode ${xcode_version:-?}"

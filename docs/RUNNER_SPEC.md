@@ -1494,6 +1494,10 @@ Three things `latem doctor` must verify and explain, because getting any of them
 
 **Invariant tests** (`invariants_test.go`) — one per rule in §5, named `TestINV1_NoInboundListeners` and so on, so a failure names the rule it broke. `TestINV4_SecretsNeverLeave` MUST include a multi-line PEM fixture; a version that only covers single-line secrets passes while the leak in §16 is live, which is how draft 01 shipped it.
 
+**Shell checks** (`test/scripts`) — A37's rule, made mechanical rather than remembered. Every `.sh` file this repository owns is scanned: a script that enables `pipefail` may not pipe a producer into a stage that exits early — `grep -q`, `grep -m`, `grep -l`, `head` — because the producer then takes SIGPIPE and the pipeline reports failure on input that matched. The escape hatches are a `# pipefail-safe: <reason>` comment and an explicit `|| true`, both of which require somebody to have looked. Vendored and generated shell is excluded by path, because a check that flagged CocoaPods' scripts would be switched off within a week.
+
+The test carries its own negative controls: a planted hazard it must find, the fixed form it must not flag, and a script without `pipefail` it must leave alone. It earned them immediately — the first pass at fixing the six findings replaced `tool | grep -q` with `printf … | grep -q`, which has the same defect for a large enough value, and the check refused it. The answer in bash is no pipeline at all: capture the output and use `[[ $out == *pattern* ]]`.
+
 **Manual matrix** (documented in `docs/testing.md`; not automatable) — iOS build end to end on real hardware with real signing; Tart VM lifecycle including forced kill; GPU passthrough; reboot recovery on both platforms.
 
 ---

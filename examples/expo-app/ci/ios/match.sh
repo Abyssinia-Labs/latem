@@ -39,7 +39,11 @@ bundle exec fastlane match appstore --readonly
 echo "--- identities available for signing"
 security find-identity -v -p codesigning
 
-if ! security find-identity -v -p codesigning | grep -q "Apple Distribution"; then
+# Captured and matched in the shell, no pipeline (amendment A37). Piped into
+# `grep -q`, this check reports "no identity" on a keychain that has one —
+# intermittently, and only on a loaded machine, which is what a runner is.
+identities=$(security find-identity -v -p codesigning)
+if [[ $identities != *"Apple Distribution"* ]]; then
   echo "ERROR: no Apple Distribution identity in the keychain after match." >&2
   echo "  Likely causes, in order:" >&2
   echo "   - wrong MATCH_GIT_URL (pointing at an empty or wrong certs repo)" >&2

@@ -10,4 +10,6 @@ bundle config set --local path vendor/bundle
 bundle install --quiet
 bundle exec fastlane --version >/dev/null
 
-echo "java $("$JAVA_HOME/bin/java" -version 2>&1 | head -1 | cut -d'"' -f2)  sdk $ANDROID_HOME"
+# pipefail-safe: the version banner, same reasoning as the iOS install script.
+java_version=$( ("$JAVA_HOME/bin/java" -version 2>&1 || true) | sed -n '1s/.*"\(.*\)".*/\1/p')
+echo "java ${java_version:-?}  sdk $ANDROID_HOME"

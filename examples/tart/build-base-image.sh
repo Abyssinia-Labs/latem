@@ -48,7 +48,14 @@ command -v tart >/dev/null || {
 # ~90 GB. This is rebuilt on Xcode upgrades, by a person, deliberately — a
 # nightly job that rebuilds it would saturate the disk and the licence at once.
 
-if tart list --format json | grep -q "\"$VM_NAME\""; then
+# Captured and matched in the shell, with no pipeline at all. Piping a
+# producer into `grep -q` under `pipefail` reports failure on input that
+# matched, because grep exits at the first match and the producer takes
+# SIGPIPE — measured at 17 false negatives in 200 runs (amendment A37).
+# `printf … | grep -q` has the same defect for a large enough value, so the
+# answer is bash's own pattern match. test/scripts enforces this.
+existing_vms=$(tart list --format json)
+if [[ $existing_vms == *"\"$VM_NAME\""* ]]; then
   echo "VM '$VM_NAME' already exists."
   echo "Delete it first if you mean to rebuild: tart delete $VM_NAME"
   exit 1

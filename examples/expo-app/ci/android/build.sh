@@ -44,7 +44,11 @@ PLAY_JSON_PATH="$SECRET_DIR/play-service-account.json"
 # base64 -d on GNU coreutils, -D on BSD/macOS. This job targets the Linux
 # container runner, but the decode is written portably because the same script
 # runs by hand on a Mac during M0.
-if base64 --help 2>&1 | grep -q -- "-d,"; then
+# Captured and matched in the shell, no pipeline (amendment A37): piped into
+# `grep -q` this reports a failure when the help text matched, which silently
+# picks the BSD branch on a GNU box.
+base64_help=$(base64 --help 2>&1 || true)
+if [[ $base64_help == *"-d,"* ]]; then
   printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
 else
   printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -D > "$KEYSTORE_PATH"

@@ -95,7 +95,9 @@ case "$SIGCHECK" in
     echo "ERROR: build/app.aab is not signed." >&2
     echo "       ANDROID_KEYSTORE_PATH was probably not visible to Gradle." >&2
     echo "       jarsigner said:" >&2
-    printf '%s\n' "$SIGCHECK" | head -20 | sed 's/^/         /' >&2
+    # pipefail-safe: diagnostics on the way to a hard failure. A SIGPIPE here
+    # would replace the error being reported with an error about reporting it.
+    printf '%s\n' "$SIGCHECK" | head -20 | sed 's/^/         /' >&2 || true
     echo "       zip entries under META-INF:" >&2
     unzip -l build/app.aab > /tmp/aab-listing.$$ 2>&1 || true
     grep -i "META-INF" /tmp/aab-listing.$$ | head -10 | sed 's/^/         /' >&2 || true
