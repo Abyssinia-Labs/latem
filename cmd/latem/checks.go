@@ -674,15 +674,13 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 			out = append(out, pass(id, title, repo.URL))
 			continue
 		}
-		detail := firstLineOf(strings.TrimSpace(string(outBytes)))
+		detail := gitRemoteError(string(outBytes))
 		if detail == "" {
 			detail = err.Error()
 		}
-		out = append(out, fail(id, title, fmt.Sprintf("%s — %s", repo.URL, detail),
-			fmt.Sprintf("git ls-remote %s   # to see the full error", repo.URL)).
-			withNotes("An agent started by launchd or systemd does not inherit your interactive ssh "+
-				"agent. A deploy key in ~/.ssh with an ssh config entry works from both; a forwarded "+
-				"agent works from neither."))
+		notes, fixes := repoFailureAdvice(repo.URL, string(outBytes))
+		out = append(out, fail(id, title, fmt.Sprintf("%s — %s", repo.URL, detail), fixes...).
+			withNotes(notes...))
 	}
 	// A34, per repo and from the mirror rather than the remote.
 	return append(out, d.checkSchemes(ctx)...)
@@ -1078,6 +1076,138 @@ func firstLineOf(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return s
+}
+
+// sshProgressLine reports whether a line is something ssh prints on its way to
+// succeeding rather than a description of a failure.
+//
+// "Warning: Permanently added …" is the one that matters. ssh writes it to
+// stderr the first time it accepts a host key, which is a success, and it is
+// therefore the *first* line of stderr on exactly the machines this check
+// exists for — new ones. Reporting the first line verbatim told an operator
+// their repository was unreachable because of a known-hosts warning, while the
+// line that said "Permission denied (publickey)" sat below it, unread.
+func sshProgressLine(line string) bool {
+	return strings.HasPrefix(line, "Warning: Permanently added")
+}
+
+// gitRemoteError picks the line of `git ls-remote` output that names the
+// failure, rather than whichever line ssh happened to write first.
+//
+// The first non-progress line wins: git and ssh both put the specific cause
+// ("Permission denied (publickey).", "ERROR: Repository not found.") above
+// their own summary ("fatal: Could not read from remote repository."), so the
+// first one that is not progress is the most specific one available. If every
+// line is progress — which would mean git failed while saying nothing — the
+// first line is still better than an empty detail.
+func gitRemoteError(out string) string {
+	var fallback string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = line
+		}
+		if sshProgressLine(line) {
+			continue
+		}
+		return line
+	}
+	return fallback
+}
+
+// repoFailureAdvice turns what git said into the explanation and the repair for
+// it.
+//
+// One fixed paragraph used to be attached to every failure of this check: that
+// an agent started by launchd does not inherit an interactive ssh agent. It
+// describes a real trap, and it was the wrong answer for the commonest case by
+// far — a machine with no key at all — so an operator whose ~/.ssh did not
+// exist went looking at a service's environment for a credential that was
+// never anywhere. The note now follows the cause, and the `fix` is a repair
+// rather than another diagnostic wherever the cause is specific enough to name
+// one.
+func repoFailureAdvice(url, out string) (notes, fixes []string) {
+	seeFullError := fmt.Sprintf("git ls-remote %s   # to see the full error", url)
+
+	switch {
+	case strings.Contains(out, "Permission denied (publickey"):
+		return []string{
+			"This machine has no ssh key the host accepts. A deploy key in ~/.ssh with an " +
+				"ssh config entry is the form that works from both an interactive shell and an " +
+				"agent started by launchd or systemd; a forwarded agent works from neither, " +
+				"because the service does not inherit your session.",
+		}, []string{
+			"gh auth login --git-protocol ssh   # or install a deploy key in ~/.ssh",
+		}
+
+	case strings.Contains(out, "Repository not found"), strings.Contains(out, "does not appear to be a git repository"):
+		return []string{
+			"The credential worked and the repository did not answer to it. Either the URL " +
+				"names something that is not there, or the key reaching the host is not " +
+				"entitled to that repository — a private repo answers both the same way, on " +
+				"purpose, so that it does not confirm its own existence.",
+		}, []string{seeFullError}
+
+	case strings.Contains(out, "Host key verification failed"):
+		return []string{
+			"ssh has no accepted host key for this host and could not ask: an agent has no " +
+				"terminal to answer the prompt on. The key has to be in known_hosts before " +
+				"the first run rather than during it.",
+		}, []string{
+			fmt.Sprintf("ssh-keyscan %s >> ~/.ssh/known_hosts", sshHostOf(url)),
+		}
+
+	case strings.Contains(out, "Could not resolve hostname"):
+		return []string{
+			"Name resolution failed, so nothing was authenticated and nothing was refused. " +
+				"On a machine that builds unattended this is worth distinguishing from a " +
+				"credential problem, because it comes back on its own and a credential does not.",
+		}, []string{seeFullError}
+
+	case strings.Contains(out, "Authentication failed"):
+		return []string{
+			"An https URL was refused. The credential comes from a helper rather than from " +
+				"~/.ssh, and a helper that can only answer by prompting cannot answer for a " +
+				"service — which is why this can work in your shell and fail in the agent.",
+		}, []string{seeFullError}
+
+	case strings.Contains(out, "Connection timed out"), strings.Contains(out, "Connection refused"),
+		strings.Contains(out, "Operation timed out"):
+		return []string{
+			"The host did not complete a connection. A firewall or a network that allows " +
+				"your workstation and not this machine presents exactly this way.",
+		}, []string{seeFullError}
+	}
+
+	return []string{
+		"An agent started by launchd or systemd does not inherit your interactive ssh " +
+			"agent. A deploy key in ~/.ssh with an ssh config entry works from both; a " +
+			"forwarded agent works from neither.",
+	}, []string{seeFullError}
+}
+
+// sshHostOf pulls the hostname out of an scp-style or ssh:// URL, for a
+// ssh-keyscan line an operator can paste. It returns the URL unchanged when it
+// cannot tell, which makes the suggestion obviously wrong rather than subtly
+// wrong.
+func sshHostOf(url string) string {
+	rest := url
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	if i := strings.IndexAny(rest, ":/"); i >= 0 {
+		rest = rest[:i]
+	}
+	if rest == "" {
+		return url
+	}
+	return rest
 }
 
 func portOf(addr string) string {

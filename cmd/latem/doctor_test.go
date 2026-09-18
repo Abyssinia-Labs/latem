@@ -503,12 +503,67 @@ func TestDoctorRepoReachability(t *testing.T) {
 		if len(got) != 1 || got[0].Level != levelFail {
 			t.Fatalf("an unreachable repo = %+v, want a failure", got)
 		}
-		// git's own first line is the useful part; the rest is noise.
 		if !strings.Contains(got[0].Detail, "Repository not found") {
 			t.Errorf("the detail should carry git's own words: %q", got[0].Detail)
 		}
-		if !strings.Contains(strings.Join(got[0].Notes, " "), "ssh agent") {
-			t.Error("the explanation should mention the launchd/systemd ssh-agent trap")
+		// And NOT the ssh-agent paragraph, which is the wrong answer here: the
+		// credential worked. This assertion used to require it.
+		if strings.Contains(strings.Join(got[0].Notes, " "), "ssh agent") {
+			t.Errorf("a repository that answered should not be explained as an ssh-agent problem: %q", got[0].Notes)
+		}
+	})
+
+	// The line ssh writes on success is the first line of stderr on a machine
+	// seeing a host for the first time, which is precisely the machine this
+	// check exists for. Reporting it as the reason sent pass 1 of the M7
+	// acceptance test looking at launchd for a key that did not exist.
+	t.Run("ssh's known-hosts warning is not the error", func(t *testing.T) {
+		cmds := healthyRunner("linux")
+		cmds[probe] = fakeCmd{exit: 128, out: "Warning: Permanently added 'example.invalid' (ED25519) to the list of known hosts.\r\n" +
+			"git@example.invalid: Permission denied (publickey).\n" +
+			"fatal: Could not read from remote repository."}
+		d := newTestDoctor("linux", dir, cmds, cfg, nil)
+		got := d.checkRepos(context.Background())
+		if len(got) != 1 || got[0].Level != levelFail {
+			t.Fatalf("an unreachable repo = %+v, want a failure", got)
+		}
+		if strings.Contains(got[0].Detail, "Permanently added") {
+			t.Errorf("ssh's success warning was reported as the failure: %q", got[0].Detail)
+		}
+		if !strings.Contains(got[0].Detail, "Permission denied (publickey)") {
+			t.Errorf("the detail should name the real cause: %q", got[0].Detail)
+		}
+		// And the repair should be a repair, not another diagnostic.
+		if !strings.Contains(strings.Join(got[0].Fix, " "), "gh auth login") {
+			t.Errorf("a missing key should be answered with how to install one: %q", got[0].Fix)
+		}
+		if !strings.Contains(strings.Join(got[0].Notes, " "), "no ssh key") {
+			t.Errorf("the note should say the machine has no key: %q", got[0].Notes)
+		}
+	})
+
+	t.Run("each cause gets its own explanation", func(t *testing.T) {
+		tests := []struct {
+			name, out, wantNote string
+		}{
+			{"host key", "Host key verification failed.", "known_hosts"},
+			{"dns", "ssh: Could not resolve hostname nope.invalid", "Name resolution"},
+			{"https auth", "fatal: Authentication failed for 'https://example.invalid/app.git'", "helper"},
+			{"network", "ssh: connect to host example.invalid port 22: Connection timed out", "firewall"},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				cmds := healthyRunner("linux")
+				cmds[probe] = fakeCmd{exit: 128, out: tc.out}
+				d := newTestDoctor("linux", dir, cmds, cfg, nil)
+				got := d.checkRepos(context.Background())
+				if len(got) != 1 || got[0].Level != levelFail {
+					t.Fatalf("got %+v, want a failure", got)
+				}
+				if !strings.Contains(strings.Join(got[0].Notes, " "), tc.wantNote) {
+					t.Errorf("notes = %q, want something about %q", got[0].Notes, tc.wantNote)
+				}
+			})
 		}
 	})
 
