@@ -39,9 +39,14 @@ Hosted CI needs save-and-restore because its machines are ephemeral. Yours are
 not.
 
 ```yaml
+# .latem/jobs.yaml — declared once at the top level
 caches:
   - name: pnpm-store
     path: /home/runner/.local/share/pnpm/store
+
+jobs:
+  test:
+    caches: [pnpm-store]      # jobs reference it by name
 ```
 
 That is a Docker named volume, or a host directory shared into the VM. There is
@@ -67,7 +72,7 @@ is a document with tests attached, not a paragraph in a README.
 | **INV-2** | The control plane supplies names, never definitions. The inbound command set is closed at two kinds — `run` and `cancel`. A `run` carries `{id, repo, job, ref, inputs, origin}` and has no field able to express a command, an image, a path, an executor, or a timeout. |
 | **INV-3** | Nothing from outside the trust boundary reaches a shell. Every git invocation passes argv as a slice with an options terminator, so a ref named `--upload-pack=/bin/sh` is a ref. |
 | **INV-4** | Secrets never leave the machine. Redaction happens at the point of emission, so no sink can be added that bypasses it — including multi-line values, line by line, because `APP_STORE_CONNECT_KEY_P8` is a PEM block and redacting only the whole value redacts nothing. |
-| **INV-5** | The job registry comes from your disk at the resolved commit. `jobs.yaml` is read from the checked-out workspace, never fetched from a broker, so a run is reproducible from the commit alone. Refs outside your allowlist need a local `latem approve`, and what that approves is one commit — if the branch moves before the run starts, it is parked again rather than built. |
+| **INV-5** | The job registry comes from your disk at the resolved commit. `jobs.yaml` is read from the checked-out workspace, never fetched from a broker, so a run is reproducible from the commit alone. Refs outside your allowlist are rejected outright; set `require_approval_otherwise = true` to park them for a local `latem approve` instead, and what that approves is one commit — if the branch moves before the run starts, it is parked again rather than built. **Parking is opt-in: `latem init` leaves the setting commented out, so the default is rejection.** |
 
 Each has a test named after it. A pull request that weakens one is rejected
 regardless of its other merits. The full statement is
@@ -128,6 +133,64 @@ $ latem doctor            # check the machine; every failure names its fix
 $ latem service install   # run the agent at boot
 $ latem run myapp test    # trigger a build
 ```
+
+Two things that sequence assumes, neither of which it creates. Both are one-time
+and both are quick, but a run fails without them.
+
+### Give the machine a git credential
+
+Latem mirrors your repository over the URL in `config.toml`, so **the machine
+needs its own credential** — a fresh account has none, and `latem init`'s example
+is an ssh URL. Without one, `doctor` fails the repo check and every run fails
+`E_SOURCE` with `Permission denied (publickey)`.
+
+```console
+$ gh auth login --git-protocol ssh      # or: ssh-keygen -t ed25519, then add the
+                                        # public half as a deploy key on the repo
+$ latem doctor                          # the repo check should now be [ ok ]
+```
+
+A **deploy key in `~/.ssh` with an `ssh config` entry** is the form that works
+from both an interactive shell and an agent started by launchd or systemd. A
+forwarded agent works from neither, because the service does not inherit your
+interactive `ssh-agent`. An https URL with a credential helper works too, as long
+as the helper can answer without a terminal.
+
+Verify with the same command the agent will run:
+
+```console
+$ git ls-remote git@github.com:me/myapp.git
+```
+
+### Give the repository a job
+
+**`latem run myapp test` runs the job named `test` from `.latem/jobs.yaml` in
+your repository**, read at the commit being built — not from this machine. If the
+file is not there, the run fails immediately:
+
+```console
+latem: r_… failed (E_NO_REGISTRY): .latem/jobs.yaml is not present at this commit
+```
+
+Most repositories do not have one yet, so **write it, commit it, and push it**.
+A working tree change is not enough: latem mirrors from the remote and checks out
+the resolved commit (INV-5). The smallest file that runs is:
+
+```yaml
+version: 1
+
+jobs:
+  test:
+    runs_on: [macos]        # must be a subset of a runner's labels
+    steps:
+      - name: test
+        run: echo hello
+```
+
+`version`, `runs_on` and `steps` are the only required keys, and the job name has
+to match the one you pass to `latem run`. On macOS `latem init` generates the
+labels `["macos", "arm64", "xcode"]`, so `runs_on` must be a subset of those.
+[Configuration](#configuration) has the full schema.
 
 ## `latem doctor`
 
@@ -198,6 +261,56 @@ only, never values — and warns about any short enough that the redactor will
 skip it. `latem doctor --fix` prints a consolidated list of the remediation
 commands; it never runs them.
 
+### Where secret values live
+
+A job's `secrets: [NAME, …]` names what to resolve. The values are on the
+machine, never in the repository, and are looked up in a fixed order — the first
+that answers wins:
+
+| | Source | How to set it |
+|---|---|---|
+| 1 | Environment | `LATEM_SECRET_<NAME>` in the agent's environment — the override, useful for `LATEM_SECRET_X=… latem run` to answer "is it the secret or is it the build?" |
+| 2 | File | a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
+| 3 | Keychain | `security add-generic-password -s latem -a <NAME> -w …` |
+| 4 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
+
+**`secrets.env` is line-based and cannot hold a multi-line value.** This matters
+because the secret INV-4 is built around — `APP_STORE_CONNECT_KEY_P8`, a PEM
+block — is multi-line by definition. A quoted block spanning lines is a parse
+error, and the obvious workaround of collapsing it with `\n` escapes is worse
+than an error: the escapes are **not** expanded, so the value resolves, `doctor`
+reports it `[ ok ]`, and the build gets one line containing literal backslash-n.
+That is not a usable key, and nothing says so until `fastlane` fails.
+
+**Put multi-line secrets in the Keychain**, which holds them intact:
+
+```console
+$ security add-generic-password -s latem -a APP_STORE_CONNECT_KEY_P8 \
+      -w "$(cat AuthKey_ABC123.p8)"
+```
+
+> **On v0.1.0 this silently produced a corrupt key.** `security` prints any
+> value containing a newline as a hex string, and v0.1.0 passed that through
+> unchanged, so a PEM resolved to `2d2d2d2d2d424547…` — and reported `[ ok ]`.
+> Fixed after v0.1.0; on v0.1.0 use `[secrets.commands]` below instead.
+
+**Or name a command**, which works equally well and is where a secret lives when
+it comes from a password manager rather than this machine:
+
+```toml
+[secrets.commands]
+APP_STORE_CONNECT_KEY_P8 = "cat /Users/admin/.config/latem/AuthKey_ABC123.p8"
+MATCH_PASSWORD           = "op read op://Private/match/password"
+```
+
+The string is tokenised with shell *quoting* rules and no shell *semantics*
+(INV-3): whitespace separates words, quotes group, and a backslash escapes one
+character. A pipe, `$`, a backtick or a redirect is rejected rather than
+interpreted — so put anything that needs a shell in a script and name the script.
+
+Redaction does not depend on which source a value came from, and multi-line
+values are redacted line by line (INV-4).
+
 ## Running a Mac mini headless
 
 Three things have to be true for a macOS machine to come back on its own after
@@ -261,24 +374,51 @@ concurrency = 1                  # enforced — parallel Xcode builds contend
   min_free_gb = 60
 ```
 
+`require_approval_otherwise = true` is shown here because it is the setting most
+worth knowing about, and **`latem init` writes it commented out**. Without it, a
+ref outside `allowed_refs` is rejected rather than parked:
+
+```console
+latem: r_… rejected (E_INVALID_REF): ref "refs/heads/feature/x" is outside allowed_refs for "myapp" and approval is disabled
+```
+
+**To add a second repository, edit `config.toml` by hand** and add another
+`[repos.<name>]` block. `latem init` refuses to run against an existing config,
+and its `--force` flag *overwrites* the file rather than merging into it — it
+would drop the repos already there. `latem doctor` validates what you added.
+
 Every rule is validated at load and fatal there: a runner that starts on a
 broken config does not fail at startup, it fails forty minutes into somebody's
 build. Disk floors are per runner — 40 GB for docker, 60 for native, 200 for
 tart — because a global 20 GB admits an iOS build the machine cannot finish.
 
-Jobs live in `.latem/jobs.yaml` in your own repository:
+Jobs live in `.latem/jobs.yaml` **in your own repository**, committed and
+pushed — see [Give the repository a job](#give-the-repository-a-job) above.
+
+**Caches are declared once at the top level, and jobs reference them by name.**
+The declaration carries the name and the mount path; the job carries a list of
+names and nothing else. Writing the name-and-path mapping inside a job is the
+most common mistake, and it is rejected at parse time.
 
 ```yaml
 version: 1
+
+# Top-level: declare each cache once, with the path it mounts at.
+caches:
+  - name: pods
+    path: /Users/admin/Library/Caches/CocoaPods
+  - name: pnpm-store
+    path: /Users/admin/.local/share/pnpm/store
 
 jobs:
   ios-release:
     runs_on: [macos, xcode, ios]
     timeout: 90m
-    caches:
-      - { name: pods,        path: /Users/admin/Library/Caches/CocoaPods }
-      - { name: pnpm-store,  path: /Users/admin/.local/share/pnpm/store }
+    caches: [pods, pnpm-store]      # names only — the paths are declared above
     secrets: [MATCH_PASSWORD, APP_STORE_CONNECT_KEY_P8]
+    artifacts:
+      - path: build/*.ipa
+        retain: 30d
     steps:
       - name: install
         run: pnpm install --frozen-lockfile
@@ -286,13 +426,29 @@ jobs:
         run: ci/ios/build.sh
 ```
 
+`runs_on` is matched against a runner's `labels`. **`latem init` generates
+`["macos", "arm64", "xcode"]` — not `ios`**, so this job would find no runner on
+a freshly initialised machine until you add `ios` to the runner's `labels`, as
+the `config.toml` above does. A job whose labels are not a subset of some
+runner's never starts.
+
+The schema is strict: an unknown key is an error rather than a warning, so a
+typo fails the run that introduced it instead of silently doing something else.
+**Required are `version: 1`, at least one job, and per job `runs_on` and
+`steps`.** Everything else is optional — `timeout` defaults to 30m, the shell
+defaults to `bash`.
+
+`artifacts` is a list of globs relative to the workspace root, each with an
+optional `retain`. Collected files land in `~/.latem/artifacts/<run-id>/`;
+there is no subcommand to fetch them yet.
+
 ## Commands
 
 ```
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
-latem list [--state S] [--repo R]
+latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f]
 latem cancel <run-id> [--reason R]
 latem approve <run-id>               Local only; pins that run's commit (INV-5)
@@ -302,6 +458,35 @@ latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | status
 latem version
 ```
+
+**`latem list` shows only runs that have not finished.** A run that has already
+succeeded or failed needs `--all`, which is how you confirm a build worked:
+
+```console
+$ latem list --all
+RUN ID                      STATE      REPO   JOB   REF              STARTED   DURATION
+r_a0d1c0b8aae59b84287b3729  succeeded  myapp  test  refs/heads/main  just now  1s
+```
+
+`--limit` caps the number printed and defaults to 50.
+
+### Run states
+
+`--state S` takes one of these. Three of them are worth knowing about because
+they are **not** `failed`, and a script that filters for `failed` alone misses
+every one:
+
+| State | Means |
+|---|---|
+| `queued` | admitted, waiting for a runner |
+| `awaiting_approval` | outside `allowed_refs`; needs `latem approve` (INV-5) |
+| `claimed` · `preparing` · `running` · `collecting` | in flight |
+| `succeeded` | every step exited 0 |
+| `failed` | a step exited non-zero |
+| `timed_out` | exceeded the job or step budget — **not** `failed` |
+| `cancelled` | `latem cancel` — **not** `failed` |
+| `rejected` | refused at admission, e.g. `E_INVALID_REF` — **not** `failed` |
+| `interrupted` | the agent stopped mid-run |
 
 `--print` on `service install` renders the unit or plist to stdout without
 installing it. Read it before you install it: that flag is what caught a
@@ -321,6 +506,22 @@ Exit codes are contract:
 Three is the interesting one. `latem run --wait` finding nothing to wait for is
 not the same event as a build that failed, and a script has to be able to tell
 them apart without parsing English.
+
+**`latem run` on its own exits `0` as soon as the run is accepted**, before it
+has done anything — it prints a run id and returns. That `0` means "queued", not
+"succeeded", and a run that fails a second later has already exited `0`. **Use
+`--wait` or `--follow` in anything that checks the result**; only those make the
+exit code describe the build:
+
+```console
+$ latem run myapp test --wait
+latem: r_90782d84ba6689ec1739424c failed (E_NO_REGISTRY): …
+$ echo $?
+1
+```
+
+`latem logs` also exits `0` for a run that failed — it succeeded in printing the
+logs. The state is in the output, not the status.
 
 ## Metrics
 
@@ -361,11 +562,12 @@ are green.
 
 Not built, and honestly named:
 
-- **A tagged release.** Everything a release needs is in place — the pipeline,
-  the signing key it will use (`D73938C642AD64D3`, which `latem version` now
-  reports), and the verification the installer and the agent both perform. What
-  has not happened is the tag, so the installer above has nothing to fetch and
-  no stranger has yet installed this.
+- **A public release.** v0.1.0 **is** tagged, and the signed archives are on it
+  — the pipeline, the signing key (`D73938C642AD64D3`, which `latem version`
+  reports), and the verification the installer and the agent both perform are
+  all in place and exercised. What has not happened is making the repository
+  public, so the installer above has nothing it can fetch anonymously and no
+  stranger has yet installed this.
 - **The Tart executor**, deferred to v2 by amendment A31. Native is the default
   because the first deployment builds repositories its operator controls; Tart
   is the isolation upgrade for when that stops being true, and `RUNNER_SPEC`
