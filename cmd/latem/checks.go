@@ -710,7 +710,17 @@ func (d *doctor) checkSecrets(ctx context.Context) []check {
 
 	out := []check{pass("secrets.chain", "secrets chain", strings.Join(chain.Providers(), " → "))}
 
-	names := d.knownSecretNames()
+	names, fileErr := d.knownSecretNames()
+	if fileErr != nil {
+		// The error names a line number and never line content, which is the
+		// point: a malformed line in this file is a line someone was putting a
+		// credential on.
+		out = append(out, fail("secrets.file", "secrets.env",
+			fileErr.Error(),
+			fmt.Sprintf("# fix the line named above in %s", d.cfg.Paths.SecretsEnv)).
+			withNotes("No names are listed from a file that does not parse. Resolving against a "+
+				"half-read credential file would report names that are not names."))
+	}
 	if len(names) == 0 {
 		out = append(out, skip("secrets.resolve", "secret names",
 			"none declared locally; a job's secrets: block is only readable at the resolved commit"))
@@ -755,43 +765,31 @@ func (d *doctor) checkSecrets(ctx context.Context) []check {
 }
 
 // knownSecretNames is every secret name this machine can enumerate locally.
-func (d *doctor) knownSecretNames() []string {
+//
+// The second return is a secrets.env that would not parse. It is reported as
+// its own failure rather than swallowed, because the alternative — enumerating
+// whatever the broken file appeared to contain — is what used to print the
+// interior lines of a PEM as though they were secret names.
+func (d *doctor) knownSecretNames() (names []string, fileErr error) {
 	set := map[string]bool{}
 	for name := range d.cfg.Secrets.Commands {
 		set[name] = true
 	}
-	for _, name := range readSecretsEnvNames(d.cfg.Paths.SecretsEnv) {
-		set[name] = true
-	}
-	return sortedStrings(set)
-}
-
-// readSecretsEnvNames reads the keys, and only the keys, of secrets.env.
-//
-// The values are never read into this process. The file is the one place on
-// disk holding plaintext secrets, and a diagnostic has no business loading
-// them to count them.
-func readSecretsEnvNames(path string) []string {
-	if path == "" {
-		return nil
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // the path comes from the agent's own validated config
-	if err != nil {
-		return nil
-	}
-	var names []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if key, _, ok := strings.Cut(line, "="); ok {
-			if key = strings.TrimSpace(strings.TrimPrefix(key, "export ")); key != "" {
-				names = append(names, key)
+	if path := d.cfg.Paths.SecretsEnv; path != "" {
+		declared, err := secrets.NewFileProvider(path).Names()
+		switch {
+		case errors.Is(err, secrets.ErrNotFound):
+			// No secrets file. A machine that keeps everything in the keychain
+			// or in [secrets.commands] is not misconfigured.
+		case err != nil:
+			fileErr = err
+		default:
+			for _, name := range declared {
+				set[name] = true
 			}
 		}
 	}
-	return names
+	return sortedStrings(set), fileErr
 }
 
 func envName(name string) string {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -453,31 +454,61 @@ func TestDoctorSecretsOnlyWhenAsked(t *testing.T) {
 	}
 }
 
-func TestReadSecretsEnvNames(t *testing.T) {
-	// Keys only. The values are never read into this process — the file is the
-	// one place on disk holding plaintext secrets.
-	dir := privateDir(t)
-	path := filepath.Join(dir, "secrets.env")
-	body := "# a comment\n\nAPI_TOKEN=super-secret\nexport OTHER=value\nmalformed line\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got := readSecretsEnvNames(path)
-	want := map[string]bool{"API_TOKEN": true, "OTHER": true}
-	if len(got) != len(want) {
-		t.Fatalf("names = %v, want %v", got, want)
-	}
-	for _, n := range got {
-		if !want[n] {
-			t.Errorf("unexpected name %q", n)
+func TestKnownSecretNames(t *testing.T) {
+	write := func(t *testing.T, body string) *doctor {
+		t.Helper()
+		dir := privateDir(t)
+		cfg := testConfig(dir)
+		if body != "" {
+			if err := os.WriteFile(cfg.Paths.SecretsEnv, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
+		return newTestDoctor("linux", dir, healthyRunner("linux"), cfg, nil)
 	}
-	if readSecretsEnvNames(filepath.Join(dir, "absent")) != nil {
-		t.Error("an absent file should produce no names")
-	}
-	if readSecretsEnvNames("") != nil {
-		t.Error("an empty path should produce no names")
-	}
+
+	t.Run("names from the file and from [secrets.commands]", func(t *testing.T) {
+		d := write(t, "# a comment\n\nAPI_TOKEN=super-secret\nOTHER=value\n")
+		d.cfg.Secrets.Commands = map[string]string{"FROM_COMMAND": "echo x"}
+		got, err := d.knownSecretNames()
+		if err != nil {
+			t.Fatalf("a well-formed file should not error: %v", err)
+		}
+		want := []string{"API_TOKEN", "FROM_COMMAND", "OTHER"}
+		if !slices.Equal(got, want) {
+			t.Errorf("names = %v, want %v", got, want)
+		}
+	})
+
+	// The whole of F15: a quoted multi-line value's interior lines contain "="
+	// and were reported as secret names, printing a PEM's own base64 to the
+	// terminal under a flag that promises "names only, never values".
+	t.Run("a file that does not parse yields an error and no names", func(t *testing.T) {
+		d := write(t, "TEST_SECRET=abcdef123456\nTEST_PEM=\"-----BEGIN PRIVATE KEY-----\n"+
+			"QQQQINTERIORLINETWOQQQQ=\n-----END PRIVATE KEY-----\"\n")
+		got, err := d.knownSecretNames()
+		if err == nil {
+			t.Fatal("an unterminated quote should be reported, not parsed around")
+		}
+		if len(got) != 0 {
+			t.Errorf("names = %v, want none from a file that does not parse", got)
+		}
+		if strings.Contains(err.Error(), "QQQQINTERIORLINETWOQQQQ") {
+			t.Errorf("the error carries part of a value: %q", err)
+		}
+	})
+
+	t.Run("an absent file is not an error", func(t *testing.T) {
+		d := write(t, "")
+		d.cfg.Secrets.Commands = map[string]string{"ONLY_COMMAND": "echo x"}
+		got, err := d.knownSecretNames()
+		if err != nil {
+			t.Fatalf("an absent secrets.env should not be an error: %v", err)
+		}
+		if !slices.Equal(got, []string{"ONLY_COMMAND"}) {
+			t.Errorf("names = %v", got)
+		}
+	})
 }
 
 func TestDoctorRepoReachability(t *testing.T) {

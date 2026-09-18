@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 )
 
 // FileName is the secrets file inside the config directory (§15).
@@ -48,6 +49,44 @@ func (p *FileProvider) Path() string { return p.path }
 
 // Name identifies this provider in diagnostics.
 func (p *FileProvider) Name() string { return "file" }
+
+// Names returns the secret names the file declares, sorted, and nothing else.
+//
+// It exists so that a diagnostic enumerating "what is declared on this machine"
+// does not have to write a second parser for this format. The one that was
+// written split every line on the first "=" and reported the left side as a
+// name, which is correct for `KEY=value` and wrong for the interior lines of a
+// quoted multi-line value — a PEM's own base64, printed to the terminal as
+// though it were the name of a secret. `doctor --secrets` promises "names only,
+// never values", and that is the shape of the only way it has ever broken that
+// promise.
+//
+// A file that does not parse yields an error and no names at all. Half-reading
+// a credential file is how the fragments got out in the first place: the error
+// from [parseSecretsFile] names a line number and never line content, which is
+// exactly what a caller should print instead of guessing.
+//
+// Values are parsed, because deciding where one ends is the whole job, and then
+// zeroed before returning. Nothing but the names outlives this call.
+func (p *FileProvider) Names() ([]string, error) {
+	buf, err := p.read()
+	if err != nil {
+		return nil, err
+	}
+	defer zero(buf)
+
+	entries, parseErr := parseSecretsFile(buf)
+	names := make([]string, 0, len(entries))
+	for name, entry := range entries {
+		zero(entry.value)
+		names = append(names, name)
+	}
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	slices.Sort(names)
+	return names, nil
+}
 
 // Resolve returns the value of name from the secrets file.
 func (p *FileProvider) Resolve(_ context.Context, name string) (Value, error) {

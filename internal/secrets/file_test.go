@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -259,4 +260,70 @@ func TestParseSecretsFile_ProducesIndependentBuffers(t *testing.T) {
 	if string(entries["B"].value) != "hunter3" {
 		t.Error("zeroing one value damaged another")
 	}
+}
+
+// TestFileProvider_Names is the F15 regression at its source.
+//
+// `doctor --secrets` enumerated names by splitting every line on the first "=",
+// which promotes the interior lines of a quoted multi-line value to names — a
+// PEM's own base64, printed under a flag whose documented contract is "names
+// only, never values".
+func TestFileProvider_Names(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "secrets.env")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("names only, sorted", func(t *testing.T) {
+		p := NewFileProvider(write(t, "# c\n\nZED=1\nALPHA=2\n"))
+		got, err := p.Names()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, []string{"ALPHA", "ZED"}) {
+			t.Errorf("Names() = %v", got)
+		}
+	})
+
+	// A value may contain "=" — base64 padding above all — and a name is what
+	// is left of the FIRST one. The escaped form is how this file holds a PEM
+	// at all; the literal multi-line form does not parse, which the case below
+	// covers.
+	t.Run("a value containing = contributes one name", func(t *testing.T) {
+		escaped := strings.ReplaceAll(pemFixture, "\n", `\n`)
+		p := NewFileProvider(write(t, `PEM="`+escaped+`"`+"\nTOKEN=abc=def=ghi\n"))
+		got, err := p.Names()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, []string{"PEM", "TOKEN"}) {
+			t.Fatalf("Names() = %v, want [PEM TOKEN]", got)
+		}
+	})
+
+	t.Run("a file that does not parse yields no names", func(t *testing.T) {
+		// An unterminated quote: every line below the opening one is value.
+		p := NewFileProvider(write(t, "A=1\nB=\"unterminated\nQQQQINTERIOR=still-value\n"))
+		got, err := p.Names()
+		if err == nil {
+			t.Fatal("want an error")
+		}
+		if len(got) != 0 {
+			t.Errorf("Names() = %v, want none", got)
+		}
+		if strings.Contains(err.Error(), "QQQQINTERIOR") {
+			t.Errorf("the error carries line content: %q", err)
+		}
+	})
+
+	t.Run("an absent file is ErrNotFound", func(t *testing.T) {
+		p := NewFileProvider(filepath.Join(t.TempDir(), "absent"))
+		if _, err := p.Names(); !errors.Is(err, ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
 }
