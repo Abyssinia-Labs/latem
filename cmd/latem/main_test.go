@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -297,6 +298,24 @@ func TestVersionCommand(t *testing.T) {
 		// rather than mysterious (amendment A4).
 		if !strings.Contains(got, "protocol "+protocol.Version) {
 			t.Errorf("version output missing the protocol version:\n%s", got)
+		}
+		// The release key, which is how a stalled self-update is diagnosed
+		// after a key rotation (§20). Its *value* depends on how the binary was
+		// built, so what is asserted is that the line is there and says which
+		// case this build is in — the one thing a reader cannot infer.
+		if !strings.Contains(got, "release key ") {
+			t.Errorf("version output does not say which release key this build trusts:\n%s", got)
+		}
+		if selfupdate.HaveTrustedKey() {
+			key, err := selfupdate.TrustedKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, "release key "+key.ID()) {
+				t.Errorf("version output does not name the embedded key %s:\n%s", key.ID(), got)
+			}
+		} else if !strings.Contains(got, "self-update unavailable") {
+			t.Errorf("a build with no key does not say self-update is unavailable:\n%s", got)
 		}
 	})
 

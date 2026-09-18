@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -20,7 +21,11 @@ func newVersionCommand() *cobra.Command {
 The protocol version matters when a control plane refuses a connection.
 Inbound decoding is strict (RUNNER_SPEC §7, amendment A4), so even an additive
 change on the far side reaches an older agent as a decode failure rather than
-as silence — and the first question is which two versions are talking.`,
+as silence — and the first question is which two versions are talking.
+
+The release key line is the answer to the other version question: which key
+this binary will accept an update from (§20). A build with none says so, and
+that is also why it refuses agent.auto_update at load.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
@@ -31,6 +36,15 @@ as silence — and the first question is which two versions are talking.`,
 			printf(out, "latem %s\n", version)
 			printf(out, "protocol %s\n", protocol.Version)
 			printf(out, "go %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+			// Which key this binary trusts, in the form minisign prints an
+			// id. It is what a key rotation is diagnosed with: an agent that
+			// has stopped updating is either on the old key or on the new one,
+			// and nothing else in the output distinguishes those.
+			if key, err := selfupdate.TrustedKey(); err == nil {
+				printf(out, "release key %s\n", key.ID())
+			} else {
+				printf(out, "release key none (self-update unavailable)\n")
+			}
 			if rev, dirty, ok := buildRevision(); ok {
 				suffix := ""
 				if dirty {
