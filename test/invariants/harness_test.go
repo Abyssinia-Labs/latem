@@ -504,8 +504,16 @@ func (m *machine) waitForState(t *testing.T, id string, timeout time.Duration, w
 	for i, w := range want {
 		names[i] = string(w)
 	}
-	t.Fatalf("run %s never reached %s; it is %s (%s: %s) [last error: %v]",
-		id, strings.Join(names, " or "), last.State, last.ErrorCode, last.ErrorMsg, lastErr)
+	// The approval columns are in the message because the one intermittent
+	// failure this harness has produced on a loaded runner was an approved run
+	// sitting in awaiting_approval, and the row is what distinguishes gate 8
+	// re-parking an approved run from a parking attempt overwriting the
+	// approval underneath it. Printing the whole row costs nothing on a path
+	// that is about to fail the test.
+	t.Fatalf("run %s never reached %s; it is %s (%s: %s) [last error: %v]\n"+
+		"  sha=%q ref=%q approved_sha=%q approved_at=%v expires_at=%v",
+		id, strings.Join(names, " or "), last.State, last.ErrorCode, last.ErrorMsg, lastErr,
+		last.SHA, last.RefNormalized, last.ApprovedSHA, last.ApprovedAt, last.ExpiresAt)
 	return last
 }
 

@@ -273,7 +273,19 @@ func TestARefOutsidePolicyIsParkedAndRunsOnceApproved(t *testing.T) {
 		protocol.StateSucceeded, protocol.StateFailed,
 		protocol.StateRejected, protocol.StateAwaitingApproval)
 	if done.State != protocol.StateSucceeded {
-		t.Fatalf("an approved run gave %s (%s): %s", done.State, done.ErrorCode, done.ErrorMsg)
+		// The approval columns are in the message because this test has failed
+		// on a loaded macOS runner, intermittently, landing back in
+		// awaiting_approval with its *original* park text — the shape of the
+		// pre-A27 loop this test's own comment describes. Two explanations fit
+		// and the row distinguishes them: if approved_sha is set and equals the
+		// resolved commit, gate 8 re-parked an approved run; if it is empty,
+		// the approval was overwritten by the parking attempt still finishing
+		// underneath it. Printing them turns the next occurrence into an
+		// answer instead of another sighting.
+		t.Fatalf("an approved run gave %s (%s): %s\n"+
+			"  approved_sha=%q approved_at=%v sha=%q ref=%q expires_at=%v",
+			done.State, done.ErrorCode, done.ErrorMsg,
+			done.ApprovedSHA, done.ApprovedAt, done.SHA, done.RefNormalized, done.ExpiresAt)
 	}
 	if done.SHA != sideshow {
 		t.Errorf("built %q, approved %q", done.SHA, sideshow)
