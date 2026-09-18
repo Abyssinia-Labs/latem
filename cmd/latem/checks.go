@@ -863,15 +863,15 @@ func (d *doctor) checkAutoLogin(ctx context.Context) check {
 	case err != nil:
 		return warn("macos.autologin", "auto-login", "could not be read: "+err.Error())
 	case !al.Enabled:
-		return fail("macos.autologin", "auto-login", "not configured — no session exists after a reboot",
-			"System Settings → Users & Groups → Automatic login → "+d.sys.User()).
+		return fail("macos.autologin", "auto-login", "not configured — no session exists after a reboot").
+			withManual("System Settings → Users & Groups → Automatic login → " + d.sys.User()).
 			withNotes("A LaunchAgent needs a logged-in user. Without auto-login the machine boots, " +
 				"nobody logs in, the agent never starts, and it goes offline until somebody walks " +
 				"over to it (§23).")
 	case al.User != d.sys.User():
 		return fail("macos.autologin", "auto-login",
-			fmt.Sprintf("auto-logs in as %q but the agent runs as %q", al.User, d.sys.User()),
-			"System Settings → Users & Groups → Automatic login → "+d.sys.User()).
+			fmt.Sprintf("auto-logs in as %q but the agent runs as %q", al.User, d.sys.User())).
+			withManual("System Settings → Users & Groups → Automatic login → " + d.sys.User()).
 			withNotes("This looks like a working configuration and is not: the LaunchAgent belongs " +
 				"to a user who is never logged in.")
 	default:
@@ -1428,7 +1428,8 @@ func (d *doctor) checkAndroidSDK() check {
 		}
 	}
 	return warn("android.sdk", "Android SDK", "not found",
-		"install via Android Studio, or brew install --cask android-commandlinetools").
+		"brew install --cask android-commandlinetools").
+		withManual("or install the SDK through Android Studio").
 		withNotes("Only needed for Android jobs.")
 }
 

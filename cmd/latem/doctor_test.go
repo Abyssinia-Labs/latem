@@ -50,19 +50,33 @@ func TestDoctorNamesEveryFaultOnABrokenMachine(t *testing.T) {
 		}
 	}
 
-	// Every failure must carry a fix, or a check has told the operator that
-	// something is wrong and not what to do — which RUNNER_SPEC §19 says is
-	// the entire point of the subcommand. The config problems are the one
-	// exception: internal/config writes the remediation into its own message,
-	// and restating it here in different words would let the two drift.
+	// Every failure must carry a repair — a command in Fix or a step in Manual
+	// — or a check has told the operator that something is wrong and not what
+	// to do, which RUNNER_SPEC §19 says is the entire point of the subcommand.
+	// Either counts: auto-login is repaired in System Settings and there is no
+	// command for it, which is exactly why Manual exists. The config problems
+	// are the one exception: internal/config writes the remediation into its
+	// own message, and restating it here in different words would let the two
+	// drift.
 	for _, s := range rep.Sections {
 		for _, c := range s.Checks {
 			if c.Level != levelFail || strings.HasPrefix(c.ID, "config.problem.") {
 				continue
 			}
-			if len(c.Fix) == 0 {
-				t.Errorf("failing check %q (%s) carries no fix", c.ID, c.Detail)
+			if len(c.Fix) == 0 && len(c.Manual) == 0 {
+				t.Errorf("failing check %q (%s) carries no repair", c.ID, c.Detail)
 			}
+		}
+	}
+
+	// And nothing in Fix may be prose: --fix prints that list under a heading
+	// saying "review before running", so every line in it has to be something a
+	// shell accepts. A line with no command-shaped first word is one an
+	// operator pastes and watches fail (F6).
+	for _, f := range rep.fixes() {
+		first, _, _ := strings.Cut(strings.TrimPrefix(f, "# "), " ")
+		if strings.ContainsAny(first, "→…") || first == "install" || first == "or" {
+			t.Errorf("fix %q is prose, not a command; it belongs in Manual", f)
 		}
 	}
 }

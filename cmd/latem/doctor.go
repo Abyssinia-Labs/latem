@@ -69,6 +69,13 @@ type check struct {
 	// subcommand: it is what turns the failure table in §18.1 into something
 	// an operator can self-service.
 	Fix []string
+	// Manual is a repair a person performs rather than a command anything can
+	// run — a GUI setting, an installer. It is separate from Fix because
+	// `--fix` prints Fix under a heading that says "review before running",
+	// and a line of prose in that list is one an operator pastes and watches
+	// fail. Naming the step is still worth doing; implying it is a command is
+	// not.
+	Manual []string
 	// Notes carry the explanation a bare command cannot — most importantly
 	// FileVault's, where there are two valid answers and choosing one on the
 	// operator's behalf would be wrong.
@@ -89,6 +96,11 @@ func fail(id, title, detail string, fix ...string) check {
 
 func skip(id, title, detail string) check {
 	return check{ID: id, Title: title, Level: levelSkip, Detail: detail}
+}
+
+func (c check) withManual(steps ...string) check {
+	c.Manual = append(c.Manual, steps...)
+	return c
 }
 
 func (c check) withNotes(notes ...string) check {
@@ -134,6 +146,27 @@ func (r report) counts() (passed, warned, failed, skipped int) {
 }
 
 // fixes collects every remediation, deduplicated, in the order encountered.
+// manualSteps is the Manual half of the remediation, collected exactly as
+// fixes() collects the runnable half.
+func (r report) manualSteps() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range r.Sections {
+		for _, c := range s.Checks {
+			if c.Level != levelFail && c.Level != levelWarn {
+				continue
+			}
+			for _, m := range c.Manual {
+				if !seen[m] {
+					seen[m] = true
+					out = append(out, m)
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (r report) fixes() []string {
 	var out []string
 	seen := map[string]bool{}
@@ -249,13 +282,24 @@ func printReport(w io.Writer, rep report, showFix, color bool) {
 	printf(w, "\n%d passed, %d warning(s), %d failed, %d skipped\n", passed, warned, failed, skipped)
 
 	if showFix {
-		fixes := rep.fixes()
-		if len(fixes) == 0 {
+		fixes, manual := rep.fixes(), rep.manualSteps()
+		switch {
+		case len(fixes) == 0 && len(manual) == 0:
 			printf(w, "\nnothing to fix.\n")
-		} else {
-			printf(w, "\nRemediation — review before running; latem does not run these for you:\n\n")
-			for _, f := range fixes {
-				printf(w, "  %s\n", f)
+		default:
+			if len(fixes) > 0 {
+				printf(w, "\nRemediation — review before running; latem does not run these for you:\n\n")
+				for _, f := range fixes {
+					printf(w, "  %s\n", f)
+				}
+			}
+			// Under its own heading, because everything above it can be pasted
+			// into a shell and nothing below it can.
+			if len(manual) > 0 {
+				printf(w, "\nBy hand — these are not commands:\n\n")
+				for _, m := range manual {
+					printf(w, "  %s\n", m)
+				}
 			}
 		}
 	}
