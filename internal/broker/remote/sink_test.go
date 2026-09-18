@@ -249,13 +249,22 @@ func TestSink_AckedIsWhatTheFarSideTookAndNotWhatWasSent(t *testing.T) {
 
 	// And the resume point is durable, not merely remembered: an agent that
 	// restarts has to pick up where the far side actually is.
-	seq, err := h.DB.LastAckedSeq(t.Context(), store.BrokerRemote, runID)
-	if err != nil {
-		t.Fatalf("LastAckedSeq: %v", err)
-	}
-	if seq < 12 {
-		t.Errorf("last_acked_seq persisted as %d, want at least 12 — the resume point would not survive a restart", seq)
-	}
+	//
+	// Awaited rather than read the instant Acked() moves. [sink.ack] releases
+	// the lock and *then* calls persist, so the counter is briefly ahead of the
+	// row by design — the alternative is a database write on the hot path under
+	// a mutex, and the skew is in the safe direction because resuming from a
+	// stale point re-sends frames rather than skipping them. Reading the row at
+	// the moment the counter moves therefore measures that window instead of
+	// the durability this asserts, which is why it passed on a workstation and
+	// failed on a loaded CI runner.
+	h.CP.Await(t, "the resume point to reach the store, without which a restart would not resume where the far side actually is", func() bool {
+		seq, err := h.DB.LastAckedSeq(t.Context(), store.BrokerRemote, runID)
+		if err != nil {
+			t.Fatalf("LastAckedSeq: %v", err)
+		}
+		return seq >= 12
+	})
 	// Under this transport's key, and not the local one's. A sink that wrote to
 	// the shared column would make a local broker on the same machine resume
 	// from what a network happened to acknowledge (amendment A28).
