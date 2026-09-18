@@ -69,6 +69,28 @@ func TestDoctorNamesEveryFaultOnABrokenMachine(t *testing.T) {
 		}
 	}
 
+	// A repair must be visible in the default output, not only under --fix.
+	// Splitting Manual out of Fix made auto-login — the check that fails most
+	// often on a fresh Mac, and the one with no command — print no repair at
+	// all in the view an operator actually reads.
+	{
+		var out strings.Builder
+		printReport(&out, rep, false, false)
+		text := out.String()
+		for _, s := range rep.Sections {
+			for _, c := range s.Checks {
+				if c.Level != levelFail || len(c.Manual) == 0 {
+					continue
+				}
+				for _, m := range c.Manual {
+					if !strings.Contains(text, m) {
+						t.Errorf("check %q names a by-hand repair that plain `doctor` never prints: %q", c.ID, m)
+					}
+				}
+			}
+		}
+	}
+
 	// And nothing in Fix may be prose: --fix prints that list under a heading
 	// saying "review before running", so every line in it has to be something a
 	// shell accepts. A line with no command-shaped first word is one an

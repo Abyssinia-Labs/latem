@@ -275,6 +275,14 @@ func printReport(w io.Writer, rep report, showFix, color bool) {
 			for _, f := range c.Fix {
 				printf(w, "         fix: %s\n", f)
 			}
+			// Manual is rendered here too, and labelled differently. Splitting
+			// the two was right for --fix's pasteable list; leaving Manual out
+			// of the per-check view was not, because a check whose repair is a
+			// GUI step then named no repair at all — and auto-login, which has
+			// no command, is the one that fails most often on a fresh Mac.
+			for _, m := range c.Manual {
+				printf(w, "         by hand: %s\n", m)
+			}
 		}
 	}
 
