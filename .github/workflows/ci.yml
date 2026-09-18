@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +54,7 @@ jobs:
         run: go test -race -count=1 ./...
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -72,7 +72,7 @@ jobs:
   # go.mod has one owner (docs/PLAN.md, rule 2). This job makes a stray `go get`
   # visible in review rather than in someone else's rebase.
   tidy:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -87,7 +87,7 @@ jobs:
   # Integration tests need a Docker daemon, so they run separately from the
   # gate. Not required to merge a leaf workstream; required before M3 closes.
   integration:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4

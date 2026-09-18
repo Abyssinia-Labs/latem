@@ -54,7 +54,7 @@ jobs:
   # A release is the one artefact where "it was probably green" is not good
   # enough, so the gate runs again here against the exact tree being shipped.
   gate:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,7 +78,7 @@ jobs:
 
   build:
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       version: ${{ steps.version.outputs.version }}
       bare: ${{ steps.version.outputs.bare }}
@@ -193,10 +193,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: blacksmith-6vcpu-macos-15
             goos: darwin
             goarch: arm64
-          - os: ubuntu-latest
+          - os: blacksmith-4vcpu-ubuntu-2404
             goos: linux
             goarch: amd64
     runs-on: ${{ matrix.os }}
@@ -252,7 +252,7 @@ jobs:
   sign:
     needs: [build, smoke]
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
@@ -341,7 +341,7 @@ jobs:
   publish:
     needs: [build, smoke, sign]
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
