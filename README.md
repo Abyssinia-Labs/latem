@@ -207,23 +207,64 @@ needs its own credential** — a fresh account has none, and `latem init`'s exam
 is an ssh URL. Without one, `doctor` fails the repo check and every run fails
 `E_SOURCE` with `Permission denied (publickey)`.
 
+The test is not "can *you* clone it" but "can a process started by launchd or
+systemd clone it, with no terminal to prompt at". That rules out more than it
+looks like it does, so the two forms that pass are given first.
+
+**https with a credential helper** is the shortest route on a machine that has
+`gh`, and the helper answers without a terminal:
+
 ```console
-$ gh auth login --git-protocol ssh      # or: ssh-keygen -t ed25519, then add the
-                                        # public half as a deploy key on the repo
+$ gh auth login --git-protocol https
 $ latem doctor                          # the repo check should now be [ ok ]
 ```
 
-A **deploy key in `~/.ssh` with an `ssh config` entry** is the form that works
-from both an interactive shell and an agent started by launchd or systemd. A
-forwarded agent works from neither, because the service does not inherit your
-interactive `ssh-agent`. An https URL with a credential helper works too, as long
-as the helper can answer without a terminal.
+Use the https URL in `config.toml` to match — `https://github.com/me/myapp.git`.
 
-Verify with the same command the agent will run:
+**A deploy key in `~/.ssh`, with no passphrase and an `ssh config` entry**, is
+the other, and the one to use when the credential should be scoped to a single
+repository:
 
 ```console
-$ git ls-remote git@github.com:me/myapp.git
+$ ssh-keygen -t ed25519 -N '' -f ~/.ssh/myapp_deploy      # -N '' — no passphrase
+$ cat >> ~/.ssh/config <<'CONF'
+Host github.com
+  IdentityFile ~/.ssh/myapp_deploy
+  IdentitiesOnly yes
+CONF
+$ ssh-keyscan github.com >> ~/.ssh/known_hosts            # before the first run
 ```
+
+Then add the `.pub` half as a deploy key on the repository.
+
+**What does not work, and is the easy mistake:** `gh auth login
+--git-protocol ssh` generates a *passphrase-protected* key, adds no `ssh config`
+entry, and leaves the passphrase for your `ssh-agent` to hold. An agent started
+by launchd does not inherit your interactive `ssh-agent`, so it has no way to
+unlock that key and no terminal to ask you for it. It will work in your shell
+and fail in the service — the worst shape a credential problem can take. If you
+have already done it, either add the key to the login keychain
+(`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`, plus `UseKeychain yes` and
+`AddKeysToAgent yes` in `~/.ssh/config`), or generate a passphraseless deploy
+key as above.
+
+**`known_hosts` matters for the same reason.** On a fresh account it does not
+exist, so the first ssh connection wants to ask you to accept a host key — and a
+service has nobody to ask. `ssh-keyscan` above does it in advance.
+
+Verify with the same command the agent will run, and without the one thing the
+agent will not have:
+
+```console
+$ env -u SSH_AUTH_SOCK git ls-remote git@github.com:me/myapp.git
+```
+
+Dropping `SSH_AUTH_SOCK` is the point. It is what a launchd-started service
+does not inherit, so a key that works only because your `ssh-agent` is holding
+the passphrase fails here exactly as it will fail in the service — which a plain
+`git ls-remote` in your own shell will not tell you. Everything else about the
+environment is left alone, because an https helper needs `PATH` to find the
+program it shells out to.
 
 ### Give the repository a job
 
