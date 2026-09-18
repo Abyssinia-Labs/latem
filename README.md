@@ -92,9 +92,63 @@ download, installs to `~/.local/bin`, and runs `latem doctor`.
 **The current release is v0.1.2, and this repository is private**, so that line
 returns 404 today — for the script itself, for the release assets, and for
 anything else anonymous. It is one line and it works; there is simply nobody it
-works *for* until the repository is public. With a token,
-`gh release download v0.1.2` gets the same archives, and their signature is
-checked the same way (below).
+works *for* until the repository is public.
+
+### Installing from a private repository, by hand
+
+Until the repository is public this is the install, not a footnote to it. It is
+what `install.sh` does, in the order it does it.
+
+**First authenticate**, or every command below fails. A private repository's
+releases are invisible anonymously, and the failure does not say so — `gh`
+reports `release not found`, which reads like a wrong version number:
+
+```console
+$ gh auth login
+```
+
+Then download the archive for your platform, the checksums manifest, and the
+manifest's signature. The signature is a separate asset, so it takes a second
+`--pattern`:
+
+```console
+$ gh release download v0.1.2 --repo Abyssinia-Labs/latem --pattern '*darwin_arm64*'
+$ gh release download v0.1.2 --repo Abyssinia-Labs/latem --pattern '*checksums*'
+```
+
+Substitute `darwin_amd64`, `linux_amd64` or `linux_arm64` as needed. Verify,
+signature first — this is the check that says who produced the file, and the
+key is the one compiled into every binary latem ships:
+
+```console
+$ minisign -Vm latem_0.1.2_checksums.txt \
+      -P 'RWTTZK1Cxjg51w6BUpg5KpkKhOHzUT+EDhgidVqHUHsiTr6nPjKC3esu'
+Signature and comment signature verified
+Trusted comment: latem v0.1.2
+
+$ shasum -a 256 -c latem_0.1.2_checksums.txt 2>/dev/null | grep darwin_arm64
+latem_0.1.2_darwin_arm64.tar.gz: OK
+```
+
+**If either fails, stop.** Neither is optional and neither has a flag to skip
+it; the two prove different things, and [What "verifies the download"
+means](#what-verifies-the-download-means) is why.
+
+Then extract just the binary, and put its directory on `PATH` — `install.sh`
+does this and warns you about the second part, which nothing here can:
+
+```console
+$ mkdir -p ~/.local/bin && tar -xzf latem_0.1.2_darwin_arm64.tar.gz -C ~/.local/bin latem
+$ export PATH="$HOME/.local/bin:$PATH"     # and add this to ~/.zprofile
+$ latem version
+latem v0.1.2
+```
+
+**`latem version` must print the version you downloaded.** If it prints
+something else, an older latem is earlier on your `PATH` — `command -v latem`
+says which.
+
+`minisign` is not on a stock macOS: `brew install minisign`. `gh` likewise.
 
 **Do not take v0.1.0.** A multi-line secret held in the macOS Keychain — an App
 Store Connect `.p8` above all — resolved to hex rather than to a key on that
