@@ -1,0 +1,391 @@
+# The M7 release pipeline (RUNNER_SPEC §25, §20).
+#
+# What a release is, in one place, so the shape cannot drift from the two
+# things that consume it — install.sh and internal/selfupdate:
+#
+#   latem_<version>_<os>_<arch>.tar.gz    the binary, at the archive root
+#   latem_<version>_checksums.txt         sha256 of every archive above
+#   latem_<version>_checksums.txt.minisig its minisign signature
+#
+# <version> has no leading `v`; the tag does. Both spellings appear below and
+# the difference is load-bearing: install.sh strips the `v` with ${VERSION#v}
+# and selfupdate.AssetName takes the stripped form, so an asset published with
+# the `v` in its name is an asset nothing can find.
+#
+# # Why the signature covers the checksums file rather than the binaries
+#
+# One signature for all four platforms, and the manifest it signs binds each
+# archive to a name that contains the version. That is what makes a *genuine*
+# release republished under a newer tag detectable: the attacker would need a
+# signed line naming an asset that does not exist. internal/selfupdate's
+# package comment states the chain; this file is the other half of it.
+#
+# # The dry run
+#
+# `workflow_dispatch` builds, archives, checksums and smoke-tests everything
+# and signs and publishes nothing. It needs no secrets, so the pipeline can be
+# exercised on a repository that has not generated a signing key yet — which
+# is also the only way to find out that a release workflow works before the
+# day it matters.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit or tag to build (dry run; nothing is published)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never two releases of the same tag at once. Not cancel-in-progress: a
+  # half-cancelled publish is worse than a queued one.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag can be pushed at any commit, including one that never passed ci.yml.
+  # A release is the one artefact where "it was probably green" is not good
+  # enough, so the gate runs again here against the exact tree being shipped.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      bare: ${{ steps.version.outputs.bare }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The tag's shape is a contract, not a convention. selfupdate's version
+      # parser is deliberately strict (`v1.2` is refused), so a tag it cannot
+      # parse produces a release that every agent declines to update to — with
+      # the failure appearing days later, in a log nobody is reading. Refuse it
+      # here instead, where somebody is watching.
+      - name: version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = push ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            # A rehearsal builds whatever `ref` selected and calls it this,
+            # because the version is what the pipeline is testing rather than
+            # something the operator should have to choose to test it.
+            version="v0.0.0-dryrun"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::$version is not a release tag." >&2
+            echo "A tag must be vMAJOR.MINOR.PATCH with an optional -prerelease suffix." >&2
+            echo "internal/selfupdate.parseVersion refuses anything else, so a release" >&2
+            echo "under this name is one no agent can ever update to." >&2
+            exit 1
+          fi
+          echo "version=$version"        >> "$GITHUB_OUTPUT"
+          echo "bare=${version#v}"       >> "$GITHUB_OUTPUT"
+
+      # All four targets from one runner, which is safe because none of this
+      # needs cgo: modernc.org/sqlite is pure Go, so CGO_ENABLED=0 is the
+      # normal build rather than a reduced one.
+      #
+      # Measured before this was written, because it is the assumption a
+      # cross-compiled release stands on: Go's internal linker ad-hoc signs
+      # darwin/arm64 (`codesign -dv` reports `adhoc,linker-signed`), which is
+      # what macOS requires of any arm64 binary before it will execute one.
+      # The smoke job below runs the result on a real Mac rather than trusting
+      # that paragraph.
+      - name: build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BARE: ${{ steps.version.outputs.bare }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            echo "==> $os/$arch"
+            # -trimpath and -s -w for a build that does not carry this
+            # runner's paths around; -X stamps the version the CLI prints and
+            # that selfupdate compares a release against. The VCS stamp
+            # debug.ReadBuildInfo() reads survives -s -w, which is what keeps
+            # `latem version`'s revision line working.
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "dist/latem" ./cmd/latem
+            # The binary sits at the archive root: install.sh looks for
+            # exactly $TMP/latem after extracting, and selfupdate matches the
+            # entry name exactly. LICENSE travels with it because Apache-2.0
+            # asks it to.
+            tar -czf "dist/latem_${BARE}_${os}_${arch}.tar.gz" \
+              -C dist latem -C "$GITHUB_WORKSPACE" LICENSE README.md
+            rm dist/latem
+          done
+          ls -l dist
+
+      - name: checksums
+        env:
+          BARE: ${{ steps.version.outputs.bare }}
+        run: |
+          set -euo pipefail
+          cd dist
+          # A glob is already sorted, so the manifest is byte-identical for
+          # identical inputs and a diff between two releases is readable.
+          sha256sum *.tar.gz > "latem_${BARE}_checksums.txt"
+          # The same check install.sh will run on every machine, run once here
+          # where a failure costs nothing.
+          sha256sum -c "latem_${BARE}_checksums.txt"
+          cat "latem_${BARE}_checksums.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # Cross-compiling is the one step of this pipeline that could produce a
+  # perfectly signed binary the target platform refuses to execute, and no
+  # amount of checksumming would notice. So a real machine runs it.
+  #
+  # macos-latest is arm64 and ubuntu-latest is amd64, which covers the two
+  # platforms anyone is installing on today. darwin/amd64 and linux/arm64 are
+  # published untested by this job, and that is a stated gap rather than an
+  # oversight — GitHub's arm64 Linux and Intel macOS runners are not on this
+  # repository's plan.
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: unpack and run
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          BARE: ${{ needs.build.outputs.bare }}
+        run: |
+          set -euo pipefail
+          tar -xzf "dist/latem_${BARE}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" -C dist
+          chmod +x dist/latem
+
+          # `version --short` is not a formality: internal/selfupdate runs
+          # exactly this on a downloaded binary and refuses the update when the
+          # answer disagrees with the release. A stamp that did not take would
+          # make every self-update fail, and nothing else in the pipeline looks
+          # at it.
+          got=$(dist/latem version --short)
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::the binary reports $got and the release is $VERSION" >&2
+            exit 1
+          fi
+          dist/latem version
+
+      # init then doctor, on a machine that has never seen this program: the
+      # first two commands the README tells a stranger to run, and M7's
+      # acceptance criterion in miniature.
+      - name: init and doctor
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)/latem"
+          dist/latem init --config-dir "$dir" --name ci-smoke \
+            --repo smoke=https://github.com/Abyssinia-Labs/latem.git
+          # doctor exits non-zero on a runner with no Docker and no Xcode,
+          # which is the correct answer rather than a failure of this test.
+          # What is being checked is that it loads the config it was just
+          # handed and reports, instead of crashing on it.
+          set +e
+          dist/latem doctor --config-dir "$dir"
+          code=$?
+          set -e
+          if [ "$code" -gt 1 ]; then
+            echo "::error::doctor exited $code (a usage error or a crash, not a failed check)" >&2
+            exit 1
+          fi
+
+  sign:
+    needs: [build, smoke]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag's own trusted.pub, which is the file the binaries in this
+          # release embed. main's copy could already have been rotated.
+          ref: ${{ github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: install minisign
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          minisign -v
+
+      # The signing key never touches the workspace, the logs, or a variable
+      # this script echoes. It is written to a 0600 file under a private temp
+      # directory and removed in the same step.
+      - name: sign the checksums
+        env:
+          BARE: ${{ needs.build.outputs.bare }}
+          VERSION: ${{ needs.build.outputs.version }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set." >&2
+            echo "A release is signed or it is not a release: §20's self-update has no" >&2
+            echo "trust root without it, and install.sh's checksum only proves the file" >&2
+            echo "arrived intact from whoever served it. docs/release.md §2 generates the" >&2
+            echo "keypair; it takes one command." >&2
+            exit 1
+          fi
+
+          keydir="$(mktemp -d)"
+          chmod 700 "$keydir"
+          trap 'rm -rf "$keydir"' EXIT
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keydir/minisign.key"
+
+          sums="dist/latem_${BARE}_checksums.txt"
+          # The trusted comment is signed too (minisign's fourth line), so it is
+          # a safe place to record which release this manifest belongs to. It is
+          # not what binds the download to a version — the asset names inside
+          # the signed file do that — it is what a human reads out of
+          # `minisign -V`.
+          if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+            printf '%s\n' "$MINISIGN_PASSWORD" |
+              minisign -S -s "$keydir/minisign.key" -m "$sums" -t "latem ${VERSION}"
+          else
+            minisign -S -s "$keydir/minisign.key" -m "$sums" -t "latem ${VERSION}" < /dev/null
+          fi
+
+      # The check that catches the failure nobody would find until an agent
+      # tried to update: an Actions secret holding a key that is not the one
+      # compiled into the binaries this release ships. Verified against the
+      # committed public key rather than against the signing key, because that
+      # committed file is what every installed agent will use.
+      - name: verify against the key this build trusts
+        env:
+          BARE: ${{ needs.build.outputs.bare }}
+        run: |
+          set -euo pipefail
+          pub=internal/selfupdate/trusted.pub
+          if ! grep -Evq '^(#|untrusted comment:|[[:space:]]*$)' "$pub"; then
+            echo "::error::$pub holds no public key." >&2
+            echo "This release would be signed by a key no binary in it trusts, so" >&2
+            echo "auto_update would stay refused on every machine that installed it." >&2
+            echo "docs/release.md §2." >&2
+            exit 1
+          fi
+          minisign -V -p "$pub" \
+            -m "dist/latem_${BARE}_checksums.txt" \
+            -x "dist/latem_${BARE}_checksums.txt.minisig"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signature
+          path: dist/*.minisig
+          if-no-files-found: error
+
+  publish:
+    needs: [build, smoke, sign]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: signature
+          path: dist
+
+      # Deliberately not --clobber and deliberately not idempotent. A release
+      # that already exists means either this workflow is being re-run over a
+      # published artefact, or a tag was moved; both want a person, not a
+      # retry. docs/release.md §5 says how to withdraw one.
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BARE: ${{ needs.build.outputs.bare }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          # A quoted heredoc and two substitutions, rather than an unquoted one
+          # and an escape for every backtick and dollar in a code block.
+          cat > "$notes" <<'EOF'
+          ## Install
+
+          ```sh
+          curl -fsSL https://raw.githubusercontent.com/__REPO__/main/install.sh | sh
+          ```
+
+          The installer verifies the sha256 of the archive it downloads. That
+          proves the file arrived intact; it does not prove who produced it,
+          because the checksums come from the same server as the binary. The
+          signature is what proves that, and checking it takes one command:
+
+          ```sh
+          minisign -Vm latem___BARE___checksums.txt \
+            -P "$(sed -n 2p internal/selfupdate/trusted.pub)"
+          ```
+
+          An agent with `auto_update = true` does this for itself, daily,
+          against the same key compiled into the binary (RUNNER_SPEC §20).
+          EOF
+          sed -i "s|__REPO__|${GITHUB_REPOSITORY}|g; s|__BARE__|${BARE}|g" "$notes"
+
+          gh release create "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$VERSION" \
+            --notes-file "$notes" \
+            --generate-notes \
+            dist/*.tar.gz \
+            "dist/latem_${BARE}_checksums.txt" \
+            "dist/latem_${BARE}_checksums.txt.minisig"

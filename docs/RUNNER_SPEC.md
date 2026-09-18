@@ -100,6 +100,18 @@
 | Structured logging | `log/slog` (stdlib) |
 | CLI | `github.com/spf13/cobra` |
 | WebSocket | `github.com/coder/websocket` |
+| BLAKE2b | `golang.org/x/crypto/blake2b` (§20's minisign verification) |
+
+**One note on the eighth entry.** The minisign verifier in
+`internal/selfupdate` is 150 lines of format parsing over `crypto/ed25519`, and
+it would have needed no dependency at all but for one measured fact: **minisign
+0.12 prehashes by default**, so the signature is over BLAKE2b-512 of the file
+rather than over the file. Implementing BLAKE2b here was not on the table, and
+accepting only the legacy PureEdDSA form would mean rejecting every signature
+the current tool produces. A verifier that handles one of the two forms its
+signing tool can emit is a verifier that one day calls a legitimate release
+forged, with no diagnosis available to the operator beyond "minisign says it is
+valid and latem says it is not".
 
 **One note on YAML.** `sigs.k8s.io/yaml` routes YAML through JSON, and JSON has no duration type. Every duration field in §8 and §9 (`timeout`, `shutdown_grace`, `log_retention`, `boot_timeout`, `approval_ttl`, retention strings) is a `protocol.Duration` — a wrapper over `time.Duration` with a custom `UnmarshalJSON` accepting Go duration strings. Define it once in `pkg/protocol` and use it in both the TOML and YAML paths. Three independent implementations of this is the predictable failure.
 
@@ -473,7 +485,7 @@ shutdown_grace = "30m"
 work_dir       = "~/.latem/work"
 log_retention  = "14d"
 queue_ttl      = "72h"              # queued longer than this → rejected
-auto_update    = false   # true is refused at load until §20's self-update exists (M7)
+auto_update    = false   # true needs a build with an embedded signing key (§20)
 remote_logs    = "always"           # "always" | "on_failure"
 metrics_addr   = "127.0.0.1:9838"   # loopback only; "" disables (INV-1)
 
@@ -1304,7 +1316,15 @@ latem version
 
 **Self-update** is opt-in and off by default (`[agent] auto_update = false`). When enabled: check a release feed daily, verify a minisign signature, download to a temp path, atomic rename, re-exec only when no run is active. Never update mid-run.
 
-**Until that exists, `auto_update = true` is a load error.** There is no release feed and no signature to verify — M7 owns both — so the only thing true of enabling it was that nothing happened, silently, on a machine whose operator believed it would keep itself current. The config loader refuses the value and names M7; the refusal goes when the feature arrives. This is the same decision A27 made about an approval that recorded nothing and A38 made about a documented `~` no executor expanded: **a control that reads as a control and does nothing is worse than an absent one**, because it stops the operator looking.
+The five things that turn that sentence into something implementable, each recorded here because a reimplementation needs all five and none of them is obvious (amendment A41):
+
+1. **What is signed is the checksums manifest, not the binary.** One signature covers every platform's archive, and the manifest binds each archive to a filename that contains the version. The consequence is the useful part: the *release feed does not have to be trusted*. It supplies a version string, and every byte that reaches disk is covered by a signature from a key compiled into the running binary. A hostile feed can deny service or offer a version this key signed, and nothing else.
+2. **A downgrade is refused.** An update must be strictly newer than the running binary, compared as `vMAJOR.MINOR.PATCH` with semver's prerelease ordering. Without this, replaying an old and perfectly genuine release is an attack.
+3. **A relabelled release is refused** — v0.1.0's real signed manifest, republished under a tag claiming v0.9.0 — because the asset name is derived from the claimed version and looked up *inside* the signed manifest. `latem_0.9.0_darwin_arm64.tar.gz` is not a line anyone but the signer can produce. The version is bound by signed content rather than by the feed's word for it.
+4. **The downloaded binary is asked what it is** before it replaces anything. The signature proves who built it; it says nothing about whether the release was assembled correctly. An archive built from the wrong tag, or published under the wrong platform's name, is signed exactly as faithfully as a correct one.
+5. **"No run active" is arranged, not observed.** Checking that nothing is in flight and then re-execing is a race with a worker about to claim, and losing it orphans a build — which §6's reconciliation then correctly marks `interrupted` and reaps. So the agent *stops claiming first*, then waits for idle, with two constraints: the pause must be reversible (`draining` is a one-way latch whose only caller is shutdown, and a machine that failed to download an update must go back to work), and the wait must be bounded. Ten minutes: this is capacity given up for an update rather than for a shutdown, and an update that does not happen today happens tomorrow.
+
+**A build that trusts no signing key refuses `auto_update = true` at load.** The signing key is embedded at build time, so this is a property of the binary rather than of the machine: a `go build` from a tree whose `internal/selfupdate/trusted.pub` is still the placeholder can verify nothing, and would check a feed daily and decline every release into a log nobody reads. That is the same decision A27 made about an approval that recorded nothing and A38 made about a documented `~` no executor expanded — **a control that reads as a control and does nothing is worse than an absent one**, because it stops the operator looking. The refusal is narrow: it is keyed on the key, not on the calendar, so a release binary accepts the value and a hand-built one does not.
 
 **Metrics.** INV-1 forbids binding a non-loopback listener; it does not forbid loopback. `metrics_addr` (default `127.0.0.1:9838`, empty to disable) serves counters and gauges — runs by terminal state, run duration, queue depth, cache volume sizes, disk free per runner, broker connection state, log frames dropped. The config loader rejects a non-loopback value, so the invariant is enforced where it cannot be forgotten. Anyone wanting these off-machine points a local Prometheus at it or tunnels; the agent does not grow a remote surface for observability.
 
@@ -1558,6 +1578,11 @@ Cache pruning and disk guards, artifact retention, log rotation, `latem doctor -
 
 *Acceptance:* a new machine goes from `curl | sh` to a green run in under five minutes, following only the README.
 
+The release pipeline is `.github/workflows/release.yml`: four cross-compiled targets from one runner, a sha256 manifest, a minisign signature over that manifest, a smoke job that runs the built binary on a real machine of each of the two common platforms, and a publish step that is deliberately not idempotent. Two parts of it are worth stating as requirements rather than leaving in the file:
+
+- **The tag's shape is a contract.** §20's version comparison is strict, so a tag it cannot parse — `v1.2`, a branch name, a bare SHA — produces a release no agent can ever update to, with the failure appearing days later in an unread log. The workflow refuses such a tag before it builds anything.
+- **Cross-compiling is verified by running the result, not by reasoning about it.** All four targets come off one Linux runner, which is sound because nothing here needs cgo, and which stands on one measured fact: Go's internal linker ad-hoc signs `darwin/arm64` binaries (`codesign -dv` reports `adhoc,linker-signed`), and macOS refuses to execute an arm64 binary without at least that. A paragraph is not evidence, so a smoke job unpacks the artefact on `macos-latest` and `ubuntu-latest` and runs `version --short`, `init` and `doctor` on it. `darwin/amd64` and `linux/arm64` ship untested by that job, which is a stated gap rather than an oversight.
+
 ---
 
 ## 26. Open questions
@@ -1697,6 +1722,16 @@ Two further items are recorded but **not** amended, because neither is a contrac
 | A39 | §8, §23 | **The service definition's log paths follow `--config-dir`, and `service install` creates the log directory** | Two defects in one plist, both found by rendering it before installing. (1) It carried `LATEM_CONFIG_DIR=<relocated>` while pointing `StandardOutPath` at `~/.latem/logs` — two config trees in one file, when §8 says `--config-dir` relocates the lock, socket, sqlite, work dir and caches *together*. (2) Nothing created the log directory, and **launchd does not create the parent of `StandardOutPath`**: when it is missing the job fails to spawn and the diagnostic is written to the file it could not open. On any machine that has not yet run `latem agent` — which is every machine at first install, and the Mac mini this targets — `service install` therefore produced a service that silently never started |
 
 | A40 | §5 (INV-3), §12, §20 | **`git checkout --detach` takes no options terminator**, and INV-3's argv rule is satisfied for a resolved object name by *validation* rather than by punctuation | `git checkout --detach --end-of-options <sha>` works on git 2.50.1 and **fails on 2.43.0**: `--detach does not take a path argument '--end-of-options'`. checkout's own path/revision disambiguation did not learn the terminator until somewhere between those releases. A7 recorded the terminator as required having verified it on 2.50.1 *alone*, so every runner with an older git could fetch and then fail to check anything out — the first job on a fresh Mac mini died there. The value at that argv is not a broker-supplied string: `validateSHA` has already required `^[0-9a-f]{40}$` or `^[0-9a-f]{64}$`, so it provably cannot begin with a dash and cannot be read as an option however the argv is arranged. Both INV-3 argv tests now exempt values by that *shape*, and nothing else: a ref, a URL and a path are strings whose characters an attacker picks, and all three still fail without a terminator |
+
+### Amendment from the release pipeline
+
+| # | Section | Change | Why it surfaced |
+|---|---|---|---|
+| A41 | §20, §25 | **§20's self-update gains the five requirements its one sentence assumed**, and the `auto_update` load error narrows from "not implemented" to "this build trusts no signing key" | Written while building the thing, and every one of the five is a decision the original sentence leaves to the implementer with a wrong default available. *What gets signed* determines whether the release feed is part of the trust boundary — sign the manifest and it is not, sign nothing and the feed is the whole of it. *Strictly newer* is the difference between an update and a replay. *Asking the binary its version* catches the failure no signature can, because a release built from the wrong tag is signed as faithfully as a right one. And *"when no run is active"* is not a condition that can be observed — checking it and then acting is a race whose loss orphans a build, so the pool has to stop claiming first, with a pause that is reversible and bounded. The load error narrowed rather than disappearing because the key is embedded at build time: a hand-built binary still cannot verify anything, and an agent declining every release into an unread log is precisely the silent no-op the original refusal existed to prevent |
+
+**The two copies of one key are held level by a test, not by a comment.** The signing key appears twice by necessity — `internal/selfupdate/trusted.pub`, embedded in the agent, and `PUBKEY` in `install.sh`, which is POSIX sh and cannot read Go. A populated `trusted.pub` beside an empty `PUBKEY` ships an installer that cannot check what the agent it installs will insist on, and the reverse ships an agent that refuses what the installer accepted. `test/scripts/install_test.go` requires them to be equal or both empty. That is A37's rule applied to a convention: a hazard that can recur needs something mechanical.
+
+**The installer's checksum was overclaiming, and the fix was a paragraph rather than code.** `install.sh` said a checksum mismatch covers "a corrupted or substituted archive". It does not cover substitution: the checksums file arrives from the same server as the archive, so a match proves the download is intact and says nothing about who served it. The signature is what says that, and `minisign` is not installed on most machines — so the script verifies it when it can, says plainly what it did not check when it cannot, and no longer claims the stronger property. An installer that overstates its guarantees is worse than one that states a weaker guarantee accurately, for the same reason a control that does nothing is worse than an absent one.
 
 **A40 corrects A7 rather than replacing it.** A7's finding stands — `git checkout --detach -- $SHA` really does fail, because to git `--` means a pathspec follows — and its correction to §12's `rev-parse` line is untouched, since `rev-parse` accepts the terminator on every version and carries a genuinely attacker-influenced ref. What A7 got wrong was scope: it verified one git version and wrote the result as a rule. **A version-dependent behaviour confirmed on one machine is a fact about that machine.** `latem doctor` already checks git ≥ 2.24 for `--end-of-options` support generally, and that check passed on 2.43 while the specific invocation did not work — a floor that is necessary and not sufficient.
 

@@ -32,6 +32,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # install.sh verifies a release signature when minisign is present, and
+      # test/scripts exercises that path against a real keypair — but only when
+      # the tool is installed, and it skips otherwise. A test that skips on
+      # every runner is not a test, so one of the two platforms carries it.
+      # apt has it; brew would cost a minute on every macOS run for the same
+      # assertion.
+      - name: minisign
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+
       - name: build
         run: go build ./...
 
