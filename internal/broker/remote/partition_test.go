@@ -138,6 +138,7 @@ func TestPartition_TenMinutesMidRunLosesNoLogFrames(t *testing.T) {
 
 			// The partition. The build keeps building.
 			connectsBefore := h.CP.Handshakes()
+			resumesBefore := len(h.CP.Resumes())
 			h.CP.Partition()
 			h.CP.Await(t, "the broker to notice the partition", func() bool { return !h.Connected() })
 
@@ -159,8 +160,16 @@ func TestPartition_TenMinutesMidRunLosesNoLogFrames(t *testing.T) {
 			h.CP.WithholdLogAcks(false)
 			h.CP.SwallowLogs(false)
 			h.CP.Heal()
-			h.CP.Await(t, "the broker to reconnect", func() bool {
-				return h.Connected() && h.CP.Handshakes() > connectsBefore
+			// Awaited on the resume frame, not only on the handshake.
+			// cp.handshakes counts the moment the WebSocket is accepted, which
+			// is before the agent has sent anything over it — so a reconnect is
+			// already visible there while the resume frame this test goes on to
+			// assert about is still in flight. On a loaded runner the partition
+			// takes a dozen or more dial attempts and that window is wide
+			// enough to lose the race.
+			h.CP.Await(t, "the broker to reconnect and resume", func() bool {
+				return h.Connected() && h.CP.Handshakes() > connectsBefore &&
+					len(h.CP.Resumes()) > resumesBefore
 			})
 
 			writeFrames(t, sink, runID, 121, total, "after")
