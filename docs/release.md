@@ -120,7 +120,7 @@ What then runs, in order, with each stage gating the next:
 
 | Job | What it is for |
 |---|---|
-| `gate` | `build`, `vet`, `test -race` against the exact tree being shipped. A tag can be pushed at any commit, including one that never passed `ci.yml` |
+| `gate` | `make check`'s four parts — build, vet, `test -race`, lint — against the exact tree being shipped. A tag can be pushed at any commit, including one that never passed `ci.yml` |
 | `build` | Four targets from one Linux runner, `-trimpath`, `-s -w`, `-X main.version=<tag>`; archives; the sha256 manifest, verified with `sha256sum -c` on the spot |
 | `smoke` | Unpacks the artefact on `macos-latest` and `ubuntu-latest` and runs `version --short`, `init` and `doctor`. `version --short` is not a formality — self-update runs exactly that on a downloaded binary and refuses the release if the answer disagrees |
 | `sign` | minisign over the manifest, then **verification against the committed `trusted.pub`**. That check is what catches an Actions secret holding a key no binary in the release trusts, which is otherwise discovered by an agent, silently, a day later |

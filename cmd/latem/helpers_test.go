@@ -202,8 +202,22 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		newDocker:  (&fakeDocker{}).factory(),
 		newSecrets: (&fakeSecrets{}).factory(),
 		sameFS:     func(string, string) error { return nil },
+		// A machine with room. Every default here describes a healthy host, and
+		// free space was the one that came from the real filesystem instead —
+		// so "a 40 GB floor passes" held on a laptop and failed on every
+		// runner. A test that wants a full disk says so.
+		freeGB: func(context.Context) (float64, error) { return testFreeGB, nil },
+		// Nowhere, unless a test puts a ruby somewhere it controls. The real
+		// list is absolute paths under /opt, which system.ToolAt stats for
+		// real: inheriting them means reading whatever Homebrew this machine
+		// happens to have.
+		kegRubies: []string{filepath.Join(dir, "no", "keg", "ruby")},
 	}
 }
+
+// testFreeGB is comfortably above every runner floor in §14.4, including
+// tart's 200.
+const testFreeGB = 500.0
 
 // findCheck locates a check by ID across every section.
 func findCheck(rep report, id string) (check, bool) {

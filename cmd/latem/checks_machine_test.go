@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -135,8 +138,24 @@ func TestDoctorKVM(t *testing.T) {
 	})
 }
 
+// fakeKeg creates an executable standing in for a keg-only ruby and returns
+// its path. Executable because system.ToolAt requires the mode bit — a
+// zero-length regular file would be reported as absent, and the test would pass
+// for the wrong reason.
+func fakeKeg(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(privateDir(t), "opt", "ruby", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(bin, "ruby")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestDoctorRuby(t *testing.T) {
-	const keg = "/opt/homebrew/opt/ruby/bin/ruby"
 
 	t.Run("modern ruby on PATH", func(t *testing.T) {
 		dir := privateDir(t)
@@ -156,13 +175,23 @@ func TestDoctorRuby(t *testing.T) {
 
 	// The documented trap: macOS ships 2.6 at /usr/bin/ruby, Homebrew's is
 	// keg-only, and `which ruby` after "installing Ruby" still answers 2.6.
+	//
+	// The keg path is one this test creates, not /opt/homebrew/opt/ruby/bin/ruby.
+	// checkRuby finds an off-PATH ruby with system.ToolAt, which stats the real
+	// filesystem — so pointing it at the real Homebrew location made the test
+	// pass on a laptop that has Homebrew's ruby installed and fail on every
+	// machine that does not, which is every CI runner. It read the developer's
+	// machine and reported on it.
 	t.Run("the keg-only trap", func(t *testing.T) {
 		dir := privateDir(t)
+		keg := fakeKeg(t)
+
 		cmds := healthyRunner("darwin")
 		cmds["ruby --version"] = fakeCmd{out: "ruby 2.6.10 (2022-04-12 revision def) [universal.arm64e-darwin25]"}
 		cmds[keg+" --version"] = fakeCmd{out: "ruby 3.4.2 (2026-01-15 revision abc) [arm64-darwin25]"}
 		d := newTestDoctor("darwin", dir, cmds, testConfig(dir), nil)
 		d.sys = newSystemForTest("darwin", dir, cmds, "ruby")
+		d.kegRubies = []string{keg}
 
 		got, bin := d.checkRuby(t.Context())
 		if got.Level != levelWarn {
@@ -173,11 +202,17 @@ func TestDoctorRuby(t *testing.T) {
 		if !strings.Contains(got.Detail, "2.6.10") || !strings.Contains(got.Detail, "3.4.2") {
 			t.Errorf("detail does not name both rubies: %q", got.Detail)
 		}
-		if bin != "/opt/homebrew/opt/ruby/bin" {
-			t.Errorf("bin = %q, want the keg's bin so bundler is probed against the ruby that works", bin)
+		if bin != filepath.Dir(keg) {
+			t.Errorf("bin = %q, want %q so bundler is probed against the ruby that works",
+				bin, filepath.Dir(keg))
 		}
 		if len(got.Fix) == 0 || !strings.Contains(got.Fix[0], "PATH") {
 			t.Errorf("no PATH fix offered: %v", got.Fix)
+		}
+		// And the fix has to name the directory to prepend, not merely mention
+		// PATH: an operator pasting it is the point.
+		if !strings.Contains(got.Fix[0], filepath.Dir(keg)) {
+			t.Errorf("the fix does not name the directory to put on PATH: %q", got.Fix[0])
 		}
 	})
 
@@ -185,6 +220,9 @@ func TestDoctorRuby(t *testing.T) {
 		dir := privateDir(t)
 		d := newTestDoctor("darwin", dir, map[string]fakeCmd{}, testConfig(dir), nil)
 		d.sys = newSystemForTest("darwin", dir, map[string]fakeCmd{}, "nothing")
+		// Nowhere, meaning nowhere — including wherever this machine keeps its
+		// own ruby.
+		d.kegRubies = []string{filepath.Join(privateDir(t), "no", "ruby", "here")}
 
 		got, bin := d.checkRuby(t.Context())
 		if got.Level != levelWarn {
@@ -200,11 +238,17 @@ func TestDoctorRuby(t *testing.T) {
 		}
 	})
 
+	// "Nothing better installed" has to be stated rather than inherited from
+	// whatever the machine running the tests has in /opt. On a laptop with
+	// Homebrew's ruby this subtest passed for the wrong reason — the real file
+	// was found and then produced no parseable version, because the fake exec
+	// had no entry for it.
 	t.Run("too old, with nothing better installed", func(t *testing.T) {
 		dir := privateDir(t)
 		cmds := map[string]fakeCmd{"ruby --version": {out: "ruby 2.6.10 (2022-04-12) [arm64-darwin25]"}}
 		d := newTestDoctor("darwin", dir, cmds, testConfig(dir), nil)
 		d.sys = newSystemForTest("darwin", dir, cmds, "ruby")
+		d.kegRubies = []string{filepath.Join(dir, "no", "keg", "ruby")}
 
 		got, _ := d.checkRuby(t.Context())
 		if got.Level != levelWarn {
@@ -299,5 +343,56 @@ func TestDoctorBroker_SkipsWhenThereIsNothingToCompareAgainst(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Detail, "no remote broker") {
 		t.Errorf("detail = %q", got[0].Detail)
+	}
+}
+
+// A disk below a runner's floor, which is the state this check exists for and
+// the one nothing could assert until free space became injectable. The old
+// tests could only check that a floor *passed* — which is a statement about the
+// machine running them, and is why they passed on a laptop and failed on a CI
+// runner with 11.6 GB.
+func TestDoctorDisk_BelowTheFloor(t *testing.T) {
+	dir := privateDir(t)
+	d := newTestDoctor("linux", dir, healthyRunner("linux"), testConfig(dir), nil)
+	d.freeGB = func(context.Context) (float64, error) { return 3.2, nil }
+
+	var seen bool
+	for _, c := range d.checkDisk(context.Background()) {
+		if !strings.HasPrefix(c.ID, "disk.free.") {
+			continue
+		}
+		seen = true
+		if c.Level != levelFail {
+			t.Errorf("%s is %v on a disk with 3.2 GB free: %q", c.ID, c.Level, c.Detail)
+		}
+		// Both numbers, because "low disk" without the floor leaves the
+		// operator guessing how much they have to free.
+		if !strings.Contains(c.Detail, "3.2") || !strings.Contains(c.Detail, "40") {
+			t.Errorf("%s does not name what is free and what is required: %q", c.ID, c.Detail)
+		}
+		if len(c.Fix) == 0 || !strings.Contains(c.Fix[0], "cache prune") {
+			t.Errorf("%s offers no way to reclaim space: %v", c.ID, c.Fix)
+		}
+	}
+	if !seen {
+		t.Fatal("checkDisk reported no per-runner check at all")
+	}
+}
+
+// And the probe failing, which is neither pass nor fail of a floor: an
+// unreadable filesystem must be reported rather than defaulted to roomy.
+func TestDoctorDisk_AnUnreadableFilesystemIsNotHealthy(t *testing.T) {
+	dir := privateDir(t)
+	d := newTestDoctor("linux", dir, healthyRunner("linux"), testConfig(dir), nil)
+	d.freeGB = func(context.Context) (float64, error) {
+		return 0, errors.New("statfs: permission denied")
+	}
+
+	rep := d.checkDisk(context.Background())
+	if len(rep) != 1 || rep[0].Level != levelFail {
+		t.Fatalf("an unreadable filesystem gave %d check(s), first %v", len(rep), rep[0].Level)
+	}
+	if !strings.Contains(rep[0].Detail, "permission denied") {
+		t.Errorf("the failure does not carry the reason: %q", rep[0].Detail)
 	}
 }

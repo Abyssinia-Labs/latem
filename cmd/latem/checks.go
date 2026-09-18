@@ -85,6 +85,24 @@ type doctor struct {
 	// cannot open, and one that works — and none of the three can be arranged
 	// on the machine running the tests.
 	kvm func() system.KVM
+	// freeGB is how much room the config directory's filesystem has.
+	//
+	// Injectable for the reason every probe here is: the states worth checking
+	// are a disk above a runner's floor and one below it, and a test cannot
+	// arrange either — it gets whatever the machine running it has. Asserting
+	// that a 40 GB floor passes is asserting that the test machine has 40 GB
+	// free, which a developer's laptop does and a CI runner does not.
+	freeGB func(context.Context) (float64, error)
+	// kegRubies is [kegOnlyRubies], overridable.
+	//
+	// It is a list of absolute paths that [system.System.ToolAt] stats on the
+	// real filesystem, which made the keg-only case untestable in the way that
+	// matters: the test passed on a laptop with Homebrew's ruby installed at
+	// /opt/homebrew/opt/ruby/bin/ruby and failed on every CI runner, because
+	// it was reading the developer's machine rather than a fixture. A test that
+	// asserts on what the host happens to have is a test that reports on the
+	// host.
+	kegRubies []string
 }
 
 func newDoctor() *doctor {
@@ -434,7 +452,11 @@ func (d *doctor) checkDisk(ctx context.Context) []check {
 		return []check{fail("disk.free", "free disk", err.Error())}
 	}
 
-	free, err := mgr.FreeGB(ctx)
+	freeGB := mgr.FreeGB
+	if d.freeGB != nil {
+		freeGB = d.freeGB
+	}
+	free, err := freeGB(ctx)
 	if err != nil {
 		return []check{fail("disk.free", "free disk", err.Error())}
 	}
@@ -1112,7 +1134,7 @@ func (d *doctor) checkRuby(ctx context.Context) (check, string) {
 	// A usable Ruby off PATH is the common state and the confusing one, so
 	// look for it before reporting on whatever PATH resolved.
 	var kegPath, kegBanner string
-	for _, p := range kegOnlyRubies {
+	for _, p := range d.kegPaths() {
 		if t := d.sys.ToolAt(ctx, p, "--version"); t.Found && t.Version.AtLeast(rubyMinimum[0], rubyMinimum[1], rubyMinimum[2]) {
 			kegPath, kegBanner = p, t.Banner
 			break
@@ -1149,6 +1171,14 @@ func (d *doctor) checkRuby(ctx context.Context) (check, string) {
 			rb.Banner+" — too old; fastlane needs "+fmt.Sprintf("%d.%d+", rubyMinimum[0], rubyMinimum[1]),
 			"brew install ruby"), ""
 	}
+}
+
+// kegPaths is where a usable off-PATH ruby might be.
+func (d *doctor) kegPaths() []string {
+	if d.kegRubies != nil {
+		return d.kegRubies
+	}
+	return kegOnlyRubies
 }
 
 // checkBundler probes bundler belonging to the Ruby a step will actually use,

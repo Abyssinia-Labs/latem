@@ -63,9 +63,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # minisign, for the same reason ci.yml installs it: test/scripts
+      # exercises install.sh's signature path only when the tool is present.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq minisign
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # The gate is `make check`, and `make check` includes lint. Running three
+      # of its four parts here and calling it the gate would be the kind of
+      # approximation this file exists to avoid.
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
 
   build:
     needs: gate
