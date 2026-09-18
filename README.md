@@ -89,19 +89,20 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 Never as root. The script detects your OS and architecture, verifies the
 download, installs to `~/.local/bin`, and runs `latem doctor`.
 
-**The current release is v0.1.1, and this repository is private**, so that line
+**The current release is v0.1.2, and this repository is private**, so that line
 returns 404 today — for the script itself, for the release assets, and for
 anything else anonymous. It is one line and it works; there is simply nobody it
 works *for* until the repository is public. With a token,
-`gh release download v0.1.1` gets the same archives, and their signature is
+`gh release download v0.1.2` gets the same archives, and their signature is
 checked the same way (below).
 
-**Take v0.1.1 rather than v0.1.0 even though both are tagged.** A multi-line
-secret held in the macOS Keychain — an App Store Connect `.p8` above all —
-resolved to hex rather than to a key on v0.1.0, silently, with `doctor`
-reporting it `[ ok ]` and the failure arriving much later as a 401 from
-`fastlane pilot upload`. [Where secret values live](#where-secret-values-live)
-has the detail.
+**Do not take v0.1.0.** A multi-line secret held in the macOS Keychain — an App
+Store Connect `.p8` above all — resolved to hex rather than to a key on that
+release, silently, with `doctor` reporting it `[ ok ]` and the failure arriving
+much later as a 401 from `fastlane pilot upload`.
+[Where secret values live](#where-secret-values-live) has the detail. v0.1.1
+fixed it; v0.1.2 adds a release's worth of corrections to what `doctor` and the
+run log tell you, and changes nothing about how a build runs.
 
 Otherwise, build from source with Go 1.25 or newer:
 
@@ -581,7 +582,7 @@ are green.
 
 Not built, and honestly named:
 
-- **A public release.** v0.1.0 and v0.1.1 **are** tagged, and the signed
+- **A public release.** v0.1.0, v0.1.1 and v0.1.2 **are** tagged, and the signed
   archives are on them — the pipeline, the signing key (`D73938C642AD64D3`,
   which `latem version` reports), and the verification the installer and the
   agent both perform are all in place and exercised. What has not happened is
