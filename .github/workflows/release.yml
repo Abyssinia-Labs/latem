@@ -417,6 +417,22 @@ jobs:
           sed -i "s|__REPO__|${GITHUB_REPOSITORY}|g; s|__BARE__|${BARE}|g; \
                   s|__PUBKEY__|${pubkey}|g; s|__PUBKEY_ID__|${keyid}|g" "$notes"
 
+          # An optional per-release note, prepended when it exists. The block
+          # above says how to install and verify a release and is identical
+          # every time; --generate-notes adds a commit list. Neither says what
+          # changed and why it matters, and a release that alters behaviour an
+          # operator relies on owes them a sentence from a person. This is
+          # where it goes, and its absence is not an error: most releases do
+          # not need one.
+          human="docs/release-notes/${VERSION}.md"
+          if [ -f "$human" ]; then
+            combined="$(mktemp)"
+            cat "$human" > "$combined"
+            printf '\n' >> "$combined"
+            cat "$notes" >> "$combined"
+            notes="$combined"
+          fi
+
           gh release create "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$VERSION" \

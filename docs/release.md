@@ -120,6 +120,20 @@ binary executes on macOS at all.
 
 ## 4. Cutting one
 
+If this release changes behaviour somebody relies on, **write the note first**,
+at `docs/release-notes/<tag>.md`, and commit it before the tag:
+
+```bash
+$EDITOR docs/release-notes/v0.1.1.md
+```
+
+`publish` prepends that file to the notes when it exists, ahead of the install
+and verification block, and its absence is not an error — most releases do not
+need one. The block below it is identical every release and `--generate-notes`
+adds a commit list; neither says what changed or why it matters. Say plainly
+whether an operator on the previous version is affected and what they have to do
+about it, because that is the sentence they came to the page for.
+
 ```bash
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
