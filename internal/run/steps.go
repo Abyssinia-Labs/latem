@@ -32,13 +32,34 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 
 		out := x.runStep(ctx, s, label, budget)
 
-		x.note("step %d/%d: %s finished in %s", i+1, total, label,
-			x.o.now().Sub(start).Round(time.Millisecond))
+		x.note("step %d/%d: %s %s", i+1, total, label,
+			stepEnding(out, x.o.now().Sub(start).Round(time.Millisecond)))
 		if !out.ok() {
 			return out
 		}
 	}
 	return outcome{state: protocol.StateSucceeded}
+}
+
+// stepEnding words the step's closing line according to how it ended.
+//
+// Every step used to close with "finished in 3.854s", including one that was
+// killed. In a long job that line is what an operator reads to find where the
+// run stopped, and for a cancel or a timeout it said the opposite of what
+// happened: the run-level line below reported "cancelled", while the step above
+// it claimed to have finished, and the duration was time spent waiting to die.
+//
+// A non-zero exit still reads "finished", because it did: the process ran to
+// completion and chose its status. Only a killed step is worded differently,
+// which is the distinction this line was flattening.
+func stepEnding(out outcome, d time.Duration) string {
+	switch out.state {
+	case protocol.StateCancelled:
+		return fmt.Sprintf("cancelled after %s", d)
+	case protocol.StateTimedOut:
+		return fmt.Sprintf("timed out after %s", d)
+	}
+	return fmt.Sprintf("finished in %s", d)
 }
 
 // checkBudget refuses to start a step the job has no time left for. Without it
