@@ -137,7 +137,7 @@ What then runs, in order, with each stage gating the next:
 |---|---|
 | `gate` | `make check`'s four parts — build, vet, `test -race`, lint — against the exact tree being shipped. A tag can be pushed at any commit, including one that never passed `ci.yml` |
 | `build` | Four targets from one Linux runner, `-trimpath`, `-s -w`, `-X main.version=<tag>`; archives; the sha256 manifest, verified with `sha256sum -c` on the spot |
-| `smoke` | Unpacks the artefact on `macos-latest` and `ubuntu-latest` and runs `version --short`, `init` and `doctor`. `version --short` is not a formality — self-update runs exactly that on a downloaded binary and refuses the release if the answer disagrees |
+| `smoke` | Unpacks the artefact on a real Mac and a real Linux box and runs `version --short`, `init` and `doctor`. It reads the platform off `uname` and prints which archive it opened. `version --short` is not a formality — self-update runs exactly that on a downloaded binary and refuses the release if the answer disagrees |
 | `sign` | minisign over the manifest, then **verification against the committed `trusted.pub`**. That check is what catches an Actions secret holding a key no binary in the release trusts, which is otherwise discovered by an agent, silently, a day later |
 | `publish` | `gh release create` with all six assets and notes |
 
@@ -178,10 +178,11 @@ Stated rather than left to be discovered:
   Gatekeeper to approve a double-click. Notarizing a CLI needs a Developer ID
   certificate in CI and is worth doing the first time someone installs by
   double-clicking rather than by `curl | sh`.
-- **`darwin/amd64` and `linux/arm64` are published untested.** The smoke job
-  covers `darwin/arm64` and `linux/amd64`, which are what `macos-latest` and
-  `ubuntu-latest` are. Adding the other two means runners this repository's
-  plan does not have.
+- **Two of the four archives are published untested.** The smoke job covers
+  whatever its two runners turn out to be — one macOS, one Linux, printed in
+  the log — which in practice is `darwin/arm64` and `linux/amd64`. Covering the
+  other two means runners of those architectures, which this repository does
+  not currently have.
 - **`install.sh` resolves `latest` through `api.github.com`**, which is
   rate-limited by IP at 60 requests an hour unauthenticated. A machine behind a
   shared NAT can exhaust that without having run the script, and

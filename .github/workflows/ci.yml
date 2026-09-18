@@ -38,8 +38,14 @@ jobs:
       # every runner is not a test, so one of the two platforms carries it.
       # apt has it; brew would cost a minute on every macOS run for the same
       # assertion.
+      #
+      # Keyed on runner.os rather than on the matrix label. The label version
+      # of this condition stopped matching the moment the runners moved to
+      # another provider, and the failure was silent in the worst way: the step
+      # was skipped, minisign was absent, and the tests it exists for went back
+      # to reporting themselves as skipped on every platform.
       - name: minisign
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq minisign

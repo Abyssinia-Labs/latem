@@ -65,6 +65,7 @@ jobs:
           cache: true
       # minisign, for the same reason ci.yml installs it: test/scripts
       # exercises install.sh's signature path only when the tool is present.
+      # Unconditional here because this job has one runner and it is Linux.
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq minisign
       - run: go build ./...
       - run: go vet ./...
@@ -182,23 +183,22 @@ jobs:
   # perfectly signed binary the target platform refuses to execute, and no
   # amount of checksumming would notice. So a real machine runs it.
   #
-  # macos-latest is arm64 and ubuntu-latest is amd64, which covers the two
-  # platforms anyone is installing on today. darwin/amd64 and linux/arm64 are
-  # published untested by this job, and that is a stated gap rather than an
-  # oversight — GitHub's arm64 Linux and Intel macOS runners are not on this
-  # repository's plan.
+  # One macOS runner and one Linux runner, which between them cover the two
+  # platforms anyone is installing on today. The other two archives ship
+  # untested by this job; that is a stated gap rather than an oversight, and the
+  # step below prints which one it actually exercised so the gap is visible in
+  # the log rather than only here.
+  #
+  # The architecture is read off the runner rather than written in this matrix.
+  # It was hardcoded once, and the assumption did not survive the runners being
+  # swapped to a different provider: a label is a promise about a machine, and
+  # `uname -m` is the machine.
   smoke:
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: blacksmith-6vcpu-macos-15
-            goos: darwin
-            goarch: arm64
-          - os: blacksmith-4vcpu-ubuntu-2404
-            goos: linux
-            goarch: amd64
+        os: [blacksmith-6vcpu-macos-15, blacksmith-4vcpu-ubuntu-2404]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/download-artifact@v4
@@ -212,7 +212,20 @@ jobs:
           BARE: ${{ needs.build.outputs.bare }}
         run: |
           set -euo pipefail
-          tar -xzf "dist/latem_${BARE}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" -C dist
+          case "$(uname -s)" in
+            Darwin) os=darwin ;;
+            Linux)  os=linux ;;
+            *) echo "::error::unexpected runner OS $(uname -s)" >&2; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            arm64 | aarch64) arch=arm64 ;;
+            x86_64 | amd64)  arch=amd64 ;;
+            *) echo "::error::unexpected runner arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          # Named in the log, because "the smoke job passed" is worth nothing
+          # without knowing which of the four archives it opened.
+          echo "==> smoke-testing ${os}/${arch} on $(uname -srm)"
+          tar -xzf "dist/latem_${BARE}_${os}_${arch}.tar.gz" -C dist
           chmod +x dist/latem
 
           # `version --short` is not a formality: internal/selfupdate runs
