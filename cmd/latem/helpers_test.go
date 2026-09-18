@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
@@ -275,4 +277,33 @@ const localeProbe = "env LANG=en_US.UTF-8 bash -lc " +
 // localeAnswer builds one canned answer for that probe.
 func localeAnswer(lang, lcAll, charmap string) fakeCmd {
 	return fakeCmd{out: lang + "\t" + lcAll + "\t" + charmap + "\n"}
+}
+
+// newSystemForTestEnv is [newSystemForTest] with an environment.
+//
+// Separate rather than variadic because most checks do not read the
+// environment at all, and the ones that do — ANDROID_HOME, JAVA_HOME — are the
+// ones whose interesting states are "set and wrong" rather than "absent".
+func newSystemForTestEnv(goos, home string, cmds map[string]fakeCmd, env map[string]string) *system.System {
+	return system.New(system.Options{
+		GOOS:     goos,
+		GOARCH:   "arm64",
+		Home:     home,
+		User:     "tester",
+		Run:      newFakeRunner(cmds).run,
+		LookPath: fakePath("git", "docker", "java", "keytool"),
+		Getenv:   func(k string) string { return env[k] },
+		Getuid:   func() int { return 501 },
+	})
+}
+
+// mkdirs builds a nested directory under root and returns the path to the
+// first segment, which is what an ANDROID_HOME points at.
+func mkdirs(t *testing.T, root string, segments ...string) string {
+	t.Helper()
+	full := filepath.Join(append([]string{root}, segments...)...)
+	if err := os.MkdirAll(full, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(root, segments[0])
 }
