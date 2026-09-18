@@ -250,12 +250,15 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 	if s.IsMacOS() {
 		out, err := s.Exec(ctx, "launchctl", "print", s.guiDomain()+"/"+ServiceLabel)
 		if err != nil {
+			// On failure launchctl says one useful sentence — "Could not find
+			// service" — so its first line is the whole answer. On success the
+			// first line is the opening of a brace block; see launchdDetail.
 			st.Detail = firstLine(out)
 			return st, nil
 		}
 		st.Loaded = true
-		st.Detail = firstLine(out)
 		text := string(out)
+		st.Detail = launchdDetail(text)
 		// launchctl prints "state = running" for a live job and "state = not
 		// running" for one that is loaded and stopped. The negative form
 		// contains the positive, so order matters.
@@ -269,4 +272,39 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 	st.Loaded = state != "" && state != "inactive" || st.Installed
 	st.Running = state == "active"
 	return st, nil
+}
+
+// launchdDetail summarises `launchctl print` for the one line `latem service
+// status` has room for.
+//
+// Its first line is "gui/501/com.latem.agent = {" — the opening of a brace
+// block — so reporting it produced a dangling brace and no content, on the last
+// line of the command the README tells an operator to trust before building.
+// What is worth saying is inside the block: the state, the pid of a live agent,
+// and the last exit status of one that is not.
+func launchdDetail(text string) string {
+	field := func(name string) string {
+		for _, line := range strings.Split(text, "\n") {
+			key, value, found := strings.Cut(line, "=")
+			if found && strings.TrimSpace(key) == name {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+
+	state := field("state")
+	if state == "" {
+		// A format we do not recognise. The raw first line is no worse than
+		// nothing and keeps the field honest rather than empty.
+		return firstLine([]byte(text))
+	}
+
+	parts := []string{"state = " + state}
+	if pid := field("pid"); pid != "" {
+		parts = append(parts, "pid "+pid)
+	} else if code := field("last exit code"); code != "" {
+		parts = append(parts, "last exit code "+code)
+	}
+	return strings.Join(parts, ", ")
 }
