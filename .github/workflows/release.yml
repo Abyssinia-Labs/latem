@@ -56,10 +56,10 @@ jobs:
   gate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -73,7 +73,7 @@ jobs:
       # The gate is `make check`, and `make check` includes lint. Running three
       # of its four parts here and calling it the gate would be the kind of
       # approximation this file exists to avoid.
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
 
@@ -84,11 +84,11 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       bare: ${{ steps.version.outputs.bare }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -172,7 +172,7 @@ jobs:
           sha256sum -c "latem_${BARE}_checksums.txt"
           cat "latem_${BARE}_checksums.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist
           path: dist/
@@ -201,7 +201,7 @@ jobs:
         os: [blacksmith-6vcpu-macos-15, blacksmith-4vcpu-ubuntu-2404]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist
@@ -267,12 +267,12 @@ jobs:
     if: github.event_name == 'push'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # The tag's own trusted.pub, which is the file the binaries in this
           # release embed. main's copy could already have been rotated.
           ref: ${{ github.ref }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist
@@ -345,7 +345,7 @@ jobs:
             -m "dist/latem_${BARE}_checksums.txt" \
             -x "dist/latem_${BARE}_checksums.txt.minisig"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: signature
           path: dist/*.minisig
@@ -362,14 +362,14 @@ jobs:
       # release page has a tarball, not a checkout, so notes that told them to
       # read a repository-relative file would be telling them to run a command
       # they cannot run.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: signature
           path: dist
