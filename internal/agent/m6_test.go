@@ -237,10 +237,22 @@ func TestM6_AnUnreachableControlPlaneDoesNotFailARun(t *testing.T) {
 	}
 
 	db := openStore(t, cfg)
+
+	// Waited for rather than read once: a run reaches a terminal state the
+	// moment the transition is persisted, and §16's local sink is still
+	// batching behind it (100 frames or 250ms, whichever comes first). The two
+	// are independent, so reading the resume point straight after waitState
+	// asks the question in the window before the last batch lands.
+	//
+	// Measured rather than theorised: one failure in eight runs of this
+	// package with three other test binaries competing for the machine — the
+	// log line "run finished" was timestamped 177ms *after* the assertion that
+	// had already failed. It passes every time on an idle machine, which is
+	// the shape of flake that survives because nobody can reproduce it.
+	waitFor(t, "the local transport to acknowledge the frames the build printed", 60*time.Second, func() bool {
+		return mustAcked(t, db, store.BrokerLocal, runID) >= 25
+	})
 	local := mustAcked(t, db, store.BrokerLocal, runID)
-	if local < 25 {
-		t.Errorf("the local transport acknowledged %d frames, want at least the 25 the build printed", local)
-	}
 	if remote := mustAcked(t, db, store.BrokerRemote, runID); remote != 0 {
 		t.Errorf("the remote transport's resume point is %d for a control plane it never reached; on the next connection %d frames would be skipped",
 			remote, remote)
