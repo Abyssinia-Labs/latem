@@ -80,6 +80,11 @@ type doctor struct {
 	// wall clock to be covered by a test.
 	newAppStore func() *appstore.Client
 	clock       func() time.Time
+	// kvm is injectable for the same reason as the rest: the states worth
+	// checking are a host with no /dev/kvm, one whose device the agent's user
+	// cannot open, and one that works — and none of the three can be arranged
+	// on the machine running the tests.
+	kvm func() system.KVM
 }
 
 func newDoctor() *doctor {
@@ -103,6 +108,7 @@ func newDoctor() *doctor {
 			return secrets.New(opts)
 		},
 		newAppStore: func() *appstore.Client { return &appstore.Client{} },
+		kvm:         system.CheckKVM,
 		sameFS:      source.CheckSameFilesystem,
 	}
 }
@@ -266,7 +272,11 @@ func (d *doctor) checkTart(ctx context.Context) check {
 }
 
 func (d *doctor) checkKVM() check {
-	k := system.CheckKVM()
+	probe := d.kvm
+	if probe == nil {
+		probe = system.CheckKVM
+	}
+	k := probe()
 	switch {
 	case k.Err != nil:
 		return warn("kvm.device", "/dev/kvm", "could not be inspected: "+k.Err.Error())
