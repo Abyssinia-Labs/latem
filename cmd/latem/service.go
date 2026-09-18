@@ -34,7 +34,8 @@ is enabled, and FileVault is either off or the operator knows what it costs.`,
 		Args: noArgs,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
-	cmd.AddCommand(newServiceInstallCommand(), newServiceUninstallCommand(), newServiceStatusCommand())
+	cmd.AddCommand(newServiceInstallCommand(), newServiceUninstallCommand(),
+		newServiceRestartCommand(), newServiceStatusCommand())
 	return cmd
 }
 
@@ -123,6 +124,33 @@ than of this service, and turning it off could stop somebody else's unit.`,
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be done without doing it")
 	return cmd
+}
+
+func newServiceRestartCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart",
+		Short: "Restart the agent so it re-reads config.toml",
+		Long: `Restart the agent so it re-reads config.toml.
+
+The agent loads its configuration once, when it starts, because a bad config
+has to be fatal at load rather than forty minutes into somebody's build (§8).
+The cost is that editing config.toml does nothing until the agent restarts —
+adding a repo by hand and then running it fails with E_UNKNOWN_REPO, on a
+machine where "latem doctor" has already read the file and called it good.
+
+This is the command for that. It restarts the running service and nothing
+else: the plist or unit on disk is untouched, so it cannot repair a broken
+installation. Use "latem service install" for that.
+
+In-flight runs are not drained first — this is a restart, not a shutdown.`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sys := system.New(system.Options{})
+			rep, err := sys.RestartService(cmd.Context())
+			printServiceReport(cmd.OutOrStdout(), rep, false)
+			return err
+		},
+	}
 }
 
 func newServiceStatusCommand() *cobra.Command {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -190,6 +191,47 @@ func (s *System) registerSteps(path string, spec ServiceSpec, opts InstallOption
 	return steps
 }
 
+// RestartService restarts an installed agent so that it re-reads config.toml.
+//
+// The agent loads its configuration once, at start, because RUNNER_SPEC §8
+// makes a bad config fatal there rather than mid-run. The cost of that choice
+// is that an edit does nothing until the agent is restarted, and before this
+// existed the only way to do it was `launchctl kickstart -k` — reaching past
+// latem to the service manager, on a machine where `latem doctor` had already
+// said the new configuration was fine.
+//
+// It does not reinstall: the plist or unit on disk is left alone, so this
+// cannot repair a broken installation and does not pretend to.
+func (s *System) RestartService(ctx context.Context) (ServiceReport, error) {
+	rep := ServiceReport{}
+
+	st, err := s.ServiceStatus(ctx)
+	if err != nil {
+		return rep, err
+	}
+	if !st.Installed {
+		return rep, fmt.Errorf("system: no agent service is installed; `latem service install` first")
+	}
+	rep.Path = st.Path
+
+	var steps []Step
+	if s.IsMacOS() {
+		domain := s.guiDomain()
+		steps = []Step{
+			{Desc: "restart the agent", Argv: []string{"launchctl", "kickstart", "-k", domain + "/" + ServiceLabel}},
+		}
+	} else {
+		steps = []Step{
+			{Desc: "restart the service", Argv: []string{"systemctl", "--user", "restart", SystemdUnitName}},
+		}
+	}
+
+	for _, step := range steps {
+		rep.Steps = append(rep.Steps, s.runStep(ctx, step))
+	}
+	return rep, rep.Err()
+}
+
 func (s *System) deregisterSteps(path string) []Step {
 	if s.IsMacOS() {
 		domain := s.guiDomain()
@@ -230,6 +272,11 @@ type ServiceState struct {
 	Running bool
 	// Detail is the service manager's own words, for display.
 	Detail string
+	// PID is the agent process, or 0 when the service manager did not name
+	// one. It is what lets a caller ask the operating system about the
+	// process — when it started, above all — without the agent having to
+	// publish anything.
+	PID int
 }
 
 // ServiceStatus reports on the installed service.
@@ -259,6 +306,7 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 		st.Loaded = true
 		text := string(out)
 		st.Detail = launchdDetail(text)
+		st.PID = launchdField(text, "pid")
 		// launchctl prints "state = running" for a live job and "state = not
 		// running" for one that is loaded and stopped. The negative form
 		// contains the positive, so order matters.
@@ -271,7 +319,30 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 	st.Detail = state
 	st.Loaded = state != "" && state != "inactive" || st.Installed
 	st.Running = state == "active"
+	if st.Running {
+		if pidOut, perr := s.Exec(ctx, "systemctl", "--user", "show", "-p", "MainPID", "--value", SystemdUnitName); perr == nil {
+			if n, cerr := strconv.Atoi(firstLine(pidOut)); cerr == nil {
+				st.PID = n
+			}
+		}
+	}
 	return st, nil
+}
+
+// launchdField returns a numeric field from `launchctl print` output, or 0.
+func launchdField(text, name string) int {
+	for _, line := range strings.Split(text, "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(key) != name {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
 
 // launchdDetail summarises `launchctl print` for the one line `latem service

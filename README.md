@@ -450,6 +450,19 @@ latem: r_… rejected (E_INVALID_REF): ref "refs/heads/feature/x" is outside all
 and its `--force` flag *overwrites* the file rather than merging into it — it
 would drop the repos already there. `latem doctor` validates what you added.
 
+**Then restart the agent**, or the edit does nothing:
+
+```console
+$ latem service restart
+```
+
+The agent reads `config.toml` once, when it starts, because a bad config has to
+be fatal at load rather than forty minutes into somebody's build. Until it
+restarts it is running what it loaded, so a repo you have just added — and that
+`doctor` has just called `[ ok ]`, because `doctor` reads the file — is still
+`E_UNKNOWN_REPO` to a run. `doctor` warns when the file is newer than the
+agent.
+
 Every rule is validated at load and fatal there: a runner that starts on a
 broken config does not fail at startup, it fails forty minutes into somebody's
 build. Disk floors are per runner — 40 GB for docker, 60 for native, 200 for
@@ -518,7 +531,7 @@ latem approve <run-id>               Local only; pins that run's commit (INV-5)
 latem register --url U --token T
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
-latem service install [--print] | uninstall | status
+latem service install [--print] | uninstall | restart | status
 latem version
 ```
 

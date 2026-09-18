@@ -9,10 +9,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
 // TestDoctorNamesEveryFaultOnABrokenMachine is the acceptance criterion from
@@ -939,4 +941,99 @@ func TestSecretsBackendErrorCarriesDiagnostic(t *testing.T) {
 	if !strings.Contains(strings.Join(x.Notes, " "), "not currently signed in") {
 		t.Errorf("the backend's diagnostic was dropped: %+v", x)
 	}
+}
+
+// TestDoctorConfigLoadedByAgent is finding 7 of the M7 acceptance test.
+//
+// `doctor` read config.toml while the agent ran on what it had loaded at
+// start, so adding a repo by hand produced a green `[ ok ] repo / <name>`
+// followed immediately by a run rejected E_UNKNOWN_REPO. A diagnostic whose
+// purpose is catching drift before a run does must not be blind to drift in
+// latem's own state.
+func TestDoctorConfigLoadedByAgent(t *testing.T) {
+	// `ps -o lstart=` for the pid launchctl reports, in the format both
+	// platforms print.
+	psKey := "ps -o lstart= -p 2566"
+
+	newDoctor := func(t *testing.T, cmds map[string]fakeCmd, configModTime time.Time) *doctor {
+		t.Helper()
+		dir := privateDir(t)
+		cfg := testConfig(dir)
+		if err := os.WriteFile(cfg.Paths.File, []byte("# config\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(cfg.Paths.File, configModTime, configModTime); err != nil {
+			t.Fatal(err)
+		}
+		d := newTestDoctor("darwin", dir, cmds, cfg, nil)
+		d.file = cfg.Paths.File
+		return d
+	}
+
+	// The plist only has to exist for ServiceStatus to report Installed; its
+	// contents are launchd's business and this check never reads them.
+	installed := func(t *testing.T, dir string) {
+		t.Helper()
+		path := system.LaunchAgentPath(dir)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("<plist/>"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	agentStarted := time.Now().Add(-1 * time.Hour)
+	psOut := agentStarted.Format("Mon Jan  2 15:04:05 2006")
+
+	t.Run("config edited after the agent started", func(t *testing.T) {
+		cmds := healthyRunner("darwin")
+		cmds["launchctl print gui/501/com.latem.agent"] = fakeCmd{
+			out: "com.latem.agent = {\n\tstate = running\n\tpid = 2566\n}\n"}
+		cmds[psKey] = fakeCmd{out: psOut}
+		d := newDoctor(t, cmds, time.Now()) // edited just now, an hour after start
+		installed(t, d.dir)
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil {
+			t.Fatal("no config.loaded check")
+		}
+		if got.Level != levelWarn {
+			t.Errorf("level = %v, want a warning; detail = %q", got.Level, got.Detail)
+		}
+		if !strings.Contains(strings.Join(got.Fix, " "), "latem service restart") {
+			t.Errorf("fix = %q, want it to name `latem service restart`", got.Fix)
+		}
+	})
+
+	t.Run("agent started after the last edit", func(t *testing.T) {
+		cmds := healthyRunner("darwin")
+		cmds["launchctl print gui/501/com.latem.agent"] = fakeCmd{
+			out: "com.latem.agent = {\n\tstate = running\n\tpid = 2566\n}\n"}
+		cmds[psKey] = fakeCmd{out: psOut}
+		d := newDoctor(t, cmds, agentStarted.Add(-10*time.Minute))
+		installed(t, d.dir)
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelPass {
+			t.Errorf("check = %+v, want a pass", got)
+		}
+	})
+
+	t.Run("no service installed is not a finding", func(t *testing.T) {
+		d := newDoctor(t, healthyRunner("darwin"), time.Now())
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelSkip {
+			t.Errorf("check = %+v, want a skip", got)
+		}
+	})
+}
+
+func checkByID(checks []check, id string) *check {
+	for i := range checks {
+		if checks[i].ID == id {
+			return &checks[i]
+		}
+	}
+	return nil
 }

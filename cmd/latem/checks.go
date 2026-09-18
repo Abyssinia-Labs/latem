@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -322,7 +323,7 @@ func (d *doctor) checkKVM() check {
 
 // ---------------------------------------------------------- configuration
 
-func (d *doctor) checkConfiguration(_ context.Context) []check {
+func (d *doctor) checkConfiguration(ctx context.Context) []check {
 	var out []check
 
 	if d.cfgErr != nil {
@@ -341,12 +342,89 @@ func (d *doctor) checkConfiguration(_ context.Context) []check {
 			fmt.Sprintf("%s — %d repo(s), %d runner(s)", d.file, len(d.cfg.Repos), len(d.cfg.Runners))))
 	}
 
+	out = append(out, d.checkConfigLoadedByAgent(ctx))
 	out = append(out, d.checkModes()...)
 	out = append(out, d.checkMetricsAddr())
 	if c, ok := d.checkWorkDirLocation(); ok {
 		out = append(out, c)
 	}
 	return out
+}
+
+// checkConfigLoadedByAgent reports a config.toml the running agent has not read.
+//
+// The agent loads its configuration once, at start, because §8 makes a bad one
+// fatal there rather than mid-run. The cost is that an edit does nothing until
+// a restart — and until this check existed, `doctor` reported on the file while
+// the agent ran on what it had loaded, so adding a repo by hand gave a green
+// `[ ok ] repo / <name>` followed immediately by a run rejected with
+// E_UNKNOWN_REPO.
+//
+// That is the worst shape a diagnostic can take. `doctor` exists to catch drift
+// before a run does, and this was drift in latem's own state, which `doctor` is
+// better placed to see than anything else on the machine.
+//
+// The comparison is the config's mtime against the agent process's start time,
+// because those are both knowable without asking the agent anything: the health
+// the agent reports over the socket carries runners, not repos, so it cannot
+// answer "is this the file you read?" today.
+func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
+	const id, title = "config.loaded", "config reloaded"
+
+	info, err := os.Stat(d.file)
+	if err != nil {
+		return skip(id, title, "config.toml not readable")
+	}
+
+	st, err := d.sys.ServiceStatus(ctx)
+	switch {
+	case err != nil:
+		return skip(id, title, "could not read the service state")
+	case !st.Installed:
+		return skip(id, title, "no agent service installed; nothing is holding an older config")
+	case !st.Running:
+		return skip(id, title, "the agent is not running; it will read this config when it starts")
+	}
+
+	started, ok := d.agentStartTime(ctx, st)
+	if !ok {
+		return skip(id, title, "could not determine when the agent started")
+	}
+	if info.ModTime().After(started) {
+		return warn(id, title,
+			fmt.Sprintf("config.toml was modified %s after the agent started; the agent is running the configuration it loaded at %s",
+				info.ModTime().Sub(started).Round(time.Second), started.Format("15:04:05")),
+			"latem service restart").
+			withNotes("Everything this command reports about the configuration is read from the " +
+				"file, not from the agent. Until it restarts, a repo added here is still " +
+				"E_UNKNOWN_REPO to a run.")
+	}
+	return pass(id, title, "the agent started after the last change to config.toml")
+}
+
+// agentStartTime asks the operating system when the agent's process began.
+//
+// From the pid the service manager reports, because the agent does not publish
+// its start time anywhere a local caller can reach without the metrics endpoint,
+// which is optional and off on some machines.
+func (d *doctor) agentStartTime(ctx context.Context, st system.ServiceState) (time.Time, bool) {
+	if st.PID <= 0 {
+		return time.Time{}, false
+	}
+	out, err := d.sys.Exec(ctx, "ps", "-o", "lstart=", "-p", strconv.Itoa(st.PID))
+	if err != nil {
+		return time.Time{}, false
+	}
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return time.Time{}, false
+	}
+	// `ps -o lstart=` is the one format both macOS and Linux print here.
+	t, err := time.ParseInLocation("Mon Jan  2 15:04:05 2006", text, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // checkModes enforces RUNNER_SPEC §23's directory and file modes.
