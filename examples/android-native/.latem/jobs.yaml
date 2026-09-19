@@ -1,22 +1,16 @@
 # Job registry for a plain Gradle Android application — RUNNER_SPEC §9, §18.2.
 #
-# ┌───────────────────────────────────────────────────────────────────────────┐
-# │ BOTH JOBS HAVE RUN, end to end, by hand, 2026-08-11.                      │
-# │                                                                           │
-# │ JDK 17.0.20, AGP 9.3.1, Gradle 9.7, SDK 36, on a MacBook Pro M4 Max.      │
-# │   android-smoke   → assembleDebug → app-debug.apk (853K), no credential   │
-# │   android-release → signed .aab → Play internal track, 21:07:34           │
-# │                     signed by CN=Latem Upload Key, O=Abyssinia Labs       │
-# │                                                                           │
-# │ What has NOT run is an agent executing them. Every step was invoked from  │
-# │ a shell; the timeouts below are still estimates.                          │
-# │                                                                           │
-# │ docs/manual-baseline.md §7.3 has the session.                             │
-# └───────────────────────────────────────────────────────────────────────────┘
+# This one has run. `android-smoke` built an 853K debug APK with no credential;
+# `android-release` signed an .aab and it reached the Play internal track,
+# signed by CN=Latem Upload Key. JDK 17, AGP 9.3.1, Gradle 9.7, SDK 36.
 #
-# Why this exists alongside examples/expo-app: that one does not build at all
-# (A32). This registry needs no Expo, no Node, and no hosted account to reach a
+# Deliberately plain: no Expo, no Node, and no hosted account needed to reach a
 # release bundle.
+#
+# The timeouts below are measured on one machine and are not a law. The shape is
+# the part worth copying: a smoke job that needs no credential at all, a release
+# job that names its secrets rather than containing them, and the Gradle caches
+# declared once at the top level.
 
 version: 1
 

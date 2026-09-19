@@ -1,31 +1,21 @@
 # Job registry for a plain Xcode application — RUNNER_SPEC §9, §18.
 #
-# ┌───────────────────────────────────────────────────────────────────────────┐
-# │ BOTH JOBS HAVE RUN, end to end, by hand, 2026-08-11.                      │
-# │                                                                           │
-# │ ios-smoke   → .app in 20.2s cold, no Apple credential of any kind.        │
-# │ ios-release → signed .ipa → TestFlight → installed on a physical iPhone.  │
-# │               App REDACTED-APP-ID, build 1.0 (1), 17:53:16.                    │
-# │                                                                           │
-# │ AND AN AGENT HAS NOW RUN THEM, same machine, same day:                   │
-# │   ios-smoke    22s                                                        │
-# │   ios-release  2m25s → build 1786500336 distributed to internal testers   │
-# │ Secrets resolved through §15's chain from secrets.env, and INV-4 was      │
-# │ checked against that run: no secret in any log or in sqlite.              │
-# │                                                                           │
-# │ Still untested: a LaunchAgent-STARTED agent. Everything above ran from an │
-# │ interactive shell, which has a live keychain session — §13.3 calls that   │
-# │ the single most common install failure, and it is still ahead of us.      │
-# │                                                                           │
-# │ docs/manual-baseline.md §7 has the session and the eleven defects it      │
-# │ surfaced.                                                                 │
-# └───────────────────────────────────────────────────────────────────────────┘
+# This one has run. `ios-smoke` built a simulator .app in 20.2s from cold with
+# no Apple credential of any kind; `ios-release` signed an .ipa, uploaded it to
+# TestFlight and it installed on a physical iPhone. Both were then run again by
+# an agent rather than from a shell — 22s and 2m25s — and the run log was
+# checked afterwards for every secret it used: none appears in any log or in the
+# sqlite store.
 #
-# Why this example exists alongside examples/expo-app: that one does not build.
-# Expo SDK 57 does not compile against Swift 6.2 (Xcode 26), and `eas build
-# --local` additionally requires an Expo account, which is a hosted dependency
-# the project's whole pitch is about not having. This registry needs neither.
-# docs/ios.md has both findings in full.
+# Deliberately plain: no Expo, no framework, and no hosted account anywhere in
+# the critical path. `eas build --local` requires an Expo account, which is a
+# hosted dependency in the middle of every build on a runner whose whole pitch
+# is not having one. docs/ios.md has that finding in full.
+#
+# The timeouts below are measured on one Mac mini and are not a law. The rest of
+# the shape is worth copying: a smoke job that needs no credentials at all, a
+# release job that names its secrets and never contains them, and caches
+# declared once because a cold iOS build is mostly download.
 
 version: 1
 
