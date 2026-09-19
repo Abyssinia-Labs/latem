@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -41,6 +42,9 @@ type Emitter struct {
 	sinks []Sink
 	// inPEM is the multi-line guard. See [Emitter.Emit].
 	inPEM bool
+	// stopToken, when set, pauses workflow-command processing until a line
+	// reading `::<token>::` arrives. See [Emitter.command].
+	stopToken string
 }
 
 // NewEmitter builds a pipeline for one run.
@@ -92,11 +96,24 @@ func (e *Emitter) Emit(stream protocol.Stream, line string) protocol.LogFrame {
 		if pemEnd.MatchString(line) {
 			e.inPEM = false
 		}
-	} else {
-		out = e.red.Redact(line)
+		return e.emitLocked(stream, out)
 	}
 
-	return e.emitLocked(stream, out)
+	// Workflow commands (A42 phase 2). Checked after the PEM guard so a line
+	// inside a suppressed key block can never issue one, and gated on Known
+	// so that output which merely has the shape — a C++ diagnostic naming
+	// std::vector — stays output.
+	if e.resumesCommands(line) {
+		e.stopToken = ""
+		return e.emitLocked(protocol.StreamAgent, "[latem] workflow commands resumed")
+	}
+	if e.stopToken == "" {
+		if cmd, ok := ghcmd.ParseLine(line); ok && cmd.Known() {
+			return e.command(stream, cmd)
+		}
+	}
+
+	return e.emitLocked(stream, e.red.Redact(line))
 }
 
 // EmitTruncated is [Emitter.Emit] with a note about bytes dropped to the line
