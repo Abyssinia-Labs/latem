@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -20,6 +21,11 @@ const (
 	// would show up in `git status`, in `git clean -n`, and eventually in
 	// somebody's commit.
 	EnvFileName = "env"
+	// OutputFileName is the basename of the file exported as $GITHUB_OUTPUT,
+	// beside the env file. Created and truncated the same way; unlike the env
+	// file, never carried, because outputs belong to the step that wrote
+	// them.
+	OutputFileName = "output"
 
 	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored data
 	// the agent then trusts, so it gets a size it cannot exceed as well as a
@@ -193,16 +199,19 @@ func writeNote(out io.Writer, msg string) {
 // A missing file is not an error: most steps never touch $LATEM_ENV, and a step
 // is free to delete it, so "absent" and "empty" both mean the same thing —
 // nothing to merge.
-func (e *runEnv) readEnvFile() ([]byte, error) {
-	// #nosec G304 -- envFile is built in Prepare from Options.EnvFileDir and a
+func (e *runEnv) readEnvFile() ([]byte, error) { return e.readBack(e.envFile, "$LATEM_ENV") }
+
+// readBack reads one of the per-run bookkeeping files a step may have written.
+func (e *runEnv) readBack(file, label string) ([]byte, error) {
+	// #nosec G304 -- file is built in Prepare from Options.EnvFileDir and a
 	// run id already through protocol.ValidateID (amendment A6). No part of it
 	// is broker-supplied or job-supplied.
-	f, err := os.Open(e.envFile)
+	f, err := os.Open(file)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", e.envFile)
+		return nil, wrapErr(protocol.ErrExecutor, err, "read %s (%s)", label, file)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -213,7 +222,7 @@ func (e *runEnv) readEnvFile() ([]byte, error) {
 	// it, only the host's disk.
 	data, err := io.ReadAll(io.LimitReader(f, MaxEnvFileBytes+1))
 	if err != nil {
-		return nil, wrapErr(protocol.ErrExecutor, err, "read $LATEM_ENV (%s)", e.envFile)
+		return nil, wrapErr(protocol.ErrExecutor, err, "read %s (%s)", label, file)
 	}
 	if data == nil {
 		data = []byte{}
@@ -228,18 +237,50 @@ func (e *runEnv) readEnvFile() ([]byte, error) {
 // O_TRUNC rather than remove-and-recreate so that a step which captured the
 // path and holds it open across the boundary sees an empty file rather than a
 // deleted inode it can keep appending to invisibly.
-func (e *runEnv) createEnvFile() error {
+func (e *runEnv) createEnvFile() error { return e.createEmpty(e.envFile, "$LATEM_ENV") }
+
+// createEmpty creates or truncates one bookkeeping file, creating the run's
+// directory on the way.
+func (e *runEnv) createEmpty(file, label string) error {
 	if err := os.MkdirAll(e.envDir, envDirMode); err != nil {
-		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV directory (%s)", e.envDir)
+		return wrapErr(protocol.ErrExecutor, err, "create %s directory (%s)", label, e.envDir)
 	}
-	// #nosec G304 -- see readEnvFile: the path is built from agent config and a
+	// #nosec G304 -- see readBack: the path is built from agent config and a
 	// validated run id.
-	f, err := os.OpenFile(e.envFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, envFileMode)
+	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, envFileMode)
 	if err != nil {
-		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", e.envFile)
+		return wrapErr(protocol.ErrExecutor, err, "create %s (%s)", label, file)
 	}
 	if err := f.Close(); err != nil {
-		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", e.envFile)
+		return wrapErr(protocol.ErrExecutor, err, "create %s (%s)", label, file)
 	}
 	return nil
+}
+
+// readOutputs reads and truncates $GITHUB_OUTPUT after a step.
+//
+// The parser is shared with the workflow package because the format is
+// GitHub's, heredoc and all. There is no protected predicate: an output is a
+// named value handed to later steps' expressions, not an environment entry,
+// so there is nothing for it to shadow.
+func (e *runEnv) readOutputs(out io.Writer) (map[string]string, error) {
+	data, err := e.readBack(e.outFile, "$GITHUB_OUTPUT")
+	if err != nil || len(data) == 0 {
+		return nil, err
+	}
+	assignments, warnings := ghcmd.ParseKeyValueFile(data, nil)
+	for _, w := range warnings {
+		writeNote(out, "$GITHUB_OUTPUT: "+w)
+	}
+	if err := e.createEmpty(e.outFile, "$GITHUB_OUTPUT"); err != nil {
+		return nil, err
+	}
+	if len(assignments) == 0 {
+		return nil, nil
+	}
+	outputs := make(map[string]string, len(assignments))
+	for _, a := range assignments {
+		outputs[a.Key] = a.Value
+	}
+	return outputs, nil
 }

@@ -63,7 +63,13 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 		x.note("step %d/%d: %s", i+1, total, label)
 		start := x.o.now()
 
-		out := x.runStep(ctx, s, label, budget, late)
+		out, outputs := x.runStep(ctx, s, label, budget, late)
+		if s.ID != "" && len(outputs) > 0 {
+			if x.outputs == nil {
+				x.outputs = map[string]map[string]string{}
+			}
+			x.outputs[s.ID] = outputs
+		}
 
 		x.note("step %d/%d: %s %s", i+1, total, label,
 			stepEnding(out, x.o.now().Sub(start).Round(time.Millisecond)))
@@ -148,7 +154,7 @@ func (x *execution) checkBudget(ctx context.Context, label string, budget time.D
 func (x *execution) runStep(
 	ctx context.Context, s registry.ResolvedStep, label string, budget time.Duration,
 	late map[string]string,
-) outcome {
+) (outcome, map[string]string) {
 	stepCtx := ctx
 	if s.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -174,13 +180,13 @@ func (x *execution) runStep(
 	}
 
 	type finished struct {
-		code int
-		err  error
+		res executor.Result
+		err error
 	}
 	done := make(chan finished, 1)
 	go func() {
-		code, err := x.env.Exec(stepCtx, step, stdout.pw, stderr.pw)
-		done <- finished{code, err}
+		res, err := x.env.Exec(stepCtx, step, stdout.pw, stderr.pw)
+		done <- finished{res, err}
 	}()
 
 	var r finished
@@ -198,7 +204,7 @@ func (x *execution) runStep(
 		case r = <-done:
 		case <-timer.C:
 			abandoned = true
-			r = finished{code: -1, err: context.Cause(stepCtx)}
+			r = finished{res: executor.Result{ExitCode: -1}, err: context.Cause(stepCtx)}
 		}
 		timer.Stop()
 	}
@@ -214,13 +220,13 @@ func (x *execution) runStep(
 	}
 
 	if requested, reason, actor := x.h.cancelled(); requested {
-		return cancelOutcome(outcome{}, reason, actor)
+		return cancelOutcome(outcome{}, reason, actor), nil
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return timeoutOutcome(label, true, budget)
+		return timeoutOutcome(label, true, budget), nil
 	}
 	if s.Timeout > 0 && errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
-		return timeoutOutcome(label, false, s.Timeout)
+		return timeoutOutcome(label, false, s.Timeout), nil
 	}
 	if isCancellation(r.err) || (r.err == nil && isCancellation(ctx.Err())) {
 		// The context closed without a cancel command and without a deadline:
@@ -228,21 +234,21 @@ func (x *execution) runStep(
 		return outcome{
 			state: protocol.StateCancelled,
 			msg:   fmt.Sprintf("run stopped during step %q", label),
-		}
+		}, nil
 	}
 	if r.err != nil {
-		return fail(r.err, protocol.ErrExecutor)
+		return fail(r.err, protocol.ErrExecutor), nil
 	}
-	if r.code != 0 {
-		code := r.code
+	if r.res.ExitCode != 0 {
+		code := r.res.ExitCode
 		return outcome{
 			state:    protocol.StateFailed,
 			code:     protocol.ErrStep,
 			msg:      fmt.Sprintf("step %q exited %d", label, code),
 			exitCode: &code,
-		}
+		}, r.res.Outputs
 	}
-	return outcome{state: protocol.StateSucceeded}
+	return outcome{state: protocol.StateSucceeded}, r.res.Outputs
 }
 
 // stepLabel names a step for the log and for [executor.Step.Name]. A step's

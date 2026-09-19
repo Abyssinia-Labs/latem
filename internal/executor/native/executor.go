@@ -268,10 +268,14 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		shell:     e.shell,
 		envDir:    dir,
 		envFile:   filepath.Join(dir, EnvFileName),
+		outFile:   filepath.Join(dir, OutputFileName),
 		grace:     e.grace,
 		drain:     e.drain,
 		carried:   map[string]string{},
 		active:    map[*stepProc]struct{}{},
+	}
+	if err := env.createEmpty(env.outFile, "$GITHUB_OUTPUT"); err != nil {
+		return nil, err
 	}
 	if err := env.createEnvFile(); err != nil {
 		return nil, err

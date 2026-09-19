@@ -175,14 +175,50 @@ jobs:
 	}
 }
 
-func TestStepsContextIsRefusedUntilOutputsAreWired(t *testing.T) {
-	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: echo ${{ steps.x.outputs.y }}\n")
-	_, err := Compile(w, "b", testScope())
-	if err == nil {
-		t.Fatal("steps.* must be refused until $GITHUB_OUTPUT is wired")
+// steps.* is late, and the registry's ordering check is what makes that safe:
+// a reference to a step that is not earlier is refused at admission rather
+// than resolving to an empty string that looks like the step produced nothing.
+func TestStepsContextIsLateAndOrdered(t *testing.T) {
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - id: build
+        run: make
+      - run: echo ${{ steps.build.outputs.sha }}
+`)
+	job, err := Compile(w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
 	}
-	if !strings.Contains(err.Error(), "GITHUB_OUTPUT") {
-		t.Errorf("the error should name the channel: %v", err)
+	late := job.Steps[1].Late["GHA_EXPR_1"]
+	if late == nil {
+		t.Fatalf("steps.* should be a late binding: %+v", job.Steps[1])
+	}
+	got, err := late.Resolve(registry.StepScope{Outputs: map[string]map[string]string{"build": {"sha": "abc"}}})
+	if err != nil || got != "abc" {
+		t.Errorf("resolved %q, %v", got, err)
+	}
+	// Absent is the empty string — GitHub's answer, and what
+	// `if: steps.x.outputs.y != ''` depends on.
+	got, _ = late.Resolve(registry.StepScope{})
+	if got != "" {
+		t.Errorf("an absent output should be empty, got %q", got)
+	}
+	reg := &registry.Registry{Version: 1, Jobs: map[string]*registry.Job{"b": job}}
+	if err := reg.Validate(); err != nil {
+		t.Errorf("validate: %v", err)
+	}
+
+	w2 := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: echo ${{ steps.later.outputs.x }}\n      - id: later\n        run: make\n")
+	job2, err := Compile(w2, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	reg2 := &registry.Registry{Version: 1, Jobs: map[string]*registry.Job{"b": job2}}
+	if err := reg2.Validate(); err == nil || !strings.Contains(err.Error(), "not an earlier step") {
+		t.Errorf("a forward reference must be refused at admission: %v", err)
 	}
 }
 

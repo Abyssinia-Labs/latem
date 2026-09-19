@@ -222,13 +222,13 @@ func TestExec_StreamsOutputAndReturnsExitCode(t *testing.T) {
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
 	var log bytes.Buffer
-	code, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &log, &log)
+	res, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &log, &log)
 	// A non-zero exit is a result, not an error: the agent maps it to E_STEP.
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
-	if code != 7 {
-		t.Errorf("exit code = %d, want 7", code)
+	if res.ExitCode != 7 {
+		t.Errorf("exit res.ExitCode = %d, want 7", res.ExitCode)
 	}
 	for _, want := range []string{"building", "warning: deprecated"} {
 		if !strings.Contains(log.String(), want) {

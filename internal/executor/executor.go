@@ -79,7 +79,12 @@ type Env interface {
 	// pipeline distinguishes the two and the wire type has a field for it,
 	// but the executor could not say which was which. Passing the same writer
 	// twice is legal for a caller that does not care.
-	Exec(ctx context.Context, step Step, stdout, stderr io.Writer) (exitCode int, err error)
+	//
+	// The [Result] carries the exit code and, since A42 phase 2, what the step
+	// wrote to $GITHUB_OUTPUT. Outputs are a step's result and so belong here
+	// rather than on a side channel the caller would have to know to ask
+	// for — the same reasoning A9 applied to stdout and stderr.
+	Exec(ctx context.Context, step Step, stdout, stderr io.Writer) (Result, error)
 
 	// EnvFile is the environment-visible path to export as $LATEM_ENV.
 	//
@@ -125,6 +130,25 @@ type Spec struct {
 	Labels    map[string]string // includes latem.run-id, for crash reaping
 	Resources Resources
 }
+
+// Result is what one step produced.
+type Result struct {
+	// ExitCode is the process's. A non-zero one is not an error: the agent
+	// maps it to E_STEP. -1 means the process could not be run or waited for,
+	// and the error says why.
+	ExitCode int
+	// Outputs is what the step wrote to the file named by $GITHUB_OUTPUT,
+	// last writer winning. Keys are identifiers; the executor has already
+	// dropped anything else and said so in the step's log. Nil when the step
+	// wrote nothing, which is nearly always.
+	Outputs map[string]string
+}
+
+// OutputFileVar names the environment variable through which a step learns
+// where to write its outputs. It is GitHub's name, because that is what a
+// workflow written for GitHub reads; a latem-specific alias would be a second
+// name for the same file with nothing to recommend it.
+const OutputFileVar = "GITHUB_OUTPUT"
 
 // Step is one unit of work.
 type Step struct {

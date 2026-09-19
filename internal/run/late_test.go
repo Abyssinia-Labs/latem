@@ -192,3 +192,59 @@ func TestExecute_ConditionsOnAGreenRun(t *testing.T) {
 		t.Errorf("executed %v, want %v", got, want)
 	}
 }
+
+// The whole channel end to end: a step writes $GITHUB_OUTPUT, and a later
+// step's expression reads it as data — from a failed step too, which is the
+// `if: failure()` idiom.
+func TestExecute_StepOutputsReachLaterSteps(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.env.exec = func(_ context.Context, step executor.Step, _, _ io.Writer) (int, error) {
+		if step.Name == "build" {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	h.env.outputs = func(step executor.Step) map[string]string {
+		if step.Name == "build" {
+			return map[string]string{"log": "build.log", "sha": "; rm -rf /"}
+		}
+		return nil
+	}
+	o := h.build()
+
+	req := h.request("test")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", `
+on: [push]
+jobs:
+  test:
+    runs-on: [linux]
+    steps:
+      - id: build
+        name: build
+        run: make
+      - name: report
+        if: failure()
+        run: cat ${{ steps.build.outputs.log }} ${{ steps.build.outputs.sha }}
+`)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateFailed || res.ErrorCode != protocol.ErrStep {
+		t.Fatalf("got %s/%s, want failed/E_STEP", res.State, res.ErrorCode)
+	}
+	steps := h.env.executed()
+	if got := executedNames(steps); !slices.Equal(got, []string{"build", "report"}) {
+		t.Fatalf("executed %v", got)
+	}
+	report := steps[1]
+	if report.Run != `cat "$GHA_EXPR_1" "$GHA_EXPR_2"` {
+		t.Errorf("run = %q — an output must never become command text", report.Run)
+	}
+	if report.Env["GHA_EXPR_1"] != "build.log" || report.Env["GHA_EXPR_2"] != "; rm -rf /" {
+		t.Errorf("outputs did not reach the later step as data: %+v", report.Env)
+	}
+}

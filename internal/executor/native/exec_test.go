@@ -60,11 +60,11 @@ func live(t *testing.T, spec executor.Spec, opts Options) (*runEnv, string) {
 func run(t *testing.T, env *runEnv, step executor.Step) (int, string, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code, err := env.Exec(t.Context(), step, &stdout, &stderr)
+	res, err := env.Exec(t.Context(), step, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Exec(%q): %v\nstdout: %s\nstderr: %s", step.Run, err, stdout.String(), stderr.String())
 	}
-	return code, stdout.String(), stderr.String()
+	return res.ExitCode, stdout.String(), stderr.String()
 }
 
 // This is finding F1, and it is the reason §9 reads the way it does.

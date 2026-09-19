@@ -99,11 +99,11 @@ func run(t *testing.T, env executor.Env, name, script string) (int, string) {
 	defer cancel()
 
 	var log bytes.Buffer
-	code, err := env.Exec(ctx, executor.Step{Name: name, Run: script}, &log, &log)
+	res, err := env.Exec(ctx, executor.Step{Name: name, Run: script}, &log, &log)
 	if err != nil {
 		t.Fatalf("Exec(%s): %v\n%s", name, err, log.String())
 	}
-	return code, log.String()
+	return res.ExitCode, log.String()
 }
 
 func TestIntegration_RunsSteps(t *testing.T) {

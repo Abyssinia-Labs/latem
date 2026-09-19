@@ -72,15 +72,19 @@ func (e *runEnv) EnvFile() string { return EnvFilePath }
 // A step that exits non-zero is not an error: the exit code is the result, and
 // the agent maps a non-zero one to E_STEP. An error means the step could not
 // be run or could not be waited for.
-func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error) {
+func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
+	none := executor.Result{ExitCode: -1}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return -1, codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
+		return none, codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
 	}
 	envFile := EnvFilePath
 	env := mergeEnv(e.spec.Env, e.carried, step.Env)
+	// Both set after the merge, so that a job which wrote either name into
+	// $LATEM_ENV cannot point the next step's bookkeeping somewhere else.
 	env["LATEM_ENV"] = envFile
+	env[executor.OutputFileVar] = OutputFilePath
 	e.mu.Unlock()
 
 	// A zero Timeout means "whatever remains of the job budget", which is
@@ -105,7 +109,14 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	// next one so that the warnings land in the log of the step that caused
 	// them, which is the only place an author will look.
 	if mergeErr := e.mergeEnvFile(ctx, envFile, stdout); mergeErr != nil && err == nil {
-		return code, mergeErr
+		return executor.Result{ExitCode: code}, mergeErr
+	}
+	// Outputs are read back even from a failed step: GitHub keeps them, and a
+	// later `if: failure()` step reading `steps.build.outputs.log` is the
+	// idiom that depends on it.
+	outputs, outErr := e.readOutputs(ctx, stdout)
+	if outErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, outErr
 	}
 
 	if err != nil {
@@ -113,12 +124,12 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		// is E_STEP_TIMEOUT, not E_TIMEOUT (§21).
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			e.killContainer(ctx)
-			return -1, wrapErr(protocol.ErrStepTimeout, err,
+			return none, wrapErr(protocol.ErrStepTimeout, err,
 				"step %q exceeded its %s timeout", step.Name, step.Timeout)
 		}
-		return -1, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
+		return none, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
 	}
-	return code, nil
+	return executor.Result{ExitCode: code, Outputs: outputs}, nil
 }
 
 // StepArgv builds the argv a step is executed with.

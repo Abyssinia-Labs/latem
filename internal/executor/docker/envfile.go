@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -25,6 +26,10 @@ const (
 	// it would show up in `git status`, in `git clean -n`, and eventually in
 	// somebody's commit.
 	EnvFilePath = "/tmp/latem/env"
+	// OutputFilePath is the container-visible path exported as $GITHUB_OUTPUT.
+	// A sibling of the env file, created and truncated the same way, and
+	// unlike it not carried: outputs belong to the step that wrote them.
+	OutputFilePath = "/tmp/latem/output"
 
 	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored
 	// data the agent then trusts, so it gets a size it cannot exceed as well
@@ -267,4 +272,32 @@ func (e *runEnv) createEnvFile(ctx context.Context, envFile string) error {
 		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", envFile)
 	}
 	return nil
+}
+
+// readOutputs reads and truncates $GITHUB_OUTPUT after a step.
+//
+// The parser is shared with the workflow package because the format is
+// GitHub's, heredoc and all. There is no protected predicate: an output is a
+// named value handed to later steps' expressions, not an environment entry,
+// so there is nothing for it to shadow.
+func (e *runEnv) readOutputs(ctx context.Context, out io.Writer) (map[string]string, error) {
+	data, err := e.readEnvFile(ctx, OutputFilePath)
+	if err != nil || len(data) == 0 {
+		return nil, err
+	}
+	assignments, warnings := ghcmd.ParseKeyValueFile(data, nil)
+	for _, w := range warnings {
+		writeNote(out, "$GITHUB_OUTPUT: "+w)
+	}
+	if err := e.createEnvFile(ctx, OutputFilePath); err != nil {
+		return nil, err
+	}
+	if len(assignments) == 0 {
+		return nil, nil
+	}
+	outputs := make(map[string]string, len(assignments))
+	for _, a := range assignments {
+		outputs[a.Key] = a.Value
+	}
+	return outputs, nil
 }

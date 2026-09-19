@@ -22,18 +22,10 @@ const hoistPrefix = "GHA_EXPR_"
 // lateContexts are answered by the run loop as the step is about to run, so
 // an expression reaching for one compiles to a [registry.LateValue] rather
 // than to a value. The command is unchanged either way — see hoist.
-var lateContexts = map[string]bool{"job": true, "runner": true}
+var lateContexts = map[string]bool{"job": true, "runner": true, "steps": true}
 
-// refusedContexts cannot be compiled at all yet, each for its own reason.
-//
-// `steps` is late by nature but is refused until the $GITHUB_OUTPUT channel is
-// wired: compiling it now would resolve every reference to an empty string,
-// which is indistinguishable from the earlier step having produced nothing.
-// That is the trap the registry's References() check exists to prevent, and
-// shipping the binding before the channel would reintroduce it from the other
-// side.
+// refusedContexts cannot be compiled at all, each for its own reason.
 var refusedContexts = map[string]string{
-	"steps": "an earlier step's outputs arrive through $GITHUB_OUTPUT, which is not wired yet (A42 phase 2)",
 	"needs": "latem runs one job per run, so there is nothing for needs to refer to (N2)",
 }
 

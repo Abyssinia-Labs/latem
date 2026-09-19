@@ -65,6 +65,7 @@ type runEnv struct {
 	shell     string
 	envDir    string
 	envFile   string
+	outFile   string // $GITHUB_OUTPUT, a sibling of envFile
 	grace     time.Duration
 	drain     time.Duration
 
@@ -146,17 +147,21 @@ func StepArgv(shell, run string) []string {
 // [stepGroup] record into the run's $LATEM_ENV directory, which is what lets
 // [Executor.Reap] collect the group after the agent is restarted — §6 step 5 for
 // the one resource this executor has.
-func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error) {
+func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
+	none := executor.Result{ExitCode: -1}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return -1, codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
+		return none, codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
 	}
 	// [baseEnv] first, so the run's own variables and the step's both override
 	// it. Amendment A33: the locale is a default the agent supplies, not an
 	// assertion it enforces.
 	env := mergeEnv(baseEnv(), e.spec.Env, e.carried, step.Env)
+	// Both set after the merge, so that a job which wrote either name into
+	// $LATEM_ENV cannot point the next step's bookkeeping somewhere else.
 	env[EnvFileVar] = e.envFile
+	env[executor.OutputFileVar] = e.outFile
 	e.mu.Unlock()
 
 	// A zero Timeout means "whatever remains of the job budget", which is
@@ -174,19 +179,26 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	// next one so that the warnings land in the log of the step that caused
 	// them, which is the only place an author will look.
 	if mergeErr := e.mergeEnvFile(stdout); mergeErr != nil && err == nil {
-		return code, mergeErr
+		return executor.Result{ExitCode: code}, mergeErr
+	}
+	// Outputs are read back even from a failed step: GitHub keeps them, and a
+	// later `if: failure()` step reading `steps.build.outputs.log` is the
+	// idiom that depends on it.
+	outputs, outErr := e.readOutputs(stdout)
+	if outErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, outErr
 	}
 
 	if err != nil {
 		// A step-level deadline that fired while the job budget still had room
 		// is E_STEP_TIMEOUT, not E_TIMEOUT (§21).
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return -1, wrapErr(protocol.ErrStepTimeout, err,
+			return none, wrapErr(protocol.ErrStepTimeout, err,
 				"step %q exceeded its %s timeout", step.Name, step.Timeout)
 		}
-		return -1, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
+		return none, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
 	}
-	return code, nil
+	return executor.Result{ExitCode: code, Outputs: outputs}, nil
 }
 
 // run starts one shell, streams it, and reaps it.
