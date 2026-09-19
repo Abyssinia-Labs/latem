@@ -251,10 +251,18 @@ type Resolved struct {
 }
 
 // ResolvedStep is a step with its environment already substituted.
+//
+// Already substituted, except for Late: those values are resolved by the run
+// loop against a [StepScope] immediately before the step runs, and merged over
+// Env then. If is evaluated at the same moment and decides whether the step
+// runs at all.
 type ResolvedStep struct {
+	ID   string
 	Name string
 	Run  string
 	Env  map[string]string
+	Late map[string]LateValue
+	If   LateValue
 	// Timeout of zero means "whatever remains of the job budget". Resolving
 	// that needs a clock and a start time, so it belongs to the orchestrator
 	// rather than here.
@@ -308,9 +316,12 @@ func (r *Registry) Admit(req protocol.RunRequest, runnerLabels []string) (*Resol
 			env[k] = substitute(v, inputs)
 		}
 		steps = append(steps, ResolvedStep{
+			ID:      s.ID,
 			Name:    s.Name,
 			Run:     s.Run,
 			Env:     env,
+			Late:    s.Late,
+			If:      s.If,
 			Timeout: s.Timeout.Duration(),
 		})
 	}

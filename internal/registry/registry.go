@@ -98,6 +98,11 @@ type Job struct {
 // Step is one command.
 type Step struct {
 	Name string `json:"name,omitempty"`
+	// ID names the step for later steps' late bindings to refer to. It is
+	// excluded from decoding: the native format has no use for it yet, and
+	// the compiler is the only writer. Adding it to jobs.yaml would be a §9
+	// change and should arrive as one.
+	ID string `json:"-"`
 	// Run is literal. This is the only place in the entire system where a
 	// command may be written, and interpolation into it is a parse error —
 	// see [validateInterpolation].
@@ -107,6 +112,14 @@ type Step struct {
 	// is the only legal expansion, so ${secret.X} is a parse error.
 	Env     map[string]string `json:"env,omitempty"`
 	Timeout protocol.Duration `json:"timeout,omitempty"`
+
+	// Late holds env values that are computed as the step is about to run,
+	// and If is a condition evaluated then. Both are [LateValue]; see that
+	// type for why they exist and why they are excluded from decoding. A
+	// jobs.yaml that tries to write either is a strict-decoding error, which
+	// is the intended answer.
+	Late map[string]LateValue `json:"-"`
+	If   LateValue            `json:"-"`
 }
 
 // ArtifactDecl is a glob relative to the workspace root, plus retention.
@@ -273,13 +286,25 @@ func (j *Job) validate(name string, declaredCaches map[string]bool) []error {
 	case len(j.Steps) > MaxStepsPerJob:
 		add("too many steps: %d, limit %d", len(j.Steps), MaxStepsPerJob)
 	}
+	// earlier accumulates the ids of steps already seen, so a late binding
+	// can be checked against exactly the steps that will have run by then.
+	earlier := map[string]bool{}
 	for i, s := range j.Steps {
+		label := s.Name
+		if label == "" {
+			label = fmt.Sprintf("%d", i)
+		}
 		for _, err := range s.validate(j.Inputs) {
-			label := s.Name
-			if label == "" {
-				label = fmt.Sprintf("%d", i)
-			}
 			add("steps[%s]: %w", label, err)
+		}
+		for _, err := range validateLate(s, earlier) {
+			add("steps[%s]: %w", label, err)
+		}
+		if s.ID != "" {
+			if earlier[s.ID] {
+				add("steps[%s]: id %q is already used by an earlier step", label, s.ID)
+			}
+			earlier[s.ID] = true
 		}
 	}
 
