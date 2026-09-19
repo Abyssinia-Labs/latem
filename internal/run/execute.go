@@ -51,6 +51,10 @@ type execution struct {
 	runner        *Runner
 	sec           *secrets.Set
 	env           executor.Env
+	// outputs is every completed step's $GITHUB_OUTPUT, by step id, for later
+	// steps' late bindings. Populated once that channel is wired (A42 phase
+	// 2); until then the compiler refuses steps.* and this stays empty.
+	outputs map[string]map[string]string
 
 	teardowns []teardownStep
 }

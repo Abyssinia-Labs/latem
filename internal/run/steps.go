@@ -21,24 +21,78 @@ import (
 // the previous one did to its own.
 func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome {
 	total := len(x.resolved.Steps)
+	status := registry.StatusSuccess
+	// first is the outcome the run reports. Since A42 a failure no longer
+	// returns immediately: later steps get to consult their conditions, and
+	// `if: always()` is how a cleanup step asks to. The run's result is still
+	// the first failure — a cleanup step succeeding does not make the job
+	// green, and one failing does not change which step broke it.
+	var first *outcome
+
 	for i, s := range x.resolved.Steps {
-		if out, done := x.checkBudget(ctx, stepLabel(s, i), budget); done {
-			return out
+		label := stepLabel(s, i)
+		if out, done := x.checkBudget(ctx, label, budget); done {
+			return x.settle(out, first)
 		}
 
-		label := stepLabel(s, i)
+		sc := x.stepScope(status)
+		switch {
+		case s.If != nil:
+			holds, err := s.If.Holds(sc)
+			if err != nil {
+				out := fail(&registry.Error{Code: protocol.ErrBadRegistry,
+					Msg: fmt.Sprintf("step %d/%d: %s: if", i+1, total, label), Err: err}, protocol.ErrBadRegistry)
+				return x.settle(out, first)
+			}
+			if !holds {
+				x.note("step %d/%d: %s skipped (if: %s)", i+1, total, label, s.If.Source())
+				continue
+			}
+		case first != nil:
+			// No condition, and something has already failed. The implicit
+			// condition is success(), which no longer holds.
+			x.note("step %d/%d: %s skipped (an earlier step failed)", i+1, total, label)
+			continue
+		}
+
+		late, err := x.resolveLate(s, sc)
+		if err != nil {
+			return x.settle(fail(err, protocol.ErrBadRegistry), first)
+		}
+
 		x.note("step %d/%d: %s", i+1, total, label)
 		start := x.o.now()
 
-		out := x.runStep(ctx, s, label, budget)
+		out := x.runStep(ctx, s, label, budget, late)
 
 		x.note("step %d/%d: %s %s", i+1, total, label,
 			stepEnding(out, x.o.now().Sub(start).Round(time.Millisecond)))
 		if !out.ok() {
-			return out
+			if stopsTheRun(out) {
+				return x.settle(out, first)
+			}
+			status = statusAfter(status, out)
+			if first == nil {
+				cp := out
+				first = &cp
+			}
 		}
 	}
+	if first != nil {
+		return *first
+	}
 	return outcome{state: protocol.StateSucceeded}
+}
+
+// settle picks what the run reports when it stops early: the first failure if
+// there was one, otherwise the outcome that stopped it. A cancel arriving
+// during a cleanup step after a failure is reported as the failure, because
+// that is what broke the build; the cancel is in the log.
+func (x *execution) settle(stopping outcome, first *outcome) outcome {
+	if first != nil && stopping.state != protocol.StateCancelled {
+		return *first
+	}
+	return stopping
 }
 
 // stepEnding words the step's closing line according to how it ended.
@@ -93,6 +147,7 @@ func (x *execution) checkBudget(ctx context.Context, label string, budget time.D
 //     waited on — is whatever the executor said, defaulting to E_EXECUTOR.
 func (x *execution) runStep(
 	ctx context.Context, s registry.ResolvedStep, label string, budget time.Duration,
+	late map[string]string,
 ) outcome {
 	stepCtx := ctx
 	if s.Timeout > 0 {
@@ -104,10 +159,17 @@ func (x *execution) runStep(
 	stdout := x.stream(protocol.StreamStdout)
 	stderr := x.stream(protocol.StreamStderr)
 
+	env := x.stepEnv(s)
+	// Late values arrive last and win: the registry already refused a key
+	// that is both static and late, so this is a merge with nothing to
+	// collide with, and the ordering is only for the reader.
+	for k, v := range late {
+		env[k] = v
+	}
 	step := executor.Step{
 		Name:    label,
 		Run:     s.Run,
-		Env:     x.stepEnv(s),
+		Env:     env,
 		Timeout: s.Timeout,
 	}
 
