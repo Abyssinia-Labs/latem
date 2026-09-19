@@ -1,10 +1,64 @@
 # Latem
 
-**Self-hosted CI that treats an Apple silicon Mac as a first-class build machine.**
+**Self-hosted CI that treats an Apple silicon Mac as a first-class build
+machine.** *(LAY-tem — "metal", reversed.)*
 
-Buildkite, Woodpecker, Drone, Forgejo Actions, and Actions Runner Controller
-all run jobs on hardware you own. Latem exists for the three things they leave
-to you.
+## Why this exists
+
+If you ship an iOS app there is a Mac in the loop whatever else you decide. Not
+a container pretending and not a label pointing at something — a real machine,
+with Xcode on it, a logged-in session, an unlocked keychain and your signing
+identities. You almost certainly own one already, and it is almost certainly
+faster than the runner you are renting by the minute.
+
+So the hardware is not the missing piece. The plumbing is.
+
+**Hosted CI** charges its highest rate for macOS and then throws the machine
+away when the job ends. That one fact is why caching is a ritual — a save step,
+a restore step, a key to get wrong and a ceiling to hit — instead of a directory
+that is simply still there. It is also why your signing certificates spend their
+working life on somebody else's computer.
+
+**The self-hosted runners** — Buildkite, Woodpecker, Drone, Forgejo Actions,
+Actions Runner Controller — already run jobs on hardware you own. That is the
+right idea, and it is why latem does not try to replace them at that layer. But
+they were built for Linux containers, and macOS arrives as a label. Three things
+get left to you:
+
+- **The Mac.** `runs-on: macos` points at a box somebody set up by hand. Nothing
+  in the tool knows about a keychain under launchd, a FileVault volume that
+  quietly breaks unattended reboots, or a simulator runtime that does not match
+  the SDK — and none of those fail with an error that names itself.
+- **The cache**, still modelled as though the machine were disposable, when
+  yours is the same machine every time.
+- **The threat model.** A box on your network, holding your signing
+  certificates, running what a webhook asked it to run, usually gets a
+  paragraph.
+
+Those three are what the rest of this page is about.
+
+## Two ways to take it
+
+**Beside what you already have.** Leave your pipeline where it is and move one
+job — the iOS one, the long expensive one — onto the Mac on your desk. Nothing
+is ripped out and nothing is migrated. A hook binds one repository and one ref
+pattern to one job on one machine; the git host supplies the push, never the
+work; your existing CI never learns about it.
+[`app.latem.dev`](https://app.latem.dev) is the control plane that holds those
+hooks, and it only ever sends names — §5's INV-2 below is what makes pointing a
+signing machine at somebody else's server a reasonable thing to do.
+
+**Instead of what you already have.** Or take all of it. `latem run` needs no
+account, no hook and no network: the local broker is the default and the hosted
+one is opt-in (`RUNNER_SPEC` G2). A machine that never registers is a supported
+machine, not a trial.
+
+It is the same binary either way, and going from the first to the second
+installs nothing new.
+
+---
+
+Latem exists for the three things the other runners leave to you.
 
 ### 1. Xcode is an executor, not a shell script
 
@@ -210,8 +264,14 @@ key as above.
 exist, so the first ssh connection wants to ask you to accept a host key — and a
 service has nobody to ask. `ssh-keyscan` above does it in advance.
 
-Verify with the same command the agent will run, and without the one thing the
-agent will not have:
+**`latem doctor` now runs this check for you**, and runs it the way the service
+will: the repo probe drops `SSH_AUTH_SOCK` before asking. A credential that
+works only because your shell is holding the passphrase fails the check rather
+than passing it, and `doctor` says so in those words — *readable from your
+shell, not from a service* — instead of reporting the machine healthy and
+leaving the first real run to fail `E_SOURCE`.
+
+To see it by hand, that probe is:
 
 ```console
 $ env -u SSH_AUTH_SOCK git ls-remote git@github.com:me/myapp.git
