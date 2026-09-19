@@ -125,7 +125,7 @@ func newCachePruneCommand() *cobra.Command {
   - workspaces under work/ older than a day with no live run
   - git gc on each mirror, skipping any a live run is reading
   - Tart VMs named latem-run-* with no live run — a leaked one carrying an
-    Xcode image costs about 90 GB, which is the fastest way to fill a Mac mini
+    Xcode image costs about 90 GB, which is the fastest way to fill a Mac
 
 Mirrors untouched for 90 days are reported by ` + "`latem doctor`" + ` and never
 deleted here: a mirror may be the only local copy of a repository whose origin

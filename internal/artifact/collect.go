@@ -196,7 +196,7 @@ func copyFile(ws *os.Root, rel, dst string) (int64, string, error) {
 
 	// 0o600, and the directories 0o700. An artifact is a signed build: an
 	// .ipa embeds a provisioning profile, an .aab is the thing that ships to
-	// users. On a Mac mini with more than one login it is nobody else's.
+	// users. On a Mac with more than one login it is nobody else's.
 	// #nosec G304 -- dst is filepath.Join(<validated run dir>, <relative path
 	// from Resolve>); both halves are checked for containment above.
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)

@@ -9,7 +9,7 @@
 //
 // The agent only makes outbound connections. This package dials; it never
 // listens, binds a port, or accepts anything. That is what makes the product
-// installable on a Mac mini behind a domestic NAT with no router
+// installable on a Mac behind a domestic NAT with no router
 // configuration, no inbound firewall rule, and no conversation with anybody's
 // network team. TestINV1_RemoteBrokerBindsNothing asserts it by enumerating
 // the process's own sockets while a broker is connected.

@@ -4,7 +4,7 @@
 // RUNNER_SPEC §3 present in go.mod before anything imports it, so that `go mod
 // tidy` does not prune a library a workstream has not reached yet.
 //
-// This exists to enforce one of the parallel-work rules in docs/PLAN.md:
+// This exists to enforce a rule from the build plan:
 // go.mod has exactly one owner, WS-00, and nobody else runs `go get`.
 // Simultaneous dependency additions conflict textually and semantically at the
 // same time, and are the most common way parallel work on one Go repository

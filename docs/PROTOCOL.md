@@ -217,7 +217,7 @@ assigned to it. `latem register` writes it into `[machine] id`.
   "hello": {
     "machine_id": "mac-mini-01",
     "protocol_version": "1.0",
-    "message": "connected as mac mini"
+    "message": "connected as build-01"
   }
 }
 ```
@@ -422,7 +422,7 @@ sends it when it cannot read the real value: the server re-sends from 1 and its
 
 The second row is the expensive one to get wrong. `claimed`, `preparing`,
 `running` and `collecting` all mean a build started; a `run` command for one asks
-a Mac mini to check out, sign, and possibly upload the same commit again. The
+a Mac to check out, sign, and possibly upload the same commit again. The
 agent settles it instead: §6 step 5 reconciles an abandoned run to `interrupted`
 and reports that through its own replay.
 
@@ -765,4 +765,4 @@ frames this agent *emits* are the ones a server expects.
 Restoring the check means committing the generated corpus here and replaying it
 in `test/integration`, so a change to `wire.go` fails a test in this repository
 rather than surfacing as a decode error in another one. That belongs to WS-16
-and is recorded in `docs/PLAN.md`.
+and is recorded with the build plan.

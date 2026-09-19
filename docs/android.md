@@ -3,8 +3,7 @@
 > **Status: partly verified, and the split matters.** On **2026-08-11** a signed
 > `.aab` from `examples/android-native/` reached **Play internal testing**
 > (21:07:34), so §1, §2 and the upload path have been run end to end and their
-> failure rows in §5 are real error text —
-> [`manual-baseline.md`](./manual-baseline.md) §7.3 has the session.
+> failure rows in §5 are real error text.
 >
 > **That run was Gradle on macOS, by hand, not the container this document
 > describes.** Everything specific to the Linux docker runner — the container
@@ -187,7 +186,7 @@ in the `kvm` group.
 > option is not*.
 
 **macOS note:** there is no `/dev/kvm`. Emulator jobs belong on the Linux
-runner. The Mac mini's container runner is arm64 Linux under Docker Desktop and
+runner. The Mac's container runner is arm64 Linux under Docker Desktop and
 does not have it either.
 
 ---
@@ -236,10 +235,9 @@ wearing a costume.
 
 ## 5. Failure table
 
-Rows marked **(observed)** carry real error text from the 2026-08-11 session;
-[`manual-baseline.md`](./manual-baseline.md) §7.5 has the verbatim output and
-what fixed each one. The rest are still *(inferred)* — replace them with
-observed symptoms as they occur.
+Rows marked **(observed)** carry real error text from a run that happened; the
+rest are still *(inferred)* — replace them with observed symptoms as they
+occur.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -264,7 +262,6 @@ observed symptoms as they occur.
 
 ## See also
 
-- [`manual-baseline.md`](./manual-baseline.md) — the M0 runbook
 - [`ios.md`](./ios.md) — the harder platform
 - [`testing.md`](./testing.md) — the manual matrix
 - `examples/expo-app/ci/android/build.sh` — the (unverified) script

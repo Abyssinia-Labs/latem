@@ -11,7 +11,8 @@ import (
 // The mobile toolchain checks all share one shape: a *working* tool is
 // installed and the one on PATH is the wrong one. Every naive check — is ruby
 // present, does java run — passes on a machine that cannot build, which is why
-// these exist at all (manual-baseline.md §7.5, findings 4, 10, 13, 14, 16).
+// these exist at all: each was a real failure on a real machine before it was
+// a check here.
 
 // The bundler check must follow the Ruby the check above chose, not PATH.
 //
@@ -78,7 +79,7 @@ func touchExec(t *testing.T, path string) {
 // The JDK check must have BOTH bounds.
 //
 // The first version tested only `> 17` and passed JDK 11 — reported "ok" on a
-// Mac mini that could not build an Android release at all. Found by running
+// Mac that could not build an Android release at all. Found by running
 // doctor on a second machine, which is the only reason it was found: the
 // machine it was written on happened to have a JDK that was too new, so the
 // one branch that existed was the one being exercised.

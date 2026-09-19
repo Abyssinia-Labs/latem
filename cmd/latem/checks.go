@@ -139,7 +139,7 @@ func newDoctor() *doctor {
 
 // run executes every check and returns the report.
 //
-// No check may stop the run. An operator on a fresh Mac mini is supposed to
+// No check may stop the run. An operator on a fresh Mac is supposed to
 // get the whole list and do one afternoon's work, not fix-rerun-fix-rerun,
 // so a probe that panics or errors becomes a failed check rather than an
 // aborted diagnosis.
@@ -1324,7 +1324,7 @@ const jdkForAndroid = 17
 // nothing else does.
 //
 // Every check here exists because it cost real time on 2026-08-11
-// (manual-baseline.md §7.5). They are warnings rather than failures: a macOS
+// during the manual baseline. They are warnings rather than failures: a macOS
 // runner might build Go, and doctor cannot know what jobs a repo declares —
 // jobs.yaml lives in the repo at the resolved commit (§9), not on this machine.
 //
@@ -1459,7 +1459,7 @@ func (d *doctor) checkJDK(ctx context.Context) check {
 			withNotes("Only needed for Android release jobs.")
 	}
 	// BOTH bounds. The first version of this check tested only `> 17` and
-	// therefore passed JDK 11 — reported "ok" on a Mac mini that cannot build
+	// therefore passed JDK 11 — reported "ok" on a Mac that cannot build
 	// an Android release at all. A one-sided range check on a value with a
 	// floor and a ceiling is the same defect as an assertion that cannot fail:
 	// it is most confident exactly where it is least correct.
@@ -1524,7 +1524,7 @@ func (d *doctor) checkAndroidSDK() check {
 //
 // which names two build numbers, neither of which is the version an operator
 // would search for, and does not say that anything needs downloading. Found on
-// a Mac mini whose Xcode 26 had only an iOS 17.2 runtime — the machine the
+// a Mac whose Xcode 26 had only an iOS 17.2 runtime — the machine the
 // examples were developed on happened to have a matching one, so the whole
 // failure mode was invisible there.
 func (d *doctor) checkSimulatorRuntime(ctx context.Context) check {

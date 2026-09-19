@@ -29,17 +29,3 @@ a real store listing.
 |---|---|
 | [`testing.md`](testing.md) | The matrix of tests that cannot be automated, and the log of who ran which, when |
 | [`release.md`](release.md) | Cutting a release: the signing key, the pipeline, and what to do when it goes wrong |
-| [`PLAN.md`](PLAN.md) | How the work was decomposed, and §0 is the record of what landed |
-
-## How we know it works
-
-Kept because a project that claims things should be able to show its working,
-and because the failures are the interesting part.
-
-| | |
-|---|---|
-| [`acceptance.md`](acceptance.md) | The M7 acceptance test: the instrument, written before the measurement, with predictions recorded in advance so the result could refute them. §7 is the verdict |
-| [`acceptance-pass1-findings.md`](acceptance-pass1-findings.md) | Twenty findings from the first pass, verbatim, with the error text |
-| [`acceptance-pass2-findings.md`](acceptance-pass2-findings.md) | The timed pass: six more findings, and a decomposition of where the five minutes went |
-| [`acceptance-real-repo.md`](acceptance-real-repo.md) | The same agent pointed at a 26 MB private monorepo, running that repo's own PR gate |
-| [`manual-baseline.md`](manual-baseline.md) | The M0 baseline: every command that actually worked, by hand, before any of it was automated |

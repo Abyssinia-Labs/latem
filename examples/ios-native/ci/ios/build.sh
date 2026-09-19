@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Archive → signed .ipa → TestFlight → installed on a physical iPhone, on a
 # MacBook Pro M4 Max running Xcode 26.0.1. App REDACTED-APP-ID, build 1.0 (1),
-# distributed to internal testers at 17:53:16. docs/manual-baseline.md §7 has
+# distributed to internal testers at 17:53:16. The session that did it has
 # the session, including the eleven things that had to be wrong first.
 #
 # Nothing in this file is hypothetical any more. Where it disagrees with

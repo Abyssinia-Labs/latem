@@ -18,9 +18,8 @@
 > correctly. [`deploy.md`](./deploy.md) §9 is the procedure, and it is the only
 > section of that runbook still written from the spec.
 >
-> Correct rows from [`manual-baseline.md`](./manual-baseline.md) §7.5 as real
-> failures happen — a symptom string you can paste into a search engine is the
-> whole value of this page.
+> Correct these rows as real failures happen — a symptom string you can paste
+> into a search engine is the whole value of this page.
 
 Three things make iOS CI on your own hardware different from every other
 platform, and all three are about **the machine being a real logged-in Mac**
@@ -75,7 +74,6 @@ Everything below follows from those.
 > Rows marked **VERIFIED** were reproduced by hand on 2026-08-11 (Xcode 26.0.1,
 > macOS 26.5.2, M4 Max) and the symptom column is the literal error text. Rows
 > marked *(inferred)* are still read off the spec and have not been seen.
-> `manual-baseline.md` §7 has the full session.
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -91,7 +89,7 @@ Everything below follows from those.
 | Hangs even **with** `--non-interactive` *(inferred)* | EAS is trying to manage credentials itself and reaching for an Expo login | Configure the project so credentials are local; do not let EAS fetch its own — it races `match` |
 | `xcrun: error: SDK "iphoneos" cannot be located` | Xcode CLT selected instead of full Xcode | `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` |
 | Xcode licence prompt in the log *(inferred)* | Licence not accepted after an Xcode upgrade | `sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch`. Bake into the Tart image |
-| `pod install` fails on native extensions *(inferred)* | System Ruby 2.6 | Homebrew Ruby, first on `PATH`. See `manual-baseline.md` §1 |
+| `pod install` fails on native extensions *(inferred)* | System Ruby 2.6 | Homebrew Ruby, first on `PATH` |
 | Build much slower in the VM than on the host *(inferred, and the point of the measurement)* | DerivedData over VirtioFS | This is the §13.2 question. Measure it; set `derived_data = "vm"` if the share loses |
 | Disk full mid-build | Base image 140 GB provisioned, DerivedData tens of GB more | `min_free_gb = 200` for tart, 60 for the default native runner. Check for leaked `latem-run-*` VMs |
 | Two iOS builds fail intermittently and differently *(inferred)* | Parallel Xcode builds contending on DerivedData and the keychain | `concurrency = 1` and `concurrency_group: ios` |
@@ -231,7 +229,7 @@ any of it**, because the agent never started, and it is the agent that writes
 the logs. The machine simply goes offline and stays offline until somebody
 walks over and types a password.
 
-A headless Mac mini in a cupboard is precisely the deployment this breaks, and
+A headless Mac in a cupboard is precisely the deployment this breaks, and
 the symptom is *"my machine went offline overnight and nothing in the logs
 explains it."* Nothing explains it because nothing ran.
 
@@ -252,7 +250,7 @@ sudo fdesetup disable      # decryption takes a while; the machine stays usable
 - **Cost:** the disk is readable by anyone with physical access. That disk holds
   the login keychain with your **distribution certificates and private keys**,
   `~/.latem/secrets.env`, the Android keystore, and the machine token. A stolen
-  Mac mini yields your ability to sign releases under your own identity.
+  machine yields your ability to sign releases under your own identity.
 - **Reasonable when:** the machine is in a locked room or rack you control, and
   uptime matters more than physical-theft resistance.
 
@@ -287,7 +285,7 @@ storing the password somewhere and not telling you.
 ### Decide, and write it down
 
 `latem doctor` reports FileVault status and names both options; it does not
-pick one. Record the decision — in `manual-baseline.md` §8 — including **who
+pick one. Record the decision somewhere durable, including **who
 made it**, so the next person to find the machine offline at 9am knows whether
 that is a bug or the accepted cost.
 
@@ -373,7 +371,6 @@ exists, this is the list.
 
 ## See also
 
-- [`manual-baseline.md`](./manual-baseline.md) — the M0 runbook
 - [`testing.md`](./testing.md) — the manual matrix
 - [`android.md`](./android.md) — the other platform
 - `examples/expo-app/ci/ios/` — the (unverified) scripts

@@ -10,7 +10,6 @@ set -euo pipefail
 # with no manual bundle needed first, contradicting the widely-repeated advice
 # that a draft app must receive its first bundle through the Play Console UI.
 #
-# docs/manual-baseline.md §7.3 has the session.
 #
 # Requires in the environment:
 #   ANDROID_KEYSTORE_B64          upload keystore, base64 encoded

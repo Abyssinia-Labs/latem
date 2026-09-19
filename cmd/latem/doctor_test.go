@@ -18,7 +18,8 @@ import (
 )
 
 // TestDoctorNamesEveryFaultOnABrokenMachine is the acceptance criterion from
-// PLAN.md §5: doctor on a deliberately broken machine names every fault and
+// The acceptance criterion: doctor on a deliberately broken machine names
+// every fault and
 // its fix, and exits non-zero.
 func TestDoctorNamesEveryFaultOnABrokenMachine(t *testing.T) {
 	dir := privateDir(t)

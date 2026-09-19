@@ -570,7 +570,7 @@ concurrency = 1                     # enforced; §13.3
 #   derived_data = "vm"             # "vm" | "shared" — set by measurement, §13.2
 ```
 
-**One agent, several runners.** The example above is one machine — a Mac mini — hosting three execution slots, one of them Docker and one of them the host's own macOS. That is the model: an agent owns a config directory, a machine id, and a set of labelled runners. "Two roles on one box" does **not** mean two agents; it means two `[[runner]]` blocks with different labels, and Apple work never lands on the container runner because the labels do not match.
+**One agent, several runners.** The example above is one machine — an Apple silicon Mac — hosting three execution slots, one of them Docker and one of them the host's own macOS. That is the model: an agent owns a config directory, a machine id, and a set of labelled runners. "Two roles on one box" does **not** mean two agents; it means two `[[runner]]` blocks with different labels, and Apple work never lands on the container runner because the labels do not match.
 
 **On the two macOS blocks carrying identical labels.** That is deliberate: a job asking for `[macos, xcode]` should not have to know which executor answers, so switching a machine from native to Tart is a config edit and not a change to every repo's `jobs.yaml`. Gate 13 picks the first runner in config order whose labels match, so enabling both is not ambiguous — it is worse than ambiguous. The second block never runs, and reads in the config file as though it does. Enable one.
 
@@ -940,7 +940,7 @@ This is a deliberate reversal of draft 02, which made Tart the default and descr
 
 ### 13.1 Docker executor
 
-Target: Linux x86_64 (desktop) and Linux arm64 (Mac mini container role).
+Target: Linux x86_64 (desktop) and Linux arm64 (the container role on an Apple silicon Mac).
 
 - Workspace bind-mounted at `/workspace`, `rw`. Container `WORKDIR` is `/workspace`.
 - Cache volumes mounted at the paths from `caches[].path` (§14).
@@ -1019,7 +1019,7 @@ DerivedData was 651 MB across 13,975 files. The cache is worth **2.8×** on this
 
 > **VirtioFS must be less than 2.8× slower than local APFS, or `derived_data = "shared"` is the wrong default.**
 
-Stated that way it is one comparison rather than draft 02's three-way table, and it can be run on any Mac with Tart installed rather than on the target hardware specifically — the ratio is what matters, not the absolute times. Method and environment are in `docs/manual-baseline.md` §5; the harness is a generated Swift project rather than a real app, chosen so the result is reproducible and not a statement about one codebase's module graph.
+Stated that way it is one comparison rather than draft 02's three-way table, and it can be run on any Mac with Tart installed rather than on the target hardware specifically — the ratio is what matters, not the absolute times. The harness is a generated Swift project rather than a real app, chosen so the result is reproducible and not a statement about one codebase's module graph.
 
 `derived_data = "vm" | "shared"` (§8) exists so the answer is a config value rather than a rewrite. If `"vm"` wins, keeping DerivedData warm across runs additionally requires snapshotting the VM rather than cloning from a clean base — a real scope change to this section, and still worth knowing before the tart executor is written rather than during it.
 
@@ -1266,7 +1266,7 @@ Neither makes Expo a wrong choice for a repository that already uses it. Both me
 | `examples/ios-native/` | **yes** — 20.2 s to a simulator `.app`, archives to arm64 | no | `xcodebuild` + `fastlane` |
 | `examples/expo-app/` | no — blocked on the SDK/Xcode incompatibility above | yes, an Expo account | `xcodebuild` + `fastlane` + Node + pnpm + CocoaPods + EAS |
 
-`examples/ios-native/` is the one to bring a new Mac runner up on, because it isolates the question. It needs no Apple credential either — a simulator build is unsigned — so it answers "is this machine configured correctly?" without waiting on the credential lead times in `manual-baseline.md` §2. If it passes and the signed job fails, the problem is credentials, not the machine.
+`examples/ios-native/` is the one to bring a new Mac runner up on, because it isolates the question. It needs no Apple credential either — a simulator build is unsigned — so it answers "is this machine configured correctly?" without waiting on Apple credential lead times. If it passes and the signed job fails, the problem is credentials, not the machine.
 
 The original argument survives for what it did cover: the runner still invokes `eas` as an ordinary command, and there is still no private API anywhere in this.
 
@@ -1527,15 +1527,15 @@ The test carries its own negative controls: a planted hazard it must find, the f
 
 Milestones are ordered by dependency and sized to be independently reviewable. Each is complete only when its acceptance criteria pass.
 
-> **These milestones are acceptance gates, not an assignment plan.** They describe *what must be true* at each stage. [`PLAN.md`](./PLAN.md) decomposes the same work into workstreams with disjoint file ownership so it can be built in parallel, and maps each workstream back to the milestone it satisfies. When the two disagree about scope, this section wins; when they disagree about ordering, `PLAN.md` wins.
+> **These milestones are acceptance gates, not an assignment plan.** They describe *what must be true* at each stage, not who builds it or in what order.
 
 ### M0 — Prove the hard part manually (no code)
 
-Not an engineering task, but it gates everything after it. Run `eas build --platform ios --local` by hand on the Mac mini, with match, and get an `.ipa` to TestFlight. Do the Android equivalent.
+Not an engineering task, but it gates everything after it. Run `eas build --platform ios --local` by hand on the Mac, with match, and get an `.ipa` to TestFlight. Do the Android equivalent.
 
 It also carries the one measurement that can change an architecture rather than a constant: the §13.2 DerivedData-over-VirtioFS timing, three configurations, on this hardware. Doing it here costs an afternoon. Discovering it during M5 costs the tart executor.
 
-*Acceptance:* a build lands in TestFlight and in Play internal testing; every command used is written down in `docs/manual-baseline.md`; the three timings are recorded and `derived_data` has a defensible default. Those commands become `examples/expo-app/ci/`.
+*Acceptance:* a build lands in TestFlight and in Play internal testing; every command used is written down; the three timings are recorded and `derived_data` has a defensible default. Those commands become the `ci/` scripts in `examples/`.
 
 ### M1 — Skeleton and config
 
@@ -1742,7 +1742,7 @@ Two further items are recorded but **not** amended, because neither is a contrac
 
 **A37 generalises past shell.** The rule is that *a fix recorded only as a comment is not a fix* — if a hazard can recur it needs something mechanical: a shared helper, a lint rule, or a test. The same reasoning is why §24's invariant suite exists rather than a document describing the invariants.
 
-**A32 is the "Expo coupling" risk in PLAN.md §11 arriving on schedule**, not a surprise. That row said the response was to add a bare `xcodebuild` + Gradle example in WS-09 before M5; the row was right, and the example now exists and builds. What the row underestimated is that the coupling is not only about how *narrow* the wedge is — an Expo-only mobile story also inherits an account requirement that contradicts the project's own first sentence.
+**A32 is the "Expo coupling" risk the build plan named, arriving on schedule**, not a surprise. That row said the response was to add a bare `xcodebuild` + Gradle example in WS-09 before M5; the row was right, and the example now exists and builds. What the row underestimated is that the coupling is not only about how *narrow* the wedge is — an Expo-only mobile story also inherits an account requirement that contradicts the project's own first sentence.
 
 **A33 and A34 are the same shape and worth stating as a rule:** *the runner's environment is not the operator's shell, and its workspace is not the operator's checkout.* Both failures are invisible locally and certain on a runner, both were found within an hour of running a real build, and neither would ever have been found by testing the agent against itself. That is the argument for M0 existing.
 

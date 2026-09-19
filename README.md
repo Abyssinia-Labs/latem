@@ -1,6 +1,6 @@
 # Latem
 
-**Self-hosted CI that treats a Mac mini as a first-class build machine.**
+**Self-hosted CI that treats an Apple silicon Mac as a first-class build machine.**
 
 Buildkite, Woodpecker, Drone, Forgejo Actions, and Actions Runner Controller
 all run jobs on hardware you own. Latem exists for the three things they leave
@@ -471,7 +471,7 @@ interpreted — so put anything that needs a shell in a script and name the scri
 Redaction does not depend on which source a value came from, and multi-line
 values are redacted line by line (INV-4).
 
-## Running a Mac mini headless
+## Running a Mac headless
 
 Three things have to be true for a macOS machine to come back on its own after
 a reboot, and `doctor` checks all three.
@@ -778,12 +778,8 @@ Where to read further, in the order a new operator needs them:
   produced.
   The amendments are the interesting part: each one names the defect that
   forced it.
-- [`docs/PLAN.md`](docs/PLAN.md) — workstreams, file ownership, and where each
-  one stands.
 - [`docs/deploy.md`](docs/deploy.md) — the ordered runbook for bringing up a
   Mac runner, written from two machines rather than from the spec.
-- [`docs/manual-baseline.md`](docs/manual-baseline.md) — every command that
-  actually worked, and the twenty-five defects found on the way.
 - [`docs/ios.md`](docs/ios.md), [`docs/android.md`](docs/android.md) — the
   mobile pipelines, including the failure table `doctor` turns into a
   self-service fix.

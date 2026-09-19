@@ -79,7 +79,7 @@ func fromDecision(d registry.Decision) outcome {
 //
 // Amendment A16 added E_SECRET_BACKEND — failed, retryable — specifically to
 // distinguish "you never set this" from "I cannot reach where you set it", on
-// the grounds that a Mac mini's keychain being locked after a reboot is a
+// the grounds that a Mac's keychain being locked after a reboot is a
 // machine condition that resolves without anyone editing a commit.
 // internal/secrets predates the amendment: its Error.Code is a constant
 // E_MISSING_SECRET, and its doc comment still says §21 defines no code for a

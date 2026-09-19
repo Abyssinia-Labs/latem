@@ -10,7 +10,7 @@ set -euo pipefail
 # has been executed, no image has been built, and the timings and sizes below
 # are estimates from the spec rather than measurements. Treat this as an
 # annotated checklist you drive by hand the first time, not as automation you
-# trust. When it works, record the real numbers in docs/manual-baseline.md and
+# trust. When it works, record the real numbers somewhere durable and
 # delete this banner.
 #
 # Requires on the HOST:
@@ -150,7 +150,7 @@ cat <<'NOTES'
 
 Expected size: ~90 GB (RUNNER_SPEC §13.2). If yours is materially different,
 that number is a placeholder in the spec and yours is the real one — record it
-in docs/manual-baseline.md, because `min_free_gb = 150` for the tart runner is
+somewhere durable, because `min_free_gb = 150` for the tart runner is
 derived from it.
 
   Base image           ~90 GB
@@ -167,6 +167,6 @@ Operator tasks this creates, permanently:
   - Apple's licence permits TWO guest VMs per host. `concurrency` for a tart
     runner must be <= 2, and the config loader enforces it (§8, §13.2).
   - `tart list` after a crash will show leaked latem-run-* clones. Each one
-    costs ~90 GB nominally and is the fastest way to fill a Mac mini (§14.4).
+    costs ~90 GB nominally and is the fastest way to fill a Mac (§14.4).
 
 NOTES

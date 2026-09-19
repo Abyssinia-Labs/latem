@@ -15,10 +15,7 @@
 > What has **not** been done is [§9](#9-surviving-a-reboot): no machine has yet
 > built after a reboot with nobody logged in. That step is marked, and it is the
 > only one written from the spec rather than from a terminal.
->
-> The failures behind each instruction are in
-> [`manual-baseline.md`](./manual-baseline.md) §7.5. If something here goes
-> wrong, that table is where the verbatim error text lives.
+
 
 The order is not arbitrary. Each section can be verified before the next one
 starts, and the expensive dependencies — Apple, Google, other humans — are
@@ -294,7 +291,7 @@ latem run myapp ios-release --follow
 
 **This section is unverified.** Everything above ran from an interactive shell,
 which has a live user session and an unlocked keychain. What follows is what
-§13.3 and §23 require, and it is what a Mac mini in a cupboard actually needs.
+§13.3 and §23 require, and it is what a Mac in a cupboard actually needs.
 
 ```bash
 latem service install --print    # read it first
@@ -339,8 +336,7 @@ above it:
 5. `~/.latem/logs/agent.err.log` — the agent's, when a run never started
 
 [`ios.md`](./ios.md) §1 is a failure table keyed by verbatim symptom; rows
-marked **VERIFIED** were observed rather than reasoned. `manual-baseline.md`
-§7.5 has the full list of what went wrong the first time and what fixed it.
+marked **VERIFIED** were observed rather than reasoned.
 
 **One class of failure deserves naming here**, because it wastes the most time:
 a tool that is installed, on `PATH`, and the wrong one. `/usr/bin/ruby` is 2.6

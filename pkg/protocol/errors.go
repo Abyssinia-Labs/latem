@@ -41,7 +41,7 @@ const (
 	// ErrSecretBackend means a secret store is unusable, as distinct from a
 	// secret nobody configured: a locked keychain, `op` not signed in, a
 	// world-readable secrets.env. It is retryable because the most common
-	// instance — a Mac mini whose keychain is locked after a reboot — is a
+	// instance — a Mac whose keychain is locked after a reboot — is a
 	// machine condition that resolves without anyone editing a commit
 	// (amendment A16).
 	ErrSecretBackend ErrorCode = "E_SECRET_BACKEND"

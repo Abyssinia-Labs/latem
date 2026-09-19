@@ -365,7 +365,7 @@ func (s *System) WriteService(spec ServiceSpec) (string, error) {
 	// create the parent of StandardOutPath: if it is missing the job fails to
 	// spawn, and the diagnostic for that failure is written to the file it
 	// could not open. On a machine that has never run the agent — which is
-	// every machine at first install, and the Mac mini this targets — the
+	// every machine at first install, and the Mac this targets — the
 	// directory does not exist yet, so `service install` before a first `agent`
 	// run produced a service that silently never started.
 	if dir := s.logDirFor(spec); dir != "" {

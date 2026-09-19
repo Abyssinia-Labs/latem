@@ -302,7 +302,7 @@ func TestPrune_CollectsIdleMirrorsAndSkipsBusyOnes(t *testing.T) {
 }
 
 // A leaked VM grows toward its image's provisioned 140 GB, the fastest way to fill a
-// Mac mini. They leak whenever the agent dies between `tart clone` and `tart
+// Mac. They leak whenever the agent dies between `tart clone` and `tart
 // delete`, which is what happens the first time someone restarts the agent
 // during a build.
 func TestPrune_ReapsLeakedTartVMs(t *testing.T) {

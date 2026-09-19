@@ -11,7 +11,7 @@ import (
 
 // Tool is what a probe found out about one external program.
 //
-// Absence is not an error here. `doctor` on a fresh Mac mini is supposed to
+// Absence is not an error here. `doctor` on a fresh Mac is supposed to
 // run to completion and list everything that is missing, not stop at the first
 // one — an operator who has to fix, re-run, fix, re-run has a worse experience
 // than one who gets the whole list and does an afternoon's work in one pass.

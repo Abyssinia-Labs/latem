@@ -141,7 +141,7 @@ type Session struct {
 	// collapsing into "unknown".
 	Manager string
 	// UID is the effective uid the agent runs as. Zero is root, which on a
-	// Mac mini runner means a LaunchDaemon whatever launchctl says.
+	// Mac runner means a LaunchDaemon whatever launchctl says.
 	UID int
 	// Err is why the probe failed, if it did.
 	Err error

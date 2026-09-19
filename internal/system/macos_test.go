@@ -125,7 +125,7 @@ func TestKeychainUnlocked(t *testing.T) {
 		{"unlocked", "darwin", map[string]fakeCmd{"security show-keychain-info": {out: `Keychain "<NULL>" no-timeout`}}, true},
 		{
 			// A locked keychain after an unattended reboot is the single most
-			// common cause of a signing job failing on a Mac mini, and the
+			// common cause of a signing job failing on a Mac, and the
 			// error it produces names codesign rather than the keychain.
 			name: "locked",
 			goos: "darwin",

@@ -72,7 +72,7 @@ type stateAnswers struct {
 //
 // §9 says the step contract is "identical across all three executors", and
 // that sentence is the only reason a job author can move a repository from a
-// Linux runner to a Mac mini. It is also the sentence nothing enforces:
+// Linux runner to a Mac. It is also the sentence nothing enforces:
 // internal/executor/docker asserts the contract against docker,
 // internal/executor/native asserts it against native, and neither can notice
 // that the two now disagree — which is what §27 records as the duplicated

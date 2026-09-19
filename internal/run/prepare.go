@@ -81,7 +81,7 @@ func readRegistry(workspace string) (*registry.Registry, error) {
 // Failure is not uniform, and amendment A16 is why. A name nobody configured
 // is E_MISSING_SECRET — rejected, non-retryable, someone has to go and set it.
 // A backend that is unusable is E_SECRET_BACKEND — failed, retryable — because
-// the common instance is a Mac mini whose keychain is locked after a reboot,
+// the common instance is a Mac whose keychain is locked after a reboot,
 // which resolves without anyone editing a commit. internal/secrets already
 // tells the two apart, so this only has to not flatten them.
 func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {

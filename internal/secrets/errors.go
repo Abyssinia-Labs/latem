@@ -81,7 +81,7 @@ func (e *Error) Unwrap() error { return e.Err }
 // nobody configured is E_MISSING_SECRET: rejected, non-retryable, and no
 // amount of waiting fixes it. A secret store that could not be reached is
 // E_SECRET_BACKEND: failed, retryable, because the most common instance — a
-// Mac mini whose login keychain is locked after a reboot — is a machine
+// Mac whose login keychain is locked after a reboot — is a machine
 // condition that resolves without anyone editing a commit.
 //
 // This package originally returned E_MISSING_SECRET for both and said so in a

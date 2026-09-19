@@ -239,7 +239,7 @@ func TestReconcileContinuesWhenOneReaperFails(t *testing.T) {
 // A runner whose executor cannot even be constructed must not stop the agent,
 // and must say why it is dark.
 //
-// This is the Mac mini whose Docker socket is missing: its Xcode runner should
+// This is the Mac whose Docker socket is missing: its Xcode runner should
 // keep working, and the heartbeat should carry a sentence an operator can act
 // on rather than the runner silently disappearing from the machine's
 // advertised capabilities.

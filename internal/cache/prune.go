@@ -292,7 +292,7 @@ type tartVM struct {
 // reapVMs deletes leaked Tart VMs, §14.4's most valuable sweep by volume.
 //
 // A leaked VM grows toward its image's provisioned 140 GB, the fastest way
-// to fill a Mac mini. They leak whenever the agent dies between `tart clone`
+// to fill a Mac. They leak whenever the agent dies between `tart clone`
 // and `tart delete` — a crash, a kill -9, a power cut — so this is not an edge
 // case, it is what happens the first time someone restarts the agent during a
 // build.

@@ -52,7 +52,7 @@ The one §24 names first, and the one that cannot be faked: a self-signed
 certificate and a fake upload endpoint would exercise the plumbing and prove
 nothing about the part that actually breaks.
 
-**Preconditions:** credentials provisioned ([`manual-baseline.md`](./manual-baseline.md) §2);
+**Preconditions:** credentials provisioned;
 Tart base image built; the `ios` runner configured; `latem doctor` clean.
 
 ### M1.1 — Happy path
@@ -178,8 +178,7 @@ halfway through a 70-minute build.
 
 **Expected:** populated after the run, and reused (visibly faster) on the
 second. If `derived_data = "vm"`, DerivedData is **not** in this directory —
-that is the measurement's decision taking effect (§13.2,
-[`manual-baseline.md`](./manual-baseline.md) §5).
+that is the measurement's decision taking effect (§13.2).
 
 ---
 
@@ -310,7 +309,7 @@ Fill in per execution of the matrix. A row with no date has not been run.
 
 | Case | Date | Result | Notes |
 |---|---|---|---|
-| M1.1 iOS happy path | 2026-08-11 | **pass** | Agent started by launchd (`managername` = `Aqua`), `ios-release` → TestFlight build 1786501043, `codesign` reaching the login keychain from a launchd-spawned process. [`manual-baseline.md`](./manual-baseline.md) §7.5 |
+| M1.1 iOS happy path | 2026-08-11 | **pass** | Agent started by launchd (`managername` = `Aqua`), `ios-release` → TestFlight build 1786501043, `codesign` reaching the login keychain from a launchd-spawned process. |
 | M1.2 multi-line secret redaction | 2026-08-11 | **pass, by absence** | Checked against that real run rather than by a deliberate leak step: neither signing password, nor the issuer id, nor any of three interior lines of the App Store Connect PEM appears in the 148-line run log, in any other log, or in the sqlite store. The deliberate-leak form is automated in `test/invariants` against a PEM fixture; this row is the version with a real credential |
 | M1.3 step timeout | | | |
 | M1.4 cancel mid-build | | | |
@@ -346,6 +345,5 @@ Fill in per execution of the matrix. A row with no date has not been run.
 
 ## See also
 
-- [`manual-baseline.md`](./manual-baseline.md) — M0 runbook and the DerivedData measurement
 - [`ios.md`](./ios.md) — failure table, FileVault, LaunchAgent
 - [`android.md`](./android.md) — keystore, Play, `/dev/kvm`

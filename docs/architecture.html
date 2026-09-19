@@ -543,12 +543,12 @@ code,.mono{font-family:var(--mono);font-size:.88em}
   <div class="band__head">
     <p class="eyebrow">Reference deployment</p>
     <h2>Four runners, two boxes</h2>
-    <p class="muted">The split below is the one worth copying: the Mac mini is the only machine that can sign iOS, so it does that and as little else as possible. Note that a box runs <em>one</em> agent — a runner is a labelled slot inside it, not a second install.</p>
+    <p class="muted">The split below is the one worth copying: the Mac is the only machine that can sign iOS, so it does that and as little else as possible. Note that a box runs <em>one</em> agent — a runner is a labelled slot inside it, not a second install.</p>
   </div>
 
   <div class="machines">
     <div class="mach">
-      <p class="mach__tag">Mac mini · runner <code>ios</code></p>
+      <p class="mach__tag">Apple silicon Mac · runner <code>ios</code></p>
       <h3>Xcode, on the host</h3>
       <p class="mach__hw">macOS · LaunchAgent, auto-login on</p>
       <ul>
@@ -561,7 +561,7 @@ code,.mono{font-family:var(--mono);font-size:.88em}
       </ul>
     </div>
     <div class="mach">
-      <p class="mach__tag">Mac mini · runner <code>arm64</code></p>
+      <p class="mach__tag">Apple silicon Mac · runner <code>arm64</code></p>
       <h3>Docker, same agent</h3>
       <p class="mach__hw">Docker arm64 · a second slot, not a second install</p>
       <ul>
@@ -614,14 +614,14 @@ code,.mono{font-family:var(--mono);font-size:.88em}
   <div class="band__head">
     <p class="eyebrow">Order of work</p>
     <h2>Ship the runner first</h2>
-    <p class="muted">The wedge is mobile. Free unlimited iOS and Android builds on a Mac mini is the thing people already want and can't easily assemble themselves — and it stands alone, with no backend at all.</p>
+    <p class="muted">The wedge is mobile. Free unlimited iOS and Android builds on a Mac you own is the thing people already want and can't easily assemble themselves — and it stands alone, with no backend at all.</p>
   </div>
 
   <div class="road">
     <section>
       <p class="road__when">First — prove the hard part</p>
       <ul>
-        <li>A local EAS build, run by hand on the Mac mini, once</li>
+        <li>A local EAS build, run by hand on the Mac, once</li>
         <li>Signing sorted end to end with match: certs, profiles, App Store Connect key</li>
         <li>Android keystore and Play service account working from the desktop</li>
         <li>CI logic pulled out into scripts, so no orchestrator owns it</li>

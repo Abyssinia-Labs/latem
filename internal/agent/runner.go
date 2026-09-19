@@ -51,7 +51,7 @@ func newRunnerState(c *config.Runner, ex executor.Executor, buildErr error) *run
 	if buildErr != nil {
 		// A runner whose executor could not even be constructed is dark for
 		// the life of the process, and saying so is worth more than refusing
-		// to start: a Mac mini whose Docker socket is missing should still run
+		// to start: a Mac whose Docker socket is missing should still run
 		// its Xcode jobs, and should still explain the dark runner (§20).
 		r.reason = buildErr.Error()
 	}

@@ -132,5 +132,5 @@ every developer on the team.
 ./ci/ios/build.sh
 ```
 
-`../../docs/manual-baseline.md` §2 has the lead times for anything above that
+Apple credential lead times apply to anything above that
 involves waiting on Apple.
