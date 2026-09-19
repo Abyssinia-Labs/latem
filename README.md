@@ -89,38 +89,13 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 Never as root. The script detects your OS and architecture, verifies the
 download, installs to `~/.local/bin`, and runs `latem doctor`.
 
-**The current release is v0.1.2, and this repository is private**, so that line
-returns 404 today — for the script itself, for the release assets, and for
-anything else anonymous. It is one line and it works; there is simply nobody it
-works *for* until the repository is public.
-
-### Installing from a private repository, by hand
-
-Until the repository is public this is the install, not a footnote to it. It is
-what `install.sh` does, in the order it does it.
-
-**First authenticate**, or every command below fails. A private repository's
-releases are invisible anonymously, and the failure does not say so — `gh`
-reports `release not found`, which reads like a wrong version number:
-
-```console
-$ gh auth login
-```
-
-Then download the archive for your platform, the checksums manifest, and the
-manifest's signature. The signature is a separate asset, so it takes a second
-`--pattern`:
+**Verify what you installed**, or have the script do it for you — it does both
+checks below before it writes anything. By hand, for a release downloaded
+directly:
 
 ```console
 $ gh release download v0.1.2 --repo Abyssinia-Labs/latem --pattern '*darwin_arm64*'
 $ gh release download v0.1.2 --repo Abyssinia-Labs/latem --pattern '*checksums*'
-```
-
-Substitute `darwin_amd64`, `linux_amd64` or `linux_arm64` as needed. Verify,
-signature first — this is the check that says who produced the file, and the
-key is the one compiled into every binary latem ships:
-
-```console
 $ minisign -Vm latem_0.1.2_checksums.txt \
       -P 'RWTTZK1Cxjg51w6BUpg5KpkKhOHzUT+EDhgidVqHUHsiTr6nPjKC3esu'
 Signature and comment signature verified
@@ -128,35 +103,18 @@ Trusted comment: latem v0.1.2
 
 $ shasum -a 256 -c latem_0.1.2_checksums.txt 2>/dev/null | grep darwin_arm64
 latem_0.1.2_darwin_arm64.tar.gz: OK
-```
 
-**If either fails, stop.** Neither is optional and neither has a flag to skip
-it; the two prove different things, and [What "verifies the download"
-means](#what-verifies-the-download-means) is why.
-
-Then extract just the binary, and put its directory on `PATH` — `install.sh`
-does this and warns you about the second part, which nothing here can:
-
-```console
 $ mkdir -p ~/.local/bin && tar -xzf latem_0.1.2_darwin_arm64.tar.gz -C ~/.local/bin latem
-$ export PATH="$HOME/.local/bin:$PATH"     # and add this to ~/.zprofile
-$ latem version
-latem v0.1.2
 ```
 
-**`latem version` must print the version you downloaded.** If it prints
-something else, an older latem is earlier on your `PATH` — `command -v latem`
-says which.
+The signature is a separate asset from the manifest, which is why that is two
+downloads rather than one. `minisign` is not on a stock macOS: `brew install
+minisign`.
 
-`minisign` is not on a stock macOS: `brew install minisign`. `gh` likewise.
-
-**Do not take v0.1.0.** A multi-line secret held in the macOS Keychain — an App
-Store Connect `.p8` above all — resolved to hex rather than to a key on that
-release, silently, with `doctor` reporting it `[ ok ]` and the failure arriving
-much later as a 401 from `fastlane pilot upload`.
-[Where secret values live](#where-secret-values-live) has the detail. v0.1.1
-fixed it; v0.1.2 adds a release's worth of corrections to what `doctor` and the
-run log tell you, and changes nothing about how a build runs.
+**`~/.local/bin` has to be on your `PATH`** — `install.sh` warns when it is not,
+and a manual install has nobody to warn it. `latem version` must print the
+version you installed; if it prints another, an older latem is earlier on your
+`PATH` and `command -v latem` says which.
 
 Otherwise, build from source with Go 1.25 or newer:
 
@@ -184,11 +142,11 @@ no signing key in it refuses that setting at load, because an agent that
 declined every release into a log nobody reads would be worse than one that
 never offered to update.
 
-The same privacy caveat applies: the release feed is `api.github.com`, the agent
-sends no token, and a private repository answers 404. `latem doctor` says so
-rather than leaving it to a daily line in a log.
+The release feed is `api.github.com` and the agent sends no token, so a fork
+kept private answers 404 to its own agents. `latem doctor` says so rather than
+leaving it to a daily line in a log nobody is reading.
 
-Then, either way:
+Then:
 
 ```console
 $ latem init --repo myapp=git@github.com:me/myapp.git   # write a config.toml
@@ -294,7 +252,103 @@ jobs:
 `version`, `runs_on` and `steps` are the only required keys, and the job name has
 to match the one you pass to `latem run`. On macOS `latem init` generates the
 labels `["macos", "arm64", "xcode"]`, so `runs_on` must be a subset of those.
-[Configuration](#configuration) has the full schema.
+
+## Writing a pipeline
+
+A realistic registry, with every feature that earns its place in one. Nothing
+here is macOS-specific except the labels.
+
+```yaml
+version: 1
+
+# Declared once, mounted into every job that names them. No save step, no
+# restore step, no cache key: the directory is simply still there next run.
+caches:
+  - name: node-modules-store
+    path: /Users/ci/.local/share/pnpm/store
+  - name: build-cache
+    path: /Users/ci/.cache/turbo
+
+defaults:
+  timeout: 20m          # per job, unless a job overrides it
+
+jobs:
+  # `latem run myapp test`
+  test:
+    runs_on: [macos, arm64]
+    caches: [node-modules-store]
+    steps:
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: lint
+        run: pnpm lint
+      - name: unit tests
+        run: pnpm test -- --reporter=dot
+
+  # `latem run myapp build` — keeps what it produces.
+  build:
+    runs_on: [macos, arm64]
+    timeout: 45m
+    caches: [node-modules-store, build-cache]
+    # Globs relative to the workspace root. Collected after the job, kept for
+    # `retain`, and readable under ~/.latem/artifacts/<run-id>/.
+    artifacts:
+      - path: dist/**
+        retain: 14d
+      - path: reports/junit.xml
+        retain: 90d
+    steps:
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: build
+        run: pnpm build
+      # A step is a new process: `cd`, exports and shell functions do not
+      # survive it. The filesystem does. $LATEM_ENV is the one channel between
+      # steps — append KEY=value to it and the next step has it.
+      - name: record the version
+        run: echo "APP_VERSION=$(node -p 'require(\"./package.json\").version')" >> "$LATEM_ENV"
+      - name: name the archive
+        run: echo "building $APP_VERSION"
+
+  # `latem run myapp release --ref v1.4.0 --input channel=beta`
+  release:
+    runs_on: [macos, arm64]
+    timeout: 90m
+    # Serialises across jobs on this machine, not merely across runners: two
+    # releases signing at once contend for the same keychain.
+    concurrency_group: release
+    # Resolved on the machine, never in this file. See "Where secret values
+    # live" below.
+    secrets: [NPM_TOKEN, APP_STORE_CONNECT_KEY_P8]
+    inputs:
+      channel:
+        type: enum
+        values: [beta, production]
+        default: beta
+    steps:
+      - name: publish
+        # ${input.NAME} is the only interpolation, and only in env. A secret
+        # cannot be interpolated at all — the step reads it from its
+        # environment, which is what keeps it out of this file and out of logs.
+        env:
+          RELEASE_CHANNEL: ${input.channel}
+        run: ci/release.sh
+```
+
+Two rules worth knowing before you write your own, because neither is obvious
+and both are enforced at parse time:
+
+- **`run` is literal.** It is the only place a command may be written, and
+  nothing is interpolated into it. Anything conditional, looping, or
+  multi-command belongs in a script in your repository that the step calls —
+  which is also what makes it runnable on a laptop.
+- **A value containing `": "` needs quoting or a block scalar.** `run: echo
+  "Building: v2"` is a YAML error, not a latem one, and the message names the
+  line. `run: |` is the usual answer.
+
+**Worked examples that have actually run** live in
+[`examples/`](examples/): a plain Xcode app and a plain Gradle app, both taken
+to a real store listing, with the `ci/` scripts they call.
 
 ## `latem doctor`
 
@@ -665,8 +719,9 @@ frames.
 
 ## Status
 
-Under active development toward v0.1. Every command above is wired and does
-what it says.
+**v0.1.2 is the current release.** Every command above is wired and does what it
+says; the version number is low because the surface is still moving, not because
+the parts described here are sketches.
 
 The claim this project exists to make has been tested rather than argued: on
 2026-08-11 the agent, started by launchd rather than by a shell, took
@@ -690,12 +745,11 @@ are green.
 
 Not built, and honestly named:
 
-- **A public release.** v0.1.0, v0.1.1 and v0.1.2 **are** tagged, and the signed
-  archives are on them — the pipeline, the signing key (`D73938C642AD64D3`,
-  which `latem version` reports), and the verification the installer and the
-  agent both perform are all in place and exercised. What has not happened is
-  making the repository public, so the installer above has nothing it can fetch
-  anonymously and no stranger has yet installed this.
+- **A 1.0.** The surface described here is stable enough to build on and not
+  yet frozen: a flag may be renamed, and a config key may grow a better
+  spelling, between now and a 1.0. Releases are signed and self-update refuses
+  anything the key in your binary does not vouch for, so upgrading is not the
+  risk; a rename you have to notice is.
 - **The Tart executor**, deferred to v2 by amendment A31. Native is the default
   because the first deployment builds repositories its operator controls; Tart
   is the isolation upgrade for when that stops being true, and `RUNNER_SPEC`
