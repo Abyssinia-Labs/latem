@@ -4,76 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
-	"os"
-	"path"
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
-	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
-
-// MaxRegistryBytes bounds .latem/jobs.yaml. The file comes from a repository
-// and is read into memory before it is parsed, so it gets a size it cannot
-// exceed as well as the field limits internal/registry already enforces.
-const MaxRegistryBytes = 1 << 20
-
-// readRegistry is gate 11: the registry comes from disk, at the pinned commit
-// (INV-5).
-//
-// The file is opened through an [os.Root] scoped to the workspace rather than
-// by joining paths. A workspace is whatever a build and a repository put there,
-// symlinks included, and `.latem/jobs.yaml` pointing at /etc/shadow is a plain
-// thing to commit. os.Root makes the kernel refuse the traversal instead of
-// this function trying to out-argue a symlink race.
-func readRegistry(workspace string) (*registry.Registry, error) {
-	root, err := os.OpenRoot(workspace)
-	if err != nil {
-		return nil, &registry.Error{
-			Code: protocol.ErrNoRegistry,
-			Msg:  "opening the workspace",
-			Err:  err,
-		}
-	}
-	defer func() { _ = root.Close() }()
-
-	f, err := root.Open(path.Clean(registry.Path))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, &registry.Error{
-			Code: protocol.ErrNoRegistry,
-			Msg:  fmt.Sprintf("%s is not present at this commit", registry.Path),
-		}
-	}
-	if err != nil {
-		return nil, &registry.Error{
-			Code: protocol.ErrNoRegistry,
-			Msg:  fmt.Sprintf("reading %s", registry.Path),
-			Err:  err,
-		}
-	}
-	defer func() { _ = f.Close() }()
-
-	// One byte past the cap so an oversized file is refused rather than
-	// silently truncated into something that happens to parse.
-	data, err := io.ReadAll(io.LimitReader(f, MaxRegistryBytes+1))
-	if err != nil {
-		return nil, &registry.Error{
-			Code: protocol.ErrBadRegistry,
-			Msg:  fmt.Sprintf("reading %s", registry.Path),
-			Err:  err,
-		}
-	}
-	if len(data) > MaxRegistryBytes {
-		return nil, &registry.Error{
-			Code: protocol.ErrBadRegistry,
-			Msg:  fmt.Sprintf("%s is larger than %d bytes", registry.Path, MaxRegistryBytes),
-		}
-	}
-	return registry.Parse(data)
-}
 
 // resolveSecrets is the second half of gate 15: the names came out of the
 // registry, the values come out of the §15 chain.

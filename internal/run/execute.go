@@ -13,6 +13,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -272,9 +273,21 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	x.note("checked out %s at %s", normalized, shortSHA(ws.SHA))
 
 	// Gate 11 — the registry, off disk, at this commit.
-	reg, err := readRegistry(ws.Path)
+	//
+	// Since A42 this is two files rather than one: .latem/jobs.yaml if it
+	// declares the job, and .github/workflows/*.yml otherwise. Both arrive as
+	// a *registry.Registry, so nothing downstream of this line knows or cares
+	// which one the job was written in — that is the point, and it is what
+	// keeps §5's invariants true in one place instead of two.
+	reg, src, err := workflow.Resolve(ws.Path, x.req.Job, x.workflowScope())
 	if err != nil {
 		return nil, registry.Decision{}, err
+	}
+	if !src.Native {
+		// Worth a line in the run log: the job that ran is not in the file
+		// most readers of this repository would look in, and a workflow's own
+		// `on:` triggers are not what caused this run.
+		x.note("job %q from %s", x.req.Job, src.Path)
 	}
 	return reg, registry.Decision{}, nil
 }

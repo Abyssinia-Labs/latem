@@ -16,6 +16,8 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/store"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -117,6 +119,16 @@ func TestExecute_ConcurrencyGroupRequeues(t *testing.T) {
 
 // ------------------------------------------------------------- gate 11 ------
 
+// readRegistry is gate 11 as the orchestrator now performs it (A42): the
+// resolver, asked for a job name these fixtures declare. It is a helper so the
+// cases below still read as tests of *reading the file* — the size cap, strict
+// decoding, the symlink — rather than of resolution, which resolve_test.go
+// covers in its own package.
+func readRegistry(workspace string) (*registry.Registry, error) {
+	reg, _, err := workflow.Resolve(workspace, "test", expr.Scope{})
+	return reg, err
+}
+
 func TestReadRegistry_MissingIsENoRegistry(t *testing.T) {
 	dir := t.TempDir()
 	_, err := readRegistry(dir)
@@ -154,7 +166,7 @@ jobs:
 
 func TestReadRegistry_OversizedIsRefused(t *testing.T) {
 	dir := t.TempDir()
-	writeRegistry(t, dir, "version: 1\n"+strings.Repeat("# padding\n", MaxRegistryBytes/9))
+	writeRegistry(t, dir, "version: 1\n"+strings.Repeat("# padding\n", workflow.MaxWorkflowBytes/9))
 	_, err := readRegistry(dir)
 	if got := codeOf(err); got != protocol.ErrBadRegistry {
 		t.Fatalf("code = %s, want E_BAD_REGISTRY (%v)", got, err)
