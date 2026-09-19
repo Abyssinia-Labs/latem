@@ -52,9 +52,16 @@ test:
 # Each one skips itself when no daemon answers, so this is safe on a laptop
 # without Docker. That is also why CI checks for a daemon before running them:
 # a skip and a pass look identical in the summary line.
+#
+# -p 1 because these packages share one Docker daemon and one label namespace.
+# Run in parallel they reap each other: a reconciliation sweep in one package
+# removes containers labelled latem.managed that belong to another, and the
+# victim reports "container is not running" or "removal already in progress"
+# from somewhere unrelated to the bug. Serial is slower and is the only honest
+# way to run them.
 .PHONY: test-integration
 test-integration:
-	$(GO) test -race -count=1 -tags=integration $(PKGS)
+	$(GO) test -race -count=1 -p 1 -tags=integration $(PKGS)
 
 # Lint is advisory when golangci-lint is absent and strict when it is present
 # but the wrong version.

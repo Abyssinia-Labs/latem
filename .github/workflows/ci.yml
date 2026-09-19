@@ -109,5 +109,11 @@ jobs:
       # without it is a broken job rather than a quiet one.
       - name: require a Docker daemon
         run: docker info >/dev/null
+      # pipefail, because the exit status of `go test | tee` is tee's. Without
+      # it this step cannot fail: the job reported success while its own log
+      # said FAIL, and had been doing so for as long as the tee had been there.
       - name: integration
-        run: go test -race -count=1 -tags=integration ./... 2>&1 | tee /dev/stderr
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
