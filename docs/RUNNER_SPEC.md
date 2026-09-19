@@ -690,15 +690,16 @@ The accurate contract, identical across all three executors:
 
 This is GitHub Actions' model, so it is already what people expect; it just has to be written down. The consequence for job authors is the obvious one: if two commands must share shell state, they are one step, and the sequencing belongs in the shell script. That is N1 working as intended.
 
-**Passing values between steps.** Because shell state does not survive, there is one sanctioned channel. The agent creates an empty file per run and exports its path as `$LATEM_ENV`. A step may append `KEY=value` lines to it; between steps, the agent reads, truncates, and merges them into the run environment for every subsequent step.
+**Passing values between steps.** Because shell state does not survive, there is one sanctioned channel. The agent creates an empty file per run and exports its path as `$LATEM_ENV` — and, since A43, as `$GITHUB_ENV` too, the same file under the name a workflow written for GitHub reads. A step may append `KEY=value` lines to it, or a `KEY<<DELIMITER` block for a value that spans lines; between steps, the agent reads, truncates, and merges them into the run environment for every subsequent step.
 
 ```bash
 echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$LATEM_ENV"
+{ echo "NOTES<<EOF"; git log -3 --format=%s; echo "EOF"; } >> "$LATEM_ENV"
 ```
 
 Constrained, because this is a file a job can write and the agent then trusts:
 
-- Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`. Malformed lines are dropped with a warning, not silently.
+- Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`. Malformed lines are dropped with a warning, not silently. A `KEY<<DELIMITER` block that is never closed sets nothing — where the value was meant to end is not knowable, and "end of file" would be a guess.
 - Keys colliding with a declared secret name, or with any `LATEM_*` name, are **ignored** — a job cannot overwrite an injected credential or spoof the agent's own variables.
 - The file is capped at 64 KB per step; values pass through the redactor before appearing in any log.
 - It does not cross the trust boundary in either direction. It is job-authored data affecting the job's own environment, which is a different thing from §5's concern.
@@ -1831,3 +1832,9 @@ composite) and the pre/main/post hooks around each.
 - **`needs`** is N2. A42 reversed N1 and said nothing about N2, so a workflow with a job
   graph stays refused until someone decides to reverse that too. It is listed here so the
   refusal reads as a decision rather than an omission.
+
+### Amendment from wiring phase 2
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A43 | §9, §13, §26 | **`$LATEM_ENV` is also `$GITHUB_ENV`, one file read by one parser, and the format gains the `KEY<<DELIMITER` heredoc** | The alias was the cheap part: a workflow written for GitHub appends to `$GITHUB_ENV`, and exporting the existing file under that name costs one line per executor. What it exposed was that the two files had two parsers — the executors' `parseEnvFile` and the workflow package's `ParseKeyValueFile` — and only the second spoke the heredoc form. Aliasing without unifying would have given a multi-line value written the documented GitHub way a "malformed line" warning and no variable, from a file the workflow was told it could write to. Both executors now read `$LATEM_ENV` through the shared parser, whose cap, key grammar and never-quote-a-value rules are §9's already. The native format acquires heredocs as a consequence, which is recorded here because it is a §9 change, however small. §26 had already named the verbatim duplication of `$LATEM_ENV` parsing across the two executors as debt with the Tart executor as its trigger; this retires it earlier, and the Tart executor will have one parser to call rather than a third copy to make |

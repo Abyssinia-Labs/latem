@@ -161,6 +161,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	// Both set after the merge, so that a job which wrote either name into
 	// $LATEM_ENV cannot point the next step's bookkeeping somewhere else.
 	env[EnvFileVar] = e.envFile
+	env[executor.GitHubEnvVar] = e.envFile
 	env[executor.OutputFileVar] = e.outFile
 	e.mu.Unlock()
 

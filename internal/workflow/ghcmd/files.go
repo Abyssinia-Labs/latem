@@ -55,7 +55,7 @@ func ParseKeyValueFile(data []byte, protected func(string) bool) ([]Assignment, 
 	body, truncated := capBytes(data)
 	if truncated {
 		warnings = append(warnings, fmt.Sprintf(
-			"the file exceeded %d bytes; everything past the last complete line before the cut was ignored", MaxFileBytes))
+			"the file exceeded the %d byte limit; everything past the last complete line before the cut was ignored", MaxFileBytes))
 	}
 
 	var out []Assignment
@@ -114,7 +114,7 @@ func ParsePathFile(data []byte) ([]string, []string) {
 	body, truncated := capBytes(data)
 	if truncated {
 		warnings = append(warnings, fmt.Sprintf(
-			"the file exceeded %d bytes; everything past the last complete line before the cut was ignored", MaxFileBytes))
+			"the file exceeded the %d byte limit; everything past the last complete line before the cut was ignored", MaxFileBytes))
 	}
 	var out []string
 	for _, line := range strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n") {

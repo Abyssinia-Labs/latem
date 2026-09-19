@@ -5,10 +5,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"path"
-	"regexp"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -45,13 +43,6 @@ const (
 	envDirMode  = 0o777
 )
 
-// envKeyPattern is §9's grammar for a key a job may set.
-//
-// It is the POSIX identifier rule, and it is the reason a line like
-// `PATH=x; rm -rf /` cannot become anything but a variable named PATH — the
-// key is checked, the value is never interpreted.
-var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 // parseEnvFile parses the KEY=value lines a step appended to $LATEM_ENV.
 //
 // The constraints come from RUNNER_SPEC §9 and each one exists because this is
@@ -74,44 +65,19 @@ var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // descriptor — and echoing it into the log to explain that it was dropped
 // would be its own leak.
 func parseEnvFile(data []byte, protected func(string) bool) (map[string]string, []string) {
-	var warnings []string
-
-	if len(data) > MaxEnvFileBytes {
-		data = data[:MaxEnvFileBytes]
-		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
-			data = data[:i+1]
-		} else {
-			data = nil
-		}
-		warnings = append(warnings, fmt.Sprintf(
-			"$LATEM_ENV exceeded the %d byte limit; everything past it was ignored", MaxEnvFileBytes))
+	// The parser is the workflow package's since A43: the format is GitHub's
+	// $GITHUB_ENV format, which this file is exported as too, and one parser
+	// for one format is the whole point. Its cap is the same 64 KB, its key
+	// grammar is §9's, and it never quotes a value or a malformed line. What
+	// this adapter adds is the merge — last writer wins, as before — and the
+	// file's name on each warning, so a reader knows which channel spoke.
+	assignments, warnings := ghcmd.ParseKeyValueFile(data, protected)
+	for i, w := range warnings {
+		warnings[i] = "$LATEM_ENV " + w
 	}
-
-	out := map[string]string{}
-	for i, raw := range strings.Split(string(data), "\n") {
-		line := strings.TrimSuffix(raw, "\r")
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		lineNo := i + 1
-
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf(
-				"$LATEM_ENV line %d: no '=', dropped (expected KEY=value)", lineNo))
-			continue
-		}
-		if !envKeyPattern.MatchString(key) {
-			warnings = append(warnings, fmt.Sprintf(
-				"$LATEM_ENV line %d: key is not an identifier matching %s, dropped", lineNo, envKeyPattern))
-			continue
-		}
-		if protected != nil && protected(key) {
-			warnings = append(warnings, fmt.Sprintf(
-				"$LATEM_ENV line %d: %s is set by the agent and cannot be overwritten by a job, ignored", lineNo, key))
-			continue
-		}
-		out[key] = value
+	out := make(map[string]string, len(assignments))
+	for _, a := range assignments {
+		out[a.Key] = a.Value
 	}
 	return out, warnings
 }

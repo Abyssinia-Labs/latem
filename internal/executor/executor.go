@@ -150,6 +150,12 @@ type Result struct {
 // name for the same file with nothing to recommend it.
 const OutputFileVar = "GITHUB_OUTPUT"
 
+// GitHubEnvVar is the second name for $LATEM_ENV's path. One file, one
+// parser, two names: a workflow written for GitHub appends to $GITHUB_ENV and
+// a job written for latem appends to $LATEM_ENV, and since A43 both are the
+// same format read by the same code, so there is nothing to keep apart.
+const GitHubEnvVar = "GITHUB_ENV"
+
 // Step is one unit of work.
 type Step struct {
 	Name string
