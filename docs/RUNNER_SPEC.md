@@ -1749,3 +1749,85 @@ Two further items are recorded but **not** amended, because neither is a contrac
 **A31 is a decision about who the first user is, not about which executor is better.** Tart is better. It is also a boundary you buy before you need it, and defaults are what an operator gets when they have not yet formed an opinion — so the default should be the configuration that is correct for the deployment they actually have, with the stronger one one uncomment away and a stated criterion for when to reach for it. §13.0 is that criterion, and it is a question about provenance ("whose code runs here?") rather than about scale or hardware, because provenance is what actually changes the answer.
 
 The invariants are untouched. INV-5 in particular means exactly what it did: unapproved code does not run. What native changes is not whether the invariant holds but what it costs when an approval is granted wrongly — under Tart, a VM that is deleted; under native, the operator's keychain. That is stated in §13.0 rather than left for an operator to infer, because it is the only part of this amendment that can hurt someone.
+
+### Amendment from the Actions-compatibility decision
+
+Every amendment above was forced by something refusing to compile, refusing to run, or
+refusing to be expressible. **A42 is the first that is not.** It is a product decision,
+recorded here because it reverses a non-goal and moves the trust boundary, and a reader
+who finds N1 contradicted by the code deserves to find the reason next to it rather than
+in a commit message.
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A42 | §1 (N1), §5 (INV-3, INV-4, INV-5), §9, §13.0 | **N1 is reversed. Latem interprets GitHub Actions workflow syntax** — `.github/workflows/*.yml` as a job registry, `uses:`, composite actions, and the expression language — with `.latem/jobs.yaml` retained as the native format | Adoption, and the measurement that settles it. The user latem most needs to reach already has CI and wants to move one job — the expensive, macOS-bound one — onto hardware they own, without touching what already works. Asking them to re-author that job in a second format is the friction that ends the conversation, and it is a format cost, not a capability cost. A format that accepts only `run:` does not avoid this: **this repository's own two workflows are 22 `uses:` steps against 20 `run:`**, so a `uses:`-rejecting subset would refuse to load the workflows of the project shipping it. Half-compatibility is the one option that buys nothing |
+
+**What A42 costs, stated now rather than discovered in an incident.** Each of these is a
+claim currently made in §5 or the README that becomes narrower the moment a workflow names
+a third-party action, and each needs its wording corrected in the same change that ships
+the feature — an invariant that quietly stops holding is worse than one never claimed.
+
+- **INV-5 no longer yields reproducibility from the commit alone.** `uses: actions/checkout@v5`
+  is a *mutable tag on a repository that is not yours*, resolved at run time. The registry
+  still comes from your disk at the resolved commit, which is the part INV-5 actually
+  guarantees, but "a run is reproducible from the commit alone" is false for any workflow
+  with an unpinned `uses:`. Reproducibility becomes a property of SHA-pinned references and
+  must be described as one.
+- **INV-4 holds for `run:` steps and not for actions.** Redaction at the point of emission
+  keeps a secret out of a log. It does nothing about an action that receives the secret as
+  an input and opens a socket. "Secrets never leave the machine" is true of the log
+  pipeline, not of third-party code, and the distinction has to be in the sentence.
+- **INV-3 inherits a known vulnerability class.** `${{ }}` substituted into `run:` is the
+  script injection GitHub itself issues advisories about — `github.event.*` is attacker-authored
+  text landing in a shell. The rule that keeps INV-3 true is therefore normative for the
+  evaluator: **a context value reaches a step as an environment variable, never as
+  substituted characters in a command string.** A37's principle applies — this needs a test,
+  not a comment.
+- **N3 is hit sideways.** `actions/cache` and `actions/upload-artifact` do not manipulate
+  files; they call GitHub backend APIs. Supporting the two actions that appear in nearly
+  every workflow means implementing those services locally.
+- **§13.0's default inverts, and G6 pays for it.** "Your own repositories, native is right"
+  was sound while the only code that ran was yours. A marketplace action runs third-party
+  code as the agent user, with the login keychain unlocked and the signing identities
+  present — which is the precise scenario §13.0 gives Tart as the answer to. For any
+  workflow containing an action that is not vendored into the repository, **Tart is the
+  floor and not the upgrade**, and a machine that has not pulled the image is a 69 GB
+  download away from its first green build. G6's five minutes survives only on the
+  `.latem/jobs.yaml` path and for workflows whose steps are all `run:`.
+
+**Order of work, chosen so the trust boundary moves last.**
+
+| Phase | Work | Boundary |
+|---|---|---|
+| 1 | The workflow parser and the expression evaluator, `uses:` a named error | none |
+| 2 | Workflow commands: `$GITHUB_ENV`, `$GITHUB_OUTPUT`, `$GITHUB_PATH`, `$GITHUB_STEP_SUMMARY`, `::add-mask::`, `::group::`; step `id:`; the `steps` context | none |
+| 3 | `if:` against run-time status, which needs a condition on the registry's step | none — a model change |
+| 4 | `uses: ./path` and `uses: docker://` | INV-5 intact: both resolve at the commit the registry did |
+| 5 | The marketplace, behind SHA-pinning and an operator allowlist, with the §13.0 inversion in the same change | **here** |
+| 6 | The cache and artifact services | N3 |
+
+Nothing in phase 5 ships before the §5 wording in phases 1–4 is already correct.
+
+**This table replaces a four-item list written before any of it was built, and the
+correction is the point of recording it.** The original had today's phase 4 as phase 2 and
+went straight to the marketplace, because it was drawn from what *changes the trust
+boundary* rather than from what *has to exist first*. Phase 1 surfaced the ordering it
+actually has: `$GITHUB_OUTPUT` is what makes `steps.*.outputs` resolvable, and the compiler
+refuses that context today — so a composite action, which communicates through exactly that
+channel, cannot be implemented before the commands are. Phase 3 is separate from it because
+`if: always()` is not an expression problem at all: `registry.Step` has no condition field,
+so a cleanup step that must run after a failure cannot be compiled to one at any level of
+expression support.
+
+Phase 5 is larger than 1, 2, 4 and 6 together, and should be planned as such: resolving and
+caching action repositories, parsing `action.yml`, three action kinds (node20/node24, Docker,
+composite) and the pre/main/post hooks around each.
+
+**Two constructs are deliberately unscheduled**, because neither is blocked on effort:
+
+- **`strategy` / matrix** expands one job into several, and §11's run state machine has one
+  run per job. Scheduling it means deciding what a matrix leg *is* — a run, a step, or
+  something new — and that is a model question, not a parser one.
+- **`needs`** is N2. A42 reversed N1 and said nothing about N2, so a workflow with a job
+  graph stays refused until someone decides to reverse that too. It is listed here so the
+  refusal reads as a decision rather than an omission.
