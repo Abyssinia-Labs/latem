@@ -103,5 +103,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Before the tests, not after: every integration test skips itself when
+      # no daemon answers, and a skipped suite and a passing one produce the
+      # same green tick. This job exists to exercise Docker, so a runner
+      # without it is a broken job rather than a quiet one.
+      - name: require a Docker daemon
+        run: docker info >/dev/null
       - name: integration
-        run: go test -race -count=1 -tags=integration ./test/... 2>&1 | tee /dev/stderr
+        run: go test -race -count=1 -tags=integration ./... 2>&1 | tee /dev/stderr

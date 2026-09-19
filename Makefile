@@ -43,9 +43,18 @@ test:
 
 # Integration tests need Docker and are build-tagged, so they stay out of the
 # default gate. CI runs them on a job that has a daemon.
+#
+# Across every package, not ./test/... — the build tag is the selector, and a
+# directory is not. Three packages kept integration tests outside ./test/ that
+# nothing ever compiled: internal/executor/docker (13), internal/cache (3) and
+# internal/agent (1). They were correct and they had never run.
+#
+# Each one skips itself when no daemon answers, so this is safe on a laptop
+# without Docker. That is also why CI checks for a daemon before running them:
+# a skip and a pass look identical in the summary line.
 .PHONY: test-integration
 test-integration:
-	$(GO) test -race -count=1 -tags=integration ./test/...
+	$(GO) test -race -count=1 -tags=integration $(PKGS)
 
 # Lint is advisory when golangci-lint is absent and strict when it is present
 # but the wrong version.
