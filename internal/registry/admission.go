@@ -262,7 +262,7 @@ type ResolvedStep struct {
 	Run  string
 	Env  map[string]string
 	Late map[string]LateValue
-	If   LateValue
+	If   Condition
 	// Timeout of zero means "whatever remains of the job budget". Resolving
 	// that needs a clock and a start time, so it belongs to the orchestrator
 	// rather than here.

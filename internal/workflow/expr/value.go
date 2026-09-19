@@ -243,3 +243,8 @@ func writeJSON(b *strings.Builder, v Value, indent string) {
 // Stringify renders a value the way the expression language does when it lands
 // in text — which is what a hoisted environment variable holds.
 func Stringify(v Value) string { return toString(v) }
+
+// IsTruthy exposes the expression language's truthiness for a caller holding
+// an evaluated value — a condition, where "false" the string and false the
+// value must not be confused.
+func IsTruthy(v Value) bool { return truthy(v) }

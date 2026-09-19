@@ -19,18 +19,34 @@ import (
 // for rather than assumed away.
 const hoistPrefix = "GHA_EXPR_"
 
-// runtimeContexts are the contexts whose values do not exist until the step
-// runs. An expression reaching for one cannot be compiled to a value.
-var runtimeContexts = map[string]string{
-	"steps":  "a step's outputs exist only once that step has run",
-	"job":    "job.status is not known until the job is under way",
-	"runner": "the runner context is supplied by the executor at step time",
-	"needs":  "latem runs one job per run, so there is nothing for needs to refer to",
+// lateContexts are answered by the run loop as the step is about to run, so
+// an expression reaching for one compiles to a [registry.LateValue] rather
+// than to a value. The command is unchanged either way — see hoist.
+var lateContexts = map[string]bool{"job": true, "runner": true}
+
+// refusedContexts cannot be compiled at all yet, each for its own reason.
+//
+// `steps` is late by nature but is refused until the $GITHUB_OUTPUT channel is
+// wired: compiling it now would resolve every reference to an empty string,
+// which is indistinguishable from the earlier step having produced nothing.
+// That is the trap the registry's References() check exists to prevent, and
+// shipping the binding before the channel would reintroduce it from the other
+// side.
+var refusedContexts = map[string]string{
+	"steps": "an earlier step's outputs arrive through $GITHUB_OUTPUT, which is not wired yet (A42 phase 2)",
+	"needs": "latem runs one job per run, so there is nothing for needs to refer to (N2)",
 }
 
-// runtimeFuncs are the status functions, which answer against a status the
-// compiler does not have.
-var runtimeFuncs = map[string]bool{"success": true, "failure": true, "cancelled": true}
+// lateFuncs are the status functions. They answer against the job's status,
+// which the run loop has and the compiler does not, so they make an
+// expression late in exactly the way the `job` context does.
+//
+// always() is here although its answer is a constant. What `if: always()`
+// means is "run this step even after a failure", and the run loop can only
+// honour that if the step still carries a condition when it gets there — an
+// admission-time true would drop the condition and leave an ordinary step,
+// which stops at the first failure like any other. A test holds this.
+var lateFuncs = map[string]bool{"success": true, "failure": true, "cancelled": true, "always": true}
 
 // secretsContext is refused separately from the run-time contexts, because the
 // reason is not timing.
@@ -128,7 +144,7 @@ func (j *Job) unsupported(file, name string) error {
 		add("strategy:", "a matrix expands one job into several; latem runs the job you named")
 	}
 	if len(j.Needs) > 0 {
-		add("needs:", runtimeContexts["needs"])
+		add("needs:", refusedContexts["needs"])
 	}
 	if len(j.Services) > 0 {
 		add("services:", "service containers are not implemented")
@@ -228,25 +244,34 @@ func mergeEnv(base, over map[string]string) map[string]string {
 }
 
 // compileStep produces one registry step, or reports that the step is skipped
-// because its `if:` evaluated false.
+// because its `if:` evaluated false at admission.
+//
+// A condition that can be answered now is answered now, and a false one drops
+// the step from the compiled job — there is nothing to gain from carrying a
+// step that will not run. A condition that needs the run loop becomes the
+// step's If, evaluated then.
 func compileStep(st Step, where string, baseEnv map[string]string, shell string, sc expr.Scope) (registry.Step, bool, error) {
+	var cond registry.Condition
 	if st.If != "" {
-		runnable, err := conditionIsCompilable(st.If)
+		prog, err := conditionProgram(st.If)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
 		}
-		if !runnable {
-			return registry.Step{}, false, badRegistry(
-				"%s: if: %s depends on state that does not exist until the run is under way. "+
-					"A registry step has no condition, so this cannot be compiled to one — "+
-					"move the test into the script the step calls", where, st.If)
-		}
-		ok, err := expr.Truthy(st.If, sc)
+		w, err := classify(prog)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
 		}
-		if !ok {
-			return registry.Step{}, true, nil
+		switch w {
+		case whenLate:
+			cond = newLate(prog, sc)
+		default:
+			v, err := prog.Eval(sc)
+			if err != nil {
+				return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
+			}
+			if !expr.IsTruthy(v) {
+				return registry.Step{}, true, nil
+			}
 		}
 	}
 
@@ -259,27 +284,52 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 	}
 
 	env := map[string]string{}
-	for k, v := range baseEnv {
+	late := map[string]registry.LateValue{}
+	bind := func(k, v string) error {
+		lv, err := envValue(k, v, sc, where)
+		if err != nil {
+			return err
+		}
+		if lv != nil {
+			late[k] = lv
+			delete(env, k)
+			return nil
+		}
 		resolved, err := expr.EvalString(v, sc)
 		if err != nil {
-			return registry.Step{}, false, badRegistry("%s: env.%s: %v", where, k, err)
+			return badRegistry("%s: env.%s: %v", where, k, err)
 		}
+		delete(late, k)
 		env[k] = resolved
+		return nil
 	}
-	for k, v := range st.Env {
-		resolved, err := expr.EvalString(v, sc)
-		if err != nil {
-			return registry.Step{}, false, badRegistry("%s: env.%s: %v", where, k, err)
+	for _, k := range sortedKeys(baseEnv) {
+		if err := bind(k, baseEnv[k]); err != nil {
+			return registry.Step{}, false, err
 		}
-		env[k] = resolved
+	}
+	for _, k := range sortedKeys(st.Env) {
+		if err := bind(k, st.Env[k]); err != nil {
+			return registry.Step{}, false, err
+		}
 	}
 
-	run, hoisted, err := hoist(st.Run, env, sc, where)
+	taken := map[string]string{}
+	for k, v := range env {
+		taken[k] = v
+	}
+	for k := range late {
+		taken[k] = ""
+	}
+	run, hoisted, hoistedLate, err := hoist(st.Run, taken, sc, where)
 	if err != nil {
 		return registry.Step{}, false, err
 	}
 	for k, v := range hoisted {
 		env[k] = v
+	}
+	for k, v := range hoistedLate {
+		late[k] = v
 	}
 
 	if st.WorkingDirectory != "" {
@@ -299,14 +349,60 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		}
 	}
 
-	out := registry.Step{Name: st.Name, Run: run, Env: env}
+	out := registry.Step{ID: st.ID, Name: st.Name, Run: run, Env: env, If: cond}
 	if st.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 	}
 	if len(env) == 0 {
 		out.Env = nil
 	}
+	if len(late) > 0 {
+		out.Late = late
+	}
 	return out, false, nil
+}
+
+// envValue decides whether an env: value is late. It is late when it is
+// exactly one late expression. A value that mixes text with a late expression
+// is refused: a late binding is one program, and the honest answer is to ask
+// for the expression in a variable of its own rather than to silently split
+// the value in two.
+func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, error) {
+	if !expr.Has(v) {
+		return nil, nil
+	}
+	spans, err := expr.Spans(v)
+	if err != nil {
+		return nil, badRegistry("%s: env.%s: %v", where, k, err)
+	}
+	anyLate := false
+	for _, sp := range spans {
+		w, err := classify(sp.Prog)
+		if err != nil {
+			return nil, badRegistry("%s: env.%s: %v", where, k, err)
+		}
+		if w == whenLate {
+			anyLate = true
+		}
+	}
+	if !anyLate {
+		return nil, nil
+	}
+	if len(spans) != 1 || spans[0].Start != 0 || spans[0].End != len(v) {
+		return nil, badRegistry(
+			"%s: env.%s mixes text with an expression that is only known when the step runs; "+
+				"put that expression in a variable of its own and reference it", where, k)
+	}
+	return newLate(spans[0].Prog, sc), nil
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // hoist rewrites a run: so that no evaluated value is ever shell text.
@@ -323,13 +419,13 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 //
 // The variable is referenced double-quoted so that whitespace and globbing
 // characters in the value do not word-split either.
-func hoist(run string, existing map[string]string, sc expr.Scope, where string) (string, map[string]string, error) {
+func hoist(run string, existing map[string]string, sc expr.Scope, where string) (string, map[string]string, map[string]registry.LateValue, error) {
 	if !expr.Has(run) {
-		return run, nil, nil
+		return run, nil, nil, nil
 	}
 	spans, err := expr.Spans(run)
 	if err != nil {
-		return "", nil, badRegistry("%s: run: %v", where, err)
+		return "", nil, nil, badRegistry("%s: run: %v", where, err)
 	}
 
 	taken := map[string]bool{}
@@ -338,22 +434,13 @@ func hoist(run string, existing map[string]string, sc expr.Scope, where string) 
 	}
 
 	hoisted := map[string]string{}
+	late := map[string]registry.LateValue{}
 	var b strings.Builder
 	last, n := 0, 0
 	for _, sp := range spans {
-		ok, err := programIsCompilable(sp.Prog)
+		w, err := classify(sp.Prog)
 		if err != nil {
-			return "", nil, badRegistry("%s: run: %v", where, err)
-		}
-		if !ok {
-			return "", nil, badRegistry(
-				"%s: run: ${{ %s }} depends on state that does not exist until the run is under way; "+
-					"write the value into $LATEM_ENV from an earlier step and read the variable instead",
-				where, strings.TrimSpace(sp.Prog.Source()))
-		}
-		v, err := sp.Prog.Eval(sc)
-		if err != nil {
-			return "", nil, badRegistry("%s: run: ${{ %s }}: %v", where, strings.TrimSpace(sp.Prog.Source()), err)
+			return "", nil, nil, badRegistry("%s: run: %v", where, err)
 		}
 
 		name := ""
@@ -365,34 +452,84 @@ func hoist(run string, existing map[string]string, sc expr.Scope, where string) 
 			}
 		}
 		taken[name] = true
-		hoisted[name] = expr.Stringify(v)
+
+		// Either way the command is the same: it references a variable. The
+		// only thing that differs is whether the variable's value is known
+		// now or handed to the run loop to compute. That is the whole of A42's
+		// rule at this level — a late value changes an env entry, never the
+		// command.
+		switch w {
+		case whenLate:
+			late[name] = newLate(sp.Prog, sc)
+		default:
+			v, err := sp.Prog.Eval(sc)
+			if err != nil {
+				return "", nil, nil, badRegistry("%s: run: ${{ %s }}: %v", where, strings.TrimSpace(sp.Prog.Source()), err)
+			}
+			hoisted[name] = expr.Stringify(v)
+		}
 
 		b.WriteString(run[last:sp.Start])
 		b.WriteString(`"$` + name + `"`)
 		last = sp.End
 	}
 	b.WriteString(run[last:])
-	return b.String(), hoisted, nil
+	return b.String(), hoisted, late, nil
 }
 
-// programIsCompilable reports whether every context and function an expression
-// reaches for can be answered at admission.
-func programIsCompilable(p *expr.Program) (bool, error) {
+// when says at what point an expression can be answered.
+type when int
+
+const (
+	whenNow  when = iota // every context is in the admission scope
+	whenLate             // needs the run loop's StepScope
+)
+
+// classify decides whether an expression compiles to a value now, to a late
+// binding, or not at all — in which case the error names why.
+//
+// secrets is checked first and separately: it is neither now nor late, and the
+// reason is not timing (INV-4, §15).
+func classify(p *expr.Program) (when, error) {
 	contexts, funcs := p.References()
+	result := whenNow
 	for _, c := range contexts {
 		if c == secretsContext {
-			return false, errSecretsInExpression
+			return whenNow, errSecretsInExpression
 		}
-		if _, runtime := runtimeContexts[c]; runtime {
-			return false, nil
+		if why, refused := refusedContexts[c]; refused {
+			return whenNow, fmt.Errorf("${{ %s }}: the %s context cannot be used here — %s",
+				strings.TrimSpace(p.Source()), c, why)
+		}
+		if lateContexts[c] {
+			result = whenLate
 		}
 	}
 	for _, f := range funcs {
-		if runtimeFuncs[f] {
-			return false, nil
+		if lateFuncs[f] {
+			result = whenLate
 		}
 	}
-	return true, nil
+	return result, nil
+}
+
+// conditionProgram compiles an `if:`, which may be written bare or wrapped in
+// ${{ }}. A condition is one expression; text around the braces has no meaning
+// as a condition and is refused rather than coerced to a string that is always
+// truthy.
+func conditionProgram(cond string) (*expr.Program, error) {
+	trimmed := strings.TrimSpace(cond)
+	if !expr.Has(trimmed) {
+		return expr.Parse(trimmed)
+	}
+	spans, err := expr.Spans(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if len(spans) != 1 || spans[0].Start != 0 || spans[0].End != len(trimmed) {
+		return nil, fmt.Errorf("a condition is a single expression, not text with expressions in it")
+	}
+	return spans[0].Prog, nil
 }
 
 // errSecretsInExpression is a sentinel so the two callers report it identically.
@@ -400,28 +537,6 @@ var errSecretsInExpression = fmt.Errorf(
 	"${{ secrets.* }} is not substituted. Declare the secret in the job's secrets: list and " +
 		"read it from the environment by its own name — substituting it would write the value " +
 		"into the compiled registry, which is persisted (INV-4, RUNNER_SPEC §15)")
-
-func conditionIsCompilable(cond string) (bool, error) {
-	trimmed := strings.TrimSpace(cond)
-	if !expr.Has(trimmed) {
-		p, err := expr.Parse(trimmed)
-		if err != nil {
-			return false, err
-		}
-		return programIsCompilable(p)
-	}
-	spans, err := expr.Spans(trimmed)
-	if err != nil {
-		return false, err
-	}
-	for _, sp := range spans {
-		ok, err := programIsCompilable(sp.Prog)
-		if err != nil || !ok {
-			return false, err
-		}
-	}
-	return true, nil
-}
 
 // envValueIsLiteral rejects a compiled value that would be read as this
 // system's own interpolation syntax when the registry validates it.

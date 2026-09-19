@@ -30,8 +30,26 @@ import (
 type LateValue interface {
 	// Resolve computes the value against what is known when the step runs.
 	Resolve(StepScope) (string, error)
-	// References names the step ids this value reads, so [Registry.Validate]
-	// can refuse a reference to a step that does not exist or comes later —
+	lateRefs
+}
+
+// Condition is a step's `if:`, answered as the step is about to run.
+//
+// It is its own interface rather than a LateValue whose string the run loop
+// inspects, because truthiness belongs to the expression language: "false"
+// the string is truthy and false the value is not, and a loop re-deriving
+// that from rendered text would get it wrong for exactly the values a
+// condition is most often about.
+type Condition interface {
+	// Holds reports whether the step runs.
+	Holds(StepScope) (bool, error)
+	lateRefs
+}
+
+// lateRefs is what validation needs from either kind.
+type lateRefs interface {
+	// References names the step ids this reads, so [Registry.Validate] can
+	// refuse a reference to a step that does not exist or comes later —
 	// before anything runs, rather than as an empty string eight minutes in.
 	References() []string
 	// Source is the expression text, for messages that quote it.
@@ -106,7 +124,7 @@ func validateLate(s Step, earlier map[string]bool) []error {
 	return problems
 }
 
-func refProblems(v LateValue, earlier map[string]bool) []string {
+func refProblems(v lateRefs, earlier map[string]bool) []string {
 	if v == nil {
 		return nil
 	}

@@ -119,7 +119,7 @@ type Step struct {
 	// jobs.yaml that tries to write either is a strict-decoding error, which
 	// is the intended answer.
 	Late map[string]LateValue `json:"-"`
-	If   LateValue            `json:"-"`
+	If   Condition            `json:"-"`
 }
 
 // ArtifactDecl is a glob relative to the workspace root, plus retention.

@@ -17,6 +17,7 @@ type fakeLate struct {
 }
 
 func (f fakeLate) Resolve(StepScope) (string, error) { return f.val, nil }
+func (f fakeLate) Holds(StepScope) (bool, error)     { return f.val != "", nil }
 func (f fakeLate) References() []string              { return f.refs }
 func (f fakeLate) Source() string                    { return f.src }
 

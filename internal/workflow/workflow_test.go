@@ -175,23 +175,14 @@ jobs:
 	}
 }
 
-func TestRuntimeOnlyExpressionsAreRefused(t *testing.T) {
-	cases := map[string]string{
-		"step outputs": `run: echo ${{ steps.x.outputs.y }}`,
-		"job status":   `run: echo ${{ job.status }}`,
-		"runner os":    `run: echo ${{ runner.os }}`,
+func TestStepsContextIsRefusedUntilOutputsAreWired(t *testing.T) {
+	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: echo ${{ steps.x.outputs.y }}\n")
+	_, err := Compile(w, "b", testScope())
+	if err == nil {
+		t.Fatal("steps.* must be refused until $GITHUB_OUTPUT is wired")
 	}
-	for name, step := range cases {
-		t.Run(name, func(t *testing.T) {
-			w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - "+step+"\n")
-			_, err := Compile(w, "b", testScope())
-			if err == nil {
-				t.Fatal("a run-time context must not be compiled to a value")
-			}
-			if !strings.Contains(err.Error(), "does not exist until the run is under way") {
-				t.Errorf("unhelpful error: %v", err)
-			}
-		})
+	if !strings.Contains(err.Error(), "GITHUB_OUTPUT") {
+		t.Errorf("the error should name the channel: %v", err)
 	}
 }
 
@@ -217,19 +208,48 @@ jobs:
 	}
 }
 
-// `if: always()` cannot compile: a registry step has no condition, so a
-// compile-time answer would silently change when the step runs.
-func TestStatusConditionsAreRefused(t *testing.T) {
+// `if: failure()` is late: the registry step carries the condition and the run
+// loop answers it against the job's status at that moment.
+func TestStatusConditionsBecomeLate(t *testing.T) {
 	w := parse(t, `
 jobs:
   b:
     runs-on: [macos]
     steps:
+      - run: make
       - if: failure()
         run: ./cleanup.sh
+      - if: ${{ always() }}
+        run: ./report.sh
 `)
-	if _, err := Compile(w, "b", testScope()); err == nil {
-		t.Fatal("a status-function condition must be refused, not compiled to false")
+	job, err := Compile(w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(job.Steps) != 3 {
+		t.Fatalf("steps = %d, want all three carried", len(job.Steps))
+	}
+	if job.Steps[0].If != nil {
+		t.Error("an unconditioned step should have no If")
+	}
+	cleanup, ok := job.Steps[1].If.(*lateExpr)
+	if !ok {
+		t.Fatalf("If = %T, want a late expression", job.Steps[1].If)
+	}
+	if run, _ := cleanup.Holds(registry.StepScope{Status: registry.StatusSuccess}); run {
+		t.Error("failure() should be false while the job is succeeding")
+	}
+	if run, _ := cleanup.Holds(registry.StepScope{Status: registry.StatusFailure}); !run {
+		t.Error("failure() should be true once a step has failed")
+	}
+	report := job.Steps[2].If.(*lateExpr)
+	if run, _ := report.Holds(registry.StepScope{Status: registry.StatusCancelled}); !run {
+		t.Error("always() should be true even when cancelled")
+	}
+	// And it is still a registry job that validates.
+	reg := &registry.Registry{Version: 1, Jobs: map[string]*registry.Job{"b": job}}
+	if err := reg.Validate(); err != nil {
+		t.Errorf("a job with late conditions failed validation: %v", err)
 	}
 }
 
@@ -366,5 +386,95 @@ func TestSecretsAreNeverSubstituted(t *testing.T) {
 		if !strings.Contains(err.Error(), "secrets:") {
 			t.Errorf("the error should point at the declaration: %v", err)
 		}
+	}
+}
+
+// A late value in run: changes an env entry, never the command. The command is
+// identical to the admission-time case; only where the variable's value comes
+// from differs.
+func TestLateExpressionInRunIsHoistedNotSubstituted(t *testing.T) {
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - run: echo status=${{ job.status }} on ${{ runner.os }}
+`)
+	job, err := Compile(w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	st := job.Steps[0]
+	if st.Run != `echo status="$GHA_EXPR_1" on "$GHA_EXPR_2"` {
+		t.Errorf("run = %q", st.Run)
+	}
+	if _, static := st.Env["GHA_EXPR_1"]; static {
+		t.Error("a late value must not be pre-filled into the static env")
+	}
+	sc := registry.StepScope{Status: registry.StatusFailure, Runner: registry.RunnerFacts{OS: "macos", Arch: "arm64"}}
+	got, err := st.Late["GHA_EXPR_1"].Resolve(sc)
+	if err != nil || got != "failure" {
+		t.Errorf("job.status resolved to %q, %v", got, err)
+	}
+	got, err = st.Late["GHA_EXPR_2"].Resolve(sc)
+	if err != nil || got != "macOS" {
+		t.Errorf("runner.os resolved to %q, %v (GitHub's spelling is macOS)", got, err)
+	}
+}
+
+func TestLateEnvValue(t *testing.T) {
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    env:
+      STATUS: ${{ job.status }}
+      MIXED: prefix-${{ job.status }}
+    steps:
+      - run: make
+`)
+	_, err := Compile(w, "b", testScope())
+	if err == nil || !strings.Contains(err.Error(), "MIXED") {
+		t.Fatalf("a mixed late env value should be refused by name: %v", err)
+	}
+
+	w2 := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    env:
+      STATUS: ${{ job.status }}
+    steps:
+      - run: make
+`)
+	job, err := Compile(w2, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if job.Steps[0].Late["STATUS"] == nil {
+		t.Fatalf("STATUS should be a late binding: %+v", job.Steps[0])
+	}
+	if _, static := job.Steps[0].Env["STATUS"]; static {
+		t.Error("STATUS must not also be static")
+	}
+}
+
+func TestStepIDIsCarried(t *testing.T) {
+	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - id: build\n        run: make\n")
+	job, err := Compile(w, "b", testScope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Steps[0].ID != "build" {
+		t.Errorf("id = %q", job.Steps[0].ID)
+	}
+}
+
+// A condition is one expression. Text around it would coerce to a non-empty
+// string, which is always truthy — a condition that silently always passes.
+func TestConditionMustBeASingleExpression(t *testing.T) {
+	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - if: run when ${{ always() }}\n        run: make\n")
+	if _, err := Compile(w, "b", testScope()); err == nil {
+		t.Error("text around a condition's expression must be refused")
 	}
 }

@@ -275,3 +275,33 @@ func sortedSet(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// StepReferences lists the step ids an expression reads as `steps.<id>` or
+// `steps['<id>']` with a literal id.
+//
+// Only a literal counts. `steps[someExpr]` cannot be checked at admission and
+// is not reported, so it resolves to null at run time — which is what GitHub
+// does with it as well. The registry uses this to refuse a reference to a step
+// that is not an earlier one, before anything runs.
+func (p *Program) StepReferences() []string {
+	seen := map[string]bool{}
+	var walk func(*node)
+	walk = func(n *node) {
+		if n == nil {
+			return
+		}
+		if n.kind == nIndex && n.left != nil && n.left.kind == nContext &&
+			lowerASCII(n.left.name) == "steps" && n.right != nil && n.right.kind == nLiteral {
+			if id, ok := n.right.lit.(string); ok && id != "" {
+				seen[id] = true
+			}
+		}
+		walk(n.left)
+		walk(n.right)
+		for _, a := range n.args {
+			walk(a)
+		}
+	}
+	walk(p.root)
+	return sortedSet(seen)
+}
