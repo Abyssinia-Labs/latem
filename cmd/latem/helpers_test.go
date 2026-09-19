@@ -46,6 +46,23 @@ func (f *fakeRunner) run(_ context.Context, name string, args ...string) ([]byte
 	f.mu.Lock()
 	cmd, ok := f.cmds[key]
 	f.mu.Unlock()
+	if !ok && name == "env" {
+		// env(1) as argv[0] is a real pattern in these checks — checkLocale
+		// sets LANG that way, and checkRepos unsets SSH_AUTH_SOCK that way —
+		// so the fake models it rather than making every caller register two
+		// keys. The full key is tried first, which is what lets a test that
+		// cares about the difference register the wrapped and unwrapped forms
+		// with different outcomes.
+		if inner, stripped := stripEnvPrefix(append([]string{name}, args...)); stripped {
+			innerKey := strings.Join(inner, " ")
+			f.mu.Lock()
+			cmd, ok = f.cmds[innerKey]
+			f.mu.Unlock()
+			if ok {
+				name = inner[0]
+			}
+		}
+	}
 	if !ok {
 		return nil, &system.CommandError{Name: name, ExitCode: -1, Err: exec.ErrNotFound}
 	}
@@ -53,6 +70,28 @@ func (f *fakeRunner) run(_ context.Context, name string, args ...string) ([]byte
 		return []byte(cmd.out), &system.CommandError{Name: name, ExitCode: cmd.exit, Output: []byte(cmd.out)}
 	}
 	return []byte(cmd.out), nil
+}
+
+// stripEnvPrefix consumes an `env` argv the way env(1) does — the -i flag, any
+// number of `-u NAME` pairs, and leading NAME=value operands — and returns the
+// command env would go on to exec. The second result is false when there is no
+// such command, which is env printing the environment rather than running
+// anything.
+func stripEnvPrefix(argv []string) ([]string, bool) {
+	rest := argv[1:]
+	for len(rest) > 0 {
+		switch {
+		case rest[0] == "-i":
+			rest = rest[1:]
+		case rest[0] == "-u" && len(rest) > 1:
+			rest = rest[2:]
+		case strings.Contains(rest[0], "="):
+			rest = rest[1:]
+		default:
+			return rest, true
+		}
+	}
+	return nil, false
 }
 
 func fakePath(names ...string) func(string) (string, error) {
@@ -178,7 +217,7 @@ func testConfig(dir string) *config.Config {
 
 // newTestDoctor wires a doctor with every external dependency faked.
 func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config, cfgErr error) *doctor {
-	onPath := []string{"git", "docker", "id", "loginctl", "systemctl"}
+	onPath := []string{"git", "docker", "id", "loginctl", "systemctl", "env"}
 	if goos == "darwin" {
 		onPath = []string{"git", "docker", "tart", "fdesetup", "defaults", "launchctl", "security", "xcode-select", "xcodebuild", "env", "bash"}
 	}
