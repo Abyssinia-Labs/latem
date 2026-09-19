@@ -73,7 +73,9 @@ jobs:
       # written, so this job had never once run the linter it names.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          # The same file `make lint` reads, so a local run and this one cannot
+          # disagree about which linter judged the tree.
+          version-file: .golangci-lint-version
 
   # go.mod has one owner (docs/PLAN.md, rule 2). This job makes a stray `go get`
   # visible in review rather than in someone else's rebase.
