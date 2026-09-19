@@ -449,11 +449,6 @@ $ security add-generic-password -s latem -a APP_STORE_CONNECT_KEY_P8 \
       -w "$(cat AuthKey_ABC123.p8)"
 ```
 
-> **On v0.1.0 this silently produced a corrupt key.** `security` prints any
-> value containing a newline as a hex string, and v0.1.0 passed that through
-> unchanged, so a PEM resolved to `2d2d2d2d2d424547…` — and reported `[ ok ]`.
-> Fixed after v0.1.0; on v0.1.0 use `[secrets.commands]` below instead.
-
 **Or name a command**, which works equally well and is where a secret lives when
 it comes from a password manager rather than this machine:
 
