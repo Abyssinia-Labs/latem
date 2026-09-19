@@ -28,6 +28,10 @@ const (
 	// A sibling of the env file, created and truncated the same way, and
 	// unlike it not carried: outputs belong to the step that wrote them.
 	OutputFilePath = "/tmp/latem/output"
+	// PathFilePath and SummaryFilePath are the last two of the four, exported
+	// as $GITHUB_PATH and $GITHUB_STEP_SUMMARY.
+	PathFilePath    = "/tmp/latem/path"
+	SummaryFilePath = "/tmp/latem/summary"
 
 	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored
 	// data the agent then trusts, so it gets a size it cannot exceed as well
@@ -266,4 +270,41 @@ func (e *runEnv) readOutputs(ctx context.Context, out io.Writer) (map[string]str
 		outputs[a.Key] = a.Value
 	}
 	return outputs, nil
+}
+
+// readPathAndSummary reads and truncates $GITHUB_PATH and $GITHUB_STEP_SUMMARY
+// after a step. PATH additions accumulate for the rest of the run; the summary
+// goes to the step's log, one note per line, since there is nowhere else to
+// render it.
+func (e *runEnv) readPathAndSummary(ctx context.Context, out io.Writer) error {
+	data, err := e.readEnvFile(ctx, PathFilePath)
+	if err != nil {
+		return err
+	}
+	if len(data) > 0 {
+		dirs, warnings := ghcmd.ParsePathFile(data)
+		for _, w := range warnings {
+			writeNote(out, "$GITHUB_PATH: "+w)
+		}
+		e.mu.Lock()
+		e.pathAdds = ghcmd.AccumulatePath(e.pathAdds, dirs)
+		e.mu.Unlock()
+		if err := e.createEnvFile(ctx, PathFilePath); err != nil {
+			return err
+		}
+	}
+
+	data, err = e.readEnvFile(ctx, SummaryFilePath)
+	if err != nil {
+		return err
+	}
+	if len(data) > 0 {
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			writeNote(out, "summary: "+line)
+		}
+		if err := e.createEnvFile(ctx, SummaryFilePath); err != nil {
+			return err
+		}
+	}
+	return nil
 }

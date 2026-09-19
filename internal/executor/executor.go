@@ -156,6 +156,20 @@ const OutputFileVar = "GITHUB_OUTPUT"
 // same format read by the same code, so there is nothing to keep apart.
 const GitHubEnvVar = "GITHUB_ENV"
 
+// PathFileVar and SummaryFileVar name the remaining two files a step may
+// write. Directories appended to $GITHUB_PATH are prepended to PATH for every
+// later step of the run; $GITHUB_STEP_SUMMARY is read after the step and
+// written to the run log, since latem has no summary panel to render it in.
+const (
+	PathFileVar    = "GITHUB_PATH"
+	SummaryFileVar = "GITHUB_STEP_SUMMARY"
+)
+
+// DefaultPath is the PATH a step gets when nothing else supplies one — an
+// image with no PATH in its config, for the docker executor. It is the value
+// a stock Debian image ships, which is what most CI images are built from.
+const DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // Step is one unit of work.
 type Step struct {
 	Name string

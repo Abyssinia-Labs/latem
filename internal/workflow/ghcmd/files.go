@@ -185,3 +185,29 @@ func capBytes(data []byte) ([]byte, bool) {
 	}
 	return nil, true
 }
+
+// AccumulatePath folds one step's $GITHUB_PATH lines into the additions so
+// far. Each line is prepended, in file order, so the last line written ends up
+// first on PATH — which is what GitHub does, and what a step that writes two
+// directories and expects the second to win relies on.
+func AccumulatePath(sofar, fromFile []string) []string {
+	out := sofar
+	for _, dir := range fromFile {
+		out = append([]string{dir}, out...)
+	}
+	return out
+}
+
+// PrependPath renders PATH for a step: the additions, then whatever PATH was.
+// An empty current PATH yields the additions alone rather than a trailing
+// separator, which some shells read as "and the current directory".
+func PrependPath(adds []string, current string) string {
+	if len(adds) == 0 {
+		return current
+	}
+	joined := strings.Join(adds, ":")
+	if current == "" {
+		return joined
+	}
+	return joined + ":" + current
+}

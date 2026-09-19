@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -60,20 +61,25 @@ const (
 // this owns is the workspace path, the $LATEM_ENV file, the accumulated
 // between-step variables, and whichever step process is running right now.
 type runEnv struct {
-	spec      executor.Spec
-	workspace string
-	shell     string
-	envDir    string
-	envFile   string
-	outFile   string // $GITHUB_OUTPUT, a sibling of envFile
-	grace     time.Duration
-	drain     time.Duration
+	spec        executor.Spec
+	workspace   string
+	shell       string
+	envDir      string
+	envFile     string
+	outFile     string // $GITHUB_OUTPUT, a sibling of envFile
+	pathFile    string // $GITHUB_PATH
+	summaryFile string // $GITHUB_STEP_SUMMARY
+	grace       time.Duration
+	drain       time.Duration
 
 	mu      sync.Mutex
-	carried map[string]string      // accumulated $LATEM_ENV assignments
-	active  map[*stepProc]struct{} // steps in flight
-	closed  bool
-	removed bool
+	carried map[string]string // accumulated $LATEM_ENV assignments
+	// pathAdds is what steps appended to $GITHUB_PATH so far, first entry
+	// first on PATH.
+	pathAdds []string
+	active   map[*stepProc]struct{} // steps in flight
+	closed   bool
+	removed  bool
 }
 
 var _ executor.Env = (*runEnv)(nil)
@@ -163,6 +169,24 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[EnvFileVar] = e.envFile
 	env[executor.GitHubEnvVar] = e.envFile
 	env[executor.OutputFileVar] = e.outFile
+	env[executor.PathFileVar] = e.pathFile
+	env[executor.SummaryFileVar] = e.summaryFile
+	if len(e.pathAdds) > 0 {
+		// In front of whatever PATH the step would otherwise have had: one
+		// set explicitly, else the agent's own, which is what buildEnviron
+		// would have inherited. "In front of" is the guarantee, not "first":
+		// a step runs under `bash -lc` (§9, A33), and a login profile may
+		// prepend its own entries — Homebrew's shellenv and conda's init both
+		// do — after this value is set. That is the operator's shell doing
+		// what it does everywhere else on the machine, and the docker
+		// executor, whose steps have no profile, is where the addition is
+		// literally first.
+		current, set := env["PATH"]
+		if !set {
+			current = os.Getenv("PATH")
+		}
+		env["PATH"] = ghcmd.PrependPath(e.pathAdds, current)
+	}
 	e.mu.Unlock()
 
 	// A zero Timeout means "whatever remains of the job budget", which is
@@ -188,6 +212,9 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	outputs, outErr := e.readOutputs(stdout)
 	if outErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, outErr
+	}
+	if psErr := e.readPathAndSummary(stdout); psErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, psErr
 	}
 
 	if err != nil {

@@ -268,3 +268,30 @@ func TestCRLFIsHandled(t *testing.T) {
 		t.Errorf("CRLF input = %+v", got)
 	}
 }
+
+// Each $GITHUB_PATH line is prepended in file order, so the last line written
+// ends up first — a step that writes two directories and expects the second
+// to win relies on it.
+func TestAccumulatePathPrependsInFileOrder(t *testing.T) {
+	got := AccumulatePath(nil, []string{"/a", "/b"})
+	if strings.Join(got, ":") != "/b:/a" {
+		t.Errorf("first step = %v, want /b before /a", got)
+	}
+	got = AccumulatePath(got, []string{"/c"})
+	if strings.Join(got, ":") != "/c:/b:/a" {
+		t.Errorf("a later step's additions go in front: %v", got)
+	}
+}
+
+func TestPrependPath(t *testing.T) {
+	if got := PrependPath(nil, "/usr/bin"); got != "/usr/bin" {
+		t.Errorf("no additions should leave PATH alone: %q", got)
+	}
+	if got := PrependPath([]string{"/opt/x"}, "/usr/bin"); got != "/opt/x:/usr/bin" {
+		t.Errorf("= %q", got)
+	}
+	// No trailing separator: some shells read "x:" as "x, then here".
+	if got := PrependPath([]string{"/opt/x"}, ""); got != "/opt/x" {
+		t.Errorf("an empty current PATH must not leave a trailing separator: %q", got)
+	}
+}

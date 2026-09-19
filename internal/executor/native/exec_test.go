@@ -579,3 +579,63 @@ func waitForExit(pid int, timeout time.Duration) bool {
 	}
 	return syscall.Kill(pid, 0) == nil
 }
+
+// The four GitHub files, through real shells (A42 phase 2, A43). $GITHUB_ENV
+// is $LATEM_ENV under its other name and now speaks the heredoc; $GITHUB_PATH
+// goes in front of the next step's PATH; $GITHUB_OUTPUT comes back on the
+// Result; $GITHUB_STEP_SUMMARY lands in the step's own log.
+func TestExec_GitHubFiles(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+
+	var stdout, stderr bytes.Buffer
+	res, err := env.Exec(t.Context(), executor.Step{Run: `
+printf 'NOTES<<EOF\nfirst line\nsecond line\nEOF\n' >> "$GITHUB_ENV"
+echo "/opt/latem-test-bin" >> "$GITHUB_PATH"
+echo "sha=abc123" >> "$GITHUB_OUTPUT"
+printf 'log=%s\n' "build.log" >> "$GITHUB_OUTPUT"
+echo "## Built 3 targets" >> "$GITHUB_STEP_SUMMARY"
+`}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Exec: %v\n%s%s", err, stdout.String(), stderr.String())
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d\n%s%s", res.ExitCode, stdout.String(), stderr.String())
+	}
+	if res.Outputs["sha"] != "abc123" || res.Outputs["log"] != "build.log" {
+		t.Errorf("outputs = %+v", res.Outputs)
+	}
+	if !strings.Contains(stdout.String(), "[latem] summary: ## Built 3 targets") {
+		t.Errorf("the summary should be in the step's log: %s", stdout.String())
+	}
+
+	_, out, _ := run(t, env, executor.Step{Run: `printf '[%s]\n' "$NOTES"; echo "$PATH"`})
+	if !strings.Contains(out, "[first line\nsecond line]") {
+		t.Errorf("a heredoc value did not carry through $GITHUB_ENV: %q", out)
+	}
+	// The guarantee is "ahead of everything the agent supplied", not "first":
+	// steps run under `bash -lc` (§9, A33), and a login profile is free to
+	// prepend its own entries after the agent set PATH — Homebrew's shellenv
+	// and conda's init both do. So the addition must precede the agent's own
+	// PATH, which is what it was put in front of; what a profile does on top
+	// is the operator's shell, not the executor's.
+	// A profile reshapes PATH rather than merely prepending to it, so the
+	// agent's PATH is not present verbatim; its last component is, because
+	// profiles prepend. The addition must come before that.
+	agentPath := strings.Split(os.Getenv("PATH"), ":")
+	tail := agentPath[len(agentPath)-1]
+	add, agent := strings.Index(out, "/opt/latem-test-bin:"), strings.LastIndex(out, tail)
+	if tail == "" || add < 0 || agent < 0 || add > agent {
+		t.Errorf("$GITHUB_PATH addition should precede the agent's PATH (add at %d, agent tail %q at %d): %q", add, tail, agent, out)
+	}
+
+	// Truncated between steps: a second read of each file finds nothing.
+	for _, f := range []string{env.outFile, env.pathFile, env.summaryFile} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 0 {
+			t.Errorf("%s was not truncated between steps: %q", f, data)
+		}
+	}
+}

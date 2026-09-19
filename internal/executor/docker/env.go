@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -28,8 +29,13 @@ type runEnv struct {
 
 	mu      sync.Mutex
 	carried map[string]string // accumulated $LATEM_ENV assignments
-	closed  bool
-	removed bool
+	// pathAdds is what steps appended to $GITHUB_PATH so far, first entry
+	// first on PATH. imagePath is the image's own PATH, captured at Prepare,
+	// which the additions go in front of.
+	pathAdds  []string
+	imagePath string
+	closed    bool
+	removed   bool
 }
 
 var _ executor.Env = (*runEnv)(nil)
@@ -86,6 +92,18 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env["LATEM_ENV"] = envFile
 	env[executor.GitHubEnvVar] = envFile
 	env[executor.OutputFileVar] = OutputFilePath
+	env[executor.PathFileVar] = PathFilePath
+	env[executor.SummaryFileVar] = SummaryFilePath
+	if len(e.pathAdds) > 0 {
+		// In front of whatever PATH the step would otherwise have had: one
+		// set explicitly, else the image's. Setting PATH in the exec's env
+		// replaces the image's outright, which is why the image's is kept.
+		current, set := env["PATH"]
+		if !set {
+			current = e.imagePath
+		}
+		env["PATH"] = ghcmd.PrependPath(e.pathAdds, current)
+	}
 	e.mu.Unlock()
 
 	// A zero Timeout means "whatever remains of the job budget", which is
@@ -118,6 +136,9 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	outputs, outErr := e.readOutputs(ctx, stdout)
 	if outErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, outErr
+	}
+	if psErr := e.readPathAndSummary(ctx, stdout); psErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, psErr
 	}
 
 	if err != nil {

@@ -291,9 +291,22 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 
 	// §9's between-step channel has to exist before the first step runs, or
 	// `>> "$LATEM_ENV"` fails on a job's very first use of it.
-	if err := env.createEnvFile(ctx, OutputFilePath); err != nil {
-		_ = env.Close(ctx)
-		return nil, err
+	for _, f := range []string{OutputFilePath, PathFilePath, SummaryFilePath} {
+		if err := env.createEnvFile(ctx, f); err != nil {
+			_ = env.Close(ctx)
+			return nil, err
+		}
+	}
+	// The image's own PATH, for $GITHUB_PATH additions to go in front of.
+	// Inspect can fail for an image that was just pulled and is still
+	// settling; the default is the value most CI images carry anyway.
+	env.imagePath = executor.DefaultPath
+	if insp, inspErr := e.api.ImageInspect(ctx, img); inspErr == nil && insp.Config != nil {
+		for _, kv := range insp.Config.Env {
+			if v, ok := strings.CutPrefix(kv, "PATH="); ok && v != "" {
+				env.imagePath = v
+			}
+		}
 	}
 	if err := env.createEnvFile(ctx, EnvFilePath); err != nil {
 		_ = env.Close(context.WithoutCancel(ctx))
