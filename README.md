@@ -520,7 +520,7 @@ shutdown_grace = "30m"           # an iOS build is long
 metrics_addr   = "127.0.0.1:9838"  # loopback only; "" disables (INV-1)
 
 [repos.myapp]
-url          = "git@github.com:me/myapp.git"
+url          = "git@github.com:me/myapp.git"   # ssh, https, or a local path
 allowed_refs = ["main", "release/*"]     # expands to refs/heads/* (INV-5)
 require_approval_otherwise = true
 
@@ -533,6 +533,12 @@ concurrency = 1                  # enforced — parallel Xcode builds contend
   [runner.native]
   min_free_gb = 60
 ```
+
+**`url` may also be an absolute path to a repository on this machine** —
+`/Users/me/src/myapp` or a bare `…/myapp.git`. latem mirrors a path exactly as
+it mirrors a remote, and it is the one form that needs no credential at all,
+which makes it the fastest way to try latem against real code before deciding
+how the machine should authenticate.
 
 `require_approval_otherwise = true` is shown here because it is the setting most
 worth knowing about, and **`latem init` writes it commented out**. Without it, a
