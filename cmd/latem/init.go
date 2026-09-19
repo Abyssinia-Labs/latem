@@ -161,7 +161,11 @@ func printInitNext(w io.Writer, path string, repos []repoSpec) {
 	printf(w, "next:\n")
 	printf(w, "  latem doctor            check this machine and name the fix for anything wrong\n")
 	if len(repos) > 0 {
-		printf(w, "  latem run %s <job>   once doctor is clean\n", repos[0].Name)
+		// "clean" rather than "green": doctor warns about things that cost a
+		// reboot rather than a build, and a machine carrying those can run a
+		// job today. Telling an operator to wait for no warnings would stop
+		// them on a machine that works.
+		printf(w, "  latem run %s <job>   once doctor reports no failures\n", repos[0].Name)
 	}
 	printf(w, "  latem service install   start the agent at login and keep it running\n")
 	if runtime.GOOS == "darwin" {

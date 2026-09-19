@@ -270,6 +270,12 @@ type ServiceState struct {
 	Loaded bool
 	// Running reports whether the agent process is up.
 	Running bool
+	// Starting reports a service the manager has accepted and is still
+	// bringing up. It exists because the window is real and briefly visible:
+	// launchd reports `state = xpcproxy` while it execs the job, which is
+	// neither running nor failed, and reporting it as "not running" told an
+	// operator their install had failed two seconds after it succeeded.
+	Starting bool
 	// Detail is the service manager's own words, for display.
 	Detail string
 	// PID is the agent process, or 0 when the service manager did not name
@@ -310,7 +316,11 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 		// launchctl prints "state = running" for a live job and "state = not
 		// running" for one that is loaded and stopped. The negative form
 		// contains the positive, so order matters.
-		st.Running = strings.Contains(text, "state = running")
+		state := launchdState(text)
+		st.Running = state == "running"
+		// Anything else with a live pid is launchd on its way: `xpcproxy` is
+		// the exec stub, and "spawn scheduled" is the queue before it.
+		st.Starting = !st.Running && state != "not running" && st.PID > 0
 		return st, nil
 	}
 
@@ -319,6 +329,7 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 	st.Detail = state
 	st.Loaded = state != "" && state != "inactive" || st.Installed
 	st.Running = state == "active"
+	st.Starting = state == "activating"
 	if st.Running {
 		if pidOut, perr := s.Exec(ctx, "systemctl", "--user", "show", "-p", "MainPID", "--value", SystemdUnitName); perr == nil {
 			if n, cerr := strconv.Atoi(firstLine(pidOut)); cerr == nil {
@@ -327,6 +338,17 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 		}
 	}
 	return st, nil
+}
+
+// launchdState returns the `state = …` value from `launchctl print`, or "".
+func launchdState(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if found && strings.TrimSpace(key) == "state" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // launchdField returns a numeric field from `launchctl print` output, or 0.

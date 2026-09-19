@@ -153,6 +153,19 @@ In-flight runs are not drained first — this is a restart, not a shutdown.`,
 	}
 }
 
+// runningWord reports the three states that matter, rather than folding the
+// middle one into "no".
+func runningWord(st system.ServiceState) string {
+	switch {
+	case st.Running:
+		return "yes"
+	case st.Starting:
+		return "starting"
+	default:
+		return "no"
+	}
+}
+
 func newServiceStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -168,7 +181,7 @@ func newServiceStatusCommand() *cobra.Command {
 			printf(out, "definition  %s\n", st.Path)
 			printf(out, "installed   %s\n", yesNo(st.Installed))
 			printf(out, "loaded      %s\n", yesNo(st.Loaded))
-			printf(out, "running     %s\n", yesNo(st.Running))
+			printf(out, "running     %s\n", runningWord(st))
 			if st.Detail != "" {
 				printf(out, "detail      %s\n", st.Detail)
 			}
@@ -176,7 +189,12 @@ func newServiceStatusCommand() *cobra.Command {
 				printf(out, "\ninstall it with:\n  latem service install\n")
 				return &ExitError{Code: ExitFailure, Err: fmt.Errorf("the agent service is not installed")}
 			}
-			if !st.Running {
+			// Starting is not a failure. `latem service install` returns as
+			// soon as the service manager accepts the job, so a status run
+			// immediately afterwards catches launchd part-way through exec —
+			// and reporting that as "installed but not running", with exit 1,
+			// sent an operator to debug an agent that was seconds from ready.
+			if !st.Running && !st.Starting {
 				return &ExitError{Code: ExitFailure, Err: fmt.Errorf("the agent service is installed but not running")}
 			}
 			return nil

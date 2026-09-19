@@ -941,17 +941,19 @@ func (d *doctor) checkAutoLogin(ctx context.Context) check {
 	case err != nil:
 		return warn("macos.autologin", "auto-login", "could not be read: "+err.Error())
 	case !al.Enabled:
-		return fail("macos.autologin", "auto-login", "not configured — no session exists after a reboot").
+		return warn("macos.autologin", "auto-login", "not configured — no session exists after a reboot").
 			withManual("System Settings → Users & Groups → Automatic login → " + d.sys.User()).
 			withNotes("A LaunchAgent needs a logged-in user. Without auto-login the machine boots, " +
 				"nobody logs in, the agent never starts, and it goes offline until somebody walks " +
-				"over to it (§23).")
+				"over to it (§23). It does not stop this machine building now, which is why it " +
+				"is a warning rather than a failure: it stops it coming back by itself.")
 	case al.User != d.sys.User():
-		return fail("macos.autologin", "auto-login",
+		return warn("macos.autologin", "auto-login",
 			fmt.Sprintf("auto-logs in as %q but the agent runs as %q", al.User, d.sys.User())).
 			withManual("System Settings → Users & Groups → Automatic login → " + d.sys.User()).
 			withNotes("This looks like a working configuration and is not: the LaunchAgent belongs " +
-				"to a user who is never logged in.")
+				"to a user who is never logged in. As above, it costs you the reboot rather " +
+				"than the build.")
 	default:
 		return pass("macos.autologin", "auto-login", "enabled for "+al.User)
 	}

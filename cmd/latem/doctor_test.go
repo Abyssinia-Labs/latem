@@ -41,7 +41,7 @@ func TestDoctorNamesEveryFaultOnABrokenMachine(t *testing.T) {
 		t.Fatal("a machine with nothing installed and no config produced no failures")
 	}
 
-	for _, id := range []string{"git.present", "config.problem.1", "macos.autologin"} {
+	for _, id := range []string{"git.present", "config.problem.1"} {
 		c, ok := findCheck(rep, id)
 		if !ok {
 			t.Errorf("check %s did not run", id)
@@ -50,6 +50,15 @@ func TestDoctorNamesEveryFaultOnABrokenMachine(t *testing.T) {
 		if c.Level != levelFail {
 			t.Errorf("%s = %v, want fail", id, c.Level)
 		}
+	}
+
+	// auto-login is named but is deliberately not a failure: it costs the
+	// machine its reboot, not its build. It sits with FileVault, which has
+	// always been a warning for the same property.
+	if c, ok := findCheck(rep, "macos.autologin"); !ok {
+		t.Error("check macos.autologin did not run")
+	} else if c.Level != levelWarn {
+		t.Errorf("macos.autologin = %v, want warn", c.Level)
 	}
 
 	// Every failure must carry a repair — a command in Fix or a step in Manual
@@ -225,8 +234,8 @@ func TestDoctorAutoLoginUserMismatch(t *testing.T) {
 	d := newTestDoctor("darwin", dir, cmds, nil, errors.New("no config"))
 
 	got := d.checkAutoLogin(context.Background())
-	if got.Level != levelFail {
-		t.Fatalf("auto-login as another user = %v, want fail", got.Level)
+	if got.Level != levelWarn {
+		t.Fatalf("auto-login as another user = %v, want warn", got.Level)
 	}
 	if !strings.Contains(got.Detail, "someone-else") || !strings.Contains(got.Detail, "tester") {
 		t.Errorf("the detail should name both users: %q", got.Detail)
