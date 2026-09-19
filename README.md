@@ -348,7 +348,9 @@ and both are enforced at parse time:
 
 **Worked examples that have actually run** live in
 [`examples/`](examples/): a plain Xcode app and a plain Gradle app, both taken
-to a real store listing, with the `ci/` scripts they call.
+to a real store listing, with the `ci/` scripts they call. Everything else is
+indexed in [`docs/`](docs/) — the runbook for bringing up a machine, the
+specification, and the acceptance tests with their findings.
 
 ## `latem doctor`
 
