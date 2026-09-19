@@ -228,6 +228,9 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 	if err != nil {
 		return nil, err
 	}
+	if err := e.ensureCacheOwnership(ctx, img, mounts); err != nil {
+		return nil, err
+	}
 
 	cfg := &container.Config{
 		Image:      img,
@@ -575,12 +578,112 @@ func (e *Executor) preflightKVM(ctx context.Context) error {
 	return nil
 }
 
+// ensureCacheOwnership makes a newly created cache volume writable by the user
+// the steps will run as.
+//
+// Docker creates a named volume owned by root:root. On Linux the container runs
+// as the invoking uid so that bind-mounted workspace files stay owned by the
+// agent (§13.1), and those two facts together mean the first run that declares
+// a cache cannot write to it:
+//
+//	sh: can't create /cache/marker: Permission denied
+//
+// That is every Linux operator using the feature the README puts second, on the
+// platform the Docker executor exists for, and it stayed invisible because the
+// integration tests that would have caught it were never run and, when they
+// were, ran on Docker Desktop — where the container runs as the image's user
+// and a root-owned volume is no obstacle.
+//
+// The chown is not recursive. A volume Docker has just created is empty, so the
+// mount point is the whole of it, and walking a warm 1 GiB cache on every run to
+// re-assert ownership nothing changed would cost more than it protects. The
+// consequence is stated rather than hidden: a volume whose contents were written
+// by an earlier root-running configuration keeps those contents root-owned, and
+// wants `latem cache rm` or a manual chown.
+func (e *Executor) ensureCacheOwnership(ctx context.Context, img string, mounts []mount.Mount) error {
+	uid, gid, ok := numericUser(e.user)
+	if !ok {
+		// The image's own user, or a name this code cannot resolve to a uid.
+		// Either way there is nothing to align the volume with.
+		return nil
+	}
+
+	var targets []string
+	var volumes []mount.Mount
+	for _, m := range mounts {
+		if m.Type != mount.TypeVolume {
+			continue
+		}
+		targets = append(targets, m.Target)
+		volumes = append(volumes, m)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// Tested before changed, so a warm cache costs one stat per mount rather
+	// than a chown. `stat -c` is coreutils and busybox alike.
+	var script strings.Builder
+	for _, t := range targets {
+		fmt.Fprintf(&script, "[ \"$(stat -c %%u %s)\" = \"%d\" ] || chown %d:%d %s\n", t, uid, uid, gid, t)
+	}
+
+	res, err := e.runProbe(ctx, probeSpec{
+		image: img,
+		// Deliberately as root: the point is to grant access the step user
+		// does not yet have, which the step user cannot do for itself.
+		user: "",
+		// As the entrypoint, because this runs in the job's own image and that
+		// image may declare one of its own.
+		entrypoint: []string{"/bin/sh", "-c", script.String()},
+		mutate: func(hc *container.HostConfig) {
+			hc.Mounts = append(hc.Mounts, volumes...)
+		},
+	})
+	if err != nil {
+		return wrapErr(protocol.ErrCache, err, "preparing cache volume ownership")
+	}
+	if res.exitCode != 0 {
+		return codeErr(protocol.ErrCache,
+			"could not give %s ownership of the cache mounts (exit %d): %s",
+			e.user, res.exitCode, firstLine(res.output))
+	}
+	return nil
+}
+
+// numericUser splits a "uid" or "uid:gid" string. It reports false for an
+// empty value or a user named rather than numbered, because neither can be
+// compared against what `stat` reports.
+func numericUser(user string) (uid, gid int, ok bool) {
+	if user == "" {
+		return 0, 0, false
+	}
+	uidPart, gidPart, hasGID := strings.Cut(user, ":")
+	uid, err := strconv.Atoi(uidPart)
+	if err != nil {
+		return 0, 0, false
+	}
+	gid = uid
+	if hasGID {
+		if gid, err = strconv.Atoi(gidPart); err != nil {
+			return 0, 0, false
+		}
+	}
+	return uid, gid, true
+}
+
 // probeSpec describes a throwaway container run to completion.
 type probeSpec struct {
-	image  string
-	cmd    []string
-	user   string
-	mutate func(*container.HostConfig)
+	image string
+	cmd   []string
+	// entrypoint overrides the image's own. It matters whenever the image is
+	// the operator's rather than one of ours: a probe that sets only cmd has
+	// its argv appended to whatever ENTRYPOINT that image declares, so a
+	// `/bin/sh -c …` probe against an image entrypointed on git runs
+	// `git /bin/sh -c …`. Nil leaves the image's entrypoint alone.
+	entrypoint []string
+	user       string
+	mutate     func(*container.HostConfig)
 }
 
 type probeResult struct {
@@ -604,10 +707,11 @@ func (e *Executor) runProbe(ctx context.Context, p probeSpec) (probeResult, erro
 		p.mutate(hostCfg)
 	}
 	created, err := e.api.ContainerCreate(ctx, &container.Config{
-		Image:  p.image,
-		Cmd:    p.cmd,
-		User:   p.user,
-		Labels: map[string]string{LabelManaged: "true", "latem.probe": "true"},
+		Image:      p.image,
+		Entrypoint: p.entrypoint,
+		Cmd:        p.cmd,
+		User:       p.user,
+		Labels:     map[string]string{LabelManaged: "true", "latem.probe": "true"},
 	}, hostCfg, "")
 	if err != nil {
 		return probeResult{}, fmt.Errorf("create probe container: %w", err)

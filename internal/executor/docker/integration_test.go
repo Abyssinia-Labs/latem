@@ -41,10 +41,14 @@ func newIntegrationExecutor(t *testing.T, mutate func(*Options)) *Executor {
 	opts := Options{
 		DefaultImage: testImage,
 		Shell:        testShell,
-		// Alpine's only uid-1000-adjacent user is absent, so forcing the host
-		// uid would leave $HOME unwritable. The image's own user is right for
-		// a test image; §13.1's Linux uid mapping is an operator concern.
-		User: UserImageDefault,
+		// User is left at auto, which is what an operator gets: the invoking
+		// uid:gid on Linux, the image's own user on Docker Desktop. Forcing
+		// UserImageDefault here made the suite pass on macOS and fail on Linux
+		// — the container wrote root-owned files into a bind mount and the
+		// non-root host could then neither read them back nor delete them at
+		// cleanup. That is the option behaving as documented; the test was
+		// asserting host visibility while opting out of the setting that
+		// provides it (§13.1).
 	}
 	if mutate != nil {
 		mutate(&opts)

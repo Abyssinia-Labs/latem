@@ -276,10 +276,13 @@ func newExecutorFor(t *testing.T, counter *countingExecutor) func(*config.Runner
 			e, err := docker.New(docker.Options{
 				DefaultImage: image,
 				Shell:        testShell,
-				// Alpine has no uid-1000 user, so forcing the host uid leaves
-				// $HOME unwritable. §13.1's Linux uid mapping is an operator
-				// concern and is the docker package's own test to make.
-				User: docker.UserImageDefault,
+				// User is left at auto, which is what an operator gets: the
+				// invoking uid:gid on Linux (§13.1). Forcing UserImageDefault
+				// here made this suite pass on Docker Desktop and fail on
+				// Linux three ways at once — the agent could not remove a
+				// workspace full of root-owned files, and git refused to read
+				// a checkout owned by a different uid than the process reading
+				// it. Both are the run behaving as an operator's would.
 			})
 			if err != nil {
 				return nil, err
