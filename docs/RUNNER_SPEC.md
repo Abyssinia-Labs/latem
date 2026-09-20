@@ -1838,3 +1838,69 @@ composite) and the pre/main/post hooks around each.
 | # | Section | Change | Why |
 |---|---|---|---|
 | A43 | §9, §13, §26 | **`$LATEM_ENV` is also `$GITHUB_ENV`, one file read by one parser, and the format gains the `KEY<<DELIMITER` heredoc** | The alias was the cheap part: a workflow written for GitHub appends to `$GITHUB_ENV`, and exporting the existing file under that name costs one line per executor. What it exposed was that the two files had two parsers — the executors' `parseEnvFile` and the workflow package's `ParseKeyValueFile` — and only the second spoke the heredoc form. Aliasing without unifying would have given a multi-line value written the documented GitHub way a "malformed line" warning and no variable, from a file the workflow was told it could write to. Both executors now read `$LATEM_ENV` through the shared parser, whose cap, key grammar and never-quote-a-value rules are §9's already. The native format acquires heredocs as a consequence, which is recorded here because it is a §9 change, however small. §26 had already named the verbatim duplication of `$LATEM_ENV` parsing across the two executors as debt with the Tart executor as its trigger; this retires it earlier, and the Tart executor will have one parser to call rather than a third copy to make |
+
+### Amendment from designing phase 4
+
+Recorded before the build, as A42 was, because it changes the registry's model and adds an
+admission gate, and both should be findable next to the reason.
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A44 | §9, §10 (gate 13), §13.1 | **Local actions (`uses: ./path`) and `uses: docker://` are compiled into the registry. A step may be a container instead of a command, and a job may require an executor** | The two were designed together because they are the two halves of one question — what a `uses:` step *becomes* — and because only one of them needs the model to change. Both resolve at the commit the registry did, read through the same `os.Root`, so INV-5 holds for each without a new argument |
+
+**A composite action changes no model at all.** Its `runs.steps` are inlined as ordinary
+steps. Three rewrites make that exact rather than approximate, and all three are rewrites of
+an expression's *tree*, not of its value:
+
+- `inputs.x` inside the action is replaced by the expression the caller wrote in `with: x:`,
+  or the input's default. Because it is the tree that is substituted, a caller's
+  `${{ steps.prev.outputs.sha }}` makes the action's own reference late through the
+  classifier that already exists. There is no second late-binding mechanism.
+- Inner step ids are namespaced `<outer id>/<inner id>`, so the registry's ordering check
+  sees real ids and a collision with the job's own ids is impossible by construction.
+- An action's `outputs.<name>.value` has its step references namespaced the same way, and a
+  later `steps.<outer>.outputs.<name>` is replaced by it. Composite outputs therefore ride
+  the inner step's `$GITHUB_OUTPUT` and need no support at run time.
+
+The outer step's `if:` is and-ed into each inner condition; its `env:` lies under theirs. A
+nested `./` action is allowed, with a depth cap and a cycle check. A nested remote `uses:`
+is phase 5. Composite `run` steps name a `shell:`, and one that is not bash or sh is refused.
+
+**`docker://` changes two things, both small.**
+
+- *The registry.* `Step` gains `Container{Image, Entrypoint, Args}`, exclusive with `run` —
+  validation requires exactly one. `with.args` is a list and each element is one argv entry,
+  so a value containing `; rm -rf /` is an argument: INV-3's argv discipline, with nothing
+  added. `with:` inputs arrive as `INPUT_<NAME>`. The field is excluded from decoding. A
+  native `container:` step is plausibly a real §9 feature and should arrive as one, not as a
+  side effect of this.
+- *Admission.* A job with a container step requires the docker executor, and gate 13 checks
+  the runner's executor as well as its labels. A machine with only a native runner learns at
+  admission — `E_NO_RUNNER`, naming the step — rather than in a build. The native and Tart
+  executors still refuse a container step if handed one; that is a backstop, not the gate.
+
+**In the docker executor, the four files move onto a per-run volume.** Today `$LATEM_ENV`,
+`$GITHUB_OUTPUT`, `$GITHUB_PATH` and `$GITHUB_STEP_SUMMARY` are written into the run
+container's own filesystem, where a second container cannot see them. They move to a named
+volume mounted at the same path in the run container and in each container step, which is
+then: create from the action's image with the run's workspace mount, caches, volume,
+resource limits and labels — so §6's crash reaping collects it like the run container —
+start, stream, wait, remove. Cancellation kills it.
+
+**A tag is mutable, and that is said rather than discovered.** `docker://alpine:3.19` is the
+same class of reference as a marketplace action at a tag: INV-5 yields reproducibility only
+for a digest. The policy is permissive and honest rather than strict and surprising — the
+reference is allowed, the run log records the digest `ImageInspect` reports so the run says
+what it ran, and an operator option, `require_pinned_images`, refuses a non-digest reference
+at `Prepare`. It ships off. That mirrors phase 5's SHA-pinning gate without pre-empting it.
+`image: Dockerfile` in a local action is refused: building images is its own surface, and it
+belongs with phase 5.
+
+Of the action kinds, this is the safest. It is third-party code, but in a container of its
+own with the workspace and one volume mounted — narrower than a marketplace JavaScript
+action running natively with the login keychain unlocked, which is the whole of phase 5's
+problem.
+
+**Order.** The expression rewrites; the registry's container step and executor requirement;
+runner selection by executor; the `action.yml` parser and the inliner; the run volume, then
+the container step. Composite actions are usable after the fourth with no executor touched.
