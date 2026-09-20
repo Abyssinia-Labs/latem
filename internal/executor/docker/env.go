@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,8 @@ type runEnv struct {
 	requirePinned bool
 	stepSeq       int
 	sidecar       string
+	// grace is the SIGTERM-to-SIGKILL pause for a step stopped in place (A45).
+	grace time.Duration
 }
 
 var _ executor.Env = (*runEnv)(nil)
@@ -138,10 +141,18 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 			User:         e.user,
 			WorkingDir:   WorkspacePath,
 			Env:          envSlice(env),
-			Cmd:          StepArgv(e.shell, step.Run),
+			Cmd:          wrappedArgv(e.shell, step.Run),
 			AttachStdout: true,
 			AttachStderr: true,
 		}, stdout, stderr)
+	}
+
+	// A step that outlived its own timeout is stopped before its files are
+	// read back, so nothing is still appending to them, and stopped in place
+	// so that the steps after it have a container to run in (A45).
+	stepTimedOut := err != nil && errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	if stepTimedOut && step.Container == nil {
+		e.stopStep(ctx, step.Name, stdout)
 	}
 
 	// §9's between-step channel. Merged after the step rather than before the
@@ -164,13 +175,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	if err != nil {
 		// A step-level deadline that fired while the job budget still had room
 		// is E_STEP_TIMEOUT, not E_TIMEOUT (§21).
-		if errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			// An exec cannot be killed on its own, so a timed-out command
-			// takes the run container with it. A container step already
-			// killed and removed its own container, and the run's survives.
-			if step.Container == nil {
-				e.killContainer(ctx)
-			}
+		if stepTimedOut {
 			return none, wrapErr(protocol.ErrStepTimeout, err,
 				"step %q exceeded its %s timeout", step.Name, step.Timeout)
 		}
@@ -486,4 +491,87 @@ func (e *runEnv) runContainerStep(
 		_ = e.api.ContainerKill(killCtx, created.ID, "KILL")
 		return -1, ctx.Err()
 	}
+}
+
+// stepWrapper is what a step's argv is run under, and it is a constant: no
+// part of a step is ever written into it. It records the shell's pid and then
+// becomes the step with exec, so the pid in the file *is* the step's — and,
+// because the daemon starts every exec as the leader of a session and a
+// process group of its own, it is the group's id as well. That last fact was
+// measured against a daemon rather than remembered, and the integration test
+// holds it: if it ever stops being true, stopping a step would signal the
+// wrong processes.
+//
+// #nosec G101 -- a shell script, not a credential: gosec reads "$$" as one.
+const stepWrapper = `echo "$$" > "$0"; exec "$@"`
+
+// wrappedArgv is [StepArgv] under [stepWrapper]. INV-3 is unchanged by it:
+// `run` is still one element of the slice, whole and untouched, and the
+// wrapper receives it as "$@" without ever reading it.
+func wrappedArgv(shell, run string) []string {
+	return append([]string{"/bin/sh", "-c", stepWrapper, StepPidFile}, StepArgv(shell, run)...)
+}
+
+// stopScript stops the process group whose id is in the pid file: SIGTERM, up
+// to $1 seconds for it to go, SIGKILL.
+//
+// Two details that are here because the obvious spelling is wrong. There is no
+// `--` before the negative pid: busybox's kill rejects it, and an explicit
+// signal is what keeps a negative number from being read as one. And the pid is
+// checked before it is used — digits only, and never 0 or 1 — because the file
+// is on a volume the step can write to, and `kill -TERM -1` as root signals
+// every process in the container. A step that forges the file can only ever
+// get its own processes signalled, which it could do itself; what it must not
+// be able to do is turn this into the container-wide kill A45 exists to avoid.
+const stopScript = `p=$(cat "$0" 2>/dev/null) || exit 4
+case "$p" in ""|*[!0-9]*|0|1) exit 3;; esac
+kill -TERM -"$p" 2>/dev/null || exit 0
+i=0
+while [ "$i" -lt "$1" ] && kill -0 -"$p" 2>/dev/null; do sleep 1; i=$((i+1)); done
+kill -KILL -"$p" 2>/dev/null
+exit 0`
+
+// stopStep is §9's "kills the step's process group" for a step whose process
+// is an exec (A45).
+//
+// The Docker API has no way to signal an exec, so until A45 a timed-out step
+// took the whole run container with it. That was survivable while a failure
+// ended the run; since A42 phase 3 a step timeout is a failure like any other
+// and later steps consult their conditions, so an `if: always()` cleanup
+// would run against a container that was already dead. Signalling the group
+// from a second exec leaves the container standing.
+//
+// It runs as root, because a step may have started something it can no longer
+// signal itself, and it gets a context of its own, because the one it was
+// called under belongs to a step that has already run out of time.
+//
+// If the step cannot be stopped in place — no pid file, a forged one, an image
+// with no sh — the container is killed after all, and the log says so. A step
+// that cannot be stopped must not be left running against the job's clock,
+// and losing the later steps is the smaller of the two failures.
+func (e *runEnv) stopStep(ctx context.Context, name string, out io.Writer) {
+	grace := e.grace
+	if grace <= 0 {
+		grace = TerminateGrace
+	}
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace+15*time.Second)
+	defer cancel()
+
+	code, err := e.exec(stopCtx, container.ExecOptions{
+		User:         "0",
+		Cmd:          []string{"/bin/sh", "-c", stopScript, StepPidFile, strconv.Itoa(int(grace / time.Second))},
+		AttachStdout: true,
+		AttachStderr: true,
+	}, io.Discard, io.Discard)
+	if err == nil && code == 0 {
+		return
+	}
+	reason := fmt.Sprintf("exit %d", code)
+	if err != nil {
+		reason = err.Error()
+	}
+	writeNote(out, fmt.Sprintf(
+		"step %q could not be stopped in place (%s); the run container was killed, so later steps cannot run",
+		name, reason))
+	e.killContainer(ctx)
 }

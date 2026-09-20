@@ -14,6 +14,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -423,6 +424,53 @@ func TestIntegration_StepTimeout(t *testing.T) {
 	}
 	if elapsed > 30*time.Second {
 		t.Errorf("the step took %s to time out at 2s", elapsed)
+	}
+}
+
+// A45, against a daemon. A timed-out step's process group is stopped in place:
+// its TERM handler runs, its children are gone, and — the point — the container
+// is still there for the step after it, which is what an `if: always()` cleanup
+// needs. The first assertion also holds the fact the mechanism rests on: that
+// the pid a step records for itself is its process group's id.
+func TestIntegration_StepTimeoutLeavesTheContainerForLaterSteps(t *testing.T) {
+	e := newIntegrationExecutor(t, func(o *Options) { o.TerminateGrace = 5 * time.Second })
+	env, _ := prepareRun(t, e, "a45-stop-in-place", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	_, err := env.Exec(ctx, executor.Step{
+		Name: "hangs",
+		Run: `trap 'echo graceful > trap.out; exit 0' TERM
+sleep 300 & echo $! > child.pid
+read -r stat < /proc/$$/stat; set -- $stat; echo "$1 $5" > group.out
+wait`,
+		Timeout: 3 * time.Second,
+	}, io.Discard, io.Discard)
+	if got := CodeOf(err); got != protocol.ErrStepTimeout {
+		t.Fatalf("error code = %q, want %q (%v)", got, protocol.ErrStepTimeout, err)
+	}
+
+	var log bytes.Buffer
+	res, err := env.Exec(ctx, executor.Step{Name: "after", Run: `
+echo "group: $(cat group.out)"
+echo "trap: $(cat trap.out 2>/dev/null || echo none)"
+if kill -0 "$(cat child.pid)" 2>/dev/null; then echo "child: ALIVE"; else echo "child: gone"; fi`}, &log, &log)
+	if err != nil {
+		t.Fatalf("the step after a timeout could not run — the container did not survive: %v\n%s", err, log.String())
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d\n%s", res.ExitCode, log.String())
+	}
+	out := log.String()
+	var pid, pgid string
+	if _, scanErr := fmt.Sscanf(out[strings.Index(out, "group: ")+7:], "%s %s", &pid, &pgid); scanErr != nil || pid == "" || pid != pgid {
+		t.Errorf("a step must be the leader of its own process group, or stopping it signals the wrong processes: pid=%q pgid=%q\n%s", pid, pgid, out)
+	}
+	if !strings.Contains(out, "trap: graceful") {
+		t.Errorf("the step's TERM handler should have run before it was killed:\n%s", out)
+	}
+	if !strings.Contains(out, "child: gone") {
+		t.Errorf("the step's child outlived it:\n%s", out)
 	}
 }
 

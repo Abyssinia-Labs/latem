@@ -164,7 +164,11 @@ func (f *fakeAPI) ContainerExecAttach(
 	i := f.execSeq
 	f.execSeq++
 	stdout, stderr := at(f.execStdout, i), at(f.execStderr, i)
-	blocking := f.blockExec
+	// blockExec models a step that never finishes. The exec that *stops* a
+	// step (A45) runs as root and must not hang behind the thing it is
+	// stopping, or every timeout test would wait out the grace period.
+	isStop := i < len(f.execOpts) && f.execOpts[i].User == "0"
+	blocking := f.blockExec && !isStop
 	f.mu.Unlock()
 
 	if blocking {

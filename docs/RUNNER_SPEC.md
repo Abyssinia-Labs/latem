@@ -1912,3 +1912,36 @@ problem.
 **Order.** The expression rewrites; the registry's container step and executor requirement;
 runner selection by executor; the `action.yml` parser and the inliner; the run volume, then
 the container step. Composite actions are usable after the fourth with no executor touched.
+
+### Amendment from a step timeout on the docker executor
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A45 | §9, §13.1 | **On the docker executor a step that exceeds its timeout has its process group stopped in place — SIGTERM, the grace the native executor gives, SIGKILL — and the run container is left standing** | An interaction between two things that were each right alone. The Docker API cannot signal an exec, so a timed-out step had always taken the run container with it; and A42 phase 3 made a step timeout a failure like any other, after which later steps consult their conditions. Together, an `if: always()` cleanup after a timeout ran against a container that was already dead — on docker only, which §9 forbids: the step contract is the same on every executor. It surfaced while building A44, was written down as a known defect rather than shipped quietly, and the cheaper fix — treat a timeout as ending the run on docker — was declined in favour of this one |
+
+**The mechanism, and the measurement it rests on.** Every step now runs under a constant
+wrapper, `echo "$$" > "$0"; exec "$@"`, which records the shell's pid on the per-run volume
+and then becomes the step. No part of a step is ever written into the wrapper — `run` is
+still one argv element, whole and untouched, so INV-3 is as it was. Stopping a step is a
+second exec, as root, that signals the negative of that pid. That is correct only if the
+recorded pid is the id of a process group containing the step and nothing else, which is
+true because the daemon starts every exec as the leader of a session and group of its own.
+That was measured against a daemon rather than recalled, and an integration test asserts it
+on every run, because if it ever stops being true the stop would signal the wrong processes.
+
+**Two details that exist because the obvious spelling is wrong.** There is no `--` before the
+negative pid: busybox's `kill` rejects it, and an explicit signal is what keeps a negative
+number from being read as one. And the pid is validated before it is used — digits only,
+never 0 or 1 — because the file lives on a volume the step can write to, and `kill -TERM -1`
+as root signals every process in the container. A step that forges the file can get its own
+processes signalled, which it could do itself; it cannot turn the stop into the
+container-wide kill this amendment exists to avoid.
+
+**When a step cannot be stopped in place** — no pid file, a forged one, an image with no
+`sh` — the container is killed after all, and the step's log says that later steps cannot
+run and why. A step that cannot be stopped must not be left running against the job's
+clock, and losing the later steps is the smaller of the two failures.
+
+**What it does not do**, and neither does the native executor: a process that has left the
+group — a daemon that called `setsid` — is not signalled. On docker it dies with the
+container at the end of the run.

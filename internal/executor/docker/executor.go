@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -48,6 +49,10 @@ const (
 	// every container step alike.
 	RunVolumePrefix = "latem-run-"
 	RunFilesDir     = "/tmp/latem"
+	// StepPidFile is where a step records its own pid, so that a step which
+	// outlives its timeout can be stopped without stopping the container
+	// (A45). See [wrappedArgv].
+	StepPidFile = RunFilesDir + "/step.pid"
 
 	// DefaultPidsLimit is §13.1's `--pids-limit 4096`. It is a fork-bomb
 	// backstop, not a resource budget: 4096 is far above what a build needs
@@ -110,6 +115,12 @@ type Options struct {
 	// binary is dynamically linked, so a musl image reports a missing loader
 	// and looks like a toolkit failure when it is not.
 	GPUProbeImage string
+
+	// TerminateGrace is the pause between SIGTERM and SIGKILL when a step's
+	// process group is stopped (A45). Zero takes [TerminateGrace], which is
+	// the native executor's value for the native executor's reason: a build
+	// tool given the chance will finish writing the file it has open.
+	TerminateGrace time.Duration
 
 	// RequirePinnedImages refuses a container step whose image is named by
 	// tag rather than by digest (A44). Off by default: a tag is allowed and
@@ -307,6 +318,7 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 		labels:        cfg.Labels,
 		ensureImage:   e.ensureImage,
 		requirePinned: e.opts.RequirePinnedImages,
+		grace:         orDuration(e.opts.TerminateGrace, TerminateGrace),
 	}
 
 	if err := e.api.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
@@ -894,4 +906,17 @@ func parseMemory(s string) (int64, error) {
 		return 0, fmt.Errorf("%q is negative", s)
 	}
 	return int64(n * float64(mult)), nil
+}
+
+// TerminateGrace is how long a stopped step has between SIGTERM and SIGKILL.
+// It is the native executor's figure, deliberately: §9 requires the step
+// contract to be the same on every executor, and "how long do I have to flush
+// my output" is part of it.
+const TerminateGrace = 30 * time.Second
+
+func orDuration(d, fallback time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return fallback
 }
