@@ -248,6 +248,8 @@ type Resolved struct {
 	Artifacts        []ArtifactDecl
 	ConcurrencyGroup string
 	Shell            string
+	// RequiresExecutor is the executor gate 13 held the runner to, or "".
+	RequiresExecutor string
 }
 
 // ResolvedStep is a step with its environment already substituted.
@@ -263,6 +265,8 @@ type ResolvedStep struct {
 	Env  map[string]string
 	Late map[string]LateValue
 	If   Condition
+	// Container is set for a container step, in which case Run is empty.
+	Container *ContainerStep
 	// Timeout of zero means "whatever remains of the job budget". Resolving
 	// that needs a clock and a start time, so it belongs to the orchestrator
 	// rather than here.
@@ -276,6 +280,15 @@ type ResolvedStep struct {
 // By the time this runs, the registry argument came off disk at a pinned
 // commit — never from a broker (INV-5).
 func (r *Registry) Admit(req protocol.RunRequest, runnerLabels []string) (*Resolved, Decision) {
+	return r.AdmitOn(req, Runner{Labels: runnerLabels})
+}
+
+// AdmitOn is [Registry.Admit] for a caller that knows the runner's executor as
+// well as its labels, which since A44 gate 13 needs: a job with a container
+// step can only land on a docker runner, and a machine that has none should
+// hear so here rather than from a build.
+func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, Decision) {
+	runnerLabels := runner.Labels
 	// Gate 12 — job lookup.
 	job, ok := r.Jobs[req.Job]
 	if !ok {
@@ -288,6 +301,19 @@ func (r *Registry) Admit(req protocol.RunRequest, runnerLabels []string) (*Resol
 	if missing := missingLabels(job.RunsOn, runnerLabels); len(missing) > 0 {
 		return nil, reject(protocol.ErrNoRunner,
 			"job %q needs labels %v; this runner is missing %v", req.Job, job.RunsOn, missing)
+	}
+
+	// Gate 13, second half (A44) — the executor. Labels say what a machine
+	// is; this says what it can run. Checked after the labels so that a
+	// machine which is simply the wrong one is told that first.
+	if need := job.RequiredExecutor(); need != "" && runner.Executor != need {
+		have := runner.Executor
+		if have == "" {
+			have = "unknown"
+		}
+		return nil, reject(protocol.ErrNoRunner,
+			"job %q has a container step, which needs a %s runner; this runner's executor is %s",
+			req.Job, need, have)
 	}
 
 	// Gate 14 — typed input validation.
@@ -316,13 +342,14 @@ func (r *Registry) Admit(req protocol.RunRequest, runnerLabels []string) (*Resol
 			env[k] = substitute(v, inputs)
 		}
 		steps = append(steps, ResolvedStep{
-			ID:      s.ID,
-			Name:    s.Name,
-			Run:     s.Run,
-			Env:     env,
-			Late:    s.Late,
-			If:      s.If,
-			Timeout: s.Timeout.Duration(),
+			ID:        s.ID,
+			Name:      s.Name,
+			Run:       s.Run,
+			Env:       env,
+			Late:      s.Late,
+			If:        s.If,
+			Container: s.Container,
+			Timeout:   s.Timeout.Duration(),
 		})
 	}
 
@@ -338,6 +365,7 @@ func (r *Registry) Admit(req protocol.RunRequest, runnerLabels []string) (*Resol
 		Artifacts:        job.Artifacts,
 		ConcurrencyGroup: job.ConcurrencyGroup,
 		Shell:            r.Defaults.Shell,
+		RequiresExecutor: job.RequiredExecutor(),
 	}, Decision{}
 }
 

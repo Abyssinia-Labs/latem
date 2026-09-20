@@ -155,6 +155,14 @@ func StepArgv(shell, run string) []string {
 // the one resource this executor has.
 func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
 	none := executor.Result{ExitCode: -1}
+	if step.Container != nil {
+		// A backstop, not the gate: admission routes a job with a container
+		// step to a docker runner (A44). Reaching here means something
+		// bypassed it, and running nothing while reporting success would be
+		// the worst available answer.
+		return none, codeErr(protocol.ErrExecutor,
+			"step %q is a container (%s), which the native executor cannot run", step.Name, step.Container.Image)
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()

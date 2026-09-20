@@ -639,3 +639,19 @@ echo "## Built 3 targets" >> "$GITHUB_STEP_SUMMARY"
 		}
 	}
 }
+
+// A backstop, not the gate — admission routes container jobs to docker (A44).
+// But a container step that did reach here must be an error, never a step that
+// ran nothing and reported success.
+func TestExec_ContainerStepIsRefused(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	res, err := env.Exec(t.Context(), executor.Step{
+		Name: "lint", Container: &executor.Container{Image: "alpine:3.19"},
+	}, nil, nil)
+	if err == nil || res.ExitCode == 0 {
+		t.Fatalf("a container step on the native executor must fail: %+v, %v", res, err)
+	}
+	if !strings.Contains(err.Error(), "alpine:3.19") {
+		t.Errorf("the error should name the image: %v", err)
+	}
+}

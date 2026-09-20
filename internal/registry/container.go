@@ -1,0 +1,89 @@
+package registry
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// ContainerStep is a step that is a container rather than a command (A44).
+//
+// It exists for `uses: docker://…`, and the compiler in internal/workflow is
+// its only writer: the field that holds it is excluded from decoding. A native
+// `container:` step is plausibly a real §9 feature, and if it arrives it
+// should arrive as one rather than as a side effect of Actions compatibility.
+//
+// Args is an argv, not a command line. Each element reaches the container as
+// one argument whatever it contains, which is INV-3's discipline with nothing
+// added: a value of `; rm -rf /` is an argument.
+type ContainerStep struct {
+	Image      string
+	Entrypoint string
+	Args       []string
+}
+
+// ExecutorDocker is the executor a container step needs.
+const ExecutorDocker = "docker"
+
+const (
+	maxContainerArgs     = 256
+	maxContainerArgBytes = 32 << 10
+)
+
+// imagePattern is deliberately narrower than the OCI reference grammar. It
+// admits registry/name:tag and name@sha256:…, and refuses whitespace, control
+// characters and a leading dash — the shapes that are only ever a mistake or
+// an attempt.
+var imagePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$`)
+
+// Pinned reports whether the image is named by digest. A tag is a mutable
+// reference: INV-5 yields reproducibility only for a digest, and A44 says so
+// rather than leaving it to be discovered.
+func (c *ContainerStep) Pinned() bool { return strings.Contains(c.Image, "@sha256:") }
+
+func (c *ContainerStep) validate() []error {
+	var problems []error
+	add := func(format string, args ...any) { problems = append(problems, fmt.Errorf(format, args...)) }
+
+	if !imagePattern.MatchString(c.Image) {
+		add("container: image %q is not a reference of the form name[:tag] or name@sha256:…", c.Image)
+	}
+	if strings.ContainsAny(c.Entrypoint, "\x00\n\r") {
+		add("container: entrypoint contains a control character")
+	}
+	if len(c.Args) > maxContainerArgs {
+		add("container: %d args, limit %d", len(c.Args), maxContainerArgs)
+	}
+	for i, a := range c.Args {
+		if len(a) > maxContainerArgBytes {
+			add("container: args[%d] is %d bytes, limit %d", i, len(a), maxContainerArgBytes)
+		}
+		if strings.ContainsRune(a, 0) {
+			add("container: args[%d] contains a NUL", i)
+		}
+	}
+	return problems
+}
+
+// RequiredExecutor names the executor a job cannot run without, or "".
+//
+// Derived from the steps rather than stored beside them, so that it cannot
+// drift: a job requires docker exactly when one of its steps is a container.
+func (j *Job) RequiredExecutor() string {
+	for _, s := range j.Steps {
+		if s.Container != nil {
+			return ExecutorDocker
+		}
+	}
+	return ""
+}
+
+// Runner is what admission needs to know about the runner a job would land on.
+type Runner struct {
+	Labels []string
+	// Executor is "docker", "native" or "tart". Empty means the caller did not
+	// say, and a job that requires an executor is refused on it: the gate
+	// fails closed, because the alternative is a container step reaching an
+	// executor that has no containers.
+	Executor string
+}

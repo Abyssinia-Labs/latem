@@ -178,6 +178,9 @@ func (x *execution) runStep(
 		Env:     env,
 		Timeout: s.Timeout,
 	}
+	if c := s.Container; c != nil {
+		step.Container = &executor.Container{Image: c.Image, Entrypoint: c.Entrypoint, Args: c.Args}
+	}
 
 	type finished struct {
 		res executor.Result

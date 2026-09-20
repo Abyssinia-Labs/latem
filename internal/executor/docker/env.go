@@ -80,6 +80,13 @@ func (e *runEnv) EnvFile() string { return EnvFilePath }
 // be run or could not be waited for.
 func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
 	none := executor.Result{ExitCode: -1}
+	if step.Container != nil {
+		// Refused until the four files move onto a per-run volume, which is
+		// what lets a second container see them (A44). Refusing by name beats
+		// running the step in the wrong image.
+		return none, codeErr(protocol.ErrExecutor,
+			"step %q is a container (%s), and container steps arrive with the run volume (A44) — not yet implemented", step.Name, step.Container.Image)
+	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()

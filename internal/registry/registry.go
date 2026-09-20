@@ -120,6 +120,10 @@ type Step struct {
 	// is the intended answer.
 	Late map[string]LateValue `json:"-"`
 	If   Condition            `json:"-"`
+
+	// Container makes this step a container instead of a command (A44). It is
+	// exclusive with Run, and excluded from decoding; see [ContainerStep].
+	Container *ContainerStep `json:"-"`
 }
 
 // ArtifactDecl is a glob relative to the workspace root, plus retention.
@@ -318,6 +322,12 @@ func (s Step) validate(inputs map[string]*Input) []error {
 	}
 
 	switch {
+	case s.Container != nil && strings.TrimSpace(s.Run) != "":
+		// Exactly one. A step that is both would have to pick, and whichever
+		// it picked would be the wrong one for somebody.
+		add("a step is a command or a container, not both")
+	case s.Container != nil:
+		problems = append(problems, s.Container.validate()...)
 	case strings.TrimSpace(s.Run) == "":
 		add("run is required")
 	case len(s.Run) > MaxRunLength:

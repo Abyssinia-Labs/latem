@@ -126,7 +126,7 @@ func (x *execution) drive(ctx context.Context) Result {
 	if runner != nil {
 		labels = runner.Labels
 	}
-	resolved, dec := reg.Admit(x.req, labels)
+	resolved, dec := reg.AdmitOn(x.req, registry.Runner{Labels: labels, Executor: executorName(runner)})
 	if !dec.OK() {
 		return x.finish(ctx, fromDecision(dec))
 	}

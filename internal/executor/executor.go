@@ -182,6 +182,20 @@ type Step struct {
 	// Timeout bounds this step alone. Zero means "whatever remains of the job
 	// budget", so it is opt-in and never tightens a job by accident.
 	Timeout time.Duration
+	// Container, when set, makes this step a container run from another image
+	// rather than a command in the run's environment (A44). Run is then empty.
+	// Only the docker executor can honour it, and admission has already
+	// routed the job there; an executor that cannot answers E_EXECUTOR rather
+	// than running nothing and reporting success.
+	Container *Container
+}
+
+// Container is the image a container step runs and what it runs it with. Args
+// is an argv: each element is one argument, whatever it contains (INV-3).
+type Container struct {
+	Image      string
+	Entrypoint string
+	Args       []string
 }
 
 // CacheMount is one cache made available to a run. Caches are mounted, not
