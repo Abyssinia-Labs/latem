@@ -173,3 +173,167 @@ func renderOperand(n *node) string {
 	}
 	return render(n)
 }
+
+// Template turns a template string — literal text, `${{ … }}` spans, or a mix —
+// into one program that evaluates to what the string would render as.
+//
+// It is what lets a `with:` value be substituted for `inputs.x` whatever shape
+// the caller wrote it in. No spans is a literal; exactly one span and nothing
+// else is that span's program, so its type and its late-ness survive; a mix
+// becomes a `format` call, with the text's own braces escaped so they are not
+// read as placeholders.
+func Template(s string) (*Program, error) {
+	spans, err := Spans(s)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case len(spans) == 0:
+		return Literal(s), nil
+	case len(spans) == 1 && spans[0].Start == 0 && spans[0].End == len(s):
+		return spans[0].Prog, nil
+	}
+	escape := strings.NewReplacer("{", "{{", "}", "}}")
+	var f strings.Builder
+	args := []*node{nil} // args[0] is the format string, filled in below
+	last := 0
+	for i, sp := range spans {
+		f.WriteString(escape.Replace(s[last:sp.Start]))
+		fmt.Fprintf(&f, "{%d}", i)
+		args = append(args, sp.Prog.root)
+		last = sp.End
+	}
+	f.WriteString(escape.Replace(s[last:]))
+	args[0] = &node{kind: nLiteral, lit: f.String()}
+	return derived(&node{kind: nCall, name: "format", args: args}), nil
+}
+
+// SubstituteField replaces exactly `<context>.<name>` and leaves every other
+// use of the context alone. It is for the one field an inlined action adds to
+// a context that otherwise belongs to the job: `github.action_path`.
+func (p *Program) SubstituteField(context, name string, repl *Program) *Program {
+	ctx := lowerASCII(context)
+	return p.mapNodes(func(n *node) *node {
+		if n.kind == nIndex && n.left != nil && n.left.kind == nContext && lowerASCII(n.left.name) == ctx &&
+			n.right != nil && n.right.kind == nLiteral {
+			if s, ok := n.right.lit.(string); ok && strings.EqualFold(s, name) {
+				return repl.root
+			}
+		}
+		return nil
+	})
+}
+
+// SubstituteOutputs replaces `steps.<id>.outputs.<name>` with the program
+// lookup returns for name. It is how a composite action's declared outputs
+// reach the job that used it: the reference becomes the action's own
+// `outputs.<name>.value` expression, which reads an inner step's real output.
+// A name the action does not declare is an error, for the same reason an
+// undeclared input is — the alternative is an empty string nobody asked for.
+func (p *Program) SubstituteOutputs(id string, lookup func(name string) (*Program, error)) (*Program, error) {
+	var failed error
+	out := p.mapNodes(func(n *node) *node {
+		name, ok := stepOutputRef(n, id)
+		if !ok || failed != nil {
+			return nil
+		}
+		repl, err := lookup(name)
+		if err != nil {
+			failed = err
+			return nil
+		}
+		return repl.root
+	})
+	if failed != nil {
+		return nil, failed
+	}
+	return out, nil
+}
+
+// stepOutputRef matches steps.<id>.outputs.<name> with literal id and name.
+func stepOutputRef(n *node, id string) (string, bool) {
+	lit := func(x *node) (string, bool) {
+		if x == nil || x.kind != nLiteral {
+			return "", false
+		}
+		s, ok := x.lit.(string)
+		return s, ok
+	}
+	if n.kind != nIndex {
+		return "", false
+	}
+	name, ok := lit(n.right)
+	if !ok {
+		return "", false
+	}
+	outputs := n.left
+	if outputs == nil || outputs.kind != nIndex {
+		return "", false
+	}
+	if s, ok := lit(outputs.right); !ok || !strings.EqualFold(s, "outputs") {
+		return "", false
+	}
+	step := outputs.left
+	if step == nil || step.kind != nIndex || step.left == nil || step.left.kind != nContext ||
+		lowerASCII(step.left.name) != "steps" {
+		return "", false
+	}
+	if s, ok := lit(step.right); !ok || s != id {
+		return "", false
+	}
+	return name, true
+}
+
+// mapNodes rebuilds the tree top-down. Where f returns a node, that node
+// replaces the subtree and is not descended into; nil means "keep walking".
+func (p *Program) mapNodes(f func(*node) *node) *Program {
+	var walk func(*node) *node
+	walk = func(n *node) *node {
+		if n == nil {
+			return nil
+		}
+		if repl := f(n); repl != nil {
+			return repl
+		}
+		out := *n
+		out.left, out.right = walk(n.left), walk(n.right)
+		if len(n.args) > 0 {
+			out.args = make([]*node, len(n.args))
+			for i, a := range n.args {
+				out.args[i] = walk(a)
+			}
+		}
+		return &out
+	}
+	return derived(walk(p.root))
+}
+
+// Wrap renders a program back into template form, `${{ … }}`, so that a
+// rewritten expression can be put back where a template string is expected.
+func (p *Program) Wrap() string { return "${{ " + p.Source() + " }}" }
+
+// RewriteTemplate applies f to every expression in a template string and
+// renders the result back as a template. Text between expressions is kept
+// byte for byte.
+func RewriteTemplate(s string, f func(*Program) (*Program, error)) (string, error) {
+	spans, err := Spans(s)
+	if err != nil {
+		return "", err
+	}
+	if len(spans) == 0 {
+		return s, nil
+	}
+	var b strings.Builder
+	last := 0
+	for _, sp := range spans {
+		b.WriteString(s[last:sp.Start])
+		prog, err := f(sp.Prog)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(prog.Wrap())
+		last = sp.End
+	}
+	b.WriteString(s[last:])
+	return b.String(), nil
+}
