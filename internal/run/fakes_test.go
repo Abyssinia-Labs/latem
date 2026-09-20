@@ -144,17 +144,26 @@ type fakeEnv struct {
 	closes  int
 
 	exec func(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error)
+	// outputs, when set, is what a step "wrote" to $GITHUB_OUTPUT. The fake
+	// has no file to read back, so a test that wants outputs states them.
+	outputs func(step executor.Step) map[string]string
 }
 
-func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error) {
+func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
 	e.mu.Lock()
 	e.steps = append(e.steps, step)
-	fn := e.exec
+	fn, outs := e.exec, e.outputs
 	e.mu.Unlock()
-	if fn == nil {
-		return 0, nil
+	res := executor.Result{}
+	if outs != nil {
+		res.Outputs = outs(step)
 	}
-	return fn(ctx, step, stdout, stderr)
+	if fn == nil {
+		return res, nil
+	}
+	code, err := fn(ctx, step, stdout, stderr)
+	res.ExitCode = code
+	return res, err
 }
 
 func (e *fakeEnv) EnvFile() string {

@@ -79,7 +79,12 @@ type Env interface {
 	// pipeline distinguishes the two and the wire type has a field for it,
 	// but the executor could not say which was which. Passing the same writer
 	// twice is legal for a caller that does not care.
-	Exec(ctx context.Context, step Step, stdout, stderr io.Writer) (exitCode int, err error)
+	//
+	// The [Result] carries the exit code and, since A42 phase 2, what the step
+	// wrote to $GITHUB_OUTPUT. Outputs are a step's result and so belong here
+	// rather than on a side channel the caller would have to know to ask
+	// for — the same reasoning A9 applied to stdout and stderr.
+	Exec(ctx context.Context, step Step, stdout, stderr io.Writer) (Result, error)
 
 	// EnvFile is the environment-visible path to export as $LATEM_ENV.
 	//
@@ -126,6 +131,45 @@ type Spec struct {
 	Resources Resources
 }
 
+// Result is what one step produced.
+type Result struct {
+	// ExitCode is the process's. A non-zero one is not an error: the agent
+	// maps it to E_STEP. -1 means the process could not be run or waited for,
+	// and the error says why.
+	ExitCode int
+	// Outputs is what the step wrote to the file named by $GITHUB_OUTPUT,
+	// last writer winning. Keys are identifiers; the executor has already
+	// dropped anything else and said so in the step's log. Nil when the step
+	// wrote nothing, which is nearly always.
+	Outputs map[string]string
+}
+
+// OutputFileVar names the environment variable through which a step learns
+// where to write its outputs. It is GitHub's name, because that is what a
+// workflow written for GitHub reads; a latem-specific alias would be a second
+// name for the same file with nothing to recommend it.
+const OutputFileVar = "GITHUB_OUTPUT"
+
+// GitHubEnvVar is the second name for $LATEM_ENV's path. One file, one
+// parser, two names: a workflow written for GitHub appends to $GITHUB_ENV and
+// a job written for latem appends to $LATEM_ENV, and since A43 both are the
+// same format read by the same code, so there is nothing to keep apart.
+const GitHubEnvVar = "GITHUB_ENV"
+
+// PathFileVar and SummaryFileVar name the remaining two files a step may
+// write. Directories appended to $GITHUB_PATH are prepended to PATH for every
+// later step of the run; $GITHUB_STEP_SUMMARY is read after the step and
+// written to the run log, since latem has no summary panel to render it in.
+const (
+	PathFileVar    = "GITHUB_PATH"
+	SummaryFileVar = "GITHUB_STEP_SUMMARY"
+)
+
+// DefaultPath is the PATH a step gets when nothing else supplies one — an
+// image with no PATH in its config, for the docker executor. It is the value
+// a stock Debian image ships, which is what most CI images are built from.
+const DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // Step is one unit of work.
 type Step struct {
 	Name string
@@ -138,6 +182,20 @@ type Step struct {
 	// Timeout bounds this step alone. Zero means "whatever remains of the job
 	// budget", so it is opt-in and never tightens a job by accident.
 	Timeout time.Duration
+	// Container, when set, makes this step a container run from another image
+	// rather than a command in the run's environment (A44). Run is then empty.
+	// Only the docker executor can honour it, and admission has already
+	// routed the job there; an executor that cannot answers E_EXECUTOR rather
+	// than running nothing and reporting success.
+	Container *Container
+}
+
+// Container is the image a container step runs and what it runs it with. Args
+// is an argv: each element is one argument, whatever it contains (INV-3).
+type Container struct {
+	Image      string
+	Entrypoint string
+	Args       []string
 }
 
 // CacheMount is one cache made available to a run. Caches are mounted, not

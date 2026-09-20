@@ -14,6 +14,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -99,11 +100,11 @@ func run(t *testing.T, env executor.Env, name, script string) (int, string) {
 	defer cancel()
 
 	var log bytes.Buffer
-	code, err := env.Exec(ctx, executor.Step{Name: name, Run: script}, &log, &log)
+	res, err := env.Exec(ctx, executor.Step{Name: name, Run: script}, &log, &log)
 	if err != nil {
 		t.Fatalf("Exec(%s): %v\n%s", name, err, log.String())
 	}
-	return code, log.String()
+	return res.ExitCode, log.String()
 }
 
 func TestIntegration_RunsSteps(t *testing.T) {
@@ -426,6 +427,53 @@ func TestIntegration_StepTimeout(t *testing.T) {
 	}
 }
 
+// A45, against a daemon. A timed-out step's process group is stopped in place:
+// its TERM handler runs, its children are gone, and — the point — the container
+// is still there for the step after it, which is what an `if: always()` cleanup
+// needs. The first assertion also holds the fact the mechanism rests on: that
+// the pid a step records for itself is its process group's id.
+func TestIntegration_StepTimeoutLeavesTheContainerForLaterSteps(t *testing.T) {
+	e := newIntegrationExecutor(t, func(o *Options) { o.TerminateGrace = 5 * time.Second })
+	env, _ := prepareRun(t, e, "a45-stop-in-place", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	_, err := env.Exec(ctx, executor.Step{
+		Name: "hangs",
+		Run: `trap 'echo graceful > trap.out; exit 0' TERM
+sleep 300 & echo $! > child.pid
+read -r stat < /proc/$$/stat; set -- $stat; echo "$1 $5" > group.out
+wait`,
+		Timeout: 3 * time.Second,
+	}, io.Discard, io.Discard)
+	if got := CodeOf(err); got != protocol.ErrStepTimeout {
+		t.Fatalf("error code = %q, want %q (%v)", got, protocol.ErrStepTimeout, err)
+	}
+
+	var log bytes.Buffer
+	res, err := env.Exec(ctx, executor.Step{Name: "after", Run: `
+echo "group: $(cat group.out)"
+echo "trap: $(cat trap.out 2>/dev/null || echo none)"
+if kill -0 "$(cat child.pid)" 2>/dev/null; then echo "child: ALIVE"; else echo "child: gone"; fi`}, &log, &log)
+	if err != nil {
+		t.Fatalf("the step after a timeout could not run — the container did not survive: %v\n%s", err, log.String())
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d\n%s", res.ExitCode, log.String())
+	}
+	out := log.String()
+	var pid, pgid string
+	if _, scanErr := fmt.Sscanf(out[strings.Index(out, "group: ")+7:], "%s %s", &pid, &pgid); scanErr != nil || pid == "" || pid != pgid {
+		t.Errorf("a step must be the leader of its own process group, or stopping it signals the wrong processes: pid=%q pgid=%q\n%s", pid, pgid, out)
+	}
+	if !strings.Contains(out, "trap: graceful") {
+		t.Errorf("the step's TERM handler should have run before it was killed:\n%s", out)
+	}
+	if !strings.Contains(out, "child: gone") {
+		t.Errorf("the step's child outlived it:\n%s", out)
+	}
+}
+
 // A cache volume is created on first use and is still there on the next run,
 // because §14 mounts caches rather than restoring them.
 func TestIntegration_CacheVolumePersistsBetweenRuns(t *testing.T) {
@@ -531,5 +579,47 @@ func TestIntegration_PrepareRefusesAHostileRunID(t *testing.T) {
 	}
 	if CodeOf(err) != protocol.ErrExecutor {
 		t.Errorf("error code = %q, want %q (%v)", CodeOf(err), protocol.ErrExecutor, err)
+	}
+}
+
+// A44, against a real daemon — the part the fake cannot answer. The four files
+// live on a per-run volume, which relies on two things only a daemon can show:
+// that the archive API writes into a volume mounted at the target path, and
+// that a second container mounting that volume sees the same files. A
+// container step writes an output and an env value; the Result carries the
+// first and the next ordinary step reads the second.
+func TestIntegration_ContainerStepSharesTheRunFiles(t *testing.T) {
+	e := newIntegrationExecutor(t, nil)
+	env, _ := prepareRun(t, e, "a44-container-step", nil)
+	ctx := context.Background()
+
+	var log bytes.Buffer
+	res, err := env.Exec(ctx, executor.Step{
+		Name: "side",
+		Container: &executor.Container{
+			Image:      "alpine:3.19",
+			Entrypoint: "/bin/sh",
+			Args:       []string{"-c", `echo "k=from-the-container" >> "$GITHUB_OUTPUT"; echo "CARRIED=yes" >> "$GITHUB_ENV"; pwd`},
+		},
+	}, &log, &log)
+	if err != nil {
+		t.Fatalf("Exec: %v\n%s", err, log.String())
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d\n%s", res.ExitCode, log.String())
+	}
+	if res.Outputs["k"] != "from-the-container" {
+		t.Errorf("the container step's output did not come back: %+v\n%s", res.Outputs, log.String())
+	}
+	if !strings.Contains(log.String(), WorkspacePath) {
+		t.Errorf("the step should start in the workspace: %s", log.String())
+	}
+
+	log.Reset()
+	if _, err := env.Exec(ctx, executor.Step{Name: "after", Run: `echo "[$CARRIED]"`}, &log, &log); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(log.String(), "[yes]") {
+		t.Errorf("$GITHUB_ENV written by a container step did not carry: %s", log.String())
 	}
 }

@@ -378,12 +378,32 @@ func (o *Orchestrator) selectRunner(reg *registry.Registry, jobName string) *Run
 	if !ok {
 		return nil
 	}
+	// A44: a job with a container step also needs a particular executor. The
+	// first runner satisfying both wins. Failing that, the first whose labels
+	// match is returned anyway, so that gate 13 refuses with the executor
+	// named rather than with a list of labels that were all present.
+	need := job.RequiredExecutor()
+	var labelsOnly *Runner
 	for i := range o.runners {
-		if hasAllLabels(o.runners[i].Labels, job.RunsOn) {
+		if !hasAllLabels(o.runners[i].Labels, job.RunsOn) {
+			continue
+		}
+		if need == "" || executorName(&o.runners[i]) == need {
 			return &o.runners[i]
 		}
+		if labelsOnly == nil {
+			labelsOnly = &o.runners[i]
+		}
 	}
-	return nil
+	return labelsOnly
+}
+
+// executorName is the runner's executor kind, or "" when it has none.
+func executorName(r *Runner) string {
+	if r == nil || r.Executor == nil {
+		return ""
+	}
+	return r.Executor.Name()
 }
 
 func hasAllLabels(have, required []string) bool {

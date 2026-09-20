@@ -574,6 +574,58 @@ func TestDoctorRepoReachability(t *testing.T) {
 		}
 	})
 
+	// The failure a plain `git ls-remote` cannot see, because the operator's
+	// own shell is the thing hiding it. `gh auth login --git-protocol ssh`
+	// produces exactly this state: a passphrase-protected key held by an
+	// interactive ssh-agent, which launchd does not inherit. Before the probe
+	// dropped SSH_AUTH_SOCK, doctor reported this machine as healthy and the
+	// first real run failed E_SOURCE.
+	t.Run("readable only with the operator's ssh agent", func(t *testing.T) {
+		const noAgent = "env -u SSH_AUTH_SOCK " + probe
+		cmds := healthyRunner("linux")
+		cmds[noAgent] = fakeCmd{exit: 128, out: "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."}
+		cmds[probe] = fakeCmd{out: "abc\trefs/heads/main"}
+		d := newTestDoctor("linux", dir, cmds, cfg, nil)
+
+		got := d.checkRepos(context.Background())
+		if len(got) != 1 || got[0].Level != levelFail {
+			t.Fatalf("a repo readable only from the shell = %+v, want a failure", got)
+		}
+		if !strings.Contains(got[0].Detail, "not from a service") {
+			t.Errorf("the detail should name the service, not the credential: %q", got[0].Detail)
+		}
+		notes := strings.Join(got[0].Notes, " ")
+		if !strings.Contains(notes, "SSH_AUTH_SOCK") {
+			t.Errorf("the note should name the variable that differs: %q", notes)
+		}
+		// The remedy must be usable with no terminal. Suggesting
+		// `gh auth login --git-protocol ssh` here is what produced the state.
+		fixes := strings.Join(got[0].Fix, " ")
+		if strings.Contains(fixes, "--git-protocol ssh") {
+			t.Errorf("the fix must not be the command that causes this: %q", fixes)
+		}
+		if !strings.Contains(fixes, "-N ''") && !strings.Contains(fixes, "apple-use-keychain") {
+			t.Errorf("the fix should offer a credential a service can use: %q", fixes)
+		}
+	})
+
+	// A42/A37: the publickey remedy is the highest-traffic fix string in
+	// doctor, and it used to name the one command the README documents as the
+	// trap. A comment did not keep it right; this does.
+	t.Run("the publickey remedy is not the trap", func(t *testing.T) {
+		_, fixes := repoFailureAdvice(
+			"git@github.com:me/app.git",
+			"git@github.com: Permission denied (publickey).",
+		)
+		joined := strings.Join(fixes, " ")
+		if strings.Contains(joined, "--git-protocol ssh") {
+			t.Errorf("doctor must not recommend the passphrase-protected form: %q", joined)
+		}
+		if !strings.Contains(joined, "--git-protocol https") {
+			t.Errorf("the shortest working route should be offered: %q", joined)
+		}
+	})
+
 	t.Run("credentials rejected", func(t *testing.T) {
 		cmds := healthyRunner("linux")
 		cmds[probe] = fakeCmd{exit: 128, out: "remote: Repository not found.\nfatal: could not read"}

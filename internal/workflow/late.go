@@ -1,0 +1,154 @@
+package workflow
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
+)
+
+// lateExpr is a compiled expression that waits for the step it belongs to.
+//
+// It implements [registry.LateValue]. The admission-time scope — github,
+// inputs, env, vars — is captured at compile time; what a [registry.StepScope]
+// adds at run time is layered on top: `steps`, `job`, and `runner`. Nothing
+// the admission scope already answered can change, so the two never conflict.
+type lateExpr struct {
+	prog *expr.Program
+	base expr.Scope
+	refs []string
+}
+
+// newLate binds a program to the admission scope and records which step ids
+// it reads, for the registry's ordering check.
+func newLate(prog *expr.Program, base expr.Scope) *lateExpr {
+	return &lateExpr{prog: prog, base: base, refs: stepRefs(prog)}
+}
+
+// Resolve evaluates against the admission scope plus what the run loop knows.
+func (l *lateExpr) Resolve(sc registry.StepScope) (string, error) {
+	v, err := l.prog.Eval(l.scope(sc))
+	if err != nil {
+		return "", fmt.Errorf("${{ %s }}: %w", l.prog.Source(), err)
+	}
+	return expr.Stringify(v), nil
+}
+
+// Holds is Resolve for a condition, keeping the expression language's own
+// truthiness rather than re-deriving it from a rendered string — "false" the
+// string is truthy, false the value is not. It is what makes *lateExpr a
+// [registry.Condition] as well as a [registry.LateValue].
+func (l *lateExpr) Holds(sc registry.StepScope) (bool, error) {
+	v, err := l.prog.Eval(l.scope(sc))
+	if err != nil {
+		return false, fmt.Errorf("${{ %s }}: %w", l.prog.Source(), err)
+	}
+	return expr.IsTruthy(v), nil
+}
+
+func (l *lateExpr) References() []string { return l.refs }
+func (l *lateExpr) Source() string       { return l.prog.Source() }
+
+// scope layers run-time facts over the admission scope.
+//
+// Status maps onto both the status functions and `job.status`, so that
+// `if: failure()` and `if: job.status == 'failure'` — which workflows use
+// interchangeably — agree with each other.
+func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
+	out := expr.Scope{
+		Contexts:     make(map[string]expr.Value, len(l.base.Contexts)+3),
+		WorkspaceDir: l.base.WorkspaceDir,
+	}
+	for k, v := range l.base.Contexts {
+		out.Contexts[k] = v
+	}
+
+	switch sc.Status {
+	case registry.StatusFailure:
+		out.Status = expr.StatusFailure
+	case registry.StatusCancelled:
+		out.Status = expr.StatusCancelled
+	default:
+		out.Status = expr.StatusSuccess
+	}
+	out.Contexts["job"] = map[string]any{"status": statusName(sc.Status)}
+
+	steps := make(map[string]any, len(sc.Outputs))
+	for id, outputs := range sc.Outputs {
+		o := make(map[string]any, len(outputs))
+		for k, v := range outputs {
+			o[k] = v
+		}
+		// GitHub's steps context carries outcome and conclusion alongside
+		// outputs. A step that has outputs in the map ran; it is recorded as
+		// having succeeded, because a failed step ends the run before any
+		// later step's scope is built, unless the later step's condition
+		// asked to run anyway — and in that case the failure is what
+		// job.status reports.
+		steps[id] = map[string]any{
+			"outputs":    o,
+			"outcome":    "success",
+			"conclusion": "success",
+		}
+	}
+	out.Contexts["steps"] = steps
+
+	out.Contexts["runner"] = map[string]any{
+		"os":   runnerOS(sc.Runner.OS),
+		"arch": runnerArch(sc.Runner.Arch),
+		"name": sc.Runner.Name,
+	}
+	return out
+}
+
+func statusName(s registry.StepStatus) string {
+	switch s {
+	case registry.StatusFailure:
+		return "failure"
+	case registry.StatusCancelled:
+		return "cancelled"
+	}
+	return "success"
+}
+
+// runnerOS and runnerArch render in GitHub's spelling, which is what a
+// workflow compares against: `runner.os == 'macOS'`, `runner.arch == 'ARM64'`.
+// The comparison is case-insensitive in the expression language, so this is
+// for the value a step *reads*, not for the test to pass.
+func runnerOS(os string) string {
+	switch os {
+	case "macos", "darwin":
+		return "macOS"
+	case "linux":
+		return "Linux"
+	}
+	return os
+}
+
+func runnerArch(arch string) string {
+	switch arch {
+	case "arm64":
+		return "ARM64"
+	case "amd64", "x64":
+		return "X64"
+	}
+	return arch
+}
+
+// stepRefs lists the step ids an expression reads through the steps context:
+// `steps.<id>.…`. Only a literal id counts. `steps[expr]` with a computed
+// key cannot be checked at admission and is left to resolve to null, which is
+// what GitHub does with it too.
+func stepRefs(prog *expr.Program) []string {
+	set := map[string]bool{}
+	for _, id := range prog.StepReferences() {
+		set[id] = true
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}

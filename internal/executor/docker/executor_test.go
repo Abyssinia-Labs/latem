@@ -178,11 +178,22 @@ func TestPrepare_CachesBecomeMountsAndVolumes(t *testing.T) {
 
 	// §14.1: a name is a Docker volume, created if it does not exist, because
 	// caches are mounted rather than restored and the first run warms them.
-	if len(f.volumes) != 1 || f.volumes[0].Name != "latem-cache-linux-gradle" {
-		t.Errorf("volumes created = %v, want one named cache volume", f.volumes)
+	// Since A44 there is also the per-run volume, created first.
+	if len(f.volumes) != 2 || f.volumes[0].Name != RunVolumePrefix+"r1" || f.volumes[1].Name != "latem-cache-linux-gradle" {
+		t.Fatalf("volumes created = %v, want the run volume and one named cache volume", f.volumes)
 	}
-	if f.volumes[0].Labels[LabelManaged] != "true" {
-		t.Errorf("cache volume is unlabelled: %v", f.volumes[0].Labels)
+	cache := f.volumes[1]
+	if cache.Labels[LabelManaged] != "true" {
+		t.Errorf("cache volume is unlabelled: %v", cache.Labels)
+	}
+	// The label Reap deletes by. A cache must never carry it: a cache is
+	// supposed to outlive every run, and this is the only thing standing
+	// between a crashed run's cleanup and somebody's warm ~/.gradle.
+	if _, marked := cache.Labels[LabelRunVolume]; marked {
+		t.Errorf("a cache volume carries the run-volume label: %v", cache.Labels)
+	}
+	if f.volumes[0].Labels[LabelRunVolume] != "true" || f.volumes[0].Labels[LabelRunID] != "r1" {
+		t.Errorf("run volume labels = %v", f.volumes[0].Labels)
 	}
 
 	mounts := f.createdHosts[0].Mounts

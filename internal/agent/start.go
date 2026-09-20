@@ -41,6 +41,7 @@ func DefaultExecutor(r *config.Runner, paths config.Paths) (executor.Executor, e
 		if r.Docker != nil {
 			opts.DefaultImage = r.Docker.DefaultImage
 			opts.GPU = r.Docker.GPU
+			opts.RequirePinnedImages = r.Docker.RequirePinnedImages
 		}
 		return docker.New(opts)
 

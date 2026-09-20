@@ -263,15 +263,25 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 
 	dir := filepath.Join(e.envDir, EnvDirPrefix+spec.RunID)
 	env := &runEnv{
-		spec:      spec,
-		workspace: spec.Workspace,
-		shell:     e.shell,
-		envDir:    dir,
-		envFile:   filepath.Join(dir, EnvFileName),
-		grace:     e.grace,
-		drain:     e.drain,
-		carried:   map[string]string{},
-		active:    map[*stepProc]struct{}{},
+		spec:        spec,
+		workspace:   spec.Workspace,
+		shell:       e.shell,
+		envDir:      dir,
+		envFile:     filepath.Join(dir, EnvFileName),
+		outFile:     filepath.Join(dir, OutputFileName),
+		pathFile:    filepath.Join(dir, PathFileName),
+		summaryFile: filepath.Join(dir, SummaryFileName),
+		grace:       e.grace,
+		drain:       e.drain,
+		carried:     map[string]string{},
+		active:      map[*stepProc]struct{}{},
+	}
+	for f, label := range map[string]string{
+		env.outFile: "$GITHUB_OUTPUT", env.pathFile: "$GITHUB_PATH", env.summaryFile: "$GITHUB_STEP_SUMMARY",
+	} {
+		if err := env.createEmpty(f, label); err != nil {
+			return nil, err
+		}
 	}
 	if err := env.createEnvFile(); err != nil {
 		return nil, err

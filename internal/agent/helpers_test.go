@@ -171,7 +171,7 @@ type fakeEnv struct {
 	mu     sync.Mutex
 }
 
-func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, _ io.Writer) (int, error) {
+func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, _ io.Writer) (executor.Result, error) {
 	_, _ = io.WriteString(stdout, "step "+step.Name+"\n")
 	if e.ex.emit != nil {
 		e.ex.emit(stdout)
@@ -180,13 +180,10 @@ func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, _ io.Wri
 		select {
 		case <-time.After(e.ex.hold):
 		case <-ctx.Done():
-			return 143, ctx.Err()
+			return executor.Result{ExitCode: 143}, ctx.Err()
 		}
 	}
-	if e.ex.exitCode != 0 {
-		return e.ex.exitCode, nil
-	}
-	return 0, nil
+	return executor.Result{ExitCode: e.ex.exitCode}, nil
 }
 
 func (e *fakeEnv) EnvFile() string { return filepath.Join(e.ex.dir, e.runID+".env") }

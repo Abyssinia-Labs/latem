@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
+
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -129,7 +131,7 @@ func TestExec_EveryStepIsFullyConfigured(t *testing.T) {
 			t.Errorf("exec %d inherited an export from the previous step: %q", i, opts.Env)
 		}
 	}
-	if got := f.execOpts[1].Cmd; !reflect.DeepEqual(got, []string{"bash", "-c", steps[1].Run}) {
+	if got := f.execOpts[1].Cmd; !reflect.DeepEqual(got, wrappedArgv("bash", steps[1].Run)) {
 		t.Errorf("argv = %#v", got)
 	}
 }
@@ -222,13 +224,13 @@ func TestExec_StreamsOutputAndReturnsExitCode(t *testing.T) {
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
 
 	var log bytes.Buffer
-	code, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &log, &log)
+	res, err := env.Exec(context.Background(), executor.Step{Name: "one", Run: "make"}, &log, &log)
 	// A non-zero exit is a result, not an error: the agent maps it to E_STEP.
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
-	if code != 7 {
-		t.Errorf("exit code = %d, want 7", code)
+	if res.ExitCode != 7 {
+		t.Errorf("exit res.ExitCode = %d, want 7", res.ExitCode)
 	}
 	for _, want := range []string{"building", "warning: deprecated"} {
 		if !strings.Contains(log.String(), want) {
@@ -272,9 +274,11 @@ func TestExec_SameWriterTwiceInterleaves(t *testing.T) {
 	}
 }
 
-// A step timeout is E_STEP_TIMEOUT, not E_TIMEOUT, and it takes the container
-// with it — the Docker API cannot signal one exec, and leaving a hung build
-// running until teardown is how a machine ends up with four of them.
+// §9: exceeding steps[].timeout kills the step's process group. Since A45 that
+// is what happens here too — the group is signalled from a second exec, as
+// root — and the run container is left standing, because since A42 a step
+// timeout is a failure like any other and an `if: always()` step after it needs
+// somewhere to run.
 func TestExec_StepTimeout(t *testing.T) {
 	f := &fakeAPI{envFileMissing: true, blockExec: true}
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
@@ -287,8 +291,57 @@ func TestExec_StepTimeout(t *testing.T) {
 	if got := CodeOf(err); got != protocol.ErrStepTimeout {
 		t.Errorf("error code = %q, want %q (%v)", got, protocol.ErrStepTimeout, err)
 	}
+
+	var stop *container.ExecOptions
+	for i := range f.execOpts {
+		if f.execOpts[i].User == "0" {
+			stop = &f.execOpts[i]
+		}
+	}
+	if stop == nil {
+		t.Fatal("no stop was issued, so the hung step is still running")
+	}
+	want := []string{"/bin/sh", "-c", stopScript, StepPidFile, "30"}
+	if !reflect.DeepEqual(stop.Cmd, want) {
+		t.Errorf("stop argv = %#v, want %#v", stop.Cmd, want)
+	}
+	if len(f.killed) != 0 {
+		t.Errorf("the run container was killed (%v); later steps would have nowhere to run", f.killed)
+	}
+}
+
+// When the step cannot be stopped in place — a forged pid file, an image with
+// no sh — the container is killed after all, and the log says so. A step that
+// cannot be stopped must not be left running against the job's clock.
+func TestExec_StepTimeoutFallsBackToKillingTheContainer(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true, blockExec: true, execExitCodes: []int{3}}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
+
+	var log bytes.Buffer
+	_, err := env.Exec(context.Background(),
+		executor.Step{Name: "hangs", Run: "sleep 900", Timeout: 50 * time.Millisecond}, &log, &log)
+	if got := CodeOf(err); got != protocol.ErrStepTimeout {
+		t.Errorf("error code = %q (%v)", got, err)
+	}
 	if len(f.killed) == 0 {
-		t.Error("the container was not killed, so the hung step is still running")
+		t.Error("a step that could not be stopped in place must not be left running")
+	}
+	if !strings.Contains(log.String(), "could not be stopped in place") {
+		t.Errorf("the log should say why later steps cannot run: %q", log.String())
+	}
+}
+
+// The wrapper is a constant and the step is still one element (INV-3): nothing
+// of `run` is ever written into the script that records the pid.
+func TestWrappedArgv(t *testing.T) {
+	run := `echo "$(id)"; rm -rf / # '"`
+	got := wrappedArgv("bash", run)
+	want := []string{"/bin/sh", "-c", stepWrapper, StepPidFile, "bash", "-c", run}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+	if strings.Contains(stepWrapper, "rm") || strings.Contains(got[2], run) {
+		t.Error("the wrapper must never contain any part of the step")
 	}
 }
 

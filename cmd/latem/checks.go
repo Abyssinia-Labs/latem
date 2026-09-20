@@ -747,11 +747,43 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 		id, title := "repo."+name, "repo / "+name
 		// --end-of-options rather than --, per amendment A7: -- would mean
 		// "a pathspec follows" and the URL is not a path.
-		outBytes, err := d.sys.Exec(ctx, "git", "ls-remote", "--heads", "--end-of-options", repo.URL)
+		//
+		// `env -u SSH_AUTH_SOCK` as argv[0], for the same reason checkLocale
+		// uses env(1): the question is not whether *you* can read this
+		// repository but whether a process started by launchd or systemd can,
+		// and that process does not inherit your interactive ssh agent. A
+		// probe that keeps the variable passes on the machine where the
+		// service is about to fail, which makes this check report the one
+		// state it exists to catch as healthy. Nothing else is unset — an
+		// https credential helper needs PATH to find the program it shells
+		// out to.
+		outBytes, err := d.sys.Exec(ctx, "env", "-u", "SSH_AUTH_SOCK",
+			"git", "ls-remote", "--heads", "--end-of-options", repo.URL)
 		if err == nil {
 			out = append(out, pass(id, title, repo.URL))
 			continue
 		}
+
+		// It failed without an agent. If it succeeds with one, the diagnosis
+		// is not "no credential" but "a credential only your session holds" —
+		// the worst shape a credential problem takes, because every check the
+		// operator runs by hand agrees with them.
+		if _, agentErr := d.sys.Exec(ctx, "git", "ls-remote", "--heads", "--end-of-options", repo.URL); agentErr == nil {
+			out = append(out, fail(id, "repo / "+name,
+				fmt.Sprintf("%s — readable from your shell, not from a service", repo.URL),
+				"ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS: hand the passphrase to the login keychain",
+				"ssh-keygen -t ed25519 -N '' -f ~/.ssh/"+name+"_deploy   # or a passphraseless deploy key",
+			).withNotes(
+				"This repository answered when the probe kept your SSH_AUTH_SOCK and refused when it "+
+					"did not. An agent started by launchd or systemd runs without that socket, so it "+
+					"will refuse there too — a run fails E_SOURCE at gate 6 while `git ls-remote` in "+
+					"your terminal keeps saying the credential is fine.",
+				"The key needs to be usable with no agent and no terminal: a passphraseless deploy "+
+					"key, or a passphrase the login keychain can supply unprompted.",
+			))
+			continue
+		}
+
 		detail := gitRemoteError(string(outBytes))
 		if detail == "" {
 			detail = err.Error()
@@ -1222,8 +1254,15 @@ func repoFailureAdvice(url, out string) (notes, fixes []string) {
 				"ssh config entry is the form that works from both an interactive shell and an " +
 				"agent started by launchd or systemd; a forwarded agent works from neither, " +
 				"because the service does not inherit your session.",
+			"`gh auth login --git-protocol ssh` is the wrong answer here and is the easy mistake: " +
+				"it writes a passphrase-protected key, adds no ssh config entry, and leaves the " +
+				"passphrase with your ssh agent — which is the one thing the service will not have. " +
+				"Prefer https with a credential helper, or a passphraseless deploy key.",
 		}
-		fixes = []string{"gh auth login --git-protocol ssh   # or install a deploy key in ~/.ssh"}
+		fixes = []string{
+			"gh auth login --git-protocol https   # then put the https URL in config.toml",
+			"ssh-keygen -t ed25519 -N '' -f ~/.ssh/latem_deploy   # then add the .pub as a deploy key",
+		}
 
 	case strings.Contains(out, "Repository not found"),
 		strings.Contains(out, "does not appear to be a git repository"):

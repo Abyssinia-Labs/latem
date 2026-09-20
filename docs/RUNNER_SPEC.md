@@ -690,15 +690,16 @@ The accurate contract, identical across all three executors:
 
 This is GitHub Actions' model, so it is already what people expect; it just has to be written down. The consequence for job authors is the obvious one: if two commands must share shell state, they are one step, and the sequencing belongs in the shell script. That is N1 working as intended.
 
-**Passing values between steps.** Because shell state does not survive, there is one sanctioned channel. The agent creates an empty file per run and exports its path as `$LATEM_ENV`. A step may append `KEY=value` lines to it; between steps, the agent reads, truncates, and merges them into the run environment for every subsequent step.
+**Passing values between steps.** Because shell state does not survive, there is one sanctioned channel. The agent creates an empty file per run and exports its path as `$LATEM_ENV` — and, since A43, as `$GITHUB_ENV` too, the same file under the name a workflow written for GitHub reads. A step may append `KEY=value` lines to it, or a `KEY<<DELIMITER` block for a value that spans lines; between steps, the agent reads, truncates, and merges them into the run environment for every subsequent step.
 
 ```bash
 echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$LATEM_ENV"
+{ echo "NOTES<<EOF"; git log -3 --format=%s; echo "EOF"; } >> "$LATEM_ENV"
 ```
 
 Constrained, because this is a file a job can write and the agent then trusts:
 
-- Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`. Malformed lines are dropped with a warning, not silently.
+- Keys must match `^[A-Za-z_][A-Za-z0-9_]*$`. Malformed lines are dropped with a warning, not silently. A `KEY<<DELIMITER` block that is never closed sets nothing — where the value was meant to end is not knowable, and "end of file" would be a guess.
 - Keys colliding with a declared secret name, or with any `LATEM_*` name, are **ignored** — a job cannot overwrite an injected credential or spoof the agent's own variables.
 - The file is capped at 64 KB per step; values pass through the redactor before appearing in any log.
 - It does not cross the trust boundary in either direction. It is job-authored data affecting the job's own environment, which is a different thing from §5's concern.
@@ -1749,3 +1750,198 @@ Two further items are recorded but **not** amended, because neither is a contrac
 **A31 is a decision about who the first user is, not about which executor is better.** Tart is better. It is also a boundary you buy before you need it, and defaults are what an operator gets when they have not yet formed an opinion — so the default should be the configuration that is correct for the deployment they actually have, with the stronger one one uncomment away and a stated criterion for when to reach for it. §13.0 is that criterion, and it is a question about provenance ("whose code runs here?") rather than about scale or hardware, because provenance is what actually changes the answer.
 
 The invariants are untouched. INV-5 in particular means exactly what it did: unapproved code does not run. What native changes is not whether the invariant holds but what it costs when an approval is granted wrongly — under Tart, a VM that is deleted; under native, the operator's keychain. That is stated in §13.0 rather than left for an operator to infer, because it is the only part of this amendment that can hurt someone.
+
+### Amendment from the Actions-compatibility decision
+
+Every amendment above was forced by something refusing to compile, refusing to run, or
+refusing to be expressible. **A42 is the first that is not.** It is a product decision,
+recorded here because it reverses a non-goal and moves the trust boundary, and a reader
+who finds N1 contradicted by the code deserves to find the reason next to it rather than
+in a commit message.
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A42 | §1 (N1), §5 (INV-3, INV-4, INV-5), §9, §13.0 | **N1 is reversed. Latem interprets GitHub Actions workflow syntax** — `.github/workflows/*.yml` as a job registry, `uses:`, composite actions, and the expression language — with `.latem/jobs.yaml` retained as the native format | Adoption, and the measurement that settles it. The user latem most needs to reach already has CI and wants to move one job — the expensive, macOS-bound one — onto hardware they own, without touching what already works. Asking them to re-author that job in a second format is the friction that ends the conversation, and it is a format cost, not a capability cost. A format that accepts only `run:` does not avoid this: **this repository's own two workflows are 22 `uses:` steps against 20 `run:`**, so a `uses:`-rejecting subset would refuse to load the workflows of the project shipping it. Half-compatibility is the one option that buys nothing |
+
+**What A42 costs, stated now rather than discovered in an incident.** Each of these is a
+claim currently made in §5 or the README that becomes narrower the moment a workflow names
+a third-party action, and each needs its wording corrected in the same change that ships
+the feature — an invariant that quietly stops holding is worse than one never claimed.
+
+- **INV-5 no longer yields reproducibility from the commit alone.** `uses: actions/checkout@v5`
+  is a *mutable tag on a repository that is not yours*, resolved at run time. The registry
+  still comes from your disk at the resolved commit, which is the part INV-5 actually
+  guarantees, but "a run is reproducible from the commit alone" is false for any workflow
+  with an unpinned `uses:`. Reproducibility becomes a property of SHA-pinned references and
+  must be described as one.
+- **INV-4 holds for `run:` steps and not for actions.** Redaction at the point of emission
+  keeps a secret out of a log. It does nothing about an action that receives the secret as
+  an input and opens a socket. "Secrets never leave the machine" is true of the log
+  pipeline, not of third-party code, and the distinction has to be in the sentence.
+- **INV-3 inherits a known vulnerability class.** `${{ }}` substituted into `run:` is the
+  script injection GitHub itself issues advisories about — `github.event.*` is attacker-authored
+  text landing in a shell. The rule that keeps INV-3 true is therefore normative for the
+  evaluator: **a context value reaches a step as an environment variable, never as
+  substituted characters in a command string.** A37's principle applies — this needs a test,
+  not a comment.
+- **N3 is hit sideways.** `actions/cache` and `actions/upload-artifact` do not manipulate
+  files; they call GitHub backend APIs. Supporting the two actions that appear in nearly
+  every workflow means implementing those services locally.
+- **§13.0's default inverts, and G6 pays for it.** "Your own repositories, native is right"
+  was sound while the only code that ran was yours. A marketplace action runs third-party
+  code as the agent user, with the login keychain unlocked and the signing identities
+  present — which is the precise scenario §13.0 gives Tart as the answer to. For any
+  workflow containing an action that is not vendored into the repository, **Tart is the
+  floor and not the upgrade**, and a machine that has not pulled the image is a 69 GB
+  download away from its first green build. G6's five minutes survives only on the
+  `.latem/jobs.yaml` path and for workflows whose steps are all `run:`.
+
+**Order of work, chosen so the trust boundary moves last.**
+
+| Phase | Work | Boundary |
+|---|---|---|
+| 1 | The workflow parser and the expression evaluator, `uses:` a named error | none |
+| 2 | Workflow commands: `$GITHUB_ENV`, `$GITHUB_OUTPUT`, `$GITHUB_PATH`, `$GITHUB_STEP_SUMMARY`, `::add-mask::`, `::group::`; step `id:`; the `steps` context | none |
+| 3 | `if:` against run-time status, which needs a condition on the registry's step | none — a model change |
+| 4 | `uses: ./path` and `uses: docker://` | INV-5 intact: both resolve at the commit the registry did |
+| 5 | The marketplace, behind SHA-pinning and an operator allowlist, with the §13.0 inversion in the same change | **here** |
+| 6 | The cache and artifact services | N3 |
+
+Nothing in phase 5 ships before the §5 wording in phases 1–4 is already correct.
+
+**This table replaces a four-item list written before any of it was built, and the
+correction is the point of recording it.** The original had today's phase 4 as phase 2 and
+went straight to the marketplace, because it was drawn from what *changes the trust
+boundary* rather than from what *has to exist first*. Phase 1 surfaced the ordering it
+actually has: `$GITHUB_OUTPUT` is what makes `steps.*.outputs` resolvable, and the compiler
+refuses that context today — so a composite action, which communicates through exactly that
+channel, cannot be implemented before the commands are. Phase 3 is separate from it because
+`if: always()` is not an expression problem at all: `registry.Step` has no condition field,
+so a cleanup step that must run after a failure cannot be compiled to one at any level of
+expression support.
+
+Phase 5 is larger than 1, 2, 4 and 6 together, and should be planned as such: resolving and
+caching action repositories, parsing `action.yml`, three action kinds (node20/node24, Docker,
+composite) and the pre/main/post hooks around each.
+
+**Two constructs are deliberately unscheduled**, because neither is blocked on effort:
+
+- **`strategy` / matrix** expands one job into several, and §11's run state machine has one
+  run per job. Scheduling it means deciding what a matrix leg *is* — a run, a step, or
+  something new — and that is a model question, not a parser one.
+- **`needs`** is N2. A42 reversed N1 and said nothing about N2, so a workflow with a job
+  graph stays refused until someone decides to reverse that too. It is listed here so the
+  refusal reads as a decision rather than an omission.
+
+### Amendment from wiring phase 2
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A43 | §9, §13, §26 | **`$LATEM_ENV` is also `$GITHUB_ENV`, one file read by one parser, and the format gains the `KEY<<DELIMITER` heredoc** | The alias was the cheap part: a workflow written for GitHub appends to `$GITHUB_ENV`, and exporting the existing file under that name costs one line per executor. What it exposed was that the two files had two parsers — the executors' `parseEnvFile` and the workflow package's `ParseKeyValueFile` — and only the second spoke the heredoc form. Aliasing without unifying would have given a multi-line value written the documented GitHub way a "malformed line" warning and no variable, from a file the workflow was told it could write to. Both executors now read `$LATEM_ENV` through the shared parser, whose cap, key grammar and never-quote-a-value rules are §9's already. The native format acquires heredocs as a consequence, which is recorded here because it is a §9 change, however small. §26 had already named the verbatim duplication of `$LATEM_ENV` parsing across the two executors as debt with the Tart executor as its trigger; this retires it earlier, and the Tart executor will have one parser to call rather than a third copy to make |
+
+### Amendment from designing phase 4
+
+Recorded before the build, as A42 was, because it changes the registry's model and adds an
+admission gate, and both should be findable next to the reason.
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A44 | §9, §10 (gate 13), §13.1 | **Local actions (`uses: ./path`) and `uses: docker://` are compiled into the registry. A step may be a container instead of a command, and a job may require an executor** | The two were designed together because they are the two halves of one question — what a `uses:` step *becomes* — and because only one of them needs the model to change. Both resolve at the commit the registry did, read through the same `os.Root`, so INV-5 holds for each without a new argument |
+
+**A composite action changes no model at all.** Its `runs.steps` are inlined as ordinary
+steps. Three rewrites make that exact rather than approximate, and all three are rewrites of
+an expression's *tree*, not of its value:
+
+- `inputs.x` inside the action is replaced by the expression the caller wrote in `with: x:`,
+  or the input's default. Because it is the tree that is substituted, a caller's
+  `${{ steps.prev.outputs.sha }}` makes the action's own reference late through the
+  classifier that already exists. There is no second late-binding mechanism.
+- Inner step ids are namespaced `<outer id>/<inner id>`, so the registry's ordering check
+  sees real ids and a collision with the job's own ids is impossible by construction.
+- An action's `outputs.<name>.value` has its step references namespaced the same way, and a
+  later `steps.<outer>.outputs.<name>` is replaced by it. Composite outputs therefore ride
+  the inner step's `$GITHUB_OUTPUT` and need no support at run time.
+
+The outer step's `if:` is and-ed into each inner condition; its `env:` lies under theirs. A
+nested `./` action is allowed, with a depth cap and a cycle check. A nested remote `uses:`
+is phase 5. Composite `run` steps name a `shell:`, and one that is not bash or sh is refused.
+
+**`docker://` changes two things, both small.**
+
+- *The registry.* `Step` gains `Container{Image, Entrypoint, Args}`, exclusive with `run` —
+  validation requires exactly one. `with.args` is a list and each element is one argv entry,
+  so a value containing `; rm -rf /` is an argument: INV-3's argv discipline, with nothing
+  added. Written as GitHub's single string it is split into words the way a shell would
+  split it, and then never seen by a shell — with one deliberate difference from GitHub,
+  found while building it. GitHub substitutes expressions and *then* splits, so a value
+  containing a space becomes several arguments and a pull request titled
+  `x --config=/etc/passwd` becomes a flag. Here an expression is atomic: it is kept whole
+  inside its word and evaluated there, so whatever it evaluates to is part of exactly one
+  argument. `with:` inputs arrive as `INPUT_<NAME>`. The field is excluded from decoding. A
+  native `container:` step is plausibly a real §9 feature and should arrive as one, not as a
+  side effect of this.
+- *Admission.* A job with a container step requires the docker executor, and gate 13 checks
+  the runner's executor as well as its labels. A machine with only a native runner learns at
+  admission — `E_NO_RUNNER`, naming the step — rather than in a build. The native and Tart
+  executors still refuse a container step if handed one; that is a backstop, not the gate.
+
+**In the docker executor, the four files move onto a per-run volume.** Today `$LATEM_ENV`,
+`$GITHUB_OUTPUT`, `$GITHUB_PATH` and `$GITHUB_STEP_SUMMARY` are written into the run
+container's own filesystem, where a second container cannot see them. They move to a named
+volume mounted at the same path in the run container and in each container step, which is
+then: create from the action's image with the run's workspace mount, caches, volume,
+resource limits and labels — so §6's crash reaping collects it like the run container —
+start, stream, wait, remove. Cancellation kills it.
+
+**A tag is mutable, and that is said rather than discovered.** `docker://alpine:3.19` is the
+same class of reference as a marketplace action at a tag: INV-5 yields reproducibility only
+for a digest. The policy is permissive and honest rather than strict and surprising — the
+reference is allowed, the run log records the digest `ImageInspect` reports so the run says
+what it ran, and an operator option, `require_pinned_images`, refuses a non-digest reference
+before anything is pulled — at the step rather than at `Prepare`, because `Prepare` is handed
+the run's own image and not its steps', and the run's own image is the operator's choice in
+config, which this does not second-guess. It ships off. That mirrors phase 5's SHA-pinning gate without pre-empting it.
+`image: Dockerfile` in a local action is refused: building images is its own surface, and it
+belongs with phase 5.
+
+Of the action kinds, this is the safest. It is third-party code, but in a container of its
+own with the workspace and one volume mounted — narrower than a marketplace JavaScript
+action running natively with the login keychain unlocked, which is the whole of phase 5's
+problem.
+
+**Order.** The expression rewrites; the registry's container step and executor requirement;
+runner selection by executor; the `action.yml` parser and the inliner; the run volume, then
+the container step. Composite actions are usable after the fourth with no executor touched.
+
+### Amendment from a step timeout on the docker executor
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A45 | §9, §13.1 | **On the docker executor a step that exceeds its timeout has its process group stopped in place — SIGTERM, the grace the native executor gives, SIGKILL — and the run container is left standing** | An interaction between two things that were each right alone. The Docker API cannot signal an exec, so a timed-out step had always taken the run container with it; and A42 phase 3 made a step timeout a failure like any other, after which later steps consult their conditions. Together, an `if: always()` cleanup after a timeout ran against a container that was already dead — on docker only, which §9 forbids: the step contract is the same on every executor. It surfaced while building A44, was written down as a known defect rather than shipped quietly, and the cheaper fix — treat a timeout as ending the run on docker — was declined in favour of this one |
+
+**The mechanism, and the measurement it rests on.** Every step now runs under a constant
+wrapper, `echo "$$" > "$0"; exec "$@"`, which records the shell's pid on the per-run volume
+and then becomes the step. No part of a step is ever written into the wrapper — `run` is
+still one argv element, whole and untouched, so INV-3 is as it was. Stopping a step is a
+second exec, as root, that signals the negative of that pid. That is correct only if the
+recorded pid is the id of a process group containing the step and nothing else, which is
+true because the daemon starts every exec as the leader of a session and group of its own.
+That was measured against a daemon rather than recalled, and an integration test asserts it
+on every run, because if it ever stops being true the stop would signal the wrong processes.
+
+**Two details that exist because the obvious spelling is wrong.** There is no `--` before the
+negative pid: busybox's `kill` rejects it, and an explicit signal is what keeps a negative
+number from being read as one. And the pid is validated before it is used — digits only,
+never 0 or 1 — because the file lives on a volume the step can write to, and `kill -TERM -1`
+as root signals every process in the container. A step that forges the file can get its own
+processes signalled, which it could do itself; it cannot turn the stop into the
+container-wide kill this amendment exists to avoid.
+
+**When a step cannot be stopped in place** — no pid file, a forged one, an image with no
+`sh` — the container is killed after all, and the step's log says that later steps cannot
+run and why. A step that cannot be stopped must not be left running against the job's
+clock, and losing the later steps is the smaller of the two failures.
+
+**What it does not do**, and neither does the native executor: a process that has left the
+group — a daemon that called `setsid` — is not signalled. On docker it dies with the
+container at the end of the run.

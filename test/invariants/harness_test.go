@@ -161,7 +161,7 @@ type recordingEnv struct {
 	spec executor.Spec
 }
 
-func (e *recordingEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (int, error) {
+func (e *recordingEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
 	env := map[string]string{}
 	for k, v := range e.spec.Env {
 		env[k] = v
@@ -178,17 +178,18 @@ func (e *recordingEnv) Exec(ctx context.Context, step executor.Step, stdout, std
 	_, _ = io.WriteString(stdout, "ran step "+step.Name+"\n")
 
 	if leaky {
-		return e.leak(stdout, stderr)
+		code, err := e.leak(stdout, stderr)
+		return executor.Result{ExitCode: code}, err
 	}
 
 	if hold > 0 {
 		select {
 		case <-time.After(hold):
 		case <-ctx.Done():
-			return 143, ctx.Err()
+			return executor.Result{ExitCode: 143}, ctx.Err()
 		}
 	}
-	return code, nil
+	return executor.Result{ExitCode: code}, nil
 }
 
 // leak writes every injected secret to both streams and then fails with one of
