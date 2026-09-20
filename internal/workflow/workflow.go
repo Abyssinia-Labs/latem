@@ -116,6 +116,10 @@ type Step struct {
 	WorkingDirectory string            `json:"working-directory,omitempty"`
 	TimeoutMins      *float64          `json:"timeout-minutes,omitempty"`
 	ContinueOnError  json.RawMessage   `json:"continue-on-error,omitempty"`
+
+	// container is set by the expander for a `uses: docker://…` step (A44).
+	// Unexported, so no file can write it.
+	container *containerSpec
 }
 
 // StringList accepts either a scalar or a sequence, which is how `runs-on` and

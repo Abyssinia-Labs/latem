@@ -1871,7 +1871,13 @@ is phase 5. Composite `run` steps name a `shell:`, and one that is not bash or s
 - *The registry.* `Step` gains `Container{Image, Entrypoint, Args}`, exclusive with `run` —
   validation requires exactly one. `with.args` is a list and each element is one argv entry,
   so a value containing `; rm -rf /` is an argument: INV-3's argv discipline, with nothing
-  added. `with:` inputs arrive as `INPUT_<NAME>`. The field is excluded from decoding. A
+  added. Written as GitHub's single string it is split into words the way a shell would
+  split it, and then never seen by a shell — with one deliberate difference from GitHub,
+  found while building it. GitHub substitutes expressions and *then* splits, so a value
+  containing a space becomes several arguments and a pull request titled
+  `x --config=/etc/passwd` becomes a flag. Here an expression is atomic: it is kept whole
+  inside its word and evaluated there, so whatever it evaluates to is part of exactly one
+  argument. `with:` inputs arrive as `INPUT_<NAME>`. The field is excluded from decoding. A
   native `container:` step is plausibly a real §9 feature and should arrive as one, not as a
   side effect of this.
 - *Admission.* A job with a container step requires the docker executor, and gate 13 checks

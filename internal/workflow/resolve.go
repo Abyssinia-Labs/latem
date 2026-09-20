@@ -109,7 +109,9 @@ func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Sour
 
 	switch {
 	case len(hits) == 1:
-		job, err := Compile(hits[0].wf, jobName, sc)
+		// The same root the workflow was read through, so a local action is
+		// read at the same commit under the same symlink discipline.
+		job, err := CompileWith(hits[0].wf, jobName, sc, rootLoader{root: root})
 		if err != nil {
 			return nil, Source{}, err
 		}

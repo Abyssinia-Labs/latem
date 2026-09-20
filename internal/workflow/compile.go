@@ -67,13 +67,34 @@ var labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // .latem/jobs.yaml, because a second execution path would be a second place for
 // the invariants in §5 to be true or not.
 func Compile(w *Workflow, jobName string, sc expr.Scope) (*registry.Job, error) {
-	j, ok := w.Jobs[jobName]
+	return CompileWith(w, jobName, sc, nil)
+}
+
+// CompileWith is [Compile] with somewhere to read local actions from. A nil
+// loader compiles everything except `uses: ./path`, which it refuses by name —
+// there being no checkout to read the action out of.
+func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoader) (*registry.Job, error) {
+	declared, ok := w.Jobs[jobName]
 	if !ok {
 		return nil, &registry.Error{
 			Code: protocol.ErrUnknownJob,
 			Msg:  fmt.Sprintf("%s declares no job %q; it has %s", w.Path, jobName, strings.Join(w.JobNames(), ", ")),
 		}
 	}
+
+	// A44: local and docker:// actions become steps before anything else
+	// looks at the job, so that the refusals, the hoisting and the late
+	// bindings below all see only kinds of step they already understand. The
+	// job is copied, not edited: a Workflow is parsed once and may be
+	// compiled for more than one run.
+	expanded, err := newExpander(actions, w.Path).expandSteps(declared.Steps, nil)
+	if err != nil {
+		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)
+	}
+	copied := *declared
+	copied.Steps = expanded
+	j := &copied
+
 	if err := j.unsupported(w.Path, jobName); err != nil {
 		return nil, err
 	}
@@ -155,12 +176,14 @@ func (j *Job) unsupported(file, name string) error {
 	}
 	for i, st := range j.Steps {
 		if st.Uses != "" {
+			// Local and docker:// actions were expanded before this ran, so
+			// what is left names a repository that is not this one.
 			found = append(found, fmt.Sprintf(
-				"  step %d uses: %s — a local or docker action is A42 phase 4, the marketplace is phase 5; "+
-					"vendor the action's command as a run: step for now",
+				"  step %d uses: %s — a remote action is A42 phase 5. A local action (uses: ./path) or "+
+					"uses: docker://image runs today; so does the action's command as a run: step",
 				i+1, st.Uses))
 		}
-		if st.Run == "" && st.Uses == "" {
+		if st.Run == "" && st.Uses == "" && st.container == nil {
 			found = append(found, fmt.Sprintf("  step %d — has neither run: nor uses:", i+1))
 		}
 		if len(st.ContinueOnError) > 0 {
@@ -270,7 +293,7 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 	if st.Shell != "" {
 		shell = st.Shell
 	}
-	if shell != "" && !isSupportedShell(shell) {
+	if st.container == nil && shell != "" && !isSupportedShell(shell) {
 		return registry.Step{}, false, badRegistry(
 			"%s: shell: %q is not one latem runs; a step is a process, and the shells it may be are bash and sh", where, shell)
 	}
@@ -304,6 +327,29 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		if err := bind(k, st.Env[k]); err != nil {
 			return registry.Step{}, false, err
 		}
+	}
+
+	if st.container != nil {
+		c, err := compileContainer(st.container, sc, where)
+		if err != nil {
+			return registry.Step{}, false, err
+		}
+		for k, v := range env {
+			if err := envValueIsLiteral(v); err != nil {
+				return registry.Step{}, false, badRegistry("%s: env.%s: %v", where, k, err)
+			}
+		}
+		out := registry.Step{ID: st.ID, Name: st.Name, Env: env, If: cond, Container: c}
+		if st.TimeoutMins != nil {
+			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
+		}
+		if len(env) == 0 {
+			out.Env = nil
+		}
+		if len(late) > 0 {
+			out.Late = late
+		}
+		return out, false, nil
 	}
 
 	taken := map[string]string{}
@@ -557,4 +603,55 @@ func isSupportedShell(s string) bool {
 // becomes part of a command: the `cd` that implements working-directory.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// compileContainer resolves a container step's image, entrypoint and argv.
+//
+// All three must be answerable at admission. An argv element is not an
+// environment entry: there is no variable for a late value to arrive in, and
+// the honest answer to `args: [${{ steps.x.outputs.y }}]` is to say so and
+// name the channel that does work, rather than to pass an empty argument.
+func compileContainer(c *containerSpec, sc expr.Scope, where string) (*registry.ContainerStep, error) {
+	static := func(field, v string) (string, error) {
+		if !expr.Has(v) {
+			return v, nil
+		}
+		spans, err := expr.Spans(v)
+		if err != nil {
+			return "", badRegistry("%s: %s: %v", where, field, err)
+		}
+		for _, sp := range spans {
+			w, err := classify(sp.Prog)
+			if err != nil {
+				return "", badRegistry("%s: %s: %v", where, field, err)
+			}
+			if w == whenLate {
+				return "", badRegistry(
+					"%s: %s: ${{ %s }} is only known when the step runs, and a container's %s is fixed "+
+						"at admission; pass the value through env, which can be late", where, field, sp.Prog.Source(), field)
+			}
+		}
+		out, err := expr.EvalString(v, sc)
+		if err != nil {
+			return "", badRegistry("%s: %s: %v", where, field, err)
+		}
+		return out, nil
+	}
+
+	out := &registry.ContainerStep{}
+	var err error
+	if out.Image, err = static("image", c.Image); err != nil {
+		return nil, err
+	}
+	if out.Entrypoint, err = static("entrypoint", c.Entrypoint); err != nil {
+		return nil, err
+	}
+	for _, a := range c.Args {
+		v, err := static("args", a)
+		if err != nil {
+			return nil, err
+		}
+		out.Args = append(out.Args, v)
+	}
+	return out, nil
 }
