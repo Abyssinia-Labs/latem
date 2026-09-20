@@ -39,6 +39,15 @@ const (
 	// unconditionally and cannot be overridden by [executor.Spec.Labels].
 	LabelRunID   = "latem.run-id"
 	LabelManaged = "latem.managed"
+	// LabelRunVolume marks the per-run volume (A44). Its own label rather
+	// than "managed and has a run id", so that nothing which looks for run
+	// volumes to delete can ever match a cache.
+	LabelRunVolume = "latem.run-volume"
+	// RunVolumePrefix names that volume, and RunFilesDir is where it mounts:
+	// the directory the four step files live in, in the run container and in
+	// every container step alike.
+	RunVolumePrefix = "latem-run-"
+	RunFilesDir     = "/tmp/latem"
 
 	// DefaultPidsLimit is §13.1's `--pids-limit 4096`. It is a fork-bomb
 	// backstop, not a resource budget: 4096 is far above what a build needs
@@ -101,6 +110,14 @@ type Options struct {
 	// binary is dynamically linked, so a musl image reports a missing loader
 	// and looks like a toolkit failure when it is not.
 	GPUProbeImage string
+
+	// RequirePinnedImages refuses a container step whose image is named by
+	// tag rather than by digest (A44). Off by default: a tag is allowed and
+	// the digest it resolved to is written to the run log, so the run says
+	// what it ran. On, a mutable reference is refused before anything is
+	// pulled. It does not apply to the run's own image, which the operator
+	// chose in config.
+	RequirePinnedImages bool
 
 	// Init runs a real init process as PID 1 in the run container. Defaults to
 	// on: PID 1 is otherwise the shell holding the container open, which does
@@ -229,6 +246,7 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 		return nil, err
 	}
 	if err := e.ensureCacheOwnership(ctx, img, mounts); err != nil {
+		e.removeRunVolume(ctx, spec.RunID)
 		return nil, err
 	}
 
@@ -268,6 +286,7 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 	name := ContainerNamePrefix + spec.RunID
 	created, err := e.api.ContainerCreate(ctx, cfg, hostCfg, name)
 	if err != nil {
+		e.removeRunVolume(ctx, spec.RunID)
 		return nil, wrapErr(protocol.ErrExecutor, err, "create container %s", name)
 	}
 
@@ -279,6 +298,15 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 		shell:       e.shell,
 		user:        e.user,
 		carried:     map[string]string{},
+		// What a container step needs to be a sibling of this container
+		// rather than a stranger: the same mounts, limits and labels.
+		runVolume:     RunVolumePrefix + spec.RunID,
+		mounts:        mounts,
+		resources:     hostCfg.Resources,
+		init:          hostCfg.Init,
+		labels:        cfg.Labels,
+		ensureImage:   e.ensureImage,
+		requirePinned: e.opts.RequirePinnedImages,
 	}
 
 	if err := e.api.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
@@ -408,6 +436,22 @@ func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec) ([]moun
 		Target: WorkspacePath,
 	}}
 
+	// The per-run volume (A44). $LATEM_ENV and the three GitHub files used to
+	// be written into the run container's own filesystem, where a second
+	// container cannot see them; on a volume, a `uses: docker://` step reads
+	// and writes the same files the steps around it do. It is a volume mount,
+	// so ensureCacheOwnership hands it to the step user along with the caches.
+	runVolume := RunVolumePrefix + spec.RunID
+	if _, err := e.api.VolumeCreate(ctx, volume.CreateOptions{
+		Name: runVolume,
+		Labels: map[string]string{
+			LabelManaged: "true", LabelRunID: spec.RunID, LabelRunVolume: "true",
+		},
+	}); err != nil {
+		return nil, wrapErr(protocol.ErrExecutor, err, "run volume %q", runVolume)
+	}
+	mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: runVolume, Target: RunFilesDir})
+
 	for _, c := range spec.Caches {
 		// §14: CacheMount.Source is "the host volume name or directory". An
 		// absolute path is a directory (the tart/native shape, §14.2);
@@ -526,7 +570,41 @@ func (e *Executor) Reap(ctx context.Context, live func(runID string) bool) ([]ex
 		}
 		reaped = append(reaped, executor.Reaped{RunID: c.RunID, Kind: "container", Ref: c.ID})
 	}
+
+	// Run volumes, after the containers that held them: a volume in use
+	// cannot be removed. Matched on their own label, which no cache carries.
+	vols, err := e.api.VolumeList(ctx, volume.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", LabelRunVolume+"=true")),
+	})
+	if err != nil {
+		if firstErr == nil {
+			firstErr = wrapErr(protocol.ErrExecutor, err, "list run volumes")
+		}
+		return reaped, firstErr
+	}
+	for _, v := range vols.Volumes {
+		if v == nil {
+			continue
+		}
+		runID := v.Labels[LabelRunID]
+		if live != nil && live(runID) {
+			continue
+		}
+		if err := e.api.VolumeRemove(ctx, v.Name, true); err != nil && !isNotFound(err) {
+			if firstErr == nil {
+				firstErr = wrapErr(protocol.ErrExecutor, err, "remove run volume %s", v.Name)
+			}
+			continue
+		}
+		reaped = append(reaped, executor.Reaped{RunID: runID, Kind: "volume", Ref: v.Name})
+	}
 	return reaped, firstErr
+}
+
+// removeRunVolume is for Prepare's failure paths, before there is an Env whose
+// Close would do it.
+func (e *Executor) removeRunVolume(ctx context.Context, runID string) {
+	_ = e.api.VolumeRemove(context.WithoutCancel(ctx), RunVolumePrefix+runID, true)
 }
 
 // Preflight verifies the machine can actually execute the work this runner

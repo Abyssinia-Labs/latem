@@ -40,6 +40,7 @@ type fakeAPI struct {
 	removed        []string
 	killed         []string
 	volumes        []volume.CreateOptions
+	removedVolumes []string
 
 	// Programmed behaviour.
 	imageMissing   bool
@@ -56,6 +57,8 @@ type fakeAPI struct {
 	containers     []container.Summary
 	pingErr        error
 	waitStatus     int64
+	listedVolumes  []*volume.Volume
+	repoDigests    []string
 
 	execSeq  int
 	closed   bool
@@ -75,7 +78,7 @@ func (f *fakeAPI) ImageInspect(_ context.Context, ref string) (image.InspectResp
 	if f.imageMissing {
 		return image.InspectResponse{}, errdefs.NotFound(errors.New("no such image: " + ref))
 	}
-	return image.InspectResponse{}, nil
+	return image.InspectResponse{RepoDigests: f.repoDigests}, nil
 }
 
 func (f *fakeAPI) ImagePull(_ context.Context, _ string, _ image.PullOptions) (io.ReadCloser, error) {
@@ -224,6 +227,19 @@ func (f *fakeAPI) VolumeCreate(_ context.Context, opts volume.CreateOptions) (vo
 	defer f.mu.Unlock()
 	f.volumes = append(f.volumes, opts)
 	return volume.Volume{Name: opts.Name}, nil
+}
+
+func (f *fakeAPI) VolumeRemove(_ context.Context, name string, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removedVolumes = append(f.removedVolumes, name)
+	return nil
+}
+
+func (f *fakeAPI) VolumeList(context.Context, volume.ListOptions) (volume.ListResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return volume.ListResponse{Volumes: f.listedVolumes}, nil
 }
 
 func (f *fakeAPI) Close() error {

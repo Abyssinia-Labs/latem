@@ -298,6 +298,11 @@ type DockerRunner struct {
 	// MinFreeGB refuses new runs below this floor (§14.4). Zero takes
 	// [DefaultDockerMinFreeGB].
 	MinFreeGB float64 `toml:"min_free_gb"`
+	// RequirePinnedImages refuses a `uses: docker://` step whose image is
+	// named by tag rather than by digest (A44). Off by default: a tag is
+	// allowed and the digest it resolved to is written to the run log. It
+	// does not apply to default_image, which the operator chose here.
+	RequirePinnedImages bool `toml:"require_pinned_images"`
 }
 
 // TartRunner is §13.2.

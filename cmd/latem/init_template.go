@@ -96,6 +96,10 @@ concurrency = 2
   [runner.docker]
   default_image = "ghcr.io/me/ci-base:latest"
   min_free_gb   = 40
+  # A workflow step may be a container: uses: docker://image. A tag is a
+  # mutable reference, so the digest it resolved to is always written to the
+  # run log. Set this to refuse anything not named by digest instead.
+  # require_pinned_images = true
 `, p.GOARCH)
 	}
 

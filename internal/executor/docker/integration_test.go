@@ -533,3 +533,45 @@ func TestIntegration_PrepareRefusesAHostileRunID(t *testing.T) {
 		t.Errorf("error code = %q, want %q (%v)", CodeOf(err), protocol.ErrExecutor, err)
 	}
 }
+
+// A44, against a real daemon — the part the fake cannot answer. The four files
+// live on a per-run volume, which relies on two things only a daemon can show:
+// that the archive API writes into a volume mounted at the target path, and
+// that a second container mounting that volume sees the same files. A
+// container step writes an output and an env value; the Result carries the
+// first and the next ordinary step reads the second.
+func TestIntegration_ContainerStepSharesTheRunFiles(t *testing.T) {
+	e := newIntegrationExecutor(t, nil)
+	env, _ := prepareRun(t, e, "a44-container-step", nil)
+	ctx := context.Background()
+
+	var log bytes.Buffer
+	res, err := env.Exec(ctx, executor.Step{
+		Name: "side",
+		Container: &executor.Container{
+			Image:      "alpine:3.19",
+			Entrypoint: "/bin/sh",
+			Args:       []string{"-c", `echo "k=from-the-container" >> "$GITHUB_OUTPUT"; echo "CARRIED=yes" >> "$GITHUB_ENV"; pwd`},
+		},
+	}, &log, &log)
+	if err != nil {
+		t.Fatalf("Exec: %v\n%s", err, log.String())
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d\n%s", res.ExitCode, log.String())
+	}
+	if res.Outputs["k"] != "from-the-container" {
+		t.Errorf("the container step's output did not come back: %+v\n%s", res.Outputs, log.String())
+	}
+	if !strings.Contains(log.String(), WorkspacePath) {
+		t.Errorf("the step should start in the workspace: %s", log.String())
+	}
+
+	log.Reset()
+	if _, err := env.Exec(ctx, executor.Step{Name: "after", Run: `echo "[$CARRIED]"`}, &log, &log); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !strings.Contains(log.String(), "[yes]") {
+		t.Errorf("$GITHUB_ENV written by a container step did not carry: %s", log.String())
+	}
+}

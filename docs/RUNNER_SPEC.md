@@ -1898,7 +1898,9 @@ same class of reference as a marketplace action at a tag: INV-5 yields reproduci
 for a digest. The policy is permissive and honest rather than strict and surprising — the
 reference is allowed, the run log records the digest `ImageInspect` reports so the run says
 what it ran, and an operator option, `require_pinned_images`, refuses a non-digest reference
-at `Prepare`. It ships off. That mirrors phase 5's SHA-pinning gate without pre-empting it.
+before anything is pulled — at the step rather than at `Prepare`, because `Prepare` is handed
+the run's own image and not its steps', and the run's own image is the operator's choice in
+config, which this does not second-guess. It ships off. That mirrors phase 5's SHA-pinning gate without pre-empting it.
 `image: Dockerfile` in a local action is refused: building images is its own surface, and it
 belongs with phase 5.
 

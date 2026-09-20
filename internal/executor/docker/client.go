@@ -47,6 +47,11 @@ type APIClient interface {
 	CopyToContainer(ctx context.Context, id, dstPath string, content io.Reader, options container.CopyToContainerOptions) error
 
 	VolumeCreate(ctx context.Context, options volume.CreateOptions) (volume.Volume, error)
+	// VolumeRemove and VolumeList arrived with A44. Until then every volume
+	// was a cache, and a cache persists by design; the per-run volume has the
+	// opposite lifecycle and has to be removed at Close and found by Reap.
+	VolumeRemove(ctx context.Context, volumeID string, force bool) error
+	VolumeList(ctx context.Context, options volume.ListOptions) (volume.ListResponse, error)
 
 	Close() error
 }

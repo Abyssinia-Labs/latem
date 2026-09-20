@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/pkg/stdcopy"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
@@ -36,6 +37,17 @@ type runEnv struct {
 	imagePath string
 	closed    bool
 	removed   bool
+
+	// A44: what a container step is built from, and the one in flight.
+	runVolume     string
+	mounts        []mount.Mount
+	resources     container.Resources
+	init          *bool
+	labels        map[string]string
+	ensureImage   func(ctx context.Context, ref string) error
+	requirePinned bool
+	stepSeq       int
+	sidecar       string
 }
 
 var _ executor.Env = (*runEnv)(nil)
@@ -80,13 +92,6 @@ func (e *runEnv) EnvFile() string { return EnvFilePath }
 // be run or could not be waited for.
 func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
 	none := executor.Result{ExitCode: -1}
-	if step.Container != nil {
-		// Refused until the four files move onto a per-run volume, which is
-		// what lets a second container see them (A44). Refusing by name beats
-		// running the step in the wrong image.
-		return none, codeErr(protocol.ErrExecutor,
-			"step %q is a container (%s), and container steps arrive with the run volume (A44) — not yet implemented", step.Name, step.Container.Image)
-	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -122,14 +127,22 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		defer cancel()
 	}
 
-	code, err := e.exec(execCtx, container.ExecOptions{
-		User:         e.user,
-		WorkingDir:   WorkspacePath,
-		Env:          envSlice(env),
-		Cmd:          StepArgv(e.shell, step.Run),
-		AttachStdout: true,
-		AttachStderr: true,
-	}, stdout, stderr)
+	var (
+		code int
+		err  error
+	)
+	if step.Container != nil {
+		code, err = e.runContainerStep(execCtx, step, env, stdout, stderr)
+	} else {
+		code, err = e.exec(execCtx, container.ExecOptions{
+			User:         e.user,
+			WorkingDir:   WorkspacePath,
+			Env:          envSlice(env),
+			Cmd:          StepArgv(e.shell, step.Run),
+			AttachStdout: true,
+			AttachStderr: true,
+		}, stdout, stderr)
+	}
 
 	// §9's between-step channel. Merged after the step rather than before the
 	// next one so that the warnings land in the log of the step that caused
@@ -152,7 +165,12 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		// A step-level deadline that fired while the job budget still had room
 		// is E_STEP_TIMEOUT, not E_TIMEOUT (§21).
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			e.killContainer(ctx)
+			// An exec cannot be killed on its own, so a timed-out command
+			// takes the run container with it. A container step already
+			// killed and removed its own container, and the run's survives.
+			if step.Container == nil {
+				e.killContainer(ctx)
+			}
 			return none, wrapErr(protocol.ErrStepTimeout, err,
 				"step %q exceeded its %s timeout", step.Name, step.Timeout)
 		}
@@ -312,9 +330,23 @@ func (e *runEnv) Close(ctx context.Context) error {
 		return nil
 	}
 
+	e.mu.Lock()
+	sidecar := e.sidecar
+	e.mu.Unlock()
+	if sidecar != "" {
+		_ = e.api.ContainerRemove(ctx, sidecar, container.RemoveOptions{Force: true})
+	}
+
 	err := e.api.ContainerRemove(ctx, e.containerID, container.RemoveOptions{Force: true})
 	if err != nil && !isNotFound(err) {
 		return wrapErr(protocol.ErrExecutor, err, "remove container %s", e.name)
+	}
+	// After the containers, because a volume in use cannot be removed. One
+	// that is already gone is success, as it is for the container.
+	if e.runVolume != "" {
+		if err := e.api.VolumeRemove(ctx, e.runVolume, true); err != nil && !isNotFound(err) {
+			return wrapErr(protocol.ErrExecutor, err, "remove run volume %s", e.runVolume)
+		}
 	}
 
 	e.mu.Lock()
@@ -330,4 +362,128 @@ func demux(r io.Reader) (string, error) {
 		return buf.String(), err
 	}
 	return buf.String(), nil
+}
+
+// runContainerStep runs a `uses: docker://…` step (A44): one container from
+// the step's image, a sibling of the run container rather than a stranger to
+// it. It gets the same workspace, the same caches and the per-run volume, so
+// $GITHUB_OUTPUT and the rest are the same files; the same resource limits;
+// and the same labels, so §6's crash reaping finds it like any other.
+//
+// It runs as the image's own user, not the step user. The image is third-party
+// and was built expecting that; and what it can reach is the workspace and one
+// volume, which is a good deal narrower than what a step on the native
+// executor can.
+func (e *runEnv) runContainerStep(
+	ctx context.Context, step executor.Step, env map[string]string, stdout, stderr io.Writer,
+) (int, error) {
+	c := step.Container
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+
+	if e.requirePinned && !strings.Contains(c.Image, "@sha256:") {
+		return -1, codeErr(protocol.ErrExecutor,
+			"step %q: image %q is named by tag, and this runner sets require_pinned_images; "+
+				"name it by digest (image@sha256:…)", step.Name, c.Image)
+	}
+	if e.ensureImage != nil {
+		if err := e.ensureImage(ctx, c.Image); err != nil {
+			return -1, err
+		}
+	}
+	// A tag is a mutable reference, so the run says what it resolved to. This
+	// is the record INV-5 cannot give for anything but a digest.
+	if insp, err := e.api.ImageInspect(ctx, c.Image); err == nil {
+		resolved := insp.ID
+		if len(insp.RepoDigests) > 0 {
+			resolved = insp.RepoDigests[0]
+		}
+		if resolved != "" {
+			writeNote(stdout, fmt.Sprintf("image %s is %s", c.Image, resolved))
+		}
+	}
+
+	labels := make(map[string]string, len(e.labels)+1)
+	for k, v := range e.labels {
+		labels[k] = v
+	}
+	labels["latem.step"] = step.Name
+
+	cfg := &container.Config{
+		Image:      c.Image,
+		Env:        envSlice(env),
+		WorkingDir: WorkspacePath,
+		Labels:     labels,
+		// An argv, element for element (INV-3). Nothing here is joined.
+		Cmd: c.Args,
+	}
+	if c.Entrypoint != "" {
+		cfg.Entrypoint = []string{c.Entrypoint}
+	}
+	host := &container.HostConfig{Mounts: e.mounts, Resources: e.resources, Init: e.init}
+
+	e.mu.Lock()
+	e.stepSeq++
+	name := fmt.Sprintf("%s-step-%d", e.name, e.stepSeq)
+	e.mu.Unlock()
+
+	created, err := e.api.ContainerCreate(ctx, cfg, host, name)
+	if err != nil {
+		return -1, fmt.Errorf("create container %s: %w", name, err)
+	}
+	e.mu.Lock()
+	e.sidecar = created.ID
+	e.mu.Unlock()
+	defer func() {
+		rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		_ = e.api.ContainerRemove(rmCtx, created.ID, container.RemoveOptions{Force: true})
+		e.mu.Lock()
+		e.sidecar = ""
+		e.mu.Unlock()
+	}()
+
+	if err := e.api.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+		return -1, fmt.Errorf("start container %s: %w", name, err)
+	}
+
+	logs, err := e.api.ContainerLogs(ctx, created.ID, container.LogsOptions{
+		ShowStdout: true, ShowStderr: true, Follow: true,
+	})
+	if err != nil {
+		return -1, fmt.Errorf("attach logs of %s: %w", name, err)
+	}
+	copyDone := make(chan struct{})
+	go func() {
+		defer close(copyDone)
+		_, _ = stdcopy.StdCopy(stdout, stderr, logs)
+	}()
+	defer func() { _ = logs.Close() }()
+
+	statusCh, errCh := e.api.ContainerWait(ctx, created.ID, container.WaitConditionNotRunning)
+	select {
+	case st := <-statusCh:
+		// The container has exited, so the log stream ends on its own; wait
+		// for it, bounded, so the last lines are in the log before the step's
+		// closing note.
+		select {
+		case <-copyDone:
+		case <-time.After(5 * time.Second):
+		}
+		if st.Error != nil && st.Error.Message != "" {
+			return -1, fmt.Errorf("container %s: %s", name, st.Error.Message)
+		}
+		return int(st.StatusCode), nil
+	case err := <-errCh:
+		return -1, fmt.Errorf("wait for %s: %w", name, err)
+	case <-ctx.Done():
+		killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		_ = e.api.ContainerKill(killCtx, created.ID, "KILL")
+		return -1, ctx.Err()
+	}
 }
