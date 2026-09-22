@@ -1945,3 +1945,44 @@ clock, and losing the later steps is the smaller of the two failures.
 **What it does not do**, and neither does the native executor: a process that has left the
 group — a daemon that called `setsid` — is not signalled. On docker it dies with the
 container at the end of the run.
+
+### Amendment from a flaky test that was not a flaky test
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A46 | §7.2, §11, §22 | **A broker's report persists only while the run is still in the state the report describes.** `store.ReapplyIfCurrent` is the guarded form, and the local broker's `Report` uses it | `TestARefOutsidePolicyIsParkedAndRunsOnceApproved` had been failing intermittently on loaded Linux runners for weeks and was carried as a flake. It was not one. It was reproducible with `GOMAXPROCS=1 -race`, at about one run in twenty, and the instrumentation added for it — printing the approval columns on failure — named the mechanism on the first capture |
+
+**The defect.** §11 has the agent write local truth before it reports, and the local broker's
+`Report` applied the transition again, reasoning that this made it "a self-transition — legal
+and idempotent by construction (§7.2)". The word carrying too much weight was *construction*.
+Reports are queued per run and delivered on a goroutine, so between the agent's write and the
+broker's re-application the run can legitimately move — and the run that moves furthest is
+precisely the one this test exercises. A run parked at gate 8; a human approves it, which pins
+the commit and re-queues it (A27); the pool claims it; and only then does the park's own report
+arrive. Re-applying it rewound the row to `awaiting_approval`, and A27's rule that entering that
+state clears the approval did exactly what it should to a row nobody had re-parked. The
+operator's decision was gone, the in-flight execution was left transitioning from a state the
+row no longer held, and the run sat waiting to be approved a second time.
+
+**Why the state machine could not catch it.** `preparing → awaiting_approval` is a real edge —
+it is how a park happens — so a rewind along it is indistinguishable from a park by legality
+alone. Nothing in an `Update` says which moment it describes, and the states either side of the
+rewind are both legitimate, so the graph has no opinion.
+
+**The guard, and what it cost.** `ReapplyIfCurrent` writes only while the run is still in
+`u.State`; otherwise it writes nothing and says so, because a late report is a true statement
+about the past rather than a fault. That makes §11's ordering a *precondition* of `Report`
+rather than an expectation of it, which is the contract change: the previous doc comment claimed
+`Report` was "correct for a caller that has not already written", and it cannot be, because such
+a caller is indistinguishable from a stale one. Four tests in `internal/broker/local` relied on
+that claim and now persist first, as §11 requires of the agent — and so did one caller that was
+not a test: `Agent.report`, which reconciliation uses to mark a crashed run interrupted, leaned
+on `Report` to do the persisting. It now writes local truth and then reports, which is the
+ordering §11 always specified and the reason that caller was the one to notice. A report is still marked
+reported when it is skipped: what a transport has seen is a fact about delivery, not about the
+row, and leaving it unmarked would keep the update in `store.Unreported`'s replay set forever.
+
+**What this says about the other flakes.** The instrumentation that solved this was added by the
+commit that gave up on solving it, and it worked on the first failure it saw. An intermittent
+test that has been rationalised as a flake is an unread bug report; the cheap move is not to
+re-run it but to make its next failure explain itself.

@@ -450,3 +450,86 @@ func TestTransition_SetsExpiryOnAWaitingState(t *testing.T) {
 		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, deadline)
 	}
 }
+
+// A46. A report is delivered asynchronously, so it describes a state the run
+// may already have left — and §11's graph cannot catch that, because the edge
+// a late park travels is a real one.
+func TestReapplyIfCurrent(t *testing.T) {
+	d := newTestDB(t)
+	mustCreate(t, d, testRun("r_reapply", protocol.StateClaimed))
+
+	// Current: applied, and the fields ride with it.
+	applied, err := d.ReapplyIfCurrent(t.Context(), "r_reapply", protocol.Update{
+		State: protocol.StateClaimed, ErrorMsg: "carried",
+	})
+	if err != nil || !applied {
+		t.Fatalf("a current report = %v, %v; want applied", applied, err)
+	}
+	got, err := d.Get(t.Context(), "r_reapply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ErrorMsg != "carried" {
+		t.Errorf("error_message = %q, want the update's", got.ErrorMsg)
+	}
+
+	// Left: nothing written, and not an error — a late report is a true
+	// statement about the past, not a fault.
+	if err := d.Transition(t.Context(), "r_reapply", protocol.StatePreparing,
+		protocol.Update{State: protocol.StatePreparing}); err != nil {
+		t.Fatal(err)
+	}
+	applied, err = d.ReapplyIfCurrent(t.Context(), "r_reapply", protocol.Update{
+		State: protocol.StateClaimed, ErrorMsg: "stale",
+	})
+	if err != nil {
+		t.Fatalf("a late report should not be an error: %v", err)
+	}
+	if applied {
+		t.Error("a report of a state the run has left was applied")
+	}
+	got, err = d.Get(t.Context(), "r_reapply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != protocol.StatePreparing || got.ErrorMsg == "stale" {
+		t.Errorf("the run was rewound: state=%s error_message=%q", got.State, got.ErrorMsg)
+	}
+}
+
+// The specific rewind A46 was written for: preparing → awaiting_approval is a
+// legal edge, so only the guard stops a late park from un-approving a run.
+func TestReapplyIfCurrentCannotRewindIntoAwaitingApproval(t *testing.T) {
+	d := newTestDB(t)
+	parked := parkedRun(t, d, "r_late_park", shaA)
+	park := protocol.Update{State: protocol.StateAwaitingApproval, SHA: parked.SHA}
+
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	if _, err := d.Approve(t.Context(), parked.ID, now, now.Add(72*time.Hour)); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if err := d.Transition(t.Context(), parked.ID, protocol.StateClaimed,
+		protocol.Update{State: protocol.StateClaimed}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(t.Context(), parked.ID, protocol.StatePreparing,
+		protocol.Update{State: protocol.StatePreparing}); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := d.ReapplyIfCurrent(t.Context(), parked.ID, park)
+	if err != nil || applied {
+		t.Fatalf("the late park = %v, %v; want skipped", applied, err)
+	}
+	got, err := d.Get(t.Context(), parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != protocol.StatePreparing {
+		t.Errorf("state = %s; the run was parked again", got.State)
+	}
+	if got.ApprovedSHA != parked.SHA {
+		t.Errorf("approved_sha = %q, want %q; A27's clearing rule ran on a run nobody re-parked",
+			got.ApprovedSHA, parked.SHA)
+	}
+}

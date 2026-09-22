@@ -329,12 +329,22 @@ func (b *Broker) Claim(ctx context.Context, runID string) error {
 // transport's replay condition as well — so a run that finished during an
 // outage was never sent to anybody.
 //
-// The transition itself is applied rather than assumed. RUNNER_SPEC §11 has
-// the agent persist before it reports, which makes this call a self-transition
-// — legal and idempotent by construction (§7.2). Applying it anyway is what
-// makes Report correct for a caller that has not already written, and what
-// makes an out-of-order report surface as store.ErrIllegalTransition instead
-// of as a run history that says a run was queued after it finished.
+// The transition is applied, but only while the run is still in the state the
+// update describes. RUNNER_SPEC §11 has the agent persist before it reports,
+// which makes this a self-transition — legal and idempotent by construction
+// (§7.2). That was the reasoning, and the word doing too much work in it was
+// "construction": reports are queued and delivered on a goroutine, so between
+// the agent's write and this call the run can legitimately move. It was
+// observed moving: a run parked at gate 8, approved by a human, re-queued and
+// claimed again, all before the park's own report was delivered — whereupon
+// the report rewound the row to awaiting_approval and amendment A27's clearing
+// rule discarded the approval. §11's graph cannot catch that, because
+// preparing → awaiting_approval is a real edge; it is how a park happens.
+//
+// So the guard is the update's own state, and a report of a state the run has
+// left writes nothing. It is still marked reported: what this transport has
+// seen is a fact about delivery, not about the row, and leaving it unmarked
+// would keep the update in store.Unreported's replay set forever.
 func (b *Broker) Report(ctx context.Context, runID string, u protocol.Update) error {
 	if err := protocol.ValidateID(runID); err != nil {
 		return fmt.Errorf("local: Report: %w", err)
@@ -351,26 +361,31 @@ func (b *Broker) Report(ctx context.Context, runID string, u protocol.Update) er
 			"local: Report %s: an expiry belongs to a waiting state, not %s (RUNNER_SPEC §11)", runID, u.State)
 	}
 
-	if err := b.st.Transition(ctx, runID, u.State, u); err != nil {
+	applied, err := b.st.ReapplyIfCurrent(ctx, runID, u)
+	if err != nil {
 		return err
 	}
 
 	// The three fields amendment A8 added. Transition applies none of them;
 	// see the [Store] comment for why that is a contract defect rather than an
-	// oversight here.
-	if u.Runner != "" {
-		if err := b.st.SetRunner(ctx, runID, u.Runner); err != nil {
-			return err
+	// oversight here. They are written only when the transition was, and for
+	// the same reason: a stale report's runner, deadline and cancel reason
+	// describe the same superseded moment its state does.
+	if applied {
+		if u.Runner != "" {
+			if err := b.st.SetRunner(ctx, runID, u.Runner); err != nil {
+				return err
+			}
 		}
-	}
-	if u.ExpiresAt != nil {
-		if err := b.st.SetExpiry(ctx, runID, *u.ExpiresAt); err != nil {
-			return err
+		if u.ExpiresAt != nil {
+			if err := b.st.SetExpiry(ctx, runID, *u.ExpiresAt); err != nil {
+				return err
+			}
 		}
-	}
-	if u.CancelReason != "" {
-		if err := b.st.SetCancelReason(ctx, runID, u.CancelReason); err != nil {
-			return err
+		if u.CancelReason != "" {
+			if err := b.st.SetCancelReason(ctx, runID, u.CancelReason); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -37,6 +37,12 @@ type Store interface {
 
 	Transition(ctx context.Context, runID string, to protocol.RunState, u protocol.Update) error
 
+	// ReapplyIfCurrent is Transition guarded on the run still being where the
+	// update says it is. [Broker.Report] uses it rather than Transition
+	// because a report is delivered asynchronously and may describe a state
+	// the run has since left.
+	ReapplyIfCurrent(ctx context.Context, runID string, u protocol.Update) (bool, error)
+
 	// The broker_state trio (amendment A28). Each takes the key of the
 	// transport asking, and this package always passes [store.BrokerLocal]:
 	// what the local transport has accepted is a different fact from what a

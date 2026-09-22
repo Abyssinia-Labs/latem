@@ -174,11 +174,20 @@ func crashed(s protocol.RunState) bool {
 // durable, this transport's broker_state row is the one being marked, and the
 // remote one picks the run up from store.Unreported(remote) on its next
 // connection (amendment A28).
+// Local truth first, then the report. That order is §11's, and since A46 it is
+// a precondition of [local.Broker.Report] rather than an expectation of it:
+// the broker persists only what the run is still doing, because a report
+// delivered late is indistinguishable from a first write unless every caller
+// writes first. This one used to rely on Report to do both, which is why it
+// was the caller that noticed.
 func (a *Agent) report(ctx context.Context, runID string, u protocol.Update) error {
+	if err := a.db.Transition(ctx, runID, u.State, u); err != nil {
+		return err
+	}
 	if brk := a.brokerOrNil(); brk != nil {
 		return brk.Report(ctx, runID, u)
 	}
-	return a.db.Transition(ctx, runID, u.State, u)
+	return nil
 }
 
 // sweepExpired rejects waiting runs past their deadline and reports each one
