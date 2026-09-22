@@ -927,7 +927,7 @@ type Step struct {
 
 ### 13.0 Choosing one
 
-Linux is not a choice: it is Docker (§13.1). macOS is, and the spec ships a default.
+Two executors ship: Docker (§13.1) and native (§13.3). Both are choices on every OS that runs them — native is Linux and macOS today, Windows being the gap A47 names — and the spec ships a default per platform. Tart (§13.2) is specified and backlogged (A31, A47).
 
 **The default for macOS is `native` (§13.3) — the host's own OS, no VM.** It requires nothing beyond a Mac that already has Xcode on it, adds no boot latency, and costs no disk. `latem init` writes it.
 
@@ -1986,3 +1986,35 @@ row, and leaving it unmarked would keep the update in `store.Unreported`'s repla
 commit that gave up on solving it, and it worked on the first failure it saw. An intermittent
 test that has been rationalised as a flake is an unread bug report; the cheap move is not to
 re-run it but to make its next failure explain itself.
+
+### Amendment from saying what the project is
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A47 | §1, §13.0, §13.2, §13.3 | **Docker and native are the two shipping executors, and native's target is every OS an operator runs — Linux and macOS today, Windows named as unimplemented. Tart is backlogged and nothing depends on it** | A positioning correction, and it is recorded because the documents had drifted into describing a narrower product than the one being built. §13.0 opened "Linux is not a choice: it is Docker", which was true when the native executor was written for macOS and is not true now — native builds and runs on Linux. The README had drifted further, opening on iOS. The thesis is owning the machines your CI runs on, whatever you build; an iOS release is the hardest case it has to pass, not its subject |
+
+**What this settles about isolation, which phase 5 needs.** Docker isolates: a job reaches the
+workspace, the caches it declared, and nothing else. Native does not, on any OS — a step runs as
+the agent's user with everything that user can reach, and that is a property of running on the
+host rather than a gap waiting on a VM. A42's §13.0 inversion was written as "Tart becomes the
+floor" for a workflow containing third-party actions; with Tart backlogged that sentence has no
+referent. It is replaced by: such a job requires an isolating executor, docker is the one, and
+on native it is a per-machine opt-in that ships off (`[actions] allow_unisolated`). Refusing
+outright is not available, because native is a first-class target rather than a stopgap.
+
+**Windows native is a goal and is unimplemented.** A Windows host can run Docker jobs today; it
+cannot run native ones. The executor is Unix-only by construction rather than by omission, and
+the list is what a separate workstream has to answer:
+
+- `internal/executor/native/proc_unix.go` is `//go:build unix`, and `proc_other.go` is a stub.
+  The process-group contract §9 requires — SIGTERM, a grace, SIGKILL, to a step's whole tree —
+  has no direct Windows equivalent; a job object is the usual answer.
+- Every step runs `bash -lc` (§9, A33). Windows needs a shell decision that is not a
+  translation: PowerShell and `cmd` differ from a login shell in what they inherit, and §9's
+  "each step is a new process, the filesystem persists" has to survive whichever is chosen.
+- `$LATEM_ENV` and the four GitHub files are appended to with shell redirection in every example
+  and in §9's own. The channel is a file and survives; the idiom in the docs does not.
+- Paths, the agent's own service installation (§23), and `doctor`'s machine checks are all
+  written against Unix shapes.
+
+None of that is on phase 5's path, and phase 5 does not wait for it.
