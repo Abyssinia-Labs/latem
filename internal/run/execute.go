@@ -126,7 +126,11 @@ func (x *execution) drive(ctx context.Context) Result {
 	if runner != nil {
 		labels = runner.Labels
 	}
-	resolved, dec := reg.AdmitOn(x.req, registry.Runner{Labels: labels, Executor: executorName(runner)})
+	resolved, dec := reg.AdmitOn(x.req, registry.Runner{
+		Labels:   labels,
+		Executor: executorName(runner),
+		Isolates: executorIsolates(runner),
+	})
 	if !dec.OK() {
 		return x.finish(ctx, fromDecision(dec))
 	}
@@ -283,7 +287,8 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// a *registry.Registry, so nothing downstream of this line knows or cares
 	// which one the job was written in — that is the point, and it is what
 	// keeps §5's invariants true in one place instead of two.
-	reg, src, err := workflow.Resolve(ws.Path, x.req.Job, x.workflowScope())
+	reg, src, err := workflow.ResolveWith(ws.Path, x.req.Job, x.workflowScope(),
+		workflow.Options{Policy: x.o.actionPolicy()})
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}

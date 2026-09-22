@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
@@ -35,7 +36,12 @@ type containerSpec struct {
 // exactly as safe as one the author wrote there by hand.
 type expander struct {
 	loader ActionLoader
-	where  string
+	policy actions.Policy
+	// usedRemote records that some step named a repository that is not this
+	// one, which is what makes the compiled job require an isolating
+	// executor.
+	usedRemote bool
+	where      string
 	// outputs holds, for each composite `uses:` step that had an id, the
 	// program each declared output became. Ids are namespaced, so one map
 	// serves every depth.
@@ -110,8 +116,20 @@ func (x *expander) expand(st Step, stack []string) ([]Step, error) {
 		}
 		return x.inlineComposite(st, action, append(stack, action.Path))
 	}
-	// A remote action. Left in place: unsupported() names it and the phase.
-	return []Step{st}, nil
+	// A remote action: another repository's code, which is the one kind of
+	// `uses:` this machine has an opinion about.
+	ref, err := actions.ParseRef(st.Uses)
+	if err != nil {
+		return nil, err
+	}
+	if err := x.policy.Permits(ref); err != nil {
+		return nil, err
+	}
+	x.usedRemote = true
+	return nil, fmt.Errorf(
+		"uses: %s is allowed on this machine, but fetching and running a remote action is not "+
+			"implemented yet (A42 phase 5). Vendor it as a local action, or call its command "+
+			"from a run: step", ref)
 }
 
 // inlineComposite returns the action's steps, rewritten to stand where the

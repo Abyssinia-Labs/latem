@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -123,5 +124,61 @@ func TestExecute_DockerStepIsRefusedAtAdmissionOnANativeRunner(t *testing.T) {
 	}
 	if len(h.env.executed()) != 0 {
 		t.Errorf("nothing should have run: %+v", h.env.executed())
+	}
+}
+
+// A job carrying third-party code prefers an isolating runner, and when there
+// is none the label match is still returned so gate 13 refuses by name rather
+// than reporting "no runner" with no reason.
+func TestSelectRunnerPrefersAnIsolatingRunner(t *testing.T) {
+	o := &Orchestrator{runners: []Runner{
+		{Name: "mac", Labels: []string{"linux"}, Executor: namedExecutor{name: "native"}},
+		{Name: "box", Labels: []string{"linux"}, Executor: namedExecutor{name: "docker"}},
+	}}
+	reg := &registry.Registry{Jobs: map[string]*registry.Job{
+		"third": {RunsOn: []string{"linux"}, Steps: []registry.Step{{Run: "make"}}, RequiresIsolation: true},
+	}}
+	if r := o.selectRunner(reg, "third"); r == nil || r.Name != "box" {
+		t.Errorf("want the isolating runner, got %+v", r)
+	}
+
+	onlyNative := &Orchestrator{runners: o.runners[:1]}
+	if r := onlyNative.selectRunner(reg, "third"); r == nil || r.Name != "mac" {
+		t.Errorf("with no isolating runner the label match is returned for gate 13: %+v", r)
+	}
+
+	if executorIsolates(&o.runners[0]) {
+		t.Error("native does not confine a step, on any OS")
+	}
+	if !executorIsolates(&o.runners[1]) {
+		t.Error("docker does")
+	}
+	if executorIsolates(&Runner{Name: "x", Executor: namedExecutor{name: "something-new"}}) {
+		t.Error("an unknown executor must not inherit isolation by default")
+	}
+}
+
+// The policy comes from config on every run, so narrowing an allowlist takes
+// effect on the next build rather than the next restart.
+func TestActionPolicyComesFromConfig(t *testing.T) {
+	yes := true
+	o := &Orchestrator{cfg: &config.Config{Actions: config.Actions{
+		Allowed: []string{"actions/*"}, RequirePinned: &yes, AllowUnisolated: true,
+	}}}
+	p := o.actionPolicy()
+	if len(p.Allowed) != 1 || !p.RequirePinned || !p.AllowUnisolated {
+		t.Errorf("policy = %+v", p)
+	}
+	// Pinning defaults on, so a config written before the block existed does
+	// not silently start accepting moving references.
+	bare := &Orchestrator{cfg: &config.Config{}}
+	if !bare.actionPolicy().RequirePinned {
+		t.Error("require_pinned must default on")
+	}
+	if len(bare.actionPolicy().Allowed) != 0 {
+		t.Error("and nothing is allowed by default")
+	}
+	if (&Orchestrator{}).actionPolicy().RequirePinned != true {
+		t.Error("no config at all is the refusing default")
 	}
 }

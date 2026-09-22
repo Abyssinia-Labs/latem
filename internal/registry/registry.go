@@ -90,9 +90,18 @@ type Job struct {
 	// most one run per group per machine; others queue rather than fail.
 	ConcurrencyGroup string            `json:"concurrency_group,omitempty"`
 	Inputs           map[string]*Input `json:"inputs,omitempty"`
-	Secrets          []string          `json:"secrets,omitempty"`
-	Artifacts        []ArtifactDecl    `json:"artifacts,omitempty"`
-	Steps            []Step            `json:"steps"`
+	// RequiresIsolation marks a job whose steps came from code the operator
+	// did not write — a remote action (A42 phase 5). It is set by the
+	// compiler and excluded from decoding: by the time a job reaches here the
+	// action has been inlined into ordinary steps, so nothing downstream can
+	// tell they were third-party unless the compiler says so.
+	//
+	// Whether an operator has opted out of the requirement is decided where
+	// the policy lives, at compile time; this field is only ever the answer.
+	RequiresIsolation bool           `json:"-"`
+	Secrets           []string       `json:"secrets,omitempty"`
+	Artifacts         []ArtifactDecl `json:"artifacts,omitempty"`
+	Steps             []Step         `json:"steps"`
 }
 
 // Step is one command.

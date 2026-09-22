@@ -70,6 +70,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -388,7 +389,9 @@ func (o *Orchestrator) selectRunner(reg *registry.Registry, jobName string) *Run
 		if !hasAllLabels(o.runners[i].Labels, job.RunsOn) {
 			continue
 		}
-		if need == "" || executorName(&o.runners[i]) == need {
+		suits := (need == "" || executorName(&o.runners[i]) == need) &&
+			(!job.RequiresIsolation || executorIsolates(&o.runners[i]))
+		if suits {
 			return &o.runners[i]
 		}
 		if labelsOnly == nil {
@@ -404,6 +407,23 @@ func executorName(r *Runner) string {
 		return ""
 	}
 	return r.Executor.Name()
+}
+
+// executorIsolates reports whether a runner's executor confines a step to the
+// workspace and the caches it declared (A47).
+//
+// Allow-listed by name rather than asked of the executor, and deliberately:
+// this is the answer gate 13 uses to decide whether third-party code may run
+// on a machine, so a new executor should have to be added here by somebody
+// who has thought about it rather than inherit a default. An unknown executor
+// does not isolate.
+func executorIsolates(r *Runner) bool {
+	switch executorName(r) {
+	case "docker", "tart":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasAllLabels(have, required []string) bool {
@@ -448,4 +468,21 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + fmt.Sprintf(" … (%d bytes truncated)", len(s)-max)
+}
+
+// actionPolicy is what this machine has decided about third-party actions.
+//
+// Read from config on every run rather than cached at construction, so that a
+// reload (§8) takes effect on the next build instead of on the next restart —
+// an operator who has just narrowed an allowlist because of something they
+// read should not have to remember that.
+func (o *Orchestrator) actionPolicy() actions.Policy {
+	if o.cfg == nil {
+		return actions.DefaultPolicy()
+	}
+	return actions.Policy{
+		Allowed:         o.cfg.Actions.Allowed,
+		RequirePinned:   o.cfg.Actions.PinningRequired(),
+		AllowUnisolated: o.cfg.Actions.AllowUnisolated,
+	}
 }

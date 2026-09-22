@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
@@ -129,18 +130,32 @@ jobs:
 	}
 }
 
+// A remote action meets two gates, and they are separate because their fixes
+// are: the allowlist is a line in config.toml, and "not implemented yet" is a
+// workflow edit until phase 5 finishes.
 func TestUsesIsRefusedByName(t *testing.T) {
-	w := parse(t, `
+	src := `
 jobs:
   build:
     runs-on: [macos]
     steps:
       - uses: actions/checkout@v5
       - run: make
-`)
-	_, err := Compile(w, "build", testScope())
+`
+	// The shipped default refuses everything, and says which file to edit.
+	_, err := Compile(parse(t, src), "build", testScope())
 	if err == nil {
-		t.Fatal("a uses: step must be refused in phase 1")
+		t.Fatal("the default policy admitted a remote action")
+	}
+	if !strings.Contains(err.Error(), "actions/checkout") || !strings.Contains(err.Error(), "allowed") {
+		t.Errorf("the refusal should name the action and the allowlist: %v", err)
+	}
+
+	// Allowed, and still not implemented — a different sentence.
+	_, err = CompileWith(parse(t, src), "build", testScope(),
+		Options{Policy: actions.Policy{Allowed: []string{"actions/*"}}})
+	if err == nil {
+		t.Fatal("an allowed remote action compiled")
 	}
 	if !strings.Contains(err.Error(), "actions/checkout@v5") {
 		t.Errorf("the error should name the action: %v", err)
@@ -388,12 +403,16 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 			if len(w.JobNames()) == 0 {
 				t.Fatal("no jobs found")
 			}
+			// Allowed by policy, so what is left to refuse them is the
+			// implementation — which is the fact A42 measured these files for.
+			opts := Options{Policy: actions.Policy{Allowed: []string{"*/*"}}}
 			for _, name := range w.JobNames() {
-				_, err := Compile(w, name, testScope())
+				_, err := CompileWith(w, name, testScope(), opts)
 				if err == nil {
 					continue // a job with no uses: is allowed to compile
 				}
-				if !strings.Contains(err.Error(), "latem does not implement yet") {
+				if !strings.Contains(err.Error(), "phase 5") &&
+					!strings.Contains(err.Error(), "latem does not implement yet") {
 					t.Errorf("job %q refused for an unexpected reason: %v", name, err)
 				}
 			}

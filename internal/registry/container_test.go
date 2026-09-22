@@ -94,3 +94,46 @@ func TestAdmitOnHoldsTheRunnerToTheExecutor(t *testing.T) {
 		t.Errorf("an ordinary job must still admit through Admit: %+v", d)
 	}
 }
+
+// Gate 13's third part (A47). A job carrying third-party code may only land on
+// an executor that confines it — and the operator's opt-out was applied at
+// compile time, so a job that still asks for this has not been excused.
+func TestAdmitOnHoldsTheRunnerToIsolation(t *testing.T) {
+	r := &Registry{Version: SchemaVersion, Jobs: map[string]*Job{
+		"j": {RunsOn: []string{"linux"}, Steps: []Step{{Run: "make"}}, RequiresIsolation: true},
+	}}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req := protocol.RunRequest{Job: "j", Ref: "refs/heads/main"}
+
+	res, d := r.AdmitOn(req, Runner{Labels: []string{"linux"}, Executor: "docker", Isolates: true})
+	if !d.OK() {
+		t.Fatalf("an isolating runner should take it: %+v", d)
+	}
+	if !res.RequiresIsolation {
+		t.Error("the resolved job should record why it landed where it did")
+	}
+
+	_, d = r.AdmitOn(req, Runner{Labels: []string{"linux"}, Executor: "native"})
+	if d.Code != protocol.ErrNoRunner {
+		t.Fatalf("a native runner took a job carrying third-party code: %+v", d)
+	}
+	for _, want := range []string{"third-party", "native", "allow_unisolated"} {
+		if !strings.Contains(d.Msg, want) {
+			t.Errorf("the refusal should mention %q: %s", want, d.Msg)
+		}
+	}
+
+	// Fails closed on a caller that did not say what the executor is.
+	if _, d = r.Admit(req, []string{"linux"}); d.Code != protocol.ErrNoRunner {
+		t.Errorf("Admit without isolation info must refuse: %+v", d)
+	}
+	// And an ordinary job is unaffected.
+	plain := &Registry{Version: SchemaVersion, Jobs: map[string]*Job{
+		"j": {RunsOn: []string{"linux"}, Steps: []Step{{Run: "make"}}},
+	}}
+	if _, d = plain.Admit(req, []string{"linux"}); !d.OK() {
+		t.Errorf("an ordinary job must still admit: %+v", d)
+	}
+}

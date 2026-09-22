@@ -22,6 +22,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/system"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 )
 
 // gitMinimum is the git release that introduced --end-of-options.
@@ -153,6 +154,7 @@ func (d *doctor) run(ctx context.Context) report {
 	rep.section("Disk", d.checkDisk(ctx)...)
 	rep.section("Executors", d.checkExecutors(ctx)...)
 	rep.section("Repositories", d.checkRepos(ctx)...)
+	rep.section("Actions", d.checkActions()...)
 	if d.includeSecrets {
 		rep.section("Secrets", d.checkSecrets(ctx)...)
 	}
@@ -1607,4 +1609,62 @@ func (d *doctor) checkSimulatorRuntime(ctx context.Context) check {
 		withNotes("actool reports this as \"No simulator runtime version from [<build>] available " +
 			"to use with iphonesimulator SDK version <build>\", naming two build numbers and " +
 			"not saying that a download is needed.")
+}
+
+// ------------------------------------------------------------------ actions
+
+// checkActions reports what this machine will run from somebody else's
+// repository (A42 phase 5).
+//
+// It is a section rather than a line because the default is to refuse, and a
+// default that refuses has to be discoverable: an operator whose workflow
+// stops at `uses: actions/checkout@v5` should find the reason and the fix
+// here, not in a build log at the end of a queue.
+func (d *doctor) checkActions() []check {
+	const id, title = "actions.policy", "remote actions"
+	if d.cfg == nil {
+		return []check{skip(id, title, "config did not load")}
+	}
+
+	p := actions.Policy{
+		Allowed:         d.cfg.Actions.Allowed,
+		RequirePinned:   d.cfg.Actions.PinningRequired(),
+		AllowUnisolated: d.cfg.Actions.AllowUnisolated,
+	}
+	out := []check{pass(id, title, p.Describe())}
+	if len(p.Allowed) == 0 {
+		out[0] = pass(id, title, p.Describe())
+		out[0].Fix = []string{
+			`# in config.toml, to allow one org's actions:`,
+			`#   [actions]`,
+			`#   allowed = ["actions/*"]`,
+		}
+		return append(out, skip("actions.isolation", "action isolation",
+			"nothing to isolate while no action is allowed"))
+	}
+
+	// The isolation question only has an answer per runner, so it is asked
+	// per runner. A machine with one native runner and an allowlist has opted
+	// into third-party code running as its own user, and should be told so
+	// plainly rather than discovering it from a build.
+	var iso []check
+	for _, r := range d.cfg.Runners {
+		rid := "actions.isolation." + r.Name
+		switch {
+		case r.Executor == config.ExecutorDocker:
+			iso = append(iso, pass(rid, "isolation / "+r.Name, "docker confines a step to the workspace"))
+		case p.AllowUnisolated:
+			iso = append(iso, warn(rid, "isolation / "+r.Name,
+				string(r.Executor)+" runs steps as this agent's user, and allow_unisolated permits actions here anyway").
+				withNotes("An action that reads ~/.ssh, the login keychain or the agent's own token "+
+					"is doing what any step can do on this executor. That is the trade allow_unisolated makes."))
+		default:
+			iso = append(iso, warn(rid, "isolation / "+r.Name,
+				string(r.Executor)+" does not confine a step, so a job using a remote action will not run here",
+				"# [actions]", "#   allow_unisolated = true   # only where that is acceptable").
+				withNotes("Gate 13 refuses it rather than running third-party code as this agent's user. "+
+					"A docker runner takes such jobs; [actions] allow_unisolated permits them here."))
+		}
+	}
+	return append(out, iso...)
 }

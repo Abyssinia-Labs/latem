@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 )
 
 // mapLoader serves actions from memory, keyed by directory.
@@ -22,14 +23,18 @@ func (m mapLoader) Load(dir string) (*Action, error) {
 	return ParseAction([]byte(body), clean)
 }
 
-func compileWith(t *testing.T, wf string, actions mapLoader) (*registry.Job, error) {
+// compileWith compiles against a set of local actions, with every remote
+// action allowed — the policy has tests of its own, and these are about
+// inlining.
+func compileWith(t *testing.T, wf string, acts mapLoader) (*registry.Job, error) {
 	t.Helper()
-	if actions == nil {
-		// An untyped nil: a nil mapLoader in the interface would be a loader
-		// that exists and knows no actions, which is a different test.
-		return CompileWith(parse(t, wf), "b", testScope(), nil)
+	opts := Options{Policy: actions.Policy{Allowed: []string{"*/*"}}}
+	if acts != nil {
+		// An untyped nil would be a loader that exists and knows no actions,
+		// which is a different test.
+		opts.Actions = acts
 	}
-	return CompileWith(parse(t, wf), "b", testScope(), actions)
+	return CompileWith(parse(t, wf), "b", testScope(), opts)
 }
 
 func mustValidate(t *testing.T, job *registry.Job) {
@@ -222,10 +227,19 @@ func TestCompositeRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "no checkout") {
 		t.Errorf("a local action with no loader: %v", err)
 	}
-	// A remote action is still phase 5, and says what does run today.
+	// A remote action that policy allows is still not implemented, and says
+	// what does run today.
 	_, err := compileWith(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/checkout@v5\n", nil)
-	if err == nil || !strings.Contains(err.Error(), "phase 5") || !strings.Contains(err.Error(), "docker://") {
+	if err == nil || !strings.Contains(err.Error(), "phase 5") || !strings.Contains(err.Error(), "Vendor") {
 		t.Errorf("remote action refusal: %v", err)
+	}
+
+	// And one policy refuses is refused for that reason instead, which is a
+	// different fix in a different file.
+	_, err = CompileWith(parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: evil/thing@v1\n"),
+		"b", testScope(), Options{Policy: actions.DefaultPolicy()})
+	if err == nil || !strings.Contains(err.Error(), "allowed") {
+		t.Errorf("a refused action should name the allowlist: %v", err)
 	}
 }
 

@@ -81,6 +81,12 @@ func (j *Job) RequiredExecutor() string {
 // Runner is what admission needs to know about the runner a job would land on.
 type Runner struct {
 	Labels []string
+	// Isolates reports whether this executor confines a step to the workspace
+	// and the caches it declared. Docker does. Native does not, on any OS —
+	// a step runs as the agent's user with everything that user can reach,
+	// and that is a property of running on the host rather than a gap waiting
+	// on a VM (A47).
+	Isolates bool
 	// Executor is "docker", "native" or "tart". Empty means the caller did not
 	// say, and a job that requires an executor is refused on it: the gate
 	// fails closed, because the alternative is a container step reaching an

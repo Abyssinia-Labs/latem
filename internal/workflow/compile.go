@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -67,13 +68,22 @@ var labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // .latem/jobs.yaml, because a second execution path would be a second place for
 // the invariants in §5 to be true or not.
 func Compile(w *Workflow, jobName string, sc expr.Scope) (*registry.Job, error) {
-	return CompileWith(w, jobName, sc, nil)
+	return CompileWith(w, jobName, sc, Options{})
 }
 
-// CompileWith is [Compile] with somewhere to read local actions from. A nil
-// loader compiles everything except `uses: ./path`, which it refuses by name —
-// there being no checkout to read the action out of.
-func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoader) (*registry.Job, error) {
+// Options is what compilation needs beyond the workflow itself.
+type Options struct {
+	// Actions reads a local action's metadata. Nil compiles everything except
+	// `uses: ./path`, which is refused by name — there being no checkout to
+	// read the action out of.
+	Actions ActionLoader
+	// Policy decides which remote actions this machine will run. Its zero
+	// value refuses all of them, which is the shipped default (A42 phase 5).
+	Policy actions.Policy
+}
+
+// CompileWith is [Compile] against a machine's actions and its policy.
+func CompileWith(w *Workflow, jobName string, sc expr.Scope, opts Options) (*registry.Job, error) {
 	declared, ok := w.Jobs[jobName]
 	if !ok {
 		return nil, &registry.Error{
@@ -87,7 +97,9 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoade
 	// bindings below all see only kinds of step they already understand. The
 	// job is copied, not edited: a Workflow is parsed once and may be
 	// compiled for more than one run.
-	expanded, err := newExpander(actions, w.Path).expandSteps(declared.Steps, nil)
+	x := newExpander(opts.Actions, w.Path)
+	x.policy = opts.Policy
+	expanded, err := x.expandSteps(declared.Steps, nil)
 	if err != nil {
 		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)
 	}
@@ -111,6 +123,12 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoade
 	out := &registry.Job{
 		Description: j.Name,
 		RunsOn:      labels,
+		// A remote action is code the operator did not write, and by this
+		// point it has been inlined into ordinary steps — so unless the job
+		// says so here, nothing downstream can tell. The operator's opt-out
+		// was applied where the policy lives, in the expander, so a job that
+		// still carries this has not been excused from it (A47).
+		RequiresIsolation: x.usedRemote && !opts.Policy.AllowUnisolated,
 	}
 	if j.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*j.TimeoutMins) * float64(minute))
@@ -176,12 +194,11 @@ func (j *Job) unsupported(file, name string) error {
 	}
 	for i, st := range j.Steps {
 		if st.Uses != "" {
-			// Local and docker:// actions were expanded before this ran, so
-			// what is left names a repository that is not this one.
-			found = append(found, fmt.Sprintf(
-				"  step %d uses: %s — a remote action is A42 phase 5. A local action (uses: ./path) or "+
-					"uses: docker://image runs today; so does the action's command as a run: step",
-				i+1, st.Uses))
+			// Unreachable since phase 5 step 2: the expander resolves every
+			// `uses:` or refuses it by name. Kept because a step that reaches
+			// execution with an unexpanded `uses:` would otherwise run as an
+			// empty command, which is the silent version of this.
+			found = append(found, fmt.Sprintf("  step %d uses: %s — unresolved", i+1, st.Uses))
 		}
 		if st.Run == "" && st.Uses == "" && st.container == nil {
 			found = append(found, fmt.Sprintf("  step %d — has neither run: nor uses:", i+1))

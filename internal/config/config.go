@@ -169,6 +169,7 @@ type Config struct {
 	Repos         map[string]*Repo `toml:"repos"`
 	Runners       []*Runner        `toml:"runner"`
 	Secrets       Secrets          `toml:"secrets"`
+	Actions       Actions          `toml:"actions"`
 
 	// Paths is derived from the config directory, never decoded. It is the
 	// single answer to "where does this agent keep its state", so relocating
@@ -180,6 +181,37 @@ type Config struct {
 	// which has no file behind it.
 	source *Options
 }
+
+// Actions is what this machine has decided about third-party actions — the
+// `uses: owner/repo@ref` a workflow names (A42 phase 5).
+//
+// The zero value refuses every one of them, and that is the shipped default.
+// A marketplace action is code the operator did not write, running on a
+// machine that holds their credentials; opting in is a decision, not a setting
+// to discover after the fact.
+type Actions struct {
+	// Allowed lists `owner/repo` patterns. `*` matches inside one path
+	// segment, so `actions/*` admits that org and nothing else, and admitting
+	// everything has to be written `*/*` rather than reached by accident.
+	Allowed []string `toml:"allowed"`
+
+	// RequirePinned refuses a reference that is not a full commit id. It
+	// defaults to true, and [Actions.Policy] is where that default lives
+	// because a zero bool cannot express it.
+	RequirePinned *bool `toml:"require_pinned"`
+
+	// AllowUnisolated permits a job using a remote action to run on the
+	// native executor, where it executes as the agent's user with everything
+	// that user can reach. Docker isolates; native does not, on any OS (A47).
+	// Off.
+	AllowUnisolated bool `toml:"allow_unisolated"`
+}
+
+// PinningRequired reports whether a reference must name a commit. It is a
+// pointer in the file and a bool here because the default is true: a plain
+// `false` zero value would silently accept moving references on every machine
+// whose config predates the block.
+func (a Actions) PinningRequired() bool { return a.RequirePinned == nil || *a.RequirePinned }
 
 // Machine is display and identity, not behaviour.
 type Machine struct {

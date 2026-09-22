@@ -59,6 +59,11 @@ func (s Source) String() string { return s.Path }
 // through: falling back would turn a syntax error into a silent change of which
 // file defines the build.
 func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Source, error) {
+	return ResolveWith(workspace, jobName, sc, Options{})
+}
+
+// ResolveWith is [Resolve] against a machine's action policy.
+func ResolveWith(workspace, jobName string, sc expr.Scope, opts Options) (*registry.Registry, Source, error) {
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
 		return nil, Source{}, &registry.Error{
@@ -111,7 +116,8 @@ func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Sour
 	case len(hits) == 1:
 		// The same root the workflow was read through, so a local action is
 		// read at the same commit under the same symlink discipline.
-		job, err := CompileWith(hits[0].wf, jobName, sc, rootLoader{root: root})
+		opts.Actions = rootLoader{root: root}
+		job, err := CompileWith(hits[0].wf, jobName, sc, opts)
 		if err != nil {
 			return nil, Source{}, err
 		}

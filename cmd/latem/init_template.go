@@ -104,6 +104,17 @@ concurrency = 2
 	}
 
 	b.WriteString(`
+# --- actions -------------------------------------------------------------
+#
+# A workflow may say "uses: owner/repo@ref", which is code you did not write
+# running where your credentials are. Nothing is allowed until you say so.
+#
+# [actions]
+#   allowed = ["actions/*"]        # * covers one segment; "*/*" is everyone
+#   require_pinned = true          # default: a tag can be moved by its owner
+#   allow_unisolated = false       # default: such a job needs a docker runner,
+#                                  # because native runs steps as this user
+
 # --- optional ------------------------------------------------------------
 #
 # [broker.remote]

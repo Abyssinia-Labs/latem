@@ -250,6 +250,9 @@ type Resolved struct {
 	Shell            string
 	// RequiresExecutor is the executor gate 13 held the runner to, or "".
 	RequiresExecutor string
+	// RequiresIsolation records that gate 13 held the runner to confining the
+	// job's steps, so a log can say why it landed where it did.
+	RequiresIsolation bool
 }
 
 // ResolvedStep is a step with its environment already substituted.
@@ -316,6 +319,18 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			req.Job, need, have)
 	}
 
+	// Gate 13, third part (A47) — isolation. A job carrying third-party code
+	// may only land on an executor that confines it. The operator's opt-out
+	// was applied at compile time, so a job that still asks for this has not
+	// been excused from it.
+	if job.RequiresIsolation && !runner.Isolates {
+		return nil, reject(protocol.ErrNoRunner,
+			"job %q runs a third-party action, which needs an executor that confines it to the "+
+				"workspace — this runner's %s executor runs steps as the agent's user. Use a docker "+
+				"runner, or set [actions] allow_unisolated on a machine where that is acceptable",
+			req.Job, orUnknown(runner.Executor))
+	}
+
 	// Gate 14 — typed input validation.
 	inputs, err := job.CoerceInputs(req.Inputs)
 	if err != nil {
@@ -354,18 +369,19 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 	}
 
 	return &Resolved{
-		JobName:          req.Job,
-		Job:              job,
-		Image:            job.Image,
-		Timeout:          r.JobTimeout(job),
-		Inputs:           inputs,
-		Steps:            steps,
-		Secrets:          job.Secrets,
-		Caches:           caches,
-		Artifacts:        job.Artifacts,
-		ConcurrencyGroup: job.ConcurrencyGroup,
-		Shell:            r.Defaults.Shell,
-		RequiresExecutor: job.RequiredExecutor(),
+		JobName:           req.Job,
+		Job:               job,
+		Image:             job.Image,
+		Timeout:           r.JobTimeout(job),
+		Inputs:            inputs,
+		Steps:             steps,
+		Secrets:           job.Secrets,
+		Caches:            caches,
+		Artifacts:         job.Artifacts,
+		ConcurrencyGroup:  job.ConcurrencyGroup,
+		Shell:             r.Defaults.Shell,
+		RequiresExecutor:  job.RequiredExecutor(),
+		RequiresIsolation: job.RequiresIsolation,
 	}, Decision{}
 }
 
@@ -381,4 +397,13 @@ func missingLabels(required, have []string) []string {
 		}
 	}
 	return missing
+}
+
+// orUnknown names an executor a caller did not supply. The gate fails closed
+// on it, so the message has to be usable when it happens.
+func orUnknown(name string) string {
+	if name == "" {
+		return "unknown"
+	}
+	return name
 }
