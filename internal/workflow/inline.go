@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
@@ -47,7 +48,14 @@ type expander struct {
 	// one, which is what makes the compiled job require an isolating
 	// executor.
 	usedRemote bool
-	where      string
+	// scope is the admission-time scope, for the one shim that has to
+	// evaluate something before any step runs: a cache's mount point.
+	scope expr.Scope
+	// caches are the declarations `uses: actions/cache` compiled into, in the
+	// order first seen and once each (A49).
+	caches    []registry.CacheDecl
+	cacheSeen map[string]bool
+	where     string
 	// outputs holds, for each composite `uses:` step that had an id, the
 	// program each declared output became. Ids are namespaced, so one map
 	// serves every depth.
@@ -129,6 +137,26 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 	if satisfied, err := checkoutShim(st); err != nil {
 		return nil, err
 	} else if satisfied {
+		return nil, nil
+	}
+
+	// The cache, as a mount (A49). Also before the allowlist, for the same
+	// reason as checkout.
+	if decls, outputs, ok, err := cacheShim(st, x.scope); err != nil {
+		return nil, err
+	} else if ok {
+		if x.cacheSeen == nil {
+			x.cacheSeen = map[string]bool{}
+		}
+		for _, d := range decls {
+			if !x.cacheSeen[d.Name] {
+				x.cacheSeen[d.Name] = true
+				x.caches = append(x.caches, d)
+			}
+		}
+		if st.ID != "" {
+			x.outputs[st.ID] = outputs
+		}
 		return nil, nil
 	}
 

@@ -98,10 +98,16 @@ type Job struct {
 	//
 	// Whether an operator has opted out of the requirement is decided where
 	// the policy lives, at compile time; this field is only ever the answer.
-	RequiresIsolation bool           `json:"-"`
-	Secrets           []string       `json:"secrets,omitempty"`
-	Artifacts         []ArtifactDecl `json:"artifacts,omitempty"`
-	Steps             []Step         `json:"steps"`
+	RequiresIsolation bool `json:"-"`
+	// CacheDecls are caches this job declared for itself — `uses:
+	// actions/cache`, compiled into a mount (A49). A registry, not a job, is
+	// where caches are declared, so the resolver lifts these into
+	// [Registry.Caches]; they ride here only because a compiler produces a job
+	// before anything produces a registry. Excluded from decoding.
+	CacheDecls []CacheDecl    `json:"-"`
+	Secrets    []string       `json:"secrets,omitempty"`
+	Artifacts  []ArtifactDecl `json:"artifacts,omitempty"`
+	Steps      []Step         `json:"steps"`
 }
 
 // Step is one command.

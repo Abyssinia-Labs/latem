@@ -124,10 +124,7 @@ func ResolveWith(
 		if err != nil {
 			return nil, Source{}, err
 		}
-		reg := &registry.Registry{
-			Version: registry.SchemaVersion,
-			Jobs:    map[string]*registry.Job{jobName: job},
-		}
+		reg := RegistryFor(jobName, job)
 		if err := reg.Validate(); err != nil {
 			return nil, Source{}, &registry.Error{
 				Code: protocol.ErrBadRegistry,

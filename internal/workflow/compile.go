@@ -110,7 +110,7 @@ func CompileWith(
 	// job is copied, not edited: a Workflow is parsed once and may be
 	// compiled for more than one run.
 	x := newExpander(opts.Actions, w.Path)
-	x.policy, x.fetcher = opts.Policy, opts.Fetcher
+	x.policy, x.fetcher, x.scope = opts.Policy, opts.Fetcher, sc
 	expanded, err := x.expandSteps(ctx, declared.Steps, nil)
 	if err != nil {
 		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)
@@ -141,6 +141,10 @@ func CompileWith(
 		// was applied where the policy lives, in the expander, so a job that
 		// still carries this has not been excused from it (A47).
 		RequiresIsolation: x.usedRemote && !opts.Policy.AllowUnisolated,
+		CacheDecls:        x.caches,
+	}
+	for _, d := range x.caches {
+		out.Caches = append(out.Caches, d.Name)
 	}
 	if j.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*j.TimeoutMins) * float64(minute))
@@ -683,4 +687,16 @@ func compileContainer(c *containerSpec, sc expr.Scope, where string) (*registry.
 		out.Args = append(out.Args, v)
 	}
 	return out, nil
+}
+
+// RegistryFor wraps one compiled job in a registry, lifting the caches it
+// declared to where a registry declares them. It is the one place that happens,
+// so the resolver and anything else building a registry from a compiled job
+// cannot disagree about it.
+func RegistryFor(jobName string, job *registry.Job) *registry.Registry {
+	return &registry.Registry{
+		Version: registry.SchemaVersion,
+		Caches:  append([]registry.CacheDecl(nil), job.CacheDecls...),
+		Jobs:    map[string]*registry.Job{jobName: job},
+	}
 }
