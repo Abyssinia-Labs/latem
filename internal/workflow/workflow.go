@@ -120,6 +120,9 @@ type Step struct {
 	// container is set by the expander for a `uses: docker://…` step (A44).
 	// Unexported, so no file can write it.
 	container *containerSpec
+	// artifact is set by the expander for upload-artifact and
+	// download-artifact (A49). Unexported for the same reason.
+	artifact *registry.ArtifactStep
 }
 
 // StringList accepts either a scalar or a sequence, which is how `runs-on` and

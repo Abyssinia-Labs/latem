@@ -3,6 +3,8 @@ package run
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
@@ -246,5 +248,77 @@ jobs:
 	}
 	if report.Env["GHA_EXPR_1"] != "build.log" || report.Env["GHA_EXPR_2"] != "; rm -rf /" {
 		t.Errorf("outputs did not reach the later step as data: %+v", report.Env)
+	}
+}
+
+// The artifact step end to end: an upload that runs because of `if: always()`
+// after a failure, its files collected at the step and reported with the run,
+// the hidden file left out, and a later step in the same run restoring it.
+func TestExecute_UploadAndDownloadArtifactAtTheStep(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	var restored string
+	var runID string
+	h.env.exec = func(_ context.Context, step executor.Step, _, _ io.Writer) (int, error) {
+		switch step.Name {
+		case "build":
+			return 2, nil
+		case "check":
+			// Read from inside the run, the way a later step would: the
+			// workspace is removed at teardown, so after Execute it is gone.
+			b, err := os.ReadFile(filepath.Join(h.source.root, runID, "restored", "out", "build.log"))
+			if err == nil {
+				restored = string(b)
+			}
+		}
+		return 0, nil
+	}
+	o := h.build()
+
+	req := h.request("test")
+	runID = req.ID
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", `
+on: [push]
+jobs:
+  test:
+    runs-on: [linux]
+    steps:
+      - name: build
+        run: make
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: logs, path: out}
+      - uses: actions/download-artifact@v4
+        if: always()
+        with: {name: logs, path: restored}
+      - name: check
+        if: always()
+        run: cat restored/out/build.log
+`)
+	h.writeWorkspaceFile(req.ID, "out/build.log", "it broke")
+	h.writeWorkspaceFile(req.ID, "out/.env", "SECRET=1")
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateFailed || res.ErrorCode != protocol.ErrStep {
+		t.Fatalf("got %s/%s, want the build's failure to stand", res.State, res.ErrorCode)
+	}
+
+	var paths []string
+	for _, a := range res.Artifacts {
+		paths = append(paths, a.Path)
+	}
+	if !slices.Equal(paths, []string{"logs/out/build.log"}) {
+		t.Errorf("reported artifacts = %v, want only the log (the .env is hidden)", paths)
+	}
+	// Neither artifact step reached the executor: they are the run loop's.
+	if got := executedNames(h.env.executed()); !slices.Equal(got, []string{"build", "check"}) {
+		t.Errorf("executor ran %v", got)
+	}
+	if restored != "it broke" {
+		t.Errorf("a later step read %q from the restored artifact", restored)
 	}
 }

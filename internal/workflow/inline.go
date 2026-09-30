@@ -160,6 +160,26 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 		return nil, nil
 	}
 
+	// Artifacts, as a step the run loop performs itself (A49). The step
+	// survives, because its `if:` is what decides whether it happens.
+	if spec, outputs, ok, err := artifactShim(st, x.scope); err != nil {
+		return nil, err
+	} else if ok {
+		st.Uses, st.With, st.artifact = "", nil, spec
+		if st.Name == "" {
+			if spec.Download {
+				st.Name = "download artifact " + spec.Name
+			} else {
+				st.Name = "upload artifact " + spec.Name
+			}
+			st.Name = strings.TrimSpace(st.Name)
+		}
+		if st.ID != "" {
+			x.outputs[st.ID] = outputs
+		}
+		return []Step{st}, nil
+	}
+
 	// A remote action: another repository's code, which is the one kind of
 	// `uses:` this machine has an opinion about.
 	ref, err := actions.ParseRef(st.Uses)

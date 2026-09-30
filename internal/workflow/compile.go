@@ -216,7 +216,7 @@ func (j *Job) unsupported(file, name string) error {
 			// empty command, which is the silent version of this.
 			found = append(found, fmt.Sprintf("  step %d uses: %s — unresolved", i+1, st.Uses))
 		}
-		if st.Run == "" && st.Uses == "" && st.container == nil {
+		if st.Run == "" && st.Uses == "" && st.container == nil && st.artifact == nil {
 			found = append(found, fmt.Sprintf("  step %d — has neither run: nor uses:", i+1))
 		}
 		if len(st.ContinueOnError) > 0 {
@@ -321,6 +321,16 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 				return registry.Step{}, true, nil
 			}
 		}
+	}
+
+	// A step the run loop performs itself has no process, so it has no shell,
+	// environment or working directory — only its condition and its budget.
+	if st.artifact != nil {
+		out := registry.Step{ID: st.ID, Name: st.Name, If: cond, Artifact: st.artifact}
+		if st.TimeoutMins != nil {
+			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
+		}
+		return out, false, nil
 	}
 
 	if st.Shell != "" {
