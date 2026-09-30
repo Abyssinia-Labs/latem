@@ -16,10 +16,15 @@ import (
 // Outputs is empty until the $GITHUB_OUTPUT channel is wired; the compiler
 // refuses steps.* until then, so nothing reads it yet.
 func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
+	actions := ""
+	if x.env != nil {
+		actions = x.env.ActionsDir()
+	}
 	return registry.StepScope{
-		Status:  status,
-		Outputs: x.outputs,
-		Runner:  runnerFacts(x.runner),
+		Status:     status,
+		Outputs:    x.outputs,
+		Runner:     runnerFacts(x.runner),
+		ActionsDir: actions,
 	}
 }
 

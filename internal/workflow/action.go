@@ -30,9 +30,17 @@ type Action struct {
 	Runs        ActionRuns              `json:"runs"`
 	Branding    json.RawMessage         `json:"branding,omitempty"`
 
-	// Path is the action's directory, relative to the repository root. It is
-	// what `github.action_path` means inside the action.
+	// Path is the action's directory. For a local action it is relative to the
+	// repository root, which is the working directory a step starts in, so it
+	// resolves on its own. For a fetched one it is relative to the action
+	// cache, which lives at a different absolute path inside a container than
+	// on the host — see Remote.
 	Path string `json:"-"`
+	// Remote marks an action fetched from another repository, whose Path has
+	// to be joined to whatever the executor says the cache is reachable at.
+	// That answer is only known once a runner is chosen, so it arrives as a
+	// late binding rather than a literal (A42 phase 5).
+	Remote bool `json:"-"`
 }
 
 // ActionInput is one declared input.

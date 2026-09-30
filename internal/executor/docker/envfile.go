@@ -32,6 +32,10 @@ const (
 	// as $GITHUB_PATH and $GITHUB_STEP_SUMMARY.
 	PathFilePath    = "/tmp/latem/path"
 	SummaryFilePath = "/tmp/latem/summary"
+	// ActionsPath is where [Spec.ActionsDir] is mounted, read-only: a fetched
+	// action's files have to be readable from inside a container that has no
+	// other view of the host (A42 phase 5).
+	ActionsPath = "/tmp/latem/actions"
 
 	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored
 	// data the agent then trusts, so it gets a size it cannot exceed as well

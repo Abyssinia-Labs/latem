@@ -69,6 +69,10 @@ type StepScope struct {
 	// is after the registry was compiled at gate 11, so it is late by
 	// construction rather than by nature.
 	Runner RunnerFacts
+	// ActionsDir is where a fetched action's files are readable from inside
+	// the step, which is the executor's answer and therefore late for exactly
+	// the same reason the runner is (A42 phase 5).
+	ActionsDir string
 }
 
 // StepStatus is the job's status as seen from inside it.

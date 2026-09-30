@@ -125,7 +125,7 @@ func TestExecute_ConcurrencyGroupRequeues(t *testing.T) {
 // decoding, the symlink — rather than of resolution, which resolve_test.go
 // covers in its own package.
 func readRegistry(workspace string) (*registry.Registry, error) {
-	reg, _, err := workflow.Resolve(workspace, "test", expr.Scope{})
+	reg, _, err := workflow.Resolve(context.Background(), workspace, "test", expr.Scope{})
 	return reg, err
 }
 

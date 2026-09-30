@@ -34,7 +34,7 @@ func compileWith(t *testing.T, wf string, acts mapLoader) (*registry.Job, error)
 		// which is a different test.
 		opts.Actions = acts
 	}
-	return CompileWith(parse(t, wf), "b", testScope(), opts)
+	return CompileWith(t.Context(), parse(t, wf), "b", testScope(), opts)
 }
 
 func mustValidate(t *testing.T, job *registry.Job) {
@@ -227,16 +227,15 @@ func TestCompositeRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "no checkout") {
 		t.Errorf("a local action with no loader: %v", err)
 	}
-	// A remote action that policy allows is still not implemented, and says
-	// what does run today.
-	_, err := compileWith(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/checkout@v5\n", nil)
-	if err == nil || !strings.Contains(err.Error(), "phase 5") || !strings.Contains(err.Error(), "Vendor") {
+	// A remote action that policy allows still needs somewhere to fetch into.
+	_, err := compileWith(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/setup-go@v6\n", nil)
+	if err == nil || !strings.Contains(err.Error(), "no action cache") {
 		t.Errorf("remote action refusal: %v", err)
 	}
 
 	// And one policy refuses is refused for that reason instead, which is a
 	// different fix in a different file.
-	_, err = CompileWith(parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: evil/thing@v1\n"),
+	_, err = CompileWith(t.Context(), parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: evil/thing@v1\n"),
 		"b", testScope(), Options{Policy: actions.DefaultPolicy()})
 	if err == nil || !strings.Contains(err.Error(), "allowed") {
 		t.Errorf("a refused action should name the allowlist: %v", err)
@@ -385,7 +384,7 @@ func TestResolveReadsLocalActionsFromTheCheckout(t *testing.T) {
 		".github/workflows/ci.yml":         "on: [push]\njobs:\n  test:\n    runs-on: [macos]\n    steps:\n      - uses: ./.github/actions/greet\n        with: {who: disk}\n",
 		".github/actions/greet/action.yml": greet,
 	})
-	reg, src, err := Resolve(ws, "test", testScope())
+	reg, src, err := Resolve(t.Context(), ws, "test", testScope())
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -403,7 +402,7 @@ func TestResolveReadsLocalActionsFromTheCheckout(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(ws2, "evil")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, _, err := Resolve(ws2, "test", testScope()); err == nil {
+	if _, _, err := Resolve(t.Context(), ws2, "test", testScope()); err == nil {
 		t.Error("an action directory linked out of the workspace must not be read")
 	}
 	if _, err := (rootLoader{}).Load("./../x"); err == nil {

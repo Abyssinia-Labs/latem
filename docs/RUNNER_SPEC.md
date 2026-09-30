@@ -2018,3 +2018,44 @@ the list is what a separate workstream has to answer:
   written against Unix shapes.
 
 None of that is on phase 5's path, and phase 5 does not wait for it.
+
+### Amendment from shimming the action everything starts with
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A48 | §9, §12, §13 | **`uses: actions/checkout` is satisfied by the checkout gate 10 already performed, needs no allowlisting, and is refused by name when it asks for something that checkout did not do.** A fetched action's own files are reachable through a new per-executor path, `latem.action_dir` | Almost every workflow opens with it, so a marketplace implementation that could not answer it would be a marketplace implementation nobody could use. And running the real one is not merely wasteful: it re-resolves the ref, which is a second answer in exactly the window INV-5's approval exists to close |
+
+**The shim is asked before the allowlist**, and that ordering is the decision. Nothing is
+fetched and nothing third-party executes, so there is no judgement for an operator to make —
+whereas requiring `actions/checkout` to be allowlisted would fail every workflow on a machine
+that had deliberately opted into no actions at all, for a step that does nothing.
+
+**What it will stand in for is enumerated, and everything else is refused by name.**
+`persist-credentials` either way, because nothing is left in the workspace; `clean`, because
+§12 gives every run a fresh clone; `fetch-depth: 1`, because one commit is what §12 checks
+out; `submodules: false`; `path` at the root. The case that decides the shape is
+`fetch-depth: 0`: it asks for full history, the workspace has one commit, and a build that
+silently got a shallow tree fails later inside `git describe` or a version derived from tags —
+a failure nobody traces back to a checkout step that appeared to succeed. Refusing it names
+the input.
+
+**`ref:` gets its own answer**, because the honest one differs. A checkout at a ref other than
+the one the run named would resolve it a second time, which is the window INV-5 closes, so the
+fix is to name the ref when the run starts — `latem run <repo> <job> --ref <ref>` — rather
+than to re-check-out inside it. This repository's own `release.yml` is the worked example: it
+passes `ref: ${{ github.event.inputs.ref || github.ref }}`, and the refusal says what that is
+here.
+
+**`github.action_path` becomes late for a fetched action.** A local action's path is relative
+to the workspace, which is where a step starts, so it stays a literal. A fetched action lives
+in a cache that is at one absolute path on the host and another inside a container — and which
+of those applies is not known until a runner is chosen at gate 13, after the job was compiled
+at gate 11. So it resolves at step time against `latem.action_dir`, an agent-owned context
+filled from the executor's own answer, through the late-binding machinery A44 already built.
+The docker executor bind-mounts the cache read-only, because a fetched action is shared between
+runs and keyed on the commit it came from: a step that could write there would be editing what
+every later run believes that commit contains.
+
+**Still refused, by name:** a JavaScript action, which waits on the runtime question and on
+phase 6; and a fetched composite action's own `uses: ./path`, which is relative to *its*
+repository rather than to the checkout and needs a loader rooted at the fetched tree.

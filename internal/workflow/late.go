@@ -94,6 +94,7 @@ func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
 	}
 	out.Contexts["steps"] = steps
 
+	out.Contexts["latem"] = map[string]any{"action_dir": sc.ActionsDir}
 	out.Contexts["runner"] = map[string]any{
 		"os":   runnerOS(sc.Runner.OS),
 		"arch": runnerArch(sc.Runner.Arch),

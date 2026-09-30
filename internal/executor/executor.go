@@ -94,6 +94,14 @@ type Env interface {
 	// executor package to get it right, defeating the interface (amendment A9).
 	EnvFile() string
 
+	// ActionsDir is the environment-visible path of [Spec.ActionsDir]: where a
+	// fetched action's own files can be read from inside a step.
+	//
+	// Same shape as EnvFile and for the same reason (amendment A9) — only the
+	// executor knows it. A host path for native, a mount target for docker.
+	// Empty when no action was fetched.
+	ActionsDir() string
+
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
@@ -125,6 +133,12 @@ type Spec struct {
 	// to protecting everything. Failing open here would mean a credential
 	// overwrite; failing closed costs a confusing refusal.
 	Secrets []string
+
+	// ActionsDir is the host directory holding fetched actions, shared across
+	// runs (A42 phase 5). An executor that isolates has to make it reachable
+	// from inside; one that does not already has it. Empty means no action
+	// was fetched, and nothing need be arranged.
+	ActionsDir string
 
 	Caches    []CacheMount
 	Labels    map[string]string // includes latem.run-id, for crash reaping

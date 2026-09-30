@@ -464,6 +464,16 @@ func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec) ([]moun
 	}
 	mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: runVolume, Target: RunFilesDir})
 
+	// The action cache, read-only (A42 phase 5). Read-only because a fetched
+	// action is shared between runs and keyed on the commit it came from: a
+	// step that could write there would be editing what every later run
+	// believes that commit contains.
+	if spec.ActionsDir != "" {
+		mounts = append(mounts, mount.Mount{
+			Type: mount.TypeBind, Source: spec.ActionsDir, Target: ActionsPath, ReadOnly: true,
+		})
+	}
+
 	for _, c := range spec.Caches {
 		// §14: CacheMount.Source is "the host volume name or directory". An
 		// absolute path is a directory (the tart/native shape, §14.2);

@@ -1,0 +1,262 @@
+package workflow
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
+)
+
+const pinned = "0123456789abcdef0123456789abcdef01234567"
+
+// fetchedAction writes an action into a fake cache and hands back a fetcher.
+type fakeFetcher struct {
+	root    string
+	fetched []string
+}
+
+func (f *fakeFetcher) Fetch(_ context.Context, r actions.Ref) (actions.Resolved, error) {
+	f.fetched = append(f.fetched, r.String())
+	rel := filepath.Join(r.Host, r.Owner, r.Repo, pinned)
+	return actions.Resolved{Ref: r, SHA: pinned, Dir: filepath.Join(f.root, rel), Rel: filepath.ToSlash(rel)}, nil
+}
+
+func newFetcher(t *testing.T, r actions.Ref, actionYML string) *fakeFetcher {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, r.Host, r.Owner, r.Repo, pinned)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "action.yml"), []byte(actionYML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &fakeFetcher{root: root}
+}
+
+func compileRemote(t *testing.T, wf string, f *fakeFetcher) (*registry.Job, error) {
+	t.Helper()
+	return CompileWith(t.Context(), parse(t, wf), "b", testScope(), Options{
+		Policy:  actions.Policy{Allowed: []string{"*/*"}},
+		Fetcher: f,
+	})
+}
+
+const remoteComposite = `
+inputs:
+  who:
+    default: world
+runs:
+  using: composite
+  steps:
+    - id: greet
+      shell: bash
+      run: ${{ github.action_path }}/greet.sh "${{ inputs.who }}"
+`
+
+// A fetched composite action is inlined like a local one, except that its own
+// files live in a cache whose location only the executor knows — so
+// github.action_path is a late binding rather than a literal.
+func TestRemoteCompositeIsInlinedWithALateActionPath(t *testing.T) {
+	ref, _ := actions.ParseRef("acme/greet@" + pinned)
+	f := newFetcher(t, ref, remoteComposite)
+
+	job, err := compileRemote(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - uses: acme/greet@`+pinned+`
+        id: hi
+        with: {who: latem}
+`, f)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(f.fetched) != 1 {
+		t.Fatalf("fetched %v", f.fetched)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].ID != "hi/greet" {
+		t.Fatalf("steps = %+v", job.Steps)
+	}
+	st := job.Steps[0]
+
+	// Still no substitution into the command: the action's own path arrives as
+	// a variable like any other value.
+	if strings.Contains(st.Run, "action_path") || strings.Contains(st.Run, "/greet.sh") == false {
+		t.Errorf("run = %q", st.Run)
+	}
+	lateKey := ""
+	for k, v := range st.Late {
+		if strings.Contains(v.Source(), "latem.action_dir") {
+			lateKey = k
+		}
+	}
+	if lateKey == "" {
+		t.Fatalf("the action path should be late: %+v", st.Late)
+	}
+
+	// Resolved against whatever the executor says the cache is reachable at —
+	// a host path on native, a mount target under docker.
+	for _, dir := range []string{"/var/latem/actions", "/tmp/latem/actions"} {
+		got, err := st.Late[lateKey].Resolve(registry.StepScope{ActionsDir: dir})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		want := dir + "/github.com/acme/greet/" + pinned
+		if got != want {
+			t.Errorf("action_path = %q, want %q", got, want)
+		}
+	}
+
+	// And the job now needs an executor that confines it.
+	if !job.RequiresIsolation {
+		t.Error("a job running third-party code should require isolation")
+	}
+	reg := &registry.Registry{Version: 1, Jobs: map[string]*registry.Job{"b": job}}
+	if err := reg.Validate(); err != nil {
+		t.Errorf("validate: %v", err)
+	}
+}
+
+// The operator's opt-out is applied where the policy lives, so the compiled job
+// simply does not ask for isolation.
+func TestAllowUnisolatedClearsTheRequirement(t *testing.T) {
+	ref, _ := actions.ParseRef("acme/greet@" + pinned)
+	f := newFetcher(t, ref, remoteComposite)
+	job, err := CompileWith(t.Context(),
+		parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: acme/greet@"+pinned+"\n"),
+		"b", testScope(),
+		Options{Policy: actions.Policy{Allowed: []string{"*/*"}, AllowUnisolated: true}, Fetcher: f})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if job.RequiresIsolation {
+		t.Error("allow_unisolated should clear the requirement at compile time")
+	}
+}
+
+// A fetched docker action is a container step, exactly as a local one is.
+func TestRemoteDockerAction(t *testing.T) {
+	ref, _ := actions.ParseRef("acme/lint@" + pinned)
+	f := newFetcher(t, ref, `
+inputs:
+  level:
+    default: warn
+runs:
+  using: docker
+  image: docker://ghcr.io/acme/lint:1
+  args: ["--level", "${{ inputs.level }}"]
+`)
+	job, err := compileRemote(t, "jobs:\n  b:\n    runs-on: [linux]\n    steps:\n      - uses: acme/lint@"+pinned+"\n        with: {level: error}\n", f)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	c := job.Steps[0].Container
+	if c == nil || c.Image != "ghcr.io/acme/lint:1" || strings.Join(c.Args, " ") != "--level error" {
+		t.Fatalf("container = %+v", c)
+	}
+	if job.Steps[0].Env["INPUT_LEVEL"] != "error" {
+		t.Errorf("env = %+v", job.Steps[0].Env)
+	}
+}
+
+// A remote action's own `uses: ./path` is relative to its repository, not to
+// the checkout, and resolving it needs a loader rooted at the fetched tree.
+// Refused by name rather than reading a path out of the wrong repo.
+func TestRemoteCompositeWithANestedLocalUsesIsRefused(t *testing.T) {
+	ref, _ := actions.ParseRef("acme/outer@" + pinned)
+	f := newFetcher(t, ref, "runs:\n  using: composite\n  steps:\n    - uses: ./inner\n")
+	_, err := compileRemote(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: acme/outer@"+pinned+"\n", f)
+	if err == nil || !strings.Contains(err.Error(), "its own repository") {
+		t.Errorf("want a refusal naming the nesting: %v", err)
+	}
+}
+
+// A JavaScript action is still refused, and says which phase it waits for.
+func TestRemoteJavaScriptActionIsRefused(t *testing.T) {
+	ref, _ := actions.ParseRef("acme/js@" + pinned)
+	f := newFetcher(t, ref, "runs:\n  using: node20\n  main: index.js\n")
+	_, err := compileRemote(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: acme/js@"+pinned+"\n", f)
+	if err == nil || !strings.Contains(err.Error(), "phase 5") {
+		t.Errorf("want the JavaScript refusal: %v", err)
+	}
+}
+
+// The shim: latem has already checked the repository out, so the step is a
+// no-op — and it needs no allowlisting, because nothing is fetched and nothing
+// third-party runs.
+func TestCheckoutShimNeedsNoAllowlistAndFetchesNothing(t *testing.T) {
+	f := &fakeFetcher{root: t.TempDir()}
+	job, err := CompileWith(t.Context(),
+		parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+      - run: make
+`),
+		"b", testScope(),
+		// The refusing default: the shim must work under it.
+		Options{Policy: actions.DefaultPolicy(), Fetcher: f})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Run != "make" {
+		t.Fatalf("steps = %+v, want only the real one", job.Steps)
+	}
+	if len(f.fetched) != 0 {
+		t.Errorf("the shim fetched something: %v", f.fetched)
+	}
+	if job.RequiresIsolation {
+		t.Error("a shimmed checkout is not third-party code")
+	}
+}
+
+// What the shim cannot stand in for is refused by name, with the input that
+// made it impossible — because silently accepting it is the failure nobody
+// traces back.
+func TestCheckoutShimRefusesWhatItCannotSatisfy(t *testing.T) {
+	cases := map[string]string{
+		// Full history, against a workspace that is one commit (§12). The
+		// symptom would be `git describe` failing much later.
+		"fetch-depth: 0":   "fetch-depth: 0",
+		"another repo":     "repository: other/thing",
+		"a different ref":  "ref: v1.2.3",
+		"a subdirectory":   "path: vendor/thing",
+		"submodules":       "submodules: true",
+		"an unknown input": "sparse-checkout: src",
+	}
+	for name, with := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := CompileWith(t.Context(),
+				parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/checkout@v5\n        with:\n          "+with+"\n      - run: make\n"),
+				"b", testScope(), Options{Policy: actions.DefaultPolicy()})
+			if err == nil {
+				t.Fatalf("with %q was silently accepted", with)
+			}
+			if !strings.Contains(err.Error(), "already checked this repository out") {
+				t.Errorf("unhelpful refusal: %v", err)
+			}
+		})
+	}
+
+	// `ref:` gets different advice, because re-resolving a ref inside a run is
+	// the window INV-5 closes — the fix is `latem run --ref`.
+	_, err := CompileWith(t.Context(),
+		parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/checkout@v5\n        with: {ref: v1}\n"),
+		"b", testScope(), Options{Policy: actions.DefaultPolicy()})
+	if err == nil || !strings.Contains(err.Error(), "--ref") {
+		t.Errorf("the ref refusal should point at the run's own ref: %v", err)
+	}
+}

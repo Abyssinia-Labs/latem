@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,6 +48,11 @@ type Resolved struct {
 	SHA string
 	// Dir holds action.yml — the repository root, or Ref.Path inside it.
 	Dir string
+	// Rel is Dir relative to the cache root, in slash form. It is what a
+	// compiled job carries instead of Dir: the cache is reachable at a
+	// different absolute path inside a container than on the host, so only the
+	// part below the root means the same thing in both.
+	Rel string
 	// Cached reports that nothing was fetched, so a log can say so.
 	Cached bool
 }
@@ -82,10 +88,12 @@ func (c *Cache) Fetch(ctx context.Context, r Ref) (Resolved, error) {
 		actionDir = filepath.Join(repoDir, filepath.FromSlash(r.Path))
 	}
 
+	rel := path.Join(r.Host, r.Owner, r.Repo, sha, r.Path)
+
 	if ok, err := isDir(repoDir); err != nil {
 		return Resolved{}, err
 	} else if ok {
-		return Resolved{Ref: r, SHA: sha, Dir: actionDir, Cached: true}, nil
+		return Resolved{Ref: r, SHA: sha, Dir: actionDir, Rel: rel, Cached: true}, nil
 	}
 
 	if err := c.fetch(ctx, r, sha, repoDir); err != nil {
@@ -96,7 +104,7 @@ func (c *Cache) Fetch(ctx context.Context, r Ref) (Resolved, error) {
 	} else if !ok {
 		return Resolved{}, fmt.Errorf("%s has no directory %q at %s", r.Slug(), r.Path, shortSHA(sha))
 	}
-	return Resolved{Ref: r, SHA: sha, Dir: actionDir}, nil
+	return Resolved{Ref: r, SHA: sha, Dir: actionDir, Rel: rel}, nil
 }
 
 // resolve turns a tag or branch into the commit it names right now.

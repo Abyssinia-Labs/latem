@@ -68,6 +68,15 @@ func (e *runEnv) ContainerID() string { return e.containerID }
 // get it right — defeating the interface (amendment A9).
 func (e *runEnv) EnvFile() string { return EnvFilePath }
 
+// ActionsDir is the container path the host's action cache is mounted at, or
+// "" when this run fetched no action and nothing was mounted.
+func (e *runEnv) ActionsDir() string {
+	if e.spec.ActionsDir == "" {
+		return ""
+	}
+	return ActionsPath
+}
+
 // Exec runs one step.
 //
 // # This is finding F1

@@ -287,8 +287,8 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// a *registry.Registry, so nothing downstream of this line knows or cares
 	// which one the job was written in — that is the point, and it is what
 	// keeps §5's invariants true in one place instead of two.
-	reg, src, err := workflow.ResolveWith(ws.Path, x.req.Job, x.workflowScope(),
-		workflow.Options{Policy: x.o.actionPolicy()})
+	reg, src, err := workflow.ResolveWith(ctx, ws.Path, x.req.Job, x.workflowScope(),
+		workflow.Options{Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache()})
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}

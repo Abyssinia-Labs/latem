@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -126,13 +128,23 @@ func (x *execution) prepareEnv(ctx context.Context, mounts []executor.CacheMount
 		image = x.runner.DefaultImage
 	}
 
+	// The action cache, if this machine has one. Created rather than assumed:
+	// docker binds it into the container, and a bind of a path that is not
+	// there fails the run rather than the fetch (A42 phase 5). An empty
+	// directory costs nothing on a machine that never fetched an action.
+	actionsDir, err := x.actionsDir()
+	if err != nil {
+		return err
+	}
+
 	spec := executor.Spec{
-		RunID:     x.run.ID,
-		Workspace: x.ws.Path,
-		Image:     image,
-		Env:       x.buildEnv(),
-		Secrets:   x.secretNames(),
-		Caches:    mounts,
+		RunID:      x.run.ID,
+		Workspace:  x.ws.Path,
+		Image:      image,
+		Env:        x.buildEnv(),
+		Secrets:    x.secretNames(),
+		Caches:     mounts,
+		ActionsDir: actionsDir,
 		Labels: map[string]string{
 			"latem.run-id": x.run.ID,
 			"latem.repo":   x.run.Repo,
@@ -149,3 +161,23 @@ func (x *execution) prepareEnv(ctx context.Context, mounts []executor.CacheMount
 	x.onTeardown("environment", env.Close)
 	return nil
 }
+
+// actionsDir is the host directory holding fetched actions, created if needed.
+func (x *execution) actionsDir() (string, error) {
+	if x.o.cfg == nil || x.o.cfg.Paths.Actions == "" {
+		return "", nil
+	}
+	dir := x.o.cfg.Paths.Actions
+	if err := os.MkdirAll(dir, actionsDirMode); err != nil {
+		return "", &registry.Error{
+			Code: protocol.ErrExecutor,
+			Msg:  "preparing the action cache",
+			Err:  err,
+		}
+	}
+	return dir, nil
+}
+
+// actionsDirMode is tight because the directory holds code that is about to
+// run, and matches internal/workflow/actions' own.
+const actionsDirMode = 0o700

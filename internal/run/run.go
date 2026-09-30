@@ -70,6 +70,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -484,5 +485,19 @@ func (o *Orchestrator) actionPolicy() actions.Policy {
 		Allowed:         o.cfg.Actions.Allowed,
 		RequirePinned:   o.cfg.Actions.PinningRequired(),
 		AllowUnisolated: o.cfg.Actions.AllowUnisolated,
+	}
+}
+
+// actionCache is where fetched actions live, or nil on a machine with no
+// config directory — in which case a remote action is refused by name rather
+// than fetched into somewhere arbitrary.
+func (o *Orchestrator) actionCache() workflow.RemoteFetcher {
+	if o.cfg == nil || o.cfg.Paths.Actions == "" {
+		return nil
+	}
+	return &actions.Cache{
+		Root:   o.cfg.Paths.Actions,
+		Policy: o.actionPolicy(),
+		Git:    actions.GitRunner{},
 	}
 }

@@ -93,6 +93,10 @@ var _ executor.Env = (*runEnv)(nil)
 // right — defeating the interface (amendment A9).
 func (e *runEnv) EnvFile() string { return e.envFile }
 
+// ActionsDir is the host path itself: a step here runs on the host, so a
+// fetched action is already where the agent put it.
+func (e *runEnv) ActionsDir() string { return e.spec.ActionsDir }
+
 // Workspace is the directory every step starts in. Not part of [executor.Env];
 // it exists for diagnostics and for tests.
 func (e *runEnv) Workspace() string { return e.workspace }

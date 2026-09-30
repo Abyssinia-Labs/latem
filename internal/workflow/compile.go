@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sort"
@@ -23,7 +24,13 @@ const hoistPrefix = "GHA_EXPR_"
 // lateContexts are answered by the run loop as the step is about to run, so
 // an expression reaching for one compiles to a [registry.LateValue] rather
 // than to a value. The command is unchanged either way — see hoist.
-var lateContexts = map[string]bool{"job": true, "runner": true, "steps": true}
+var lateContexts = map[string]bool{
+	"job": true, "runner": true, "steps": true,
+	// latem is this agent's own, and carries the one fact a compiled job
+	// cannot know: where a fetched action's files are reachable from inside
+	// the step. Only a chosen executor can answer that (A42 phase 5).
+	"latem": true,
+}
 
 // refusedContexts cannot be compiled at all, each for its own reason.
 var refusedContexts = map[string]string{
@@ -67,8 +74,8 @@ var labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // the same executors and the same log pipeline as one written in
 // .latem/jobs.yaml, because a second execution path would be a second place for
 // the invariants in §5 to be true or not.
-func Compile(w *Workflow, jobName string, sc expr.Scope) (*registry.Job, error) {
-	return CompileWith(w, jobName, sc, Options{})
+func Compile(ctx context.Context, w *Workflow, jobName string, sc expr.Scope) (*registry.Job, error) {
+	return CompileWith(ctx, w, jobName, sc, Options{})
 }
 
 // Options is what compilation needs beyond the workflow itself.
@@ -80,10 +87,15 @@ type Options struct {
 	// Policy decides which remote actions this machine will run. Its zero
 	// value refuses all of them, which is the shipped default (A42 phase 5).
 	Policy actions.Policy
+	// Fetcher resolves and fetches an allowed remote action. Nil refuses one
+	// by name rather than reaching for a cache that is not there.
+	Fetcher RemoteFetcher
 }
 
 // CompileWith is [Compile] against a machine's actions and its policy.
-func CompileWith(w *Workflow, jobName string, sc expr.Scope, opts Options) (*registry.Job, error) {
+func CompileWith(
+	ctx context.Context, w *Workflow, jobName string, sc expr.Scope, opts Options,
+) (*registry.Job, error) {
 	declared, ok := w.Jobs[jobName]
 	if !ok {
 		return nil, &registry.Error{
@@ -98,8 +110,8 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, opts Options) (*reg
 	// job is copied, not edited: a Workflow is parsed once and may be
 	// compiled for more than one run.
 	x := newExpander(opts.Actions, w.Path)
-	x.policy = opts.Policy
-	expanded, err := x.expandSteps(declared.Steps, nil)
+	x.policy, x.fetcher = opts.Policy, opts.Fetcher
+	expanded, err := x.expandSteps(ctx, declared.Steps, nil)
 	if err != nil {
 		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)
 	}
