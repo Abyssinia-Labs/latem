@@ -129,6 +129,24 @@ corrupt each other in ways that surface as intermittent failures nobody
 attributes to caching, so that is prevented structurally rather than
 documented.
 
+**A workflow's `uses: actions/cache` becomes one of these.** The `path:` is
+mounted for the whole job and the step compiles to nothing, so a workflow you
+already have gets a warm cache without being edited. Two things behave
+differently, and they follow from the model rather than from a shortcut:
+
+- **A mount accumulates; a keyed cache replaces.** `key` and `restore-keys`
+  change nothing about what is mounted. That is what you want for the stores
+  actions/cache is usually pointed at — npm, pnpm, Go modules, Gradle, Cargo,
+  pip — which are content-addressed and meant to be shared. For a cached
+  build-output directory it is not, so cache the store rather than the output.
+- **`cache-hit` is always `false`.** The install step it gates runs, and is fast
+  against a warm mount; `true` would let a stale mount skip work that was
+  needed.
+
+A path inside the workspace (`node_modules`) is refused, because a mount there
+would shadow the checkout — cache `~/.npm` instead. `upload-artifact` and
+`download-artifact` work too, collecting into §17's store when their step runs.
+
 ### 3. Five security invariants, written down and tested
 
 A self-hosted runner is a machine on your network holding your signing

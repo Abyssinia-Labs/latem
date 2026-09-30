@@ -2059,3 +2059,45 @@ every later run believes that commit contains.
 **Still refused, by name:** a JavaScript action, which waits on the runtime question and on
 phase 6; and a fetched composite action's own `uses: ./path`, which is relative to *its*
 repository rather than to the checkout and needs a loader rooted at the fetched tree.
+
+### Amendment from phase 6: the cache and artifact services, as shims
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A49 | §14, §17, A42 | **`actions/cache` compiles into a mounted cache and `upload-artifact`/`download-artifact` into a step the run loop performs itself. GitHub's cache and artifact services are not implemented** | Phase 6 was scheduled as "the cache and artifact services" and was built as two shims instead, because the services cost more than the protocol: GitHub's current actions speak an RPC API at `ACTIONS_RESULTS_URL`, upload to a signed blob-storage URL it hands back, and authenticate with a runtime token the client decodes — and a container cannot reach the host's loopback, where INV-1 permits a listener, without either binding a non-loopback interface (INV-1) or host networking (the isolation phase 5 relies on). Both protocols also changed within the last two years with the old versions switched off. §14 already said caches are mounted rather than archived; the shim takes it at its word |
+
+**The cache.** The `path:` becomes a cache declaration mounted for the whole job, named from
+the path alone so that every job on a runner caching `~/.npm` shares one mount — §14.1's own
+reasoning. `actions/cache/restore` and `/save` are the same shim. `cache-hit` is `'false'`,
+substituted at compile time through A44's output machinery, so a condition gated on it is
+answered at admission; `false` is the safe answer, because the install it gates runs fast
+against a warm mount where `true` would let a stale mount skip needed work.
+
+The semantic difference is recorded rather than hidden: a keyed cache replaces, a mount
+accumulates. `key` and `restore-keys` change nothing about what is mounted — `runner.os` in a
+key is free, since §14 scopes per runner, and a lockfile hash is the part whose meaning
+changes. For content-addressed stores accumulating is what was wanted. Refused at compile
+time, naming the line: a path inside the workspace (it would shadow the checkout), a pattern,
+an exclusion, an environment variable, a path only known once the job is running, and
+`fail-on-cache-miss` or `lookup-only`, which ask for exact-key semantics a mount cannot give.
+
+**Artifacts.** A registry step may be an `ArtifactStep`, exclusive with a command and a
+container, performed by the run loop rather than an executor — both ends of the copy are host
+paths the agent owns, and a container reaching the artifact store would cross the boundary §17
+keeps. It is a step rather than an end-of-job declaration because its `if:` decides whether it
+happens. A literal naming a directory is collected recursively, decided at collection time
+since at compile time it usually does not exist yet; this does not contradict A30, which
+refuses a bare directory only because the author's intent is unknowable, whereas
+upload-artifact's documentation defines it. Hidden files are excluded unless
+`include-hidden-files` is set, matching upload-artifact v4.4's default — §17's globs match a
+leading dot, so the default has to be written down. Download restores within the run; another
+run's artifacts, and a selection across a matrix or job graph (N2), are refused by name.
+
+**What this does to JavaScript actions.** Actions such as `setup-node` with `cache: npm`, and
+`setup-go`, call the cache service themselves rather than through a `uses:` the compiler can
+see, so no shim reaches them. The expectation — to be verified against the toolkit's source
+when JavaScript actions are built — is that the toolkit finds no service configured and skips
+caching with a warning rather than failing, in which case a latem mount on the same directory
+does the job. The services remain possible later, under the same action names, if a workflow
+needs exact-key semantics; native could have them cheaply on loopback, and docker would need a
+relay inside the container's network namespace.
