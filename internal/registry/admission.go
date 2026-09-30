@@ -270,6 +270,8 @@ type ResolvedStep struct {
 	If   Condition
 	// Container is set for a container step, in which case Run is empty.
 	Container *ContainerStep
+	// Artifact is set for a step the run loop performs itself (A49).
+	Artifact *ArtifactStep
 	// Timeout of zero means "whatever remains of the job budget". Resolving
 	// that needs a clock and a start time, so it belongs to the orchestrator
 	// rather than here.
@@ -364,6 +366,7 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			Late:      s.Late,
 			If:        s.If,
 			Container: s.Container,
+			Artifact:  s.Artifact,
 			Timeout:   s.Timeout.Duration(),
 		})
 	}

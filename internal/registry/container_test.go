@@ -137,3 +137,33 @@ func TestAdmitOnHoldsTheRunnerToIsolation(t *testing.T) {
 		t.Errorf("an ordinary job must still admit: %+v", d)
 	}
 }
+
+func TestArtifactStepValidation(t *testing.T) {
+	ok := []Step{
+		{Artifact: &ArtifactStep{Name: "build output", Include: []string{"dist/**"}, IfNoFilesFound: "warn"}},
+		{Artifact: &ArtifactStep{Download: true, Name: "build output", Path: "restored"}},
+		{Artifact: &ArtifactStep{Download: true}},
+	}
+	for _, s := range ok {
+		if err := containerJob(s).Validate(); err != nil {
+			t.Errorf("%+v should validate: %v", *s.Artifact, err)
+		}
+	}
+
+	bad := map[string]Step{
+		"two kinds":        {Run: "make", Artifact: &ArtifactStep{Name: "a", Include: []string{"x"}, IfNoFilesFound: "warn"}},
+		"no name":          {Artifact: &ArtifactStep{Include: []string{"x"}, IfNoFilesFound: "warn"}},
+		"no paths":         {Artifact: &ArtifactStep{Name: "a", IfNoFilesFound: "warn"}},
+		"a traversal name": {Artifact: &ArtifactStep{Name: "../a", Include: []string{"x"}, IfNoFilesFound: "warn"}},
+		"absolute path":    {Artifact: &ArtifactStep{Name: "a", Include: []string{"/etc/passwd"}, IfNoFilesFound: "warn"}},
+		"climbing path":    {Artifact: &ArtifactStep{Name: "a", Include: []string{"../x"}, IfNoFilesFound: "warn"}},
+		"home path":        {Artifact: &ArtifactStep{Name: "a", Include: []string{"~/x"}, IfNoFilesFound: "warn"}},
+		"bad policy":       {Artifact: &ArtifactStep{Name: "a", Include: []string{"x"}, IfNoFilesFound: "shrug"}},
+		"download escape":  {Artifact: &ArtifactStep{Download: true, Path: "../out"}},
+	}
+	for name, s := range bad {
+		if err := containerJob(s).Validate(); err == nil {
+			t.Errorf("%s: should be refused", name)
+		}
+	}
+}

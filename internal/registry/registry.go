@@ -139,6 +139,9 @@ type Step struct {
 	// Container makes this step a container instead of a command (A44). It is
 	// exclusive with Run, and excluded from decoding; see [ContainerStep].
 	Container *ContainerStep `json:"-"`
+	// Artifact makes this step a collection the run loop performs itself
+	// (A49). Exclusive with Run and Container; see [ArtifactStep].
+	Artifact *ArtifactStep `json:"-"`
 }
 
 // ArtifactDecl is a glob relative to the workspace root, plus retention.
@@ -336,11 +339,19 @@ func (s Step) validate(inputs map[string]*Input) []error {
 		problems = append(problems, fmt.Errorf(format, args...))
 	}
 
+	kinds := 0
+	for _, set := range []bool{strings.TrimSpace(s.Run) != "", s.Container != nil, s.Artifact != nil} {
+		if set {
+			kinds++
+		}
+	}
 	switch {
-	case s.Container != nil && strings.TrimSpace(s.Run) != "":
-		// Exactly one. A step that is both would have to pick, and whichever
-		// it picked would be the wrong one for somebody.
-		add("a step is a command or a container, not both")
+	case kinds > 1:
+		// Exactly one. A step that is two things would have to pick, and
+		// whichever it picked would be the wrong one for somebody.
+		add("a step is a command, a container or an artifact, and only one")
+	case s.Artifact != nil:
+		problems = append(problems, s.Artifact.validate()...)
 	case s.Container != nil:
 		problems = append(problems, s.Container.validate()...)
 	case strings.TrimSpace(s.Run) == "":

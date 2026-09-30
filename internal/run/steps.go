@@ -63,7 +63,18 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 		x.note("step %d/%d: %s", i+1, total, label)
 		start := x.o.now()
 
-		out, outputs := x.runStep(ctx, s, label, budget, late)
+		var (
+			out     outcome
+			outputs map[string]string
+		)
+		if s.Artifact != nil {
+			// Performed by the agent, not an executor: it is a copy between
+			// the workspace and this run's artifact store, both of which the
+			// agent reaches from the host whichever executor is running.
+			out = x.runArtifactStep(ctx, s, label)
+		} else {
+			out, outputs = x.runStep(ctx, s, label, budget, late)
+		}
 		if s.ID != "" && len(outputs) > 0 {
 			if x.outputs == nil {
 				x.outputs = map[string]map[string]string{}

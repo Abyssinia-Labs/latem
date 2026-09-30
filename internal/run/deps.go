@@ -50,6 +50,10 @@ type Source interface {
 // *artifact.Collector satisfies it directly.
 type Collector interface {
 	Collect(ctx context.Context, runID, workspace string, decls []artifact.Declaration) ([]protocol.ArtifactRef, error)
+	// The two upload-artifact and download-artifact need (A49). On the same
+	// interface rather than a second one, because they are the same store.
+	CollectNamed(ctx context.Context, runID, workspace string, up artifact.Upload) ([]protocol.ArtifactRef, error)
+	Restore(runID, workspace, name, dest string) (int, error)
 }
 
 // SourceManager adapts a *source.Manager to [Source].

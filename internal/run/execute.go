@@ -51,6 +51,9 @@ type execution struct {
 	runner        *Runner
 	sec           *secrets.Set
 	env           executor.Env
+	// stepArtifacts are what upload-artifact steps collected as they ran
+	// (A49), reported with the run alongside §17's end-of-job collection.
+	stepArtifacts []protocol.ArtifactRef
 	// outputs is every completed step's $GITHUB_OUTPUT, by step id, for later
 	// steps' late bindings. Populated once that channel is wired (A42 phase
 	// 2); until then the compiler refuses steps.* and this stays empty.
@@ -477,6 +480,12 @@ func (x *execution) terminate(ctx context.Context, out outcome) Result {
 }
 
 func (x *execution) terminateWith(ctx context.Context, out outcome, refs []protocol.ArtifactRef) Result {
+	// Artifacts uploaded by a step are reported whatever path reached here.
+	// A run that ends without §17's collection — cancelled early, say — still
+	// collected what its upload steps collected, and those files are on disk.
+	if len(x.stepArtifacts) > 0 {
+		refs = append(append([]protocol.ArtifactRef(nil), x.stepArtifacts...), refs...)
+	}
 	out.msg = x.redact(out.msg)
 	out.reason = x.redact(out.reason)
 

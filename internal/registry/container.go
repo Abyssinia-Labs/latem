@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // ContainerStep is a step that is a container rather than a command (A44).
@@ -92,4 +94,95 @@ type Runner struct {
 	// fails closed, because the alternative is a container step reaching an
 	// executor that has no containers.
 	Executor string
+}
+
+// ArtifactStep is a step the run loop performs itself rather than handing to
+// an executor: collecting files into this run's artifacts, or copying them
+// back out (A49).
+//
+// It exists for actions/upload-artifact and actions/download-artifact, and the
+// compiler is its only writer — the field holding it is excluded from
+// decoding. It is a step rather than an end-of-job declaration because the
+// step's `if:` decides whether it happens, and upload steps are usually
+// `if: always()` or `if: failure()`; a condition is evaluated per step, so the
+// collection has to be one.
+type ArtifactStep struct {
+	// Download is false for an upload.
+	Download bool
+	// Name is the artifact's name, and the directory it lives in. Empty on a
+	// download means every artifact this run has.
+	Name string
+
+	// Upload: patterns relative to the workspace, what to leave out, and how
+	// long to keep it. IfNoFilesFound is "warn", "error" or "ignore".
+	Include        []string
+	Exclude        []string
+	Retain         protocol.Duration
+	IfNoFilesFound string
+
+	// Download: where in the workspace to put it. Empty is the root.
+	Path string
+}
+
+var ifNoFilesFound = map[string]bool{"warn": true, "error": true, "ignore": true}
+
+func (a *ArtifactStep) validate() []error {
+	var problems []error
+	add := func(format string, args ...any) { problems = append(problems, fmt.Errorf(format, args...)) }
+
+	if a.Name != "" && !artifactNamePattern.MatchString(a.Name) {
+		add("artifact: name %q is not a plain name", a.Name)
+	}
+	if strings.Contains(a.Name, "..") {
+		add("artifact: name %q contains ..", a.Name)
+	}
+	if a.Download {
+		if len(a.Include) > 0 || len(a.Exclude) > 0 {
+			add("artifact: a download has no patterns")
+		}
+		if bad := escapes(a.Path); bad != "" {
+			add("artifact: download path %q %s", a.Path, bad)
+		}
+		return problems
+	}
+	if a.Name == "" {
+		add("artifact: an upload needs a name")
+	}
+	if len(a.Include) == 0 {
+		add("artifact: an upload needs at least one path")
+	}
+	for _, p := range append(append([]string(nil), a.Include...), a.Exclude...) {
+		if bad := escapes(p); bad != "" {
+			add("artifact: path %q %s", p, bad)
+		}
+	}
+	if !ifNoFilesFound[a.IfNoFilesFound] {
+		add("artifact: if-no-files-found %q is not warn, error or ignore", a.IfNoFilesFound)
+	}
+	if a.Retain < 0 {
+		add("artifact: retention must be positive")
+	}
+	return problems
+}
+
+var artifactNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]{0,99}$`)
+
+// escapes answers why a path cannot be one in the workspace, or "". The
+// collector re-checks all of this against the filesystem at run time; this is
+// the part that can be refused before anything runs.
+func escapes(p string) string {
+	switch {
+	case strings.HasPrefix(p, "/"):
+		return "is absolute, and artifacts are collected from the workspace"
+	case strings.HasPrefix(p, "~"):
+		return "starts with ~, and artifacts are collected from the workspace"
+	case strings.ContainsRune(p, 0):
+		return "contains a NUL"
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return "climbs out of the workspace"
+		}
+	}
+	return ""
 }
