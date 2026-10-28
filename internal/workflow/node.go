@@ -2,10 +2,13 @@ package workflow
 
 import (
 	"fmt"
+	"maps"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
 // NodeRun is the whole of what a JavaScript action's step runs (A51). It is
@@ -68,6 +71,8 @@ func (x *expander) nodeSteps(outer Step, action *Action, origin nodeOrigin) ([]S
 	if name == "" {
 		name = "Run " + outer.Uses
 	}
+	x.synth++
+	use := "_action" + strconv.Itoa(x.synth)
 	main := Step{
 		ID:              outer.ID,
 		Name:            name,
@@ -78,8 +83,59 @@ func (x *expander) nodeSteps(outer Step, action *Action, origin nodeOrigin) ([]S
 		TimeoutMins:     outer.TimeoutMins,
 		ContinueOnError: outer.ContinueOnError,
 		fromAction:      true,
+		actionUse:       use,
+	}
+
+	hook := func(label, entry, cond string) Step {
+		e := maps.Clone(env)
+		e[actionEntryVar] = entry
+		return Step{
+			Name: label + " " + name, If: cond, Run: NodeRun, Shell: "bash", Env: e,
+			fromAction: true, actionUse: use,
+		}
+	}
+
+	if action.Runs.Pre != "" {
+		// pre-if alone, default always(): pre runs before any step, so the
+		// step's own condition — which may read steps that have not run yet —
+		// cannot be asked.
+		x.pre = append(x.pre, hook("Pre", action.Runs.Pre, orAlways(action.Runs.PreIf)))
+	}
+	if action.Runs.Post != "" {
+		// post runs only if main ran, which is when GitHub registers it at
+		// all. Main needs an id for the condition to name.
+		if main.ID == "" {
+			main.ID = use
+		}
+		cond, err := postCondition(action.Runs.PostIf, main.ID)
+		if err != nil {
+			return nil, fmt.Errorf("uses: %s: post-if: %w", outer.Uses, err)
+		}
+		x.post = append(x.post, hook("Post", action.Runs.Post, cond))
 	}
 	return []Step{main}, nil
+}
+
+// orAlways is a hook's condition, defaulting to always() as GitHub does.
+func orAlways(cond string) string {
+	if strings.TrimSpace(cond) == "" {
+		return "always()"
+	}
+	return cond
+}
+
+// postCondition is post-if, default always(), and only if the main step with
+// id ran — its outcome is anything but skipped.
+func postCondition(postIf, id string) (string, error) {
+	user, err := conditionProgram(orAlways(postIf))
+	if err != nil {
+		return "", err
+	}
+	ran, err := expr.Parse(fmt.Sprintf("steps['%s'].outcome != 'skipped'", strings.ReplaceAll(id, "'", "''")))
+	if err != nil {
+		return "", err
+	}
+	return expr.And(user, ran).Wrap(), nil
 }
 
 // nodeInputs is every input as the action reads it: INPUT_<NAME>, upper-cased

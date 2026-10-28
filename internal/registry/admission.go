@@ -265,9 +265,11 @@ type ResolvedStep struct {
 	ID   string
 	Name string
 	Run  string
-	// Shell and ContinueOnError are carried from [Step] unchanged (A50).
+	// Shell, ContinueOnError and ActionUse are carried from [Step] unchanged
+	// (A50, A51).
 	Shell           string
 	ContinueOnError bool
+	ActionUse       string
 	Env             map[string]string
 	Late            map[string]LateValue
 	If              Condition
@@ -367,6 +369,7 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			Run:             s.Run,
 			Shell:           s.Shell,
 			ContinueOnError: s.ContinueOnError,
+			ActionUse:       s.ActionUse,
 			Env:             env,
 			Late:            s.Late,
 			If:              s.If,

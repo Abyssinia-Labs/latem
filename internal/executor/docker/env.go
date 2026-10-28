@@ -119,6 +119,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env["LATEM_ENV"] = envFile
 	env[executor.GitHubEnvVar] = envFile
 	env[executor.OutputFileVar] = OutputFilePath
+	env[executor.StateFileVar] = StateFilePath
 	env[executor.PathFileVar] = PathFilePath
 	env[executor.SummaryFileVar] = SummaryFilePath
 	env[executor.WorkspaceVar] = WorkspacePath
@@ -182,6 +183,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	if outErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, outErr
 	}
+	state, stateErr := e.readState(ctx, stdout)
+	if stateErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, stateErr
+	}
 	if psErr := e.readPathAndSummary(ctx, stdout); psErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, psErr
 	}
@@ -195,7 +200,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		}
 		return none, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
 	}
-	return executor.Result{ExitCode: code, Outputs: outputs}, nil
+	return executor.Result{ExitCode: code, Outputs: outputs, State: state}, nil
 }
 
 // StepArgv builds the argv a step is executed with.

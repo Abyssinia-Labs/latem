@@ -65,6 +65,9 @@ type execution struct {
 	// results is every completed or skipped step's outcome and conclusion, by
 	// step id, for the steps context (A50).
 	results map[string]registry.StepResult
+	// actionState is what each use of a JavaScript action saved through
+	// $GITHUB_STATE, by use (A51).
+	actionState map[string]map[string]string
 
 	teardowns []teardownStep
 }

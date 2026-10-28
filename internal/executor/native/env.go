@@ -67,6 +67,7 @@ type runEnv struct {
 	envDir      string
 	envFile     string
 	outFile     string // $GITHUB_OUTPUT, a sibling of envFile
+	stateFile   string // $GITHUB_STATE (A51)
 	pathFile    string // $GITHUB_PATH
 	summaryFile string // $GITHUB_STEP_SUMMARY
 	tempDir     string // $RUNNER_TEMP, inside envDir so Close empties it
@@ -185,6 +186,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[EnvFileVar] = e.envFile
 	env[executor.GitHubEnvVar] = e.envFile
 	env[executor.OutputFileVar] = e.outFile
+	env[executor.StateFileVar] = e.stateFile
 	env[executor.PathFileVar] = e.pathFile
 	env[executor.SummaryFileVar] = e.summaryFile
 	env[executor.WorkspaceVar] = e.workspace
@@ -231,6 +233,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	if outErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, outErr
 	}
+	state, stateErr := e.readState(stdout)
+	if stateErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, stateErr
+	}
 	if psErr := e.readPathAndSummary(stdout); psErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, psErr
 	}
@@ -244,7 +250,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		}
 		return none, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
 	}
-	return executor.Result{ExitCode: code, Outputs: outputs}, nil
+	return executor.Result{ExitCode: code, Outputs: outputs, State: state}, nil
 }
 
 // run starts one shell, streams it, and reaps it.

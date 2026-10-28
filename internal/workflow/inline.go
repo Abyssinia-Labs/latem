@@ -64,6 +64,10 @@ type expander struct {
 	// notes are what expansion learned that the run log should say: the
 	// commit a tag resolved to, an input an action did not declare (A51).
 	notes []string
+	// pre and post are JavaScript actions' hook steps, in the order their
+	// actions appear: pre runs before the job's first step, post after its
+	// last, in reverse (A51).
+	pre, post []Step
 }
 
 func newExpander(loader ActionLoader, where string) *expander {

@@ -162,6 +162,10 @@ type Result struct {
 	// dropped anything else and said so in the step's log. Nil when the step
 	// wrote nothing, which is nearly always.
 	Outputs map[string]string
+	// State is what the step wrote to $GITHUB_STATE, the same format. The run
+	// loop hands it to later steps of the same use of an action as STATE_*
+	// (A51). Nil when the step wrote nothing.
+	State map[string]string
 }
 
 // OutputFileVar names the environment variable through which a step learns
@@ -169,6 +173,11 @@ type Result struct {
 // workflow written for GitHub reads; a latem-specific alias would be a second
 // name for the same file with nothing to recommend it.
 const OutputFileVar = "GITHUB_OUTPUT"
+
+// StateFileVar names the fifth file a step may write: a JavaScript action's
+// state, read back after the step and handed to the same action's later steps
+// as STATE_<name> (A51).
+const StateFileVar = "GITHUB_STATE"
 
 // GitHubEnvVar is the second name for $LATEM_ENV's path. One file, one
 // parser, two names: a workflow written for GitHub appends to $GITHUB_ENV and

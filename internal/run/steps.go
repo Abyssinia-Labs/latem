@@ -194,6 +194,10 @@ func (x *execution) runStep(
 	for k, v := range late {
 		env[k] = v
 	}
+	// A51: what this use of the action saved in an earlier step.
+	for k, v := range x.actionState[s.ActionUse] {
+		env["STATE_"+k] = v
+	}
 	step := executor.Step{
 		Name:    label,
 		Run:     s.Run,
@@ -244,6 +248,7 @@ func (x *execution) runStep(
 		stdout.close()
 		stderr.close()
 	}
+	x.keepState(s.ActionUse, r.res.State)
 
 	if requested, reason, actor := x.h.cancelled(); requested {
 		return cancelOutcome(outcome{}, reason, actor), nil
@@ -316,4 +321,22 @@ func (x *execution) recordResult(id string, r registry.StepResult) {
 		x.results = map[string]registry.StepResult{}
 	}
 	x.results[id] = r
+}
+
+// keepState records what a step of one use of an action wrote to
+// $GITHUB_STATE, for that use's later steps (A51). A step that belongs to no
+// action use has nobody to hand it to.
+func (x *execution) keepState(use string, state map[string]string) {
+	if use == "" || len(state) == 0 {
+		return
+	}
+	if x.actionState == nil {
+		x.actionState = map[string]map[string]string{}
+	}
+	if x.actionState[use] == nil {
+		x.actionState[use] = map[string]string{}
+	}
+	for k, v := range state {
+		x.actionState[use][k] = v
+	}
 }

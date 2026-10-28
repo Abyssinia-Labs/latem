@@ -384,3 +384,70 @@ jobs:
 		t.Errorf("an unforgiven failure = %q, want failure|failure", got)
 	}
 }
+
+// A51: what a JavaScript action's pre and main write to $GITHUB_STATE reaches
+// that use's later steps as STATE_*, and no other use's.
+func TestExecute_ActionStateFlowsBetweenItsSteps(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.env.state = func(step executor.Step) map[string]string {
+		switch {
+		case step.Env["GHA_ACTION_ENTRY"] == "pre.js":
+			return map[string]string{"cacheKey": "k-" + step.Env["INPUT_ID"]}
+		case step.Env["GHA_ACTION_ENTRY"] == "main.js" && step.Env["INPUT_ID"] == "1":
+			return map[string]string{"installed": "yes"}
+		}
+		return nil
+	}
+	o := h.build()
+
+	req := h.request("test")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/actions/tool/action.yml",
+		"inputs:\n  id:\n    required: true\nruns:\n  using: node20\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", `
+on: [push]
+jobs:
+  test:
+    runs-on: [linux]
+    steps:
+      - uses: ./.github/actions/tool
+        with:
+          id: "1"
+      - uses: ./.github/actions/tool
+        with:
+          id: "2"
+`)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s (%s)", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	steps := h.env.executed()
+	if len(steps) != 6 {
+		t.Fatalf("executed %d steps, want pre, pre, main, main, post, post", len(steps))
+	}
+	byEntry := func(entry, id string) executor.Step {
+		for _, s := range steps {
+			if s.Env["GHA_ACTION_ENTRY"] == entry && s.Env["INPUT_ID"] == id {
+				return s
+			}
+		}
+		t.Fatalf("no %s step for use %s", entry, id)
+		return executor.Step{}
+	}
+	if got := byEntry("main.js", "1").Env["STATE_cacheKey"]; got != "k-1" {
+		t.Errorf("main of use 1: STATE_cacheKey = %q, want what its pre saved", got)
+	}
+	post1 := byEntry("post.js", "1").Env
+	if post1["STATE_cacheKey"] != "k-1" || post1["STATE_installed"] != "yes" {
+		t.Errorf("post of use 1 = %v, want both saves", post1)
+	}
+	post2 := byEntry("post.js", "2").Env
+	if post2["STATE_cacheKey"] != "k-2" || post2["STATE_installed"] != "" {
+		t.Errorf("post of use 2 = %v, want only its own state", post2)
+	}
+}

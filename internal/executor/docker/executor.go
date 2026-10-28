@@ -331,7 +331,7 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 
 	// §9's between-step channel has to exist before the first step runs, or
 	// `>> "$LATEM_ENV"` fails on a job's very first use of it.
-	for _, f := range []string{OutputFilePath, PathFilePath, SummaryFilePath} {
+	for _, f := range []string{OutputFilePath, StateFilePath, PathFilePath, SummaryFilePath} {
 		if err := env.createEnvFile(ctx, f); err != nil {
 			_ = env.Close(ctx)
 			return nil, err

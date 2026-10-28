@@ -155,6 +155,10 @@ type Step struct {
 	// outcome is failure and its conclusion success, and the job's status is
 	// unchanged (A50). Excluded from decoding; only the compiler writes it.
 	ContinueOnError bool `json:"-"`
+	// ActionUse names one use of a JavaScript action, shared by its pre, main
+	// and post steps, so that what one writes to $GITHUB_STATE reaches the
+	// others as STATE_* (A51). Excluded from decoding.
+	ActionUse string `json:"-"`
 
 	// Late holds env values that are computed as the step is about to run,
 	// and If is a condition evaluated then. Both are [LateValue]; see that

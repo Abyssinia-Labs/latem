@@ -141,6 +141,17 @@ func CompileWith(
 	if err != nil {
 		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)
 	}
+	// A51: JavaScript actions' pre steps first, their post steps last and in
+	// reverse, as GitHub orders them.
+	if len(x.pre) > 0 || len(x.post) > 0 {
+		all := make([]Step, 0, len(x.pre)+len(expanded)+len(x.post))
+		all = append(all, x.pre...)
+		all = append(all, expanded...)
+		for i := len(x.post) - 1; i >= 0; i-- {
+			all = append(all, x.post[i])
+		}
+		expanded = all
+	}
 	copied := *declared
 	copied.Steps = expanded
 	j := &copied
@@ -639,7 +650,7 @@ func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.
 
 	out := registry.Step{
 		ID: st.ID, Name: st.Name, Run: run, Shell: string(githubShell(shell)), Env: env, If: cond,
-		ContinueOnError: continueOnError,
+		ContinueOnError: continueOnError, ActionUse: st.actionUse,
 	}
 	if st.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))

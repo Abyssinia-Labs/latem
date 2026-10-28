@@ -27,6 +27,9 @@ const (
 	// as $GITHUB_PATH and $GITHUB_STEP_SUMMARY.
 	PathFileName    = "path"
 	SummaryFileName = "summary"
+	// StateFileName is the basename of the file exported as $GITHUB_STATE
+	// (A51), beside the four above and handled like $GITHUB_OUTPUT.
+	StateFileName = "state"
 	// TempDirName is the basename of the directory exported as $RUNNER_TEMP
 	// (A50), beside the files above so that removing the run's directory
 	// empties it.
@@ -237,25 +240,36 @@ func (e *runEnv) createEmpty(file, label string) error {
 // named value handed to later steps' expressions, not an environment entry,
 // so there is nothing for it to shadow.
 func (e *runEnv) readOutputs(out io.Writer) (map[string]string, error) {
-	data, err := e.readBack(e.outFile, "$GITHUB_OUTPUT")
+	return e.readKeyValues(e.outFile, "$GITHUB_OUTPUT", out)
+}
+
+// readState reads and truncates $GITHUB_STATE after a step (A51).
+func (e *runEnv) readState(out io.Writer) (map[string]string, error) {
+	return e.readKeyValues(e.stateFile, "$GITHUB_STATE", out)
+}
+
+// readKeyValues reads and truncates one of the key=value files, in GitHub's
+// format, heredoc and all.
+func (e *runEnv) readKeyValues(file, label string, out io.Writer) (map[string]string, error) {
+	data, err := e.readBack(file, label)
 	if err != nil || len(data) == 0 {
 		return nil, err
 	}
 	assignments, warnings := ghcmd.ParseKeyValueFile(data, nil)
 	for _, w := range warnings {
-		writeNote(out, "$GITHUB_OUTPUT: "+w)
+		writeNote(out, label+": "+w)
 	}
-	if err := e.createEmpty(e.outFile, "$GITHUB_OUTPUT"); err != nil {
+	if err := e.createEmpty(file, label); err != nil {
 		return nil, err
 	}
 	if len(assignments) == 0 {
 		return nil, nil
 	}
-	outputs := make(map[string]string, len(assignments))
+	values := make(map[string]string, len(assignments))
 	for _, a := range assignments {
-		outputs[a.Key] = a.Value
+		values[a.Key] = a.Value
 	}
-	return outputs, nil
+	return values, nil
 }
 
 // readPathAndSummary reads and truncates $GITHUB_PATH and $GITHUB_STEP_SUMMARY

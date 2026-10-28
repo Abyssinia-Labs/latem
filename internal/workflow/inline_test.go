@@ -446,3 +446,59 @@ jobs:
 		t.Errorf("a missing required input should be refused, got %v", err)
 	}
 }
+
+// A51: pre runs before the job's first step under pre-if, post after its last
+// in reverse under post-if and only if main ran, and all three steps of one
+// use share the use that carries $GITHUB_STATE between them.
+func TestJavaScriptActionPreAndPost(t *testing.T) {
+	hooks := "runs:\n  using: node20\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: success()\n"
+	job, err := compileWith(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - run: first
+      - uses: ./a
+        id: one
+      - uses: ./b
+      - run: last
+`, mapLoader{"a": hooks, "b": "runs:\n  using: node20\n  main: main.js\n  post: post.js\n"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	mustValidate(t, job)
+	var order []string
+	for _, st := range job.Steps {
+		order = append(order, st.Name+"="+st.Env["GHA_ACTION_ENTRY"])
+	}
+	want := []string{
+		"Pre Run ./a=pre.js", "=", "Run ./a=main.js", "Run ./b=main.js", "=",
+		"Post Run ./b=post.js", "Post Run ./a=post.js",
+	}
+	if strings.Join(order, " | ") != strings.Join(want, " | ") {
+		t.Errorf("order:\n got %v\nwant %v", order, want)
+	}
+	pre, mainA, mainB, postB, postA := job.Steps[0], job.Steps[2], job.Steps[3], job.Steps[5], job.Steps[6]
+	if pre.ActionUse == "" || pre.ActionUse != mainA.ActionUse || mainA.ActionUse != postA.ActionUse {
+		t.Errorf("one use's steps should share it: %q %q %q", pre.ActionUse, mainA.ActionUse, postA.ActionUse)
+	}
+	if mainB.ActionUse == mainA.ActionUse || mainB.ActionUse != postB.ActionUse {
+		t.Error("each use of an action has its own")
+	}
+	if mainA.ID != "one" || mainB.ID == "" {
+		t.Errorf("main keeps the uses: step's id, or gets one for post to name: %q, %q", mainA.ID, mainB.ID)
+	}
+	for _, c := range []struct {
+		st   registry.Step
+		want string
+	}{
+		{pre, "always()"},
+		{postA, "success()"},
+		{postA, "steps.one.outcome != 'skipped'"},
+		{postB, "always()"},
+	} {
+		if c.st.If == nil || !strings.Contains(c.st.If.Source(), c.want) {
+			t.Errorf("%s: condition should contain %q", c.st.Name, c.want)
+		}
+	}
+}

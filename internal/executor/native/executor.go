@@ -269,6 +269,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		envDir:      dir,
 		envFile:     filepath.Join(dir, EnvFileName),
 		outFile:     filepath.Join(dir, OutputFileName),
+		stateFile:   filepath.Join(dir, StateFileName),
 		pathFile:    filepath.Join(dir, PathFileName),
 		summaryFile: filepath.Join(dir, SummaryFileName),
 		tempDir:     filepath.Join(dir, TempDirName),
@@ -279,6 +280,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 	}
 	for f, label := range map[string]string{
 		env.outFile: "$GITHUB_OUTPUT", env.pathFile: "$GITHUB_PATH", env.summaryFile: "$GITHUB_STEP_SUMMARY",
+		env.stateFile: "$GITHUB_STATE",
 	} {
 		if err := env.createEmpty(f, label); err != nil {
 			return nil, err

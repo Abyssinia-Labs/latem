@@ -770,3 +770,22 @@ console.log("path " + process.env.GITHUB_ACTION_PATH);`
 		t.Errorf("GITHUB_ACTION_PATH should be absolute (%s): %s", dir, stdout.String())
 	}
 }
+
+// A51: $GITHUB_STATE is read back after the step, in GitHub's format, and
+// emptied for the next.
+func TestExec_GitHubStateIsReadBackAndTruncated(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	res, err := env.Exec(t.Context(), executor.Step{
+		Run: `echo "cacheKey=abc" >> "$GITHUB_STATE"; printf 'multi<<EOF\nline1\nline2\nEOF\n' >> "$GITHUB_STATE"`,
+	}, io.Discard, io.Discard)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("exit %d, %v", res.ExitCode, err)
+	}
+	if res.State["cacheKey"] != "abc" || res.State["multi"] != "line1\nline2" {
+		t.Errorf("state = %q", res.State)
+	}
+	res, err = env.Exec(t.Context(), executor.Step{Run: `true`}, io.Discard, io.Discard)
+	if err != nil || len(res.State) != 0 {
+		t.Errorf("the next step should start with an empty state file: %v, %v", res.State, err)
+	}
+}

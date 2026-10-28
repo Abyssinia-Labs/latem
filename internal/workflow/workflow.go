@@ -127,6 +127,9 @@ type Step struct {
 	// `defaults.run` does not reach into an action's steps on GitHub, and does
 	// not here (A50).
 	fromAction bool
+	// actionUse ties a JavaScript action's pre, main and post steps together,
+	// for $GITHUB_STATE (A51).
+	actionUse string
 }
 
 // StringList accepts either a scalar or a sequence, which is how `runs-on` and
