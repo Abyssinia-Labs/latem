@@ -89,7 +89,10 @@ func TestINV3_NoUnexpectedShellInvocation(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "bin", "dist", "node_modules", "examples", "test":
+			// .claude holds Claude Code's worktrees: whole copies of this
+			// tree, at paths the sanctioned-site table cannot name, and none
+			// of them the code this binary is built from.
+			case ".git", ".claude", "bin", "dist", "node_modules", "examples", "test":
 				return fs.SkipDir
 			}
 			return nil
