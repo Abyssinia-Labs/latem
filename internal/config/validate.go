@@ -308,6 +308,13 @@ func validateRepos(cfg *Config) []error {
 		if repo.GitHub != "" && !githubSlugPattern.MatchString(repo.GitHub) {
 			add("repos.%s: github = %q must be owner/name, the repository as GitHub names it", name, repo.GitHub)
 		}
+		problems = append(problems, validateVars("repos."+name+".vars", repo.Vars)...)
+		for _, env := range sortedKeys(repo.Environments) {
+			if strings.TrimSpace(env) == "" {
+				add("repos.%s.environments: an environment needs a name", name)
+			}
+			problems = append(problems, validateVars("repos."+name+".environments."+env+".vars", repo.Environments[env].Vars)...)
+		}
 		problems = appendDuration(problems, "repos."+name+".approval_ttl", &repo.ApprovalTTL, DefaultApprovalTTL)
 	}
 	return problems
@@ -647,6 +654,24 @@ func validateLabels(what string, labels []string) []error {
 			problems = append(problems, fmt.Errorf("%s: label %q appears twice", what, l))
 		}
 		seen[l] = true
+	}
+	return problems
+}
+
+// varNamePattern is GitHub's rule for a variable's name.
+var varNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateVars checks a vars table (A50): GitHub's naming rule, and nothing
+// in GITHUB_, which GitHub reserves.
+func validateVars(what string, vars map[string]string) []error {
+	var problems []error
+	for _, k := range sortedKeys(vars) {
+		switch {
+		case !varNamePattern.MatchString(k):
+			problems = append(problems, fmt.Errorf("%s.%s: a variable name must match %s", what, k, varNamePattern))
+		case strings.HasPrefix(strings.ToUpper(k), "GITHUB_"):
+			problems = append(problems, fmt.Errorf("%s.%s: names starting GITHUB_ are GitHub's own", what, k))
+		}
 	}
 	return problems
 }

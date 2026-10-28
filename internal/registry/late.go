@@ -80,6 +80,11 @@ type StepScope struct {
 	// TempDir is the run's temporary directory as the step sees it, answered
 	// for `runner.temp` — the executor's answer, like ActionsDir (A50).
 	TempDir string
+	// Secrets holds the values resolved for the secret names a workflow job
+	// reads, for `${{ secrets.X }}` (A50). A name that resolved nowhere is
+	// absent. Never set for a jobs.yaml job, which reads its secrets from the
+	// environment by name (§15).
+	Secrets map[string]string
 }
 
 // StepStatus is the job's status as seen from inside it.

@@ -42,7 +42,11 @@ const BuildNumberVar = "LATEM_BUILD_NUMBER"
 func (x *execution) buildEnv() map[string]string {
 	env := make(map[string]string, x.secretCount()+8)
 
-	if x.sec != nil {
+	// A workflow job reads its secrets through ${{ secrets.X }}, bound to the
+	// one step that names it (A50). Putting every one in every step's
+	// environment would hand a credential to steps — and third-party actions
+	// — that never asked for it, which GitHub does not do either.
+	if x.sec != nil && x.workflow == nil {
 		for _, name := range x.sec.Names() {
 			if v, ok := x.sec.Value(name); ok {
 				env[name] = string(v)

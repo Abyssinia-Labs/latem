@@ -50,19 +50,70 @@ func (l *lateExpr) Holds(sc registry.StepScope) (bool, error) {
 func (l *lateExpr) References() []string { return l.refs }
 func (l *lateExpr) Source() string       { return l.prog.Source() }
 
-// scope layers run-time facts over the admission scope.
+func (l *lateExpr) scope(sc registry.StepScope) expr.Scope { return lateScope(l.base, sc) }
+
+// lateTemplate is a late env value that mixes text with expressions:
+// `Bearer ${{ secrets.TOKEN }}`. The whole value is evaluated as the step is
+// about to run, against the same scope a [lateExpr] gets, and is still only
+// ever an environment value — never command text (A42, A50).
+type lateTemplate struct {
+	src   string
+	progs []*expr.Program
+	base  expr.Scope
+	refs  []string
+}
+
+func newLateTemplate(src string, spans []expr.Span, base expr.Scope) *lateTemplate {
+	t := &lateTemplate{src: src, base: base}
+	set := map[string]bool{}
+	for _, sp := range spans {
+		t.progs = append(t.progs, sp.Prog)
+		for _, id := range stepRefs(sp.Prog) {
+			set[id] = true
+		}
+	}
+	for id := range set {
+		t.refs = append(t.refs, id)
+	}
+	sort.Strings(t.refs)
+	return t
+}
+
+// Resolve renders the template against the admission scope plus what the run
+// loop knows.
+func (t *lateTemplate) Resolve(sc registry.StepScope) (string, error) {
+	out, err := expr.EvalString(t.src, lateScope(t.base, sc))
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", t.src, err)
+	}
+	return out, nil
+}
+
+func (t *lateTemplate) References() []string { return t.refs }
+func (t *lateTemplate) Source() string       { return t.src }
+
+// lateScope layers run-time facts over the admission scope.
 //
 // Status maps onto both the status functions and `job.status`, so that
 // `if: failure()` and `if: job.status == 'failure'` — which workflows use
 // interchangeably — agree with each other.
-func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
+//
+// secrets holds the values this run resolved for the names the job reads
+// (A50). A name that resolved nowhere is absent, so it reads as null and
+// renders as the empty string, which is GitHub's behaviour.
+func lateScope(base expr.Scope, sc registry.StepScope) expr.Scope {
 	out := expr.Scope{
-		Contexts:     make(map[string]expr.Value, len(l.base.Contexts)+3),
-		WorkspaceDir: l.base.WorkspaceDir,
+		Contexts:     make(map[string]expr.Value, len(base.Contexts)+4),
+		WorkspaceDir: base.WorkspaceDir,
 	}
-	for k, v := range l.base.Contexts {
+	for k, v := range base.Contexts {
 		out.Contexts[k] = v
 	}
+	secrets := make(map[string]any, len(sc.Secrets))
+	for k, v := range sc.Secrets {
+		secrets[k] = v
+	}
+	out.Contexts["secrets"] = secrets
 
 	switch sc.Status {
 	case registry.StatusFailure:

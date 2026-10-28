@@ -61,14 +61,27 @@ func answerableNow(v string) bool {
 	return true
 }
 
-// withEnv is sc with its env context replaced. The scope is copied, not
-// edited: one scope serves every job and step compiled from it.
+// withEnv is sc with its env context replaced.
 func withEnv(sc expr.Scope, env map[string]any) expr.Scope {
+	return withContext(sc, "env", maps.Clone(env))
+}
+
+// withContext is sc with one context replaced. The scope is copied, not
+// edited: one scope serves every job and step compiled from it.
+func withContext(sc expr.Scope, name string, value map[string]any) expr.Scope {
 	contexts := make(map[string]expr.Value, len(sc.Contexts)+1)
 	maps.Copy(contexts, sc.Contexts)
-	contexts["env"] = maps.Clone(env)
+	contexts[name] = value
 	out := sc
 	out.Contexts = contexts
+	return out
+}
+
+func stringsToAny(m map[string]string) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
 	return out
 }
 

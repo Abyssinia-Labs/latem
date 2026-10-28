@@ -13,11 +13,9 @@ import (
 // with a plausible value: `steps.*` and `job.status` do not exist yet, and
 // `secrets.*` must not be substituted at all (INV-4, §15).
 //
-// `vars` is present and empty on purpose. Repository variables are a hosted
-// concept with no local source, and an expression reading one gets the same
-// empty string it would get from an unset variable — which is the behaviour a
-// workflow author already expects, unlike an error naming a context they did
-// not know was unsupported.
+// `vars` starts empty and the compiler fills it from the repository's
+// config once it knows the job's environment (A50). A name nobody configured
+// reads as the empty string, as an unset variable does on GitHub.
 func (x *execution) workflowScope() expr.Scope {
 	refName, refType := refParts(x.refNormalized)
 	slug, isGitHub := x.githubRepository()

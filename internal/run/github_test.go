@@ -137,3 +137,84 @@ func TestRefParts(t *testing.T) {
 		}
 	}
 }
+
+// A50 end to end: a workflow's secrets are found under the job's environment
+// and repository before the machine-wide name, reach only the step that
+// names them, and one set nowhere reads as empty with the log saying so.
+// Variables come from the repository's config, by environment.
+func TestExecute_WorkflowSecretsAndVars(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.secret.values = map[string]string{
+		"app__production__DEPLOY_KEY": "production deploy key",
+		"app__DEPLOY_KEY":             "repository deploy key",
+		"CLOUDFLARE_API_TOKEN":        "machine-wide cloudflare token",
+	}
+	h.cfg.Repos["app"].Vars = map[string]string{"ACCOUNT": "acct-1"}
+	o := h.build()
+
+	req := h.request("deploy")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/deploy.yml", `
+on: [workflow_dispatch]
+jobs:
+  deploy:
+    runs-on: [linux]
+    environment: production
+    steps:
+      - name: deploy
+        run: ./deploy.sh ${{ vars.ACCOUNT }}
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          AUTH: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: optional
+        if: secrets.NOT_SET != ''
+        run: never
+      - name: plain
+        run: make
+`)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s (%s), want succeeded", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+
+	steps := h.env.executed()
+	if got := executedNames(steps); strings.Join(got, ",") != "deploy,plain" {
+		t.Fatalf("executed %v — an unset secret should read as empty", got)
+	}
+	deploy := steps[0].Env
+	if deploy["DEPLOY_KEY"] != "production deploy key" {
+		t.Errorf("DEPLOY_KEY = %q, want the production environment's", deploy["DEPLOY_KEY"])
+	}
+	if deploy["AUTH"] != "Bearer machine-wide cloudflare token" {
+		t.Errorf("AUTH = %q, want the machine-wide token rendered into the template", deploy["AUTH"])
+	}
+	if deploy["GHA_EXPR_1"] != "acct-1" {
+		t.Errorf("vars.ACCOUNT = %q", deploy["GHA_EXPR_1"])
+	}
+
+	// Only the step that named a secret has it.
+	for _, k := range []string{"DEPLOY_KEY", "AUTH"} {
+		if _, set := steps[1].Env[k]; set {
+			t.Errorf("%s reached a step that never named it", k)
+		}
+	}
+	for k, v := range h.env.runSpec().Env {
+		if strings.Contains(v, "deploy key") || strings.Contains(v, "cloudflare token") {
+			t.Errorf("a secret is in the run-wide environment as %s", k)
+		}
+	}
+
+	log := h.logContents(req.ID)
+	if !strings.Contains(log, "secret NOT_SET is not set on this machine") ||
+		!strings.Contains(log, "app__production__NOT_SET") {
+		t.Errorf("the log should name the unset secret and where it looked:\n%s", log)
+	}
+	if strings.Contains(log, "production deploy key") {
+		t.Error("a secret value reached the log")
+	}
+}

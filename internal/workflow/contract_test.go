@@ -203,3 +203,71 @@ func TestRunsOnAliases(t *testing.T) {
 		t.Errorf("windows-latest should be refused by name, got %v", err)
 	}
 }
+
+// A50: vars come from the machine, the job's environment over the
+// repository's, and environment: is read in both of its forms.
+func TestVarsAndEnvironment(t *testing.T) {
+	vars := func(env string) map[string]string {
+		out := map[string]string{"ACCOUNT": "acct", "READY": "true"}
+		if env == "production" {
+			out["READY"] = "false"
+		}
+		return out
+	}
+	w := parse(t, `
+jobs:
+  plain:
+    runs-on: [linux]
+    steps:
+      - if: vars.READY == 'true'
+        run: echo ${{ vars.ACCOUNT }}
+  prod:
+    runs-on: [linux]
+    environment:
+      name: production
+      url: https://example.com
+    steps:
+      - if: vars.READY == 'true'
+        run: never
+      - run: echo ${{ vars.ACCOUNT }}
+  dynamic:
+    runs-on: [linux]
+    environment: ${{ github.event_name == 'push' && 'production' || 'staging' }}
+    steps:
+      - run: echo ${{ vars.READY }}
+`)
+	opts := Options{Vars: vars}
+
+	plain, err := CompileWith(t.Context(), w, "plain", testScope(), opts)
+	if err != nil {
+		t.Fatalf("plain: %v", err)
+	}
+	if len(plain.Steps) != 1 || plain.Steps[0].Env["GHA_EXPR_1"] != "acct" || plain.Environment != "" {
+		t.Errorf("plain = %+v", plain)
+	}
+
+	prod, err := CompileWith(t.Context(), w, "prod", testScope(), opts)
+	if err != nil {
+		t.Fatalf("prod: %v", err)
+	}
+	if prod.Environment != "production" {
+		t.Errorf("environment = %q, want production", prod.Environment)
+	}
+	if len(prod.Steps) != 1 {
+		t.Errorf("production's READY is false, so its first step should compile away: %d steps", len(prod.Steps))
+	}
+
+	dyn, err := CompileWith(t.Context(), w, "dynamic", testScope(), opts)
+	if err != nil {
+		t.Fatalf("dynamic: %v", err)
+	}
+	if dyn.Environment != "production" || dyn.Steps[0].Env["GHA_EXPR_1"] != "false" {
+		t.Errorf("dynamic = %q, READY = %q", dyn.Environment, dyn.Steps[0].Env["GHA_EXPR_1"])
+	}
+
+	// Without a source, vars are empty, as before: the condition is false and
+	// the job has nothing left to run.
+	if _, err := Compile(t.Context(), w, "plain", testScope()); err == nil || !strings.Contains(err.Error(), "no steps") {
+		t.Errorf("with no vars the only step should compile away, got %v", err)
+	}
+}

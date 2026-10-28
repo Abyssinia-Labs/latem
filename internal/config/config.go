@@ -306,6 +306,35 @@ type Repo struct {
 	// github.com already says it, and only a URL that does not — a local
 	// path, another host — needs it written down. See [Repo.GitHubRepository].
 	GitHub string `toml:"github"`
+	// Vars is what a workflow reads as ${{ vars.NAME }}: values, not
+	// secrets, so they may appear in a compiled job and in its log (A50).
+	Vars map[string]string `toml:"vars"`
+	// Environments holds what changes when a workflow job names an
+	// `environment:` — its variables here; its secrets are looked up under
+	// the environment's name (§15, A50).
+	Environments map[string]RepoEnvironment `toml:"environments"`
+}
+
+// RepoEnvironment is one GitHub environment of a repository, as this machine
+// knows it (A50).
+type RepoEnvironment struct {
+	// Vars override [Repo.Vars] for a job in this environment.
+	Vars map[string]string `toml:"vars"`
+}
+
+// VarsFor is the vars context for a job in environment (empty for none): the
+// repository's variables with the environment's over them.
+func (r Repo) VarsFor(environment string) map[string]string {
+	out := make(map[string]string, len(r.Vars))
+	for k, v := range r.Vars {
+		out[k] = v
+	}
+	if e, ok := r.Environments[environment]; ok && environment != "" {
+		for k, v := range e.Vars {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // Runner is one execution slot. One agent hosts several; "two roles on one

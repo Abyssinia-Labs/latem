@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
@@ -27,6 +28,9 @@ func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
 	if len(names) == 0 {
 		return outcome{}, true
 	}
+	if x.workflow != nil {
+		return x.resolveWorkflowSecrets(ctx, names)
+	}
 	if x.o.secrets == nil {
 		return fail(errors.New("no secret provider is configured on this machine"),
 			protocol.ErrSecretBackend), false
@@ -46,6 +50,43 @@ func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
 		x.note("secret %s", w)
 	}
 	x.note("resolved %d secret(s): %v", set.Len(), set.Names())
+	return outcome{}, true
+}
+
+// resolveWorkflowSecrets is resolveSecrets for a job compiled from a
+// workflow (A50).
+//
+// Two differences, both GitHub's. A name is looked up under the job's
+// environment and repository before the machine-wide name, so two
+// repositories on one machine can each have their own CLOUDFLARE_API_TOKEN.
+// And a name that resolves nowhere is not E_MISSING_SECRET: it reads as the
+// empty string, which a workflow testing whether `secrets.X` is empty relies
+// on, and the log names it so that an unset secret is never a mystery. A
+// backend that cannot answer still fails the run, as it does for jobs.yaml.
+func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) (outcome, bool) {
+	scopes := [][]string{{x.req.Repo}, nil}
+	if env := x.resolved.Job.Environment; env != "" {
+		scopes = append([][]string{{x.req.Repo, env}}, scopes...)
+	}
+	set, missing, err := secrets.ResolveScoped(ctx, x.o.secrets, x.red, names, scopes)
+	if err != nil {
+		return secretOutcome(err), false
+	}
+	x.sec = set
+	for _, w := range set.Warnings() {
+		x.note("secret %s", w)
+	}
+	for _, name := range missing {
+		var tried []string
+		for _, scope := range scopes {
+			tried = append(tried, secrets.ScopedName(name, scope...))
+		}
+		x.note("secret %s is not set on this machine (looked for %s); it reads as empty, as on GitHub",
+			name, strings.Join(tried, ", "))
+	}
+	if set.Len() > 0 {
+		x.note("resolved %d secret(s): %v", set.Len(), set.Names())
+	}
 	return outcome{}, true
 }
 

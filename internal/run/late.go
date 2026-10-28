@@ -29,6 +29,7 @@ func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
 		Runner:     runnerFacts(x.runner),
 		ActionsDir: actions,
 		TempDir:    temp,
+		Secrets:    x.workflowSecrets(),
 	}
 }
 
@@ -112,4 +113,21 @@ func statusAfter(current registry.StepStatus, out outcome) registry.StepStatus {
 		return registry.StatusFailure
 	}
 	return current
+}
+
+// workflowSecrets is what ${{ secrets.X }} reads as a step is about to run
+// (A50): the values resolved for the names the job reads. Converted to strings
+// here, at the last moment, as buildEnv converts a jobs.yaml job's; the map is
+// dropped with the step's scope. Nil for a jobs.yaml job.
+func (x *execution) workflowSecrets() map[string]string {
+	if x.workflow == nil || x.sec == nil {
+		return nil
+	}
+	out := make(map[string]string, x.sec.Len())
+	for _, name := range x.sec.Names() {
+		if v, ok := x.sec.Value(name); ok {
+			out[name] = string(v)
+		}
+	}
+	return out
 }

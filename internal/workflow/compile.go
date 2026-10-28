@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -27,6 +28,11 @@ const hoistPrefix = "GHA_EXPR_"
 // than to a value. The command is unchanged either way — see hoist.
 var lateContexts = map[string]bool{
 	"job": true, "runner": true, "steps": true,
+	// secrets are late for a reason that is not timing: the value must never
+	// be in the compiled registry, which is persisted. Compiled late, the
+	// registry holds the name, and the value is resolved on the machine and
+	// read as the step is about to run (A50).
+	"secrets": true,
 	// latem is this agent's own, and carries the one fact a compiled job
 	// cannot know: where a fetched action's files are reachable from inside
 	// the step. Only a chosen executor can answer that (A42 phase 5).
@@ -49,16 +55,9 @@ var refusedContexts = map[string]string{
 // which stops at the first failure like any other. A test holds this.
 var lateFuncs = map[string]bool{"success": true, "failure": true, "cancelled": true, "always": true}
 
-// secretsContext is refused separately from the run-time contexts, because the
-// reason is not timing.
-//
-// INV-4 and §15: a secret reaches a step as an environment variable of its own
-// name, because the job declared it in secrets: — it is never substituted. If
-// this compiled, the value would be evaluated at admission and written into the
-// registry's env map, which is persisted and logged; "secrets never leave the
-// machine" would still hold and "secrets are not in the registry" would not.
-// Answering null instead would be worse still: the step would run with an empty
-// credential and fail somewhere that does not mention secrets.
+// secretsContext is read by name only: `secrets.X` or `secrets['X']`. A name
+// computed at run time could be any secret on the machine, so it is refused
+// rather than resolved (A50).
 const secretsContext = "secrets"
 
 // labelPattern mirrors the native registry's, because the labels compiled here
@@ -95,6 +94,9 @@ type Options struct {
 	// found here is replaced by the labels it names, before GitHub's hosted
 	// labels are mapped. See [compileLabels].
 	LabelAliases map[string][]string
+	// Vars answers the vars context for a job in an environment (empty for
+	// none), from the repository's config (A50). Nil leaves vars empty.
+	Vars func(environment string) map[string]string
 }
 
 // CompileWith is [Compile] against a machine's actions and its policy.
@@ -107,6 +109,19 @@ func CompileWith(
 			Code: protocol.ErrUnknownJob,
 			Msg:  fmt.Sprintf("%s declares no job %q; it has %s", w.Path, jobName, strings.Join(w.JobNames(), ", ")),
 		}
+	}
+
+	// A50: vars are the repository's, then the environment's over them —
+	// so the environment is answered first, against the repository's.
+	if opts.Vars != nil {
+		sc = withContext(sc, "vars", stringsToAny(opts.Vars("")))
+	}
+	environment, err := environmentName(declared.Environment, sc)
+	if err != nil {
+		return nil, badRegistry("%s: job %q: environment: %v", w.Path, jobName, err)
+	}
+	if opts.Vars != nil && environment != "" {
+		sc = withContext(sc, "vars", stringsToAny(opts.Vars(environment)))
 	}
 
 	// A50: the env context holds the workflow's and the job's env:, which is
@@ -189,7 +204,79 @@ func CompileWith(
 	if len(out.Steps) == 0 {
 		return nil, badRegistry("%s: job %q has no steps to run", w.Path, jobName)
 	}
+	// A50: the names, never the values. The run resolves them on the
+	// machine, scoped by repository and environment, and registers every
+	// value with the redactor before the first step.
+	out.Secrets = secretNames(out.Steps)
+	out.Environment = environment
 	return out, nil
+}
+
+// secretNames lists every secret a compiled job's late values and conditions
+// read, sorted.
+func secretNames(steps []registry.Step) []string {
+	set := map[string]bool{}
+	note := func(p *expr.Program) {
+		names, _ := p.ContextKeys(secretsContext)
+		for _, n := range names {
+			set[n] = true
+		}
+	}
+	visit := func(v any) {
+		switch l := v.(type) {
+		case *lateExpr:
+			note(l.prog)
+		case *lateTemplate:
+			for _, p := range l.progs {
+				note(p)
+			}
+		}
+	}
+	for _, st := range steps {
+		for _, v := range st.Late {
+			visit(v)
+		}
+		if st.If != nil {
+			visit(st.If)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// environmentName reads `environment:` — a name, or {name, url} — and answers
+// any expression in the name now (A50). Its url is GitHub's deployment UI and
+// has nothing to scope here.
+func environmentName(raw json.RawMessage, sc expr.Scope) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var name string
+	if err := json.Unmarshal(raw, &name); err != nil {
+		var obj struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return "", fmt.Errorf("expected a name or {name, url}, got %s", string(raw))
+		}
+		name = obj.Name
+	}
+	if !answerableNow(name) {
+		return "", fmt.Errorf("%q is only known when the job runs, and an environment decides which secrets it gets before it starts", name)
+	}
+	out, err := expr.EvalString(name, sc)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 const minute = 60 * 1_000_000_000 // protocol.Duration is nanoseconds
@@ -551,11 +638,9 @@ func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.
 	return out, false, nil
 }
 
-// envValue decides whether an env: value is late. It is late when it is
-// exactly one late expression. A value that mixes text with a late expression
-// is refused: a late binding is one program, and the honest answer is to ask
-// for the expression in a variable of its own rather than to silently split
-// the value in two.
+// envValue decides whether an env: value is late: it is when any expression in
+// it is. One expression is a [lateExpr]; text around it makes a
+// [lateTemplate], rendered whole when the step runs (A50).
 func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, error) {
 	if !expr.Has(v) {
 		return nil, nil
@@ -578,9 +663,10 @@ func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, err
 		return nil, nil
 	}
 	if len(spans) != 1 || spans[0].Start != 0 || spans[0].End != len(v) {
-		return nil, badRegistry(
-			"%s: env.%s mixes text with an expression that is only known when the step runs; "+
-				"put that expression in a variable of its own and reference it", where, k)
+		// Text around a late expression — `Bearer ${{ secrets.TOKEN }}` — is
+		// rendered whole as the step is about to run (A50). It is still an
+		// environment value, so nothing about A42's rule changes.
+		return newLateTemplate(v, spans, sc), nil
 	}
 	return newLate(spans[0].Prog, sc), nil
 }
@@ -684,7 +770,10 @@ func classify(p *expr.Program) (when, error) {
 	result := whenNow
 	for _, c := range contexts {
 		if c == secretsContext {
-			return whenNow, errSecretsInExpression
+			if _, computed := p.ContextKeys(secretsContext); computed {
+				return whenNow, fmt.Errorf("${{ %s }}: a secret has to be named, as secrets.NAME — "+
+					"one chosen at run time could be any secret on the machine", strings.TrimSpace(p.Source()))
+			}
 		}
 		if why, refused := refusedContexts[c]; refused {
 			return whenNow, fmt.Errorf("${{ %s }}: the %s context cannot be used here — %s",
@@ -720,12 +809,6 @@ func conditionProgram(cond string) (*expr.Program, error) {
 	}
 	return spans[0].Prog, nil
 }
-
-// errSecretsInExpression is a sentinel so the two callers report it identically.
-var errSecretsInExpression = fmt.Errorf(
-	"${{ secrets.* }} is not substituted. Declare the secret in the job's secrets: list and " +
-		"read it from the environment by its own name — substituting it would write the value " +
-		"into the compiled registry, which is persisted (INV-4, RUNNER_SPEC §15)")
 
 // envValueIsLiteral rejects a compiled value that would be read as this
 // system's own interpolation syntax when the registry validates it.

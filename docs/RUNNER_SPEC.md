@@ -2162,9 +2162,14 @@ evaluated at the step, so a value reaches a step only as an environment variable
 and is never written into `run`. A secret that resolves nowhere evaluates to the empty string
 and the run log names it, which is GitHub's behaviour and what a workflow testing
 `secrets.X != ''` relies on; §15's refusal of an unresolvable name still applies to jobs.yaml.
-Resolution is scoped: a job naming an `environment` looks for `<repo>/<environment>/X`, then
-`<repo>/X`, then `X`; any other job for `<repo>/X`, then `X` — so two repositories on one
-machine can each have their own `CLOUDFLARE_API_TOKEN`. `${{ vars.X }}` reads `[repos.<key>.vars]`,
+Resolution is scoped: a job naming an `environment` looks for `<repo>__<environment>__X`, then
+`<repo>__X`, then `X`; any other job for `<repo>__X`, then `X` — so two repositories on one
+machine can each have their own `CLOUDFLARE_API_TOKEN`. Two underscores, not a slash, because
+the scoped name has to work as an environment variable and a `secrets.env` key as well as a
+Keychain account; a character a name cannot hold becomes an underscore. A workflow job's
+secrets are not put in the run's environment the way a jobs.yaml job's are: each reaches only
+the step whose expression names it, which is GitHub's behaviour and keeps a credential away
+from steps — and third-party actions — that did not ask for it. `${{ vars.X }}` reads `[repos.<key>.vars]`,
 overridden by `[repos.<key>.environments.<environment>.vars]`; variables are not secrets, are
 answered at admission, and may appear in the compiled registry. `GITHUB_TOKEN` is neither: it
 arrives with workflow runs and the GitHub App, and until then `secrets.GITHUB_TOKEN` resolves

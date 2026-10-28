@@ -101,3 +101,16 @@ func (x *execution) githubEnv() map[string]string {
 	}
 	return env
 }
+
+// repoVars answers the vars context from this repository's config (A50), or
+// nil without one, which leaves vars empty as it was before.
+func (x *execution) repoVars() func(environment string) map[string]string {
+	if x.o.cfg == nil {
+		return nil
+	}
+	r, ok := x.o.cfg.Repos[x.req.Repo]
+	if !ok {
+		return nil
+	}
+	return r.VarsFor
+}

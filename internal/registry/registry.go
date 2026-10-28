@@ -104,10 +104,14 @@ type Job struct {
 	// where caches are declared, so the resolver lifts these into
 	// [Registry.Caches]; they ride here only because a compiler produces a job
 	// before anything produces a registry. Excluded from decoding.
-	CacheDecls []CacheDecl    `json:"-"`
-	Secrets    []string       `json:"secrets,omitempty"`
-	Artifacts  []ArtifactDecl `json:"artifacts,omitempty"`
-	Steps      []Step         `json:"steps"`
+	CacheDecls []CacheDecl `json:"-"`
+	// Environment is a workflow job's `environment:` name, which scopes the
+	// secrets it reads and the variables it sees (A50). Excluded from
+	// decoding: jobs.yaml has no environments.
+	Environment string         `json:"-"`
+	Secrets     []string       `json:"secrets,omitempty"`
+	Artifacts   []ArtifactDecl `json:"artifacts,omitempty"`
+	Steps       []Step         `json:"steps"`
 }
 
 // Step is one command.

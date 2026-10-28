@@ -79,3 +79,38 @@ func TestLabelAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestRepoVars(t *testing.T) {
+	opts := Options{Home: "/nonexistent-home", Getenv: func(string) string { return "" }, LookupIP: testLookupIP}
+	cfg, err := Parse([]byte(minimalValid+`
+[repos.app.vars]
+CLOUDFLARE_ACCOUNT_ID = "abc"
+STAGING_READY = "true"
+
+[repos.app.environments.production.vars]
+STAGING_READY = "false"
+`), opts)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := cfg.Repos["app"]
+	if got := r.VarsFor(""); got["STAGING_READY"] != "true" || got["CLOUDFLARE_ACCOUNT_ID"] != "abc" {
+		t.Errorf("repository vars = %v", got)
+	}
+	if got := r.VarsFor("production"); got["STAGING_READY"] != "false" || got["CLOUDFLARE_ACCOUNT_ID"] != "abc" {
+		t.Errorf("production vars = %v, want the environment's over the repository's", got)
+	}
+	if got := r.VarsFor("staging"); got["STAGING_READY"] != "true" {
+		t.Errorf("an environment with no vars should see the repository's: %v", got)
+	}
+
+	for name, c := range map[string]struct{ toml, want string }{
+		"bad name": {"[repos.app.vars]\n\"1X\" = \"a\"\n", "a variable name must match"},
+		"reserved": {"[repos.app.vars]\nGITHUB_X = \"a\"\n", "GitHub's own"},
+	} {
+		_, err := Parse([]byte(minimalValid+"\n"+c.toml), opts)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want an error containing %q", name, err, c.want)
+		}
+	}
+}

@@ -487,24 +487,52 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 // INV-4: a secret is declared and arrives by name. Substituting one would put
 // the value in the compiled registry, which is persisted and logged.
 func TestSecretsAreNeverSubstituted(t *testing.T) {
+	// Even with a value in the admission scope — which a run never puts there
+	// — a secret compiles to a late binding to its name (A50): the registry,
+	// which is persisted, never holds a value.
 	sc := testScope()
 	sc.Contexts["secrets"] = map[string]any{"NPM_TOKEN": "s3cret"}
 
-	for _, src := range []string{
-		"jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: npm publish --token ${{ secrets.NPM_TOKEN }}\n",
-		"jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - if: secrets.NPM_TOKEN != ''\n        run: make\n",
-	} {
-		w := parse(t, src)
-		_, err := Compile(t.Context(), w, "b", sc)
-		if err == nil {
-			t.Fatalf("a secrets expression must be refused:\n%s", src)
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - run: npm publish --token ${{ secrets.NPM_TOKEN }}
+      - if: secrets.DEPLOY_KEY != ''
+        run: make
+        env:
+          AUTH: Bearer ${{ secrets['API_TOKEN'] }}
+`)
+	job, err := Compile(t.Context(), w, "b", sc)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := strings.Join(job.Secrets, ","); got != "API_TOKEN,DEPLOY_KEY,NPM_TOKEN" {
+		t.Errorf("job secrets = %q, want every name the job reads", got)
+	}
+	publish := job.Steps[0]
+	if publish.Run != `npm publish --token "$GHA_EXPR_1"` {
+		t.Errorf("run = %q — a secret must reach the step as an environment variable", publish.Run)
+	}
+	if _, late := publish.Late["GHA_EXPR_1"]; !late {
+		t.Error("the secret should be bound late, by name")
+	}
+	for _, st := range job.Steps {
+		for k, v := range st.Env {
+			if strings.Contains(v, "s3cret") {
+				t.Errorf("a secret value reached the compiled registry in %s", k)
+			}
 		}
-		if strings.Contains(err.Error(), "s3cret") {
-			t.Fatalf("the refusal leaked the value: %v", err)
-		}
-		if !strings.Contains(err.Error(), "secrets:") {
-			t.Errorf("the error should point at the declaration: %v", err)
-		}
+	}
+	if job.Steps[1].If == nil {
+		t.Error("a condition reading a secret should be evaluated when the step runs")
+	}
+
+	// A name chosen at run time could be any secret on the machine.
+	w = parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: echo ${{ secrets[env.WHICH] }}\n")
+	if _, err := Compile(t.Context(), w, "b", sc); err == nil || !strings.Contains(err.Error(), "has to be named") {
+		t.Errorf("a computed secret name should be refused, got %v", err)
 	}
 }
 
@@ -552,9 +580,18 @@ jobs:
     steps:
       - run: make
 `)
-	_, err := Compile(t.Context(), w, "b", testScope())
-	if err == nil || !strings.Contains(err.Error(), "MIXED") {
-		t.Fatalf("a mixed late env value should be refused by name: %v", err)
+	// Text around a late expression is rendered whole when the step runs
+	// (A50); it is still only ever an environment value.
+	mixed, err := Compile(t.Context(), w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	v := mixed.Steps[0].Late["MIXED"]
+	if v == nil {
+		t.Fatalf("MIXED should be a late binding: %+v", mixed.Steps[0])
+	}
+	if got, err := v.Resolve(registry.StepScope{Status: registry.StatusFailure}); err != nil || got != "prefix-failure" {
+		t.Errorf("MIXED = %q, %v; want prefix-failure", got, err)
 	}
 
 	w2 := parse(t, `
