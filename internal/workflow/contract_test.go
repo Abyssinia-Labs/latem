@@ -271,3 +271,31 @@ jobs:
 		t.Errorf("with no vars the only step should compile away, got %v", err)
 	}
 }
+
+// A50: what is parsed and not acted on is said, not dropped.
+func TestIgnoredConstructsAreNoted(t *testing.T) {
+	w := parse(t, `
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - run: make
+`)
+	job, err := Compile(t.Context(), w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	all := strings.Join(job.Notes, "\n")
+	if !strings.Contains(all, "permissions:") || !strings.Contains(all, "concurrency:") {
+		t.Errorf("notes = %q", job.Notes)
+	}
+	plain := parse(t, "jobs:\n  b:\n    runs-on: [linux]\n    steps:\n      - run: make\n")
+	if job, _ := Compile(t.Context(), plain, "b", testScope()); len(job.Notes) != 0 {
+		t.Errorf("nothing ignored, nothing noted: %q", job.Notes)
+	}
+}

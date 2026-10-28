@@ -311,6 +311,11 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		// `on:` triggers are not what caused this run.
 		x.note("job %q from %s", x.req.Job, src.Path)
 		x.workflow = &src
+		for _, j := range reg.Jobs {
+			for _, n := range j.Notes {
+				x.note("%s", n)
+			}
+		}
 	}
 	return reg, registry.Decision{}, nil
 }

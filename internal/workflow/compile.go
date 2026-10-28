@@ -209,7 +209,22 @@ func CompileWith(
 	// value with the redactor before the first step.
 	out.Secrets = secretNames(out.Steps)
 	out.Environment = environment
+	out.Notes = ignoredNotes(w, j)
 	return out, nil
+}
+
+// ignoredNotes says what the job's workflow asked for that latem parsed and
+// does not do yet, so a run does not appear to honour it (A50).
+func ignoredNotes(w *Workflow, j *Job) []string {
+	var notes []string
+	if len(w.Permissions) > 0 || len(j.Permissions) > 0 {
+		notes = append(notes, "permissions: is not enforced — there is no GITHUB_TOKEN for it to scope yet")
+	}
+	if len(w.Concurrency) > 0 || len(j.Concurrency) > 0 {
+		notes = append(notes, "concurrency: is not honoured — this run neither waits for nor cancels another "+
+			"(a jobs.yaml concurrency_group does serialise)")
+	}
+	return notes
 }
 
 // secretNames lists every secret a compiled job's late values and conditions

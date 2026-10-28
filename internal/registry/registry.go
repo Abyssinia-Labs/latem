@@ -108,10 +108,14 @@ type Job struct {
 	// Environment is a workflow job's `environment:` name, which scopes the
 	// secrets it reads and the variables it sees (A50). Excluded from
 	// decoding: jobs.yaml has no environments.
-	Environment string         `json:"-"`
-	Secrets     []string       `json:"secrets,omitempty"`
-	Artifacts   []ArtifactDecl `json:"artifacts,omitempty"`
-	Steps       []Step         `json:"steps"`
+	Environment string `json:"-"`
+	// Notes are things the compiler read and did not act on, for the run log
+	// (A50): a workflow's permissions and concurrency, until workflow runs
+	// can honour them. Excluded from decoding.
+	Notes     []string       `json:"-"`
+	Secrets   []string       `json:"secrets,omitempty"`
+	Artifacts []ArtifactDecl `json:"artifacts,omitempty"`
+	Steps     []Step         `json:"steps"`
 }
 
 // Step is one command.
