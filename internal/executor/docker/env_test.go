@@ -131,7 +131,7 @@ func TestExec_EveryStepIsFullyConfigured(t *testing.T) {
 			t.Errorf("exec %d inherited an export from the previous step: %q", i, opts.Env)
 		}
 	}
-	if got := f.execOpts[1].Cmd; !reflect.DeepEqual(got, wrappedArgv("bash", steps[1].Run)) {
+	if got := f.execOpts[1].Cmd; !reflect.DeepEqual(got, wrappedArgv("bash", executor.ShellLatem, steps[1].Run)) {
 		t.Errorf("argv = %#v", got)
 	}
 }
@@ -335,13 +335,24 @@ func TestExec_StepTimeoutFallsBackToKillingTheContainer(t *testing.T) {
 // of `run` is ever written into the script that records the pid.
 func TestWrappedArgv(t *testing.T) {
 	run := `echo "$(id)"; rm -rf / # '"`
-	got := wrappedArgv("bash", run)
+	got := wrappedArgv("bash", executor.ShellLatem, run)
 	want := []string{"/bin/sh", "-c", stepWrapper, StepPidFile, "bash", "-c", run}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v, want %#v", got, want)
 	}
 	if strings.Contains(stepWrapper, "rm") || strings.Contains(got[2], run) {
 		t.Error("the wrapper must never contain any part of the step")
+	}
+}
+
+// A step compiled from a workflow runs under GitHub's shell inside the same
+// wrapper, with `run` still the last element, whole (A50, INV-3).
+func TestWrappedArgv_GitHubShell(t *testing.T) {
+	run := `false; echo "$(id)"`
+	got := wrappedArgv("bash", executor.ShellGitHub, run)
+	want := []string{"/bin/sh", "-c", stepWrapper, StepPidFile, "bash", "-e", "-c", run}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
 	}
 }
 

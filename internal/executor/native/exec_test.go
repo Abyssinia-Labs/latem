@@ -125,6 +125,49 @@ func TestExec_IsALoginShell(t *testing.T) {
 	}
 }
 
+// A50, the defect that decided it: under §9's shell a failing line in the
+// middle of a step is followed by the next one, and the step reports whatever
+// the last line reports. Under GitHub's it stops the step.
+func TestExec_GitHubShellStopsAtTheFirstFailure(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	script := "false\necho reached"
+
+	code, stdout, _ := run(t, env, executor.Step{Run: script})
+	if code != 0 || !strings.Contains(stdout, "reached") {
+		t.Fatalf("§9's shell should carry on past a failure (exit %d): %s", code, stdout)
+	}
+
+	for _, sh := range []executor.Shell{executor.ShellGitHub, executor.ShellGitHubBash, executor.ShellGitHubSh} {
+		code, stdout, _ := run(t, env, executor.Step{Run: script, Shell: sh})
+		if code == 0 || strings.Contains(stdout, "reached") {
+			t.Errorf("%s: a failing line should end the step (exit %d): %s", sh, code, stdout)
+		}
+	}
+
+	// pipefail is `shell: bash` only, as on GitHub.
+	code, _, _ = run(t, env, executor.Step{Run: "false | true", Shell: executor.ShellGitHubBash})
+	if code == 0 {
+		t.Error("shell: bash should fail a pipeline whose first command fails")
+	}
+	code, _, _ = run(t, env, executor.Step{Run: "false | true", Shell: executor.ShellGitHub})
+	if code != 0 {
+		t.Errorf("the default shell has no pipefail on GitHub; exit %d", code)
+	}
+}
+
+// GitHub's shells read no profile, so a step sees the agent's environment and
+// nothing a login shell would add.
+func TestExec_GitHubShellIsNotALoginShell(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	code, stdout, _ := run(t, env, executor.Step{
+		Run:   `shopt -q login_shell && echo "login shell" || echo "not a login shell"`,
+		Shell: executor.ShellGitHubBash,
+	})
+	if code != 0 || !strings.Contains(stdout, "not a login shell") {
+		t.Errorf("GitHub's bash should not be a login shell (exit %d): %s", code, stdout)
+	}
+}
+
 // A non-zero exit is a result, not an error: the agent maps it to E_STEP and
 // puts the number in the update. Returning an error here would lose the code.
 func TestExec_NonZeroExitIsAResult(t *testing.T) {

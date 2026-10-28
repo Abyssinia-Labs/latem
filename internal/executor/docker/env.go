@@ -150,7 +150,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 			User:         e.user,
 			WorkingDir:   WorkspacePath,
 			Env:          envSlice(env),
-			Cmd:          wrappedArgv(e.shell, step.Run),
+			Cmd:          wrappedArgv(e.shell, step.Shell, step.Run),
 			AttachStdout: true,
 			AttachStderr: true,
 		}, stdout, stderr)
@@ -514,11 +514,16 @@ func (e *runEnv) runContainerStep(
 // #nosec G101 -- a shell script, not a credential: gosec reads "$$" as one.
 const stepWrapper = `echo "$$" > "$0"; exec "$@"`
 
-// wrappedArgv is [StepArgv] under [stepWrapper]. INV-3 is unchanged by it:
-// `run` is still one element of the slice, whole and untouched, and the
-// wrapper receives it as "$@" without ever reading it.
-func wrappedArgv(shell, run string) []string {
-	return append([]string{"/bin/sh", "-c", stepWrapper, StepPidFile}, StepArgv(shell, run)...)
+// wrappedArgv is [StepArgv], or GitHub's argv for a step compiled from a
+// workflow (A50), under [stepWrapper]. INV-3 is unchanged by it: `run` is
+// still one element of the slice, whole and untouched, and the wrapper
+// receives it as "$@" without ever reading it.
+func wrappedArgv(shell string, mode executor.Shell, run string) []string {
+	argv := StepArgv(shell, run)
+	if gh := executor.GitHubArgv(mode, run); gh != nil {
+		argv = gh
+	}
+	return append([]string{"/bin/sh", "-c", stepWrapper, StepPidFile}, argv...)
 }
 
 // stopScript stops the process group whose id is in the pid file: SIGTERM, up

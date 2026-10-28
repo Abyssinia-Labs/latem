@@ -246,15 +246,21 @@ func (e *runEnv) run(
 	ctx context.Context, step executor.Step, env map[string]string, stdout, stderr io.Writer,
 ) (int, error) {
 	argv := StepArgv(e.shell, step.Run)
+	if gh := executor.GitHubArgv(step.Shell, step.Run); gh != nil {
+		// A50: a step compiled from a workflow runs under GitHub's shell, and
+		// GitHub's are not login shells — the step sees the agent's own
+		// environment, which is what a GitHub runner's steps see too.
+		argv = gh
+	}
 
 	// #nosec G204 -- this is the INV-3 surface and it is safe by construction.
-	// argv is a slice of exactly three elements built by [StepArgv]: argv[0] is
-	// the shell resolved from PATH at New and never from a broker, argv[1] is
-	// the literal "-lc", and argv[2] is step.Run passed to execve as one
-	// element. Nothing is concatenated, so no character in step.Run can be
-	// read as argv structure — the shell parses it as a script, which is the
-	// documented contract (§9), rather than the agent parsing it as a command
-	// line, which would be the injection. step.Run itself comes from the job
+	// argv is built by [StepArgv] or [executor.GitHubArgv]: argv[0] is a shell
+	// fixed by the agent and never from a broker, the elements between are
+	// literal flags, and the last is step.Run passed to execve as one element.
+	// Nothing is concatenated, so no character in step.Run can be read as argv
+	// structure — the shell parses it as a script, which is the documented
+	// contract (§9, A50), rather than the agent parsing it as a command line,
+	// which would be the injection. step.Run itself comes from the job
 	// registry at the resolved commit and never from a broker (INV-2).
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = e.workspace
@@ -282,7 +288,7 @@ func (e *runEnv) run(
 	defer group.release()
 
 	if err := cmd.Start(); err != nil {
-		return -1, fmt.Errorf("start %s: %w", e.shell, err)
+		return -1, fmt.Errorf("start %s: %w", argv[0], err)
 	}
 	// A write to a file created a moment ago, so a failure here means the
 	// filesystem is in trouble and the step is about to find that out for

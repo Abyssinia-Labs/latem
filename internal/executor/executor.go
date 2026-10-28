@@ -196,12 +196,60 @@ type Step struct {
 	// Timeout bounds this step alone. Zero means "whatever remains of the job
 	// budget", so it is opt-in and never tightens a job by accident.
 	Timeout time.Duration
+	// Shell says how Run reaches a shell. The zero value is the executor's own
+	// §9 contract; the others are GitHub's, for a step compiled from a
+	// workflow (A50).
+	Shell Shell
 	// Container, when set, makes this step a container run from another image
 	// rather than a command in the run's environment (A44). Run is then empty.
 	// Only the docker executor can honour it, and admission has already
 	// routed the job there; an executor that cannot answers E_EXECUTOR rather
 	// than running nothing and reporting success.
 	Container *Container
+}
+
+// Shell is how a step's Run is handed to a shell.
+type Shell string
+
+const (
+	// ShellLatem is §9's contract and the zero value: the executor's own
+	// shell, `bash -lc` natively and `bash -c` in a container.
+	ShellLatem Shell = ""
+	// ShellGitHub is GitHub's for a step that names no shell: `bash -e`.
+	ShellGitHub Shell = "github"
+	// ShellGitHubBash is GitHub's `shell: bash`: no profile or rc file,
+	// errexit and pipefail.
+	ShellGitHubBash Shell = "bash"
+	// ShellGitHubSh is GitHub's `shell: sh`: `sh -e`.
+	ShellGitHubSh Shell = "sh"
+)
+
+// Valid reports whether s is one of the shells above.
+func (s Shell) Valid() bool {
+	switch s {
+	case ShellLatem, ShellGitHub, ShellGitHubBash, ShellGitHubSh:
+		return true
+	}
+	return false
+}
+
+// GitHubArgv is the argv for one of GitHub's shells, or nil for [ShellLatem],
+// whose argv belongs to the executor.
+//
+// INV-3 holds the same way it does for §9's shells: run is the last element,
+// whole, and nothing is joined to it. GitHub writes the script to a file and
+// passes the path; `-c` with the text as one argument is the same program
+// without a file the step could rewrite under itself.
+func GitHubArgv(s Shell, run string) []string {
+	switch s {
+	case ShellGitHub:
+		return []string{"bash", "-e", "-c", run}
+	case ShellGitHubBash:
+		return []string{"bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run}
+	case ShellGitHubSh:
+		return []string{"sh", "-e", "-c", run}
+	}
+	return nil
 }
 
 // Container is the image a container step runs and what it runs it with. Args

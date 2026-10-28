@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
@@ -348,6 +349,63 @@ jobs:
 	}
 	if !strings.HasPrefix(job.Steps[0].Run, "cd 'sub dir'\n") {
 		t.Errorf("run = %q, want a quoted cd prefix", job.Steps[0].Run)
+	}
+}
+
+// A50: every compiled step carries GitHub's shell. No shell is GitHub's
+// default, `bash -e` — which is not the same as naming bash.
+func TestStepsCarryGitHubsShell(t *testing.T) {
+	w := parse(t, `
+jobs:
+  plain:
+    runs-on: [linux]
+    steps:
+      - run: make
+  defaulted:
+    runs-on: [linux]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: make
+      - run: make
+        shell: sh
+`)
+	job, err := Compile(t.Context(), w, "plain", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := job.Steps[0].Shell; got != string(executor.ShellGitHub) {
+		t.Errorf("no shell: got %q, want %q", got, executor.ShellGitHub)
+	}
+
+	job, err = Compile(t.Context(), w, "defaulted", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := job.Steps[0].Shell; got != string(executor.ShellGitHubBash) {
+		t.Errorf("job default bash: got %q", got)
+	}
+	if got := job.Steps[1].Shell; got != string(executor.ShellGitHubSh) {
+		t.Errorf("the step's own shell should win: got %q", got)
+	}
+
+	w = parse(t, `
+defaults:
+  run:
+    shell: sh
+jobs:
+  plain:
+    runs-on: [linux]
+    steps:
+      - run: make
+`)
+	job, err = Compile(t.Context(), w, "plain", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := job.Steps[0].Shell; got != string(executor.ShellGitHubSh) {
+		t.Errorf("workflow default sh: got %q", got)
 	}
 }
 

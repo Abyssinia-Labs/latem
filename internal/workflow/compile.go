@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
@@ -430,7 +431,7 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		}
 	}
 
-	out := registry.Step{ID: st.ID, Name: st.Name, Run: run, Env: env, If: cond}
+	out := registry.Step{ID: st.ID, Name: st.Name, Run: run, Shell: string(githubShell(shell)), Env: env, If: cond}
 	if st.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 	}
@@ -632,6 +633,20 @@ func envValueIsLiteral(v string) error {
 				"by the registry validator; this is a limitation, not something the workflow did wrong", v)
 	}
 	return nil
+}
+
+// githubShell maps a workflow's shell onto the executor's name for GitHub's
+// contract (A50). shell has already passed [isSupportedShell]; empty is
+// GitHub's default for a step that names none, `bash -e`, which is not the
+// same as `shell: bash`.
+func githubShell(shell string) executor.Shell {
+	switch strings.ToLower(strings.TrimSpace(shell)) {
+	case "bash":
+		return executor.ShellGitHubBash
+	case "sh":
+		return executor.ShellGitHubSh
+	}
+	return executor.ShellGitHub
 }
 
 func isSupportedShell(s string) bool {

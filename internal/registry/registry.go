@@ -128,6 +128,12 @@ type Step struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Timeout protocol.Duration `json:"timeout,omitempty"`
 
+	// Shell is GitHub's shell for a step compiled from a workflow — "github",
+	// "bash" or "sh", as executor.Shell defines them — and empty for a
+	// jobs.yaml step, which keeps §9's (A50). Excluded from decoding: only the
+	// compiler writes it.
+	Shell string `json:"-"`
+
 	// Late holds env values that are computed as the step is about to run,
 	// and If is a condition evaluated then. Both are [LateValue]; see that
 	// type for why they exist and why they are excluded from decoding. A

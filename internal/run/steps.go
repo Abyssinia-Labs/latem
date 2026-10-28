@@ -188,6 +188,7 @@ func (x *execution) runStep(
 		Run:     s.Run,
 		Env:     env,
 		Timeout: s.Timeout,
+		Shell:   executor.Shell(s.Shell),
 	}
 	if c := s.Container; c != nil {
 		step.Container = &executor.Container{Image: c.Image, Entrypoint: c.Entrypoint, Args: c.Args}
