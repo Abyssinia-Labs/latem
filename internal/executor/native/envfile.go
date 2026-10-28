@@ -27,6 +27,10 @@ const (
 	// as $GITHUB_PATH and $GITHUB_STEP_SUMMARY.
 	PathFileName    = "path"
 	SummaryFileName = "summary"
+	// TempDirName is the basename of the directory exported as $RUNNER_TEMP
+	// (A50), beside the files above so that removing the run's directory
+	// empties it.
+	TempDirName = "temp"
 
 	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored data
 	// the agent then trusts, so it gets a size it cannot exceed as well as a

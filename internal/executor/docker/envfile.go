@@ -32,6 +32,10 @@ const (
 	// as $GITHUB_PATH and $GITHUB_STEP_SUMMARY.
 	PathFilePath    = "/tmp/latem/path"
 	SummaryFilePath = "/tmp/latem/summary"
+	// TempPath is the directory exported as $RUNNER_TEMP (A50). It lives in
+	// the container's own filesystem beside the files above, so it goes
+	// when the container does.
+	TempPath = "/tmp/latem/temp"
 	// ActionsPath is where [Spec.ActionsDir] is mounted, read-only: a fetched
 	// action's files have to be readable from inside a container that has no
 	// other view of the host (A42 phase 5).
@@ -244,6 +248,30 @@ func (e *runEnv) createEnvFile(ctx context.Context, envFile string) error {
 	if err := e.api.CopyToContainer(ctx, e.containerID, parent, &buf,
 		container.CopyToContainerOptions{}); err != nil {
 		return wrapErr(protocol.ErrExecutor, err, "create $LATEM_ENV (%s)", envFile)
+	}
+	return nil
+}
+
+// createDir creates an empty directory in the container through the archive
+// API, for the same reasons [runEnv.createEnvFile] uses it: it works whatever
+// the image contains, and the mode is this package's rather than the image's
+// umask. The parent must already exist.
+func (e *runEnv) createDir(ctx context.Context, dir string) error {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     path.Base(dir) + "/",
+		Typeflag: tar.TypeDir,
+		Mode:     envDirMode,
+	}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", dir)
+	}
+	if err := tw.Close(); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", dir)
+	}
+	if err := e.api.CopyToContainer(ctx, e.containerID, path.Dir(dir), &buf,
+		container.CopyToContainerOptions{}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create %s", dir)
 	}
 	return nil
 }

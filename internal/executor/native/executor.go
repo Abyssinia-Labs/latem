@@ -271,6 +271,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		outFile:     filepath.Join(dir, OutputFileName),
 		pathFile:    filepath.Join(dir, PathFileName),
 		summaryFile: filepath.Join(dir, SummaryFileName),
+		tempDir:     filepath.Join(dir, TempDirName),
 		grace:       e.grace,
 		drain:       e.drain,
 		carried:     map[string]string{},
@@ -285,6 +286,11 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 	}
 	if err := env.createEnvFile(); err != nil {
 		return nil, err
+	}
+	// 0o700 like the files beside it: the directory is the run's, and a step
+	// is the only thing that should read what it put there.
+	if err := os.Mkdir(env.tempDir, 0o700); err != nil {
+		return nil, wrapErr(protocol.ErrExecutor, err, "create $RUNNER_TEMP %s", env.tempDir)
 	}
 	return env, nil
 }

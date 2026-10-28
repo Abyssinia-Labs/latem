@@ -44,6 +44,10 @@ type execution struct {
 
 	ws       *source.Workspace
 	resolved *registry.Resolved
+	// workflow is where a job compiled from .github/workflows came from, and
+	// nil for a jobs.yaml job. It decides whether the run gets GitHub's
+	// environment as well as latem's (A50).
+	workflow *workflow.Source
 	// refNormalized and sha are what INV-5 decided at gates 7 and 9. They ride
 	// on the next transition rather than one of their own (amendment A21).
 	refNormalized string
@@ -300,6 +304,7 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		// most readers of this repository would look in, and a workflow's own
 		// `on:` triggers are not what caused this run.
 		x.note("job %q from %s", x.req.Job, src.Path)
+		x.workflow = &src
 	}
 	return reg, registry.Decision{}, nil
 }

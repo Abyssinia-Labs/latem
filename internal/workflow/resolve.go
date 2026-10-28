@@ -38,6 +38,10 @@ type Source struct {
 	Path string
 	// Native is true for .latem/jobs.yaml.
 	Native bool
+	// Workflow is the workflow's `name:`, or its path when it has none, which
+	// is what GitHub reports as github.workflow and $GITHUB_WORKFLOW (A50).
+	// Empty for a jobs.yaml job.
+	Workflow string
 }
 
 func (s Source) String() string { return s.Path }
@@ -132,7 +136,11 @@ func ResolveWith(
 				Err:  err,
 			}
 		}
-		return reg, Source{Path: hits[0].file}, nil
+		name := hits[0].wf.Name
+		if name == "" {
+			name = hits[0].file
+		}
+		return reg, Source{Path: hits[0].file, Workflow: name}, nil
 
 	case len(hits) > 1:
 		var where []string

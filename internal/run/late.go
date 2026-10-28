@@ -17,14 +17,17 @@ import (
 // refuses steps.* until then, so nothing reads it yet.
 func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
 	actions := ""
+	temp := ""
 	if x.env != nil {
 		actions = x.env.ActionsDir()
+		temp = x.env.TempDir()
 	}
 	return registry.StepScope{
 		Status:     status,
 		Outputs:    x.outputs,
 		Runner:     runnerFacts(x.runner),
 		ActionsDir: actions,
+		TempDir:    temp,
 	}
 }
 

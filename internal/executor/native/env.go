@@ -69,6 +69,7 @@ type runEnv struct {
 	outFile     string // $GITHUB_OUTPUT, a sibling of envFile
 	pathFile    string // $GITHUB_PATH
 	summaryFile string // $GITHUB_STEP_SUMMARY
+	tempDir     string // $RUNNER_TEMP, inside envDir so Close empties it
 	grace       time.Duration
 	drain       time.Duration
 
@@ -96,6 +97,9 @@ func (e *runEnv) EnvFile() string { return e.envFile }
 // ActionsDir is the host path itself: a step here runs on the host, so a
 // fetched action is already where the agent put it.
 func (e *runEnv) ActionsDir() string { return e.spec.ActionsDir }
+
+// TempDir is the host path itself, for the same reason as [runEnv.ActionsDir].
+func (e *runEnv) TempDir() string { return e.tempDir }
 
 // Workspace is the directory every step starts in. Not part of [executor.Env];
 // it exists for diagnostics and for tests.
@@ -183,6 +187,8 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[executor.OutputFileVar] = e.outFile
 	env[executor.PathFileVar] = e.pathFile
 	env[executor.SummaryFileVar] = e.summaryFile
+	env[executor.WorkspaceVar] = e.workspace
+	env[executor.RunnerTempVar] = e.tempDir
 	if len(e.pathAdds) > 0 {
 		// In front of whatever PATH the step would otherwise have had: one
 		// set explicitly, else the agent's own, which is what buildEnviron

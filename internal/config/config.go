@@ -296,6 +296,11 @@ type Repo struct {
 	// outright rather than queued for someone to rubber-stamp.
 	RequireApprovalOtherwise bool              `toml:"require_approval_otherwise"`
 	ApprovalTTL              protocol.Duration `toml:"approval_ttl"`
+	// GitHub is the repository's owner/name, which a workflow reads as
+	// github.repository and $GITHUB_REPOSITORY (A50). Optional: a URL on
+	// github.com already says it, and only a URL that does not — a local
+	// path, another host — needs it written down. See [Repo.GitHubRepository].
+	GitHub string `toml:"github"`
 }
 
 // Runner is one execution slot. One agent hosts several; "two roles on one

@@ -73,6 +73,9 @@ type StepScope struct {
 	// the step, which is the executor's answer and therefore late for exactly
 	// the same reason the runner is (A42 phase 5).
 	ActionsDir string
+	// TempDir is the run's temporary directory as the step sees it, answered
+	// for `runner.temp` — the executor's answer, like ActionsDir (A50).
+	TempDir string
 }
 
 // StepStatus is the job's status as seen from inside it.

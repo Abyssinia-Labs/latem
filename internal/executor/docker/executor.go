@@ -352,6 +352,11 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 		_ = env.Close(context.WithoutCancel(ctx))
 		return nil, err
 	}
+	// After the env file, whose archive created the directory this sits in.
+	if err := env.createDir(ctx, TempPath); err != nil {
+		_ = env.Close(context.WithoutCancel(ctx))
+		return nil, err
+	}
 	return env, nil
 }
 

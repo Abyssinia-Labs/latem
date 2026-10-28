@@ -168,6 +168,37 @@ func TestExec_GitHubShellIsNotALoginShell(t *testing.T) {
 	}
 }
 
+// A50: $RUNNER_TEMP is a directory of the run's own, outside the workspace,
+// and goes with the run; $GITHUB_WORKSPACE is where the step starts.
+func TestExec_WorkspaceAndRunnerTemp(t *testing.T) {
+	env, ws := live(t, executor.Spec{Env: map[string]string{"RUNNER_TEMP": "/elsewhere"}}, Options{})
+	code, stdout, _ := run(t, env, executor.Step{
+		Run: `echo "ws=$GITHUB_WORKSPACE"; echo "temp=$RUNNER_TEMP"; touch "$RUNNER_TEMP/scratch"`,
+	})
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stdout)
+	}
+	temp := env.TempDir()
+	if !strings.Contains(stdout, "temp="+temp+"\n") || temp == "/elsewhere" {
+		t.Errorf("RUNNER_TEMP should be the run's own directory %q:\n%s", temp, stdout)
+	}
+	if !strings.Contains(stdout, "ws="+env.Workspace()+"\n") {
+		t.Errorf("GITHUB_WORKSPACE should be the workspace %q:\n%s", env.Workspace(), stdout)
+	}
+	if strings.HasPrefix(temp, ws) {
+		t.Errorf("RUNNER_TEMP %q is inside the workspace %q", temp, ws)
+	}
+	if _, err := os.Stat(filepath.Join(temp, "scratch")); err != nil {
+		t.Errorf("the step could not write to RUNNER_TEMP: %v", err)
+	}
+	if err := env.Close(t.Context()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(temp); !os.IsNotExist(err) {
+		t.Errorf("RUNNER_TEMP survived the run: %v", err)
+	}
+}
+
 // A non-zero exit is a result, not an error: the agent maps it to E_STEP and
 // puts the number in the update. Returning an error here would lose the code.
 func TestExec_NonZeroExitIsAResult(t *testing.T) {

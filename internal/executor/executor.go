@@ -102,6 +102,12 @@ type Env interface {
 	// Empty when no action was fetched.
 	ActionsDir() string
 
+	// TempDir is the environment-visible path of the run's temporary
+	// directory, exported as $RUNNER_TEMP and answered for `runner.temp`
+	// (A50). It is emptied with the run and lies outside the workspace, so
+	// nothing written there reaches `git status` or a collected artifact.
+	TempDir() string
+
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
@@ -177,6 +183,16 @@ const GitHubEnvVar = "GITHUB_ENV"
 const (
 	PathFileVar    = "GITHUB_PATH"
 	SummaryFileVar = "GITHUB_STEP_SUMMARY"
+)
+
+// WorkspaceVar and RunnerTempVar are set by every executor beside the four
+// file paths: the workspace and the run's temporary directory, as the step
+// sees them (A50). GitHub's names, for the same reason as GITHUB_OUTPUT. Both
+// are set after the run's and the step's environment are merged, so a job
+// cannot point them elsewhere.
+const (
+	WorkspaceVar  = "GITHUB_WORKSPACE"
+	RunnerTempVar = "RUNNER_TEMP"
 )
 
 // DefaultPath is the PATH a step gets when nothing else supplies one — an

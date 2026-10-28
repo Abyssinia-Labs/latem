@@ -304,6 +304,9 @@ func validateRepos(cfg *Config) []error {
 		if len(repo.AllowedRefs) == 0 && !repo.RequireApprovalOtherwise {
 			add("repos.%s: allowed_refs is empty and require_approval_otherwise is false, so no ref can ever run; list the refs you trust, or set require_approval_otherwise = true to gate them behind `latem approve`", name)
 		}
+		if repo.GitHub != "" && !githubSlugPattern.MatchString(repo.GitHub) {
+			add("repos.%s: github = %q must be owner/name, the repository as GitHub names it", name, repo.GitHub)
+		}
 		problems = appendDuration(problems, "repos."+name+".approval_ttl", &repo.ApprovalTTL, DefaultApprovalTTL)
 	}
 	return problems

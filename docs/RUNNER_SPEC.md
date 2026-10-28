@@ -2126,7 +2126,8 @@ only: `CI` and `GITHUB_ACTIONS` set to `true`; `GITHUB_REPOSITORY`, `GITHUB_REPO
 `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_EVENT_NAME`,
 `GITHUB_ACTOR`, `GITHUB_JOB`, `GITHUB_WORKFLOW`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`,
 `GITHUB_RUN_ATTEMPT`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`; and
-`RUNNER_OS` and `RUNNER_ARCH`, from the runner's labels as `runner.os` already is.
+`RUNNER_OS`, `RUNNER_ARCH` and `RUNNER_NAME`, from the runner as `runner.*` already is and in
+the same spelling (`Linux`, `macOS`, `X64`, `ARM64`).
 `GITHUB_ACTIONS=true` is a statement about the contract, not about the host: workflows and the
 tools they call test it to decide whether they are in CI, and a workflow adopted onto latem is.
 The agent's own `LATEM_*` names still win over all of these.
@@ -2170,6 +2171,6 @@ arrives with workflow runs and the GitHub App, and until then `secrets.GITHUB_TO
 like any other name.
 
 **What still is not GitHub's.** `permissions:` and `concurrency:` are parsed and not acted on;
-the run log now says so for each rather than dropping them silently. An event payload,
-`GITHUB_EVENT_PATH` beyond a minimal `{}`-shaped file, `GITHUB_TOKEN`, `needs`, matrices and
-reusable workflows wait for workflow runs.
+the run log now says so for each rather than dropping them silently. An event payload and
+`GITHUB_EVENT_PATH` (a made-up payload would mislead the actions that read it), `GITHUB_TOKEN`,
+`needs`, matrices and reusable workflows wait for workflow runs.

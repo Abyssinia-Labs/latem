@@ -200,6 +200,8 @@ func (e *fakeEnv) Close(context.Context) error {
 
 func (e *fakeEnv) ActionsDir() string { return "" }
 
+func (e *fakeEnv) TempDir() string { return "" }
+
 // fakeExecutor stands in for docker, tart, and native.
 //
 // Its resources are marker files in a directory, which is enough to make the

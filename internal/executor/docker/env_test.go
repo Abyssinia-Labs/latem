@@ -157,6 +157,28 @@ func TestExec_StepEnvOverridesRunEnv(t *testing.T) {
 	}
 }
 
+// A50: every step gets the workspace and the run's temporary directory as the
+// container sees them, and a job cannot point either somewhere else.
+func TestExec_WorkspaceAndRunnerTemp(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{
+		RunID:     "run-1",
+		Workspace: t.TempDir(),
+		Env:       map[string]string{"RUNNER_TEMP": "/elsewhere"},
+	})
+	if env.TempDir() != TempPath {
+		t.Errorf("TempDir() = %q, want %q", env.TempDir(), TempPath)
+	}
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "s", Run: "true"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	for _, kv := range []string{"GITHUB_WORKSPACE=" + WorkspacePath, "RUNNER_TEMP=" + TempPath} {
+		if !slices.Contains(f.execOpts[0].Env, kv) {
+			t.Errorf("%s missing from %q", kv, f.execOpts[0].Env)
+		}
+	}
+}
+
 // The between-step channel: what step one writes to $LATEM_ENV, step two
 // reads from its environment. This is the only thing that crosses a step
 // boundary, because §9 leaves nothing else that can.

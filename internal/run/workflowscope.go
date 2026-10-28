@@ -19,13 +19,11 @@ import (
 // workflow author already expects, unlike an error naming a context they did
 // not know was unsupported.
 func (x *execution) workflowScope() expr.Scope {
-	refName := x.refNormalized
-	refType := ""
-	switch {
-	case strings.HasPrefix(refName, "refs/heads/"):
-		refName, refType = strings.TrimPrefix(refName, "refs/heads/"), "branch"
-	case strings.HasPrefix(refName, "refs/tags/"):
-		refName, refType = strings.TrimPrefix(refName, "refs/tags/"), "tag"
+	refName, refType := refParts(x.refNormalized)
+	slug, isGitHub := x.githubRepository()
+	owner := ""
+	if isGitHub {
+		owner, _, _ = strings.Cut(slug, "/")
 	}
 
 	inputs := map[string]any{}
@@ -41,13 +39,19 @@ func (x *execution) workflowScope() expr.Scope {
 	return expr.Scope{
 		Contexts: map[string]expr.Value{
 			"github": map[string]any{
-				"repository": x.req.Repo,
-				"ref":        x.refNormalized,
-				"ref_name":   refName,
-				"ref_type":   refType,
-				"sha":        x.sha,
-				"job":        x.req.Job,
-				"run_id":     x.run.ID,
+				// owner/name since A50, from config or the URL; the config
+				// key when neither names one.
+				"repository":       slug,
+				"repository_owner": owner,
+				"server_url":       githubServerURL,
+				"api_url":          githubAPIURL,
+				"graphql_url":      githubGraphQLURL,
+				"ref":              x.refNormalized,
+				"ref_name":         refName,
+				"ref_type":         refType,
+				"sha":              x.sha,
+				"job":              x.req.Job,
+				"run_id":           x.run.ID,
 				// run_number is the machine's own sequence, which is what
 				// A36 made the build number. A workflow that tags a build with
 				// github.run_number therefore names the run that produced it,

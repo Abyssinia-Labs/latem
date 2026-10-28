@@ -96,9 +96,10 @@ func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
 
 	out.Contexts["latem"] = map[string]any{"action_dir": sc.ActionsDir}
 	out.Contexts["runner"] = map[string]any{
-		"os":   runnerOS(sc.Runner.OS),
-		"arch": runnerArch(sc.Runner.Arch),
+		"os":   RunnerOS(sc.Runner.OS),
+		"arch": RunnerArch(sc.Runner.Arch),
 		"name": sc.Runner.Name,
+		"temp": sc.TempDir,
 	}
 	return out
 }
@@ -113,11 +114,13 @@ func statusName(s registry.StepStatus) string {
 	return "success"
 }
 
-// runnerOS and runnerArch render in GitHub's spelling, which is what a
+// RunnerOS and RunnerArch render in GitHub's spelling, which is what a
 // workflow compares against: `runner.os == 'macOS'`, `runner.arch == 'ARM64'`.
 // The comparison is case-insensitive in the expression language, so this is
-// for the value a step *reads*, not for the test to pass.
-func runnerOS(os string) string {
+// for the value a step *reads*, not for the test to pass. The run loop uses
+// them for $RUNNER_OS and $RUNNER_ARCH too (A50), so the variable and the
+// context cannot disagree.
+func RunnerOS(os string) string {
 	switch os {
 	case "macos", "darwin":
 		return "macOS"
@@ -127,7 +130,7 @@ func runnerOS(os string) string {
 	return os
 }
 
-func runnerArch(arch string) string {
+func RunnerArch(arch string) string {
 	switch arch {
 	case "arm64":
 		return "ARM64"

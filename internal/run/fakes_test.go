@@ -148,6 +148,7 @@ type fakeEnv struct {
 	// has no file to read back, so a test that wants outputs states them.
 	outputs    func(step executor.Step) map[string]string
 	actionsDir string
+	tempDir    string
 }
 
 func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
@@ -175,6 +176,8 @@ func (e *fakeEnv) EnvFile() string {
 }
 
 func (e *fakeEnv) ActionsDir() string { return e.actionsDir }
+
+func (e *fakeEnv) TempDir() string { return e.tempDir }
 
 func (e *fakeEnv) Close(context.Context) error {
 	e.mu.Lock()
