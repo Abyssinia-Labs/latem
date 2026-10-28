@@ -2101,3 +2101,75 @@ caching with a warning rather than failing, in which case a latem mount on the s
 does the job. The services remain possible later, under the same action names, if a workflow
 needs exact-key semantics; native could have them cheaply on loopback, and docker would need a
 relay inside the container's network namespace.
+
+### Amendment from running a workflow the way GitHub runs it
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A50 | §9, §15, A42, A47 | **A step compiled from a workflow runs under GitHub's contract rather than §9's: GitHub's shells, GitHub's environment variables, a per-run temporary directory, the repository as `owner/name`, `defaults.run.working-directory`, the `env` context, a 360-minute default, step `continue-on-error`, `runs-on` aliases, and `${{ secrets.* }}` and `${{ vars.* }}` resolved on the machine. `.latem/jobs.yaml` is unchanged** | A42 made a workflow file a registry and then ran its steps the way §9 runs a jobs.yaml step. The two contracts differ in places a workflow depends on without saying so. The one that decided this amendment: §9 hands `run` to `bash -c` (`-lc` natively), and GitHub hands it to `bash -e`, so a multi-line step whose middle line fails *succeeds* on latem and fails on GitHub: `bun test` followed by `bun run lint` in one `run:` reports whatever lint reports. Surveying the workflows of the first fleet this is meant to carry (79 files, 237 jobs) found the rest: `RUNNER_TEMP` read 96 times and never set, `defaults.run.working-directory` in 32 jobs and ignored, `${{ env.X }}` evaluating to "" although the job declares X, `github.repository` naming the config key rather than the repository, and `${{ secrets.X }}` in 46 files with no way for a workflow job to receive a secret at all |
+
+**Shells.** A compiled step carries one of GitHub's three shells, and the executor builds the
+argv from it: no `shell:` is `bash -e`, `shell: bash` is `bash --noprofile --norc -eo pipefail`,
+and `shell: sh` is `sh -e`. `run` is still the last element of the argv, whole (INV-3). None of
+them is a login shell, which is GitHub's behaviour and a departure from §13.3's `bash -lc`: on
+the native executor a workflow step sees the agent's own environment — the service's PATH,
+which `latem service install` writes with Homebrew's prefix in it — and not the operator's
+profile. A step that needs a tool the profile would have put on PATH gets it the way it would
+on GitHub, from a setup action or `$GITHUB_PATH`. A jobs.yaml step keeps `bash -lc`; §9's
+contract for it is unchanged.
+
+**The environment.** Every executor sets, beside the four `GITHUB_*` file paths it already
+sets, `GITHUB_WORKSPACE` (the workspace as the step sees it) and `RUNNER_TEMP` (a directory per
+run, emptied with the run, outside the workspace so that it never reaches `git status` or a
+collected artifact). `runner.temp` reads the same directory. The run adds, for a workflow job
+only: `CI` and `GITHUB_ACTIONS` set to `true`; `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`,
+`GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_EVENT_NAME`,
+`GITHUB_ACTOR`, `GITHUB_JOB`, `GITHUB_WORKFLOW`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`,
+`GITHUB_RUN_ATTEMPT`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`; and
+`RUNNER_OS` and `RUNNER_ARCH`, from the runner's labels as `runner.os` already is.
+`GITHUB_ACTIONS=true` is a statement about the contract, not about the host: workflows and the
+tools they call test it to decide whether they are in CI, and a workflow adopted onto latem is.
+The agent's own `LATEM_*` names still win over all of these.
+
+**The repository.** `github.repository` and `GITHUB_REPOSITORY` are `owner/name`. They come from
+`[repos.<key>] github`, when set, and otherwise from the repository URL when it names a GitHub
+host; a URL that names neither (a local path) falls back to the config key, as before, and the
+run log says so. The config key remains what `latem run` takes.
+
+**Defaults, `env`, timeouts.** `defaults.run.working-directory` and `defaults.run.shell` apply
+at workflow and job level, a step's own setting winning. The `env` context holds the workflow's
+and job's `env:` while the job compiles and adds the step's own for that step, which is what
+GitHub evaluates `${{ env.X }}` against. A workflow job with no `timeout-minutes` gets GitHub's
+360 minutes rather than §9's 30. A step with `continue-on-error: true` that fails lets the job
+carry on: its `outcome` is `failure`, its `conclusion` `success`, and `failure()` in a later
+step stays false, as on GitHub. `continue-on-error` on a job, and `if:` on a job, remain refused
+here: both are about the job's place in a workflow run, which arrives with workflow runs
+(they are N2's business, not this amendment's).
+
+**`runs-on`.** A label passes through `[label_aliases]` before it is matched, each alias
+replaced by the labels it names. GitHub's hosted labels map by default — `ubuntu-latest` and
+`ubuntu-<version>` to `linux`, `macos-latest` and `macos-<version>` to `macos` — and a
+`[label_aliases]` entry overrides or adds to that, which is where a vendor's labels such as
+`blacksmith-4vcpu-ubuntu-2404` go. An alias may not name another alias. A `windows-*` label is
+refused by name, since no runner can carry it (A47).
+
+**Secrets and variables.** `${{ secrets.X }}` compiles into a late binding to the *name* X and
+adds X to the job's secrets, so the value is resolved by §15's chain and registered with the
+redactor before the first step, exactly as for a jobs.yaml job, and the compiled registry
+holds the name and never the value — which is what A42's refusal protected. The binding is
+evaluated at the step, so a value reaches a step only as an environment variable (A42's rule)
+and is never written into `run`. A secret that resolves nowhere evaluates to the empty string
+and the run log names it, which is GitHub's behaviour and what a workflow testing
+`secrets.X != ''` relies on; §15's refusal of an unresolvable name still applies to jobs.yaml.
+Resolution is scoped: a job naming an `environment` looks for `<repo>/<environment>/X`, then
+`<repo>/X`, then `X`; any other job for `<repo>/X`, then `X` — so two repositories on one
+machine can each have their own `CLOUDFLARE_API_TOKEN`. `${{ vars.X }}` reads `[repos.<key>.vars]`,
+overridden by `[repos.<key>.environments.<environment>.vars]`; variables are not secrets, are
+answered at admission, and may appear in the compiled registry. `GITHUB_TOKEN` is neither: it
+arrives with workflow runs and the GitHub App, and until then `secrets.GITHUB_TOKEN` resolves
+like any other name.
+
+**What still is not GitHub's.** `permissions:` and `concurrency:` are parsed and not acted on;
+the run log now says so for each rather than dropping them silently. An event payload,
+`GITHUB_EVENT_PATH` beyond a minimal `{}`-shaped file, `GITHUB_TOKEN`, `needs`, matrices and
+reusable workflows wait for workflow runs.
