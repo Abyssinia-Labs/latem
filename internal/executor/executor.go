@@ -171,9 +171,10 @@ type Result struct {
 	// and the error says why.
 	ExitCode int
 	// Outputs is what the step wrote to the file named by $GITHUB_OUTPUT,
-	// last writer winning. Keys are identifiers; the executor has already
-	// dropped anything else and said so in the step's log. Nil when the step
-	// wrote nothing, which is nearly always.
+	// last writer winning. Keys follow GitHub's rule for output names, which
+	// allows hyphens (A51); the executor has already dropped anything else
+	// and said so in the step's log. Nil when the step wrote nothing, which
+	// is nearly always.
 	Outputs map[string]string
 	// State is what the step wrote to $GITHUB_STATE, the same format. The run
 	// loop hands it to later steps of the same use of an action as STATE_*

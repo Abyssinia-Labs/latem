@@ -398,7 +398,7 @@ func (x *expander) actionRewrite(outer Step, action *Action, ns string) (func(*e
 		case given:
 			src = v
 		case in.Default != nil:
-			src = *in.Default
+			src = string(*in.Default)
 		case in.Required:
 			return nil, fmt.Errorf("uses: %s requires the input %q", outer.Uses, name)
 		}
@@ -587,7 +587,7 @@ func (x *expander) containerStep(outer Step, image string, action *Action, rewri
 	if action != nil {
 		for name, in := range action.Inputs {
 			if in.Default != nil {
-				inputs[name] = *in.Default
+				inputs[name] = string(*in.Default)
 			}
 		}
 	}

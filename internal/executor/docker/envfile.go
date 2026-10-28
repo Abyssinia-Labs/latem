@@ -305,7 +305,7 @@ func (e *runEnv) readKeyValues(ctx context.Context, file, label string, out io.W
 	if err != nil || len(data) == 0 {
 		return nil, err
 	}
-	assignments, warnings := ghcmd.ParseKeyValueFile(data, nil)
+	assignments, warnings := ghcmd.ParseOutputFile(data)
 	for _, w := range warnings {
 		writeNote(out, label+": "+w)
 	}

@@ -165,7 +165,7 @@ func (x *expander) nodeInputs(outer Step, action *Action) (map[string]string, er
 		case ok:
 			env[nodeInputVar(name)] = v
 		case in.Default != nil:
-			env[nodeInputVar(name)] = *in.Default
+			env[nodeInputVar(name)] = string(*in.Default)
 		case in.Required:
 			return nil, fmt.Errorf("uses: %s requires the input %q", outer.Uses, name)
 		}

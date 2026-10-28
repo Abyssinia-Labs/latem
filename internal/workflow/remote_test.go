@@ -323,3 +323,34 @@ func TestCheckoutShimRefusesWhatItCannotSatisfy(t *testing.T) {
 		t.Errorf("the ref refusal should point at the run's own ref: %v", err)
 	}
 }
+
+// Real metadata, setup-bun's among it, writes `type:` on an input and gives
+// defaults as booleans and null. GitHub accepts all three; so does latem.
+func TestActionMetadataAsActionsWriteIt(t *testing.T) {
+	a, err := ParseAction([]byte(`
+inputs:
+  no-cache:
+    required: false
+    type: boolean
+    default: false
+  retries:
+    default: 3
+  bun-version-file:
+    default: null
+runs:
+  using: "node24"
+  main: "dist/setup/index.js"
+`), "a")
+	if err != nil {
+		t.Fatalf("ParseAction: %v", err)
+	}
+	if d := a.Inputs["no-cache"].Default; d == nil || *d != "false" {
+		t.Errorf("no-cache default = %v, want \"false\"", d)
+	}
+	if d := a.Inputs["retries"].Default; d == nil || *d != "3" {
+		t.Errorf("retries default = %v, want \"3\"", d)
+	}
+	if a.Inputs["bun-version-file"].Default != nil {
+		t.Error("default: null is no default")
+	}
+}

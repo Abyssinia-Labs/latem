@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -46,10 +47,39 @@ type Action struct {
 
 // ActionInput is one declared input.
 type ActionInput struct {
-	Description        string  `json:"description,omitempty"`
-	Required           bool    `json:"required,omitempty"`
-	Default            *string `json:"default,omitempty"`
-	DeprecationMessage string  `json:"deprecationMessage,omitempty"`
+	Description        string        `json:"description,omitempty"`
+	Required           bool          `json:"required,omitempty"`
+	Default            *InputDefault `json:"default,omitempty"`
+	DeprecationMessage string        `json:"deprecationMessage,omitempty"`
+	// Type is not in GitHub's metadata syntax, and actions write it anyway
+	// (`type: boolean`, setup-bun among them); GitHub ignores it, and so does
+	// latem, since every input reaches the action as a string (A51).
+	Type string `json:"type,omitempty"`
+}
+
+// InputDefault is an input's default as the string the action receives.
+// Metadata writes it as a string, a boolean or a number — `default: false` —
+// and GitHub passes each as its text. `default: null` is no default at all,
+// which the pointer holding this already says.
+type InputDefault string
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (d *InputDefault) UnmarshalJSON(data []byte) error {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	switch t := v.(type) {
+	case string:
+		*d = InputDefault(t)
+	case bool:
+		*d = InputDefault(strconv.FormatBool(t))
+	case float64:
+		*d = InputDefault(strconv.FormatFloat(t, 'f', -1, 64))
+	default:
+		return fmt.Errorf("an input's default must be a string, a boolean or a number, got %s", string(data))
+	}
+	return nil
 }
 
 // ActionOutput is one declared output. Value is set for a composite action,
