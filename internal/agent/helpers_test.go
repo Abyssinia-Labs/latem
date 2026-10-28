@@ -202,6 +202,8 @@ func (e *fakeEnv) ActionsDir() string { return "" }
 
 func (e *fakeEnv) TempDir() string { return "" }
 
+func (e *fakeEnv) ToolCacheDir() string { return "" }
+
 // fakeExecutor stands in for docker, tart, and native.
 //
 // Its resources are marker files in a directory, which is enough to make the

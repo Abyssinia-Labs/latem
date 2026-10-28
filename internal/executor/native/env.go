@@ -71,6 +71,7 @@ type runEnv struct {
 	pathFile    string // $GITHUB_PATH
 	summaryFile string // $GITHUB_STEP_SUMMARY
 	tempDir     string // $RUNNER_TEMP, inside envDir so Close empties it
+	toolCache   string // $RUNNER_TOOL_CACHE, the runner's, outliving the run
 	grace       time.Duration
 	drain       time.Duration
 
@@ -101,6 +102,9 @@ func (e *runEnv) ActionsDir() string { return e.spec.ActionsDir }
 
 // TempDir is the host path itself, for the same reason as [runEnv.ActionsDir].
 func (e *runEnv) TempDir() string { return e.tempDir }
+
+// ToolCacheDir is the host path itself, likewise.
+func (e *runEnv) ToolCacheDir() string { return e.toolCache }
 
 // Workspace is the directory every step starts in. Not part of [executor.Env];
 // it exists for diagnostics and for tests.
@@ -191,6 +195,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[executor.SummaryFileVar] = e.summaryFile
 	env[executor.WorkspaceVar] = e.workspace
 	env[executor.RunnerTempVar] = e.tempDir
+	if e.toolCache != "" {
+		env[executor.ToolCacheVar] = e.toolCache
+		env[executor.AgentToolsDirVar] = e.toolCache
+	}
 	if len(e.pathAdds) > 0 {
 		// In front of whatever PATH the step would otherwise have had: one
 		// set explicitly, else the agent's own, which is what buildEnviron

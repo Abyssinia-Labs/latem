@@ -789,3 +789,25 @@ func TestExec_GitHubStateIsReadBackAndTruncated(t *testing.T) {
 		t.Errorf("the next step should start with an empty state file: %v, %v", res.State, err)
 	}
 }
+
+// A51: the tool cache is the runner's, created if missing, exported under
+// both names, and still there after the run.
+func TestExec_ToolCacheOutlivesTheRun(t *testing.T) {
+	tools := filepath.Join(t.TempDir(), "toolcache", "mini")
+	env, _ := live(t, executor.Spec{ToolCache: tools}, Options{})
+	code, stdout, _ := run(t, env, executor.Step{
+		Run: `echo "tc=$RUNNER_TOOL_CACHE agent=$AGENT_TOOLSDIRECTORY"; mkdir -p "$RUNNER_TOOL_CACHE/node/22.0.0" && touch "$RUNNER_TOOL_CACHE/node/22.0.0.complete"`,
+	})
+	if code != 0 || !strings.Contains(stdout, "tc="+tools+" agent="+tools) {
+		t.Fatalf("exit %d: %s", code, stdout)
+	}
+	if env.ToolCacheDir() != tools {
+		t.Errorf("ToolCacheDir() = %q", env.ToolCacheDir())
+	}
+	if err := env.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tools, "node", "22.0.0.complete")); err != nil {
+		t.Errorf("the tool cache should outlive the run: %v", err)
+	}
+}

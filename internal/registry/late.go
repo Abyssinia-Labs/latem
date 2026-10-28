@@ -80,6 +80,9 @@ type StepScope struct {
 	// TempDir is the run's temporary directory as the step sees it, answered
 	// for `runner.temp` — the executor's answer, like ActionsDir (A50).
 	TempDir string
+	// ToolCache is the runner's tool cache as the step sees it, answered for
+	// `runner.tool_cache` (A51), or "" when the run has none.
+	ToolCache string
 	// Secrets holds the values resolved for the secret names a workflow job
 	// reads, for `${{ secrets.X }}` (A50). A name that resolved nowhere is
 	// absent. Never set for a jobs.yaml job, which reads its secrets from the

@@ -232,6 +232,8 @@ func (e *recordingEnv) ActionsDir() string { return e.spec.ActionsDir }
 
 func (e *recordingEnv) TempDir() string { return "" }
 
+func (e *recordingEnv) ToolCacheDir() string { return "" }
+
 func (e *recordingEnv) Close(context.Context) error { return nil }
 
 // noSecrets refuses every name, which is right for jobs that declare none and

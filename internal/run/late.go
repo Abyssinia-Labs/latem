@@ -17,10 +17,11 @@ import (
 // refuses steps.* until then, so nothing reads it yet.
 func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
 	actions := ""
-	temp := ""
+	temp, tools := "", ""
 	if x.env != nil {
 		actions = x.env.ActionsDir()
 		temp = x.env.TempDir()
+		tools = x.env.ToolCacheDir()
 	}
 	return registry.StepScope{
 		Status:     status,
@@ -29,6 +30,7 @@ func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
 		Runner:     runnerFacts(x.runner),
 		ActionsDir: actions,
 		TempDir:    temp,
+		ToolCache:  tools,
 		Secrets:    x.workflowSecrets(),
 	}
 }

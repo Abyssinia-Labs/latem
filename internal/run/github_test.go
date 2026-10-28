@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -216,5 +218,29 @@ jobs:
 	}
 	if strings.Contains(log, "production deploy key") {
 		t.Error("a secret value reached the log")
+	}
+}
+
+// A51: a workflow job gets its runner's tool cache — a volume for docker, a
+// directory under the agent's state on the host — and a jobs.yaml job none.
+func TestToolCacheIsTheRunners(t *testing.T) {
+	cfg := &config.Config{Paths: config.Paths{Dir: "/home/ci/.latem"}}
+	for kind, want := range map[string]string{
+		"docker": "latem-toolcache-mini",
+		"native": "/home/ci/.latem/toolcache/mini",
+		"fake":   "",
+	} {
+		x := &execution{
+			o:        &Orchestrator{cfg: cfg},
+			workflow: &workflow.Source{Path: ".github/workflows/ci.yml"},
+			runner:   &Runner{Name: "mini", Executor: &fakeExecutor{name: kind}},
+		}
+		if got := x.toolCache(); got != want {
+			t.Errorf("%s: tool cache = %q, want %q", kind, got, want)
+		}
+		x.workflow = nil
+		if got := x.toolCache(); got != "" {
+			t.Errorf("%s: a jobs.yaml job got a tool cache %q", kind, got)
+		}
 	}
 }

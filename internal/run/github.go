@@ -1,6 +1,7 @@
 package run
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -101,6 +102,31 @@ func (x *execution) githubEnv() map[string]string {
 	}
 	return env
 }
+
+// toolCache is the runner's persistent tool cache for a job compiled from a
+// workflow (A51): a volume of its own for docker, a directory under the
+// agent's state for an executor on the host. A jobs.yaml job gets none, as it
+// gets none of GitHub's other variables.
+func (x *execution) toolCache() string {
+	if x.workflow == nil || x.runner == nil || x.runner.Executor == nil {
+		return ""
+	}
+	switch x.runner.Executor.Name() {
+	case "docker":
+		return toolCacheVolumePrefix + x.runner.Name
+	case "native":
+		if x.o.cfg == nil || x.o.cfg.Paths.Dir == "" {
+			return ""
+		}
+		return filepath.Join(x.o.cfg.Paths.Dir, "toolcache", x.runner.Name)
+	}
+	return ""
+}
+
+// toolCacheVolumePrefix names a docker runner's tool cache volume. Not the
+// cache volumes' prefix, so §14.4's pruning, which is about caches, leaves it
+// alone.
+const toolCacheVolumePrefix = "latem-toolcache-"
 
 // repoVars answers the vars context from this repository's config (A50), or
 // nil without one, which leaves vars empty as it was before.

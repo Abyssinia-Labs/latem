@@ -153,10 +153,11 @@ func lateScope(base expr.Scope, sc registry.StepScope) expr.Scope {
 
 	out.Contexts["latem"] = map[string]any{"action_dir": sc.ActionsDir}
 	out.Contexts["runner"] = map[string]any{
-		"os":   RunnerOS(sc.Runner.OS),
-		"arch": RunnerArch(sc.Runner.Arch),
-		"name": sc.Runner.Name,
-		"temp": sc.TempDir,
+		"os":         RunnerOS(sc.Runner.OS),
+		"arch":       RunnerArch(sc.Runner.Arch),
+		"name":       sc.Runner.Name,
+		"temp":       sc.TempDir,
+		"tool_cache": sc.ToolCache,
 	}
 	return out
 }

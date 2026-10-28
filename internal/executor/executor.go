@@ -108,6 +108,11 @@ type Env interface {
 	// nothing written there reaches `git status` or a collected artifact.
 	TempDir() string
 
+	// ToolCacheDir is the environment-visible path of the runner's tool
+	// cache, exported as $RUNNER_TOOL_CACHE and answered for
+	// `runner.tool_cache` (A51), or "" when the run has none.
+	ToolCacheDir() string
+
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
@@ -145,6 +150,14 @@ type Spec struct {
 	// from inside; one that does not already has it. Empty means no action
 	// was fetched, and nothing need be arranged.
 	ActionsDir string
+
+	// ToolCache is the runner's persistent tool cache (A51): a host directory
+	// for an executor that runs on the host, a volume name for docker. Empty
+	// means the run has none. Not a [CacheMount]: it is never locked, because
+	// the toolkit that writes it extracts to a temporary path and marks a tool
+	// complete only once it is whole, and a lock would serialise every job on
+	// the runner that sets up a tool.
+	ToolCache string
 
 	Caches    []CacheMount
 	Labels    map[string]string // includes latem.run-id, for crash reaping
@@ -202,6 +215,13 @@ const (
 const (
 	WorkspaceVar  = "GITHUB_WORKSPACE"
 	RunnerTempVar = "RUNNER_TEMP"
+)
+
+// ToolCacheVar names the tool cache for a step, and AgentToolsDirVar names it
+// again for the actions that read the older name (A51).
+const (
+	ToolCacheVar     = "RUNNER_TOOL_CACHE"
+	AgentToolsDirVar = "AGENT_TOOLSDIRECTORY"
 )
 
 // DefaultPath is the PATH a step gets when nothing else supplies one — an

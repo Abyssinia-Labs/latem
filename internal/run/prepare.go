@@ -186,6 +186,7 @@ func (x *execution) prepareEnv(ctx context.Context, mounts []executor.CacheMount
 		Secrets:    x.secretNames(),
 		Caches:     mounts,
 		ActionsDir: actionsDir,
+		ToolCache:  x.toolCache(),
 		Labels: map[string]string{
 			"latem.run-id": x.run.ID,
 			"latem.repo":   x.run.Repo,

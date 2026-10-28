@@ -479,6 +479,19 @@ func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec) ([]moun
 		})
 	}
 
+	// The runner's tool cache (A51): a volume of its own, never locked, and —
+	// being a volume — handed to the step user by ensureCacheOwnership with
+	// the caches.
+	if spec.ToolCache != "" {
+		if _, err := e.api.VolumeCreate(ctx, volume.CreateOptions{
+			Name:   spec.ToolCache,
+			Labels: map[string]string{LabelManaged: "true"},
+		}); err != nil {
+			return nil, wrapErr(protocol.ErrCache, err, "tool cache volume %q", spec.ToolCache)
+		}
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: spec.ToolCache, Target: ToolCachePath})
+	}
+
 	for _, c := range spec.Caches {
 		// §14: CacheMount.Source is "the host volume name or directory". An
 		// absolute path is a directory (the tart/native shape, §14.2);

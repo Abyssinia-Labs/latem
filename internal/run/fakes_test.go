@@ -184,6 +184,8 @@ func (e *fakeEnv) ActionsDir() string { return e.actionsDir }
 
 func (e *fakeEnv) TempDir() string { return e.tempDir }
 
+func (e *fakeEnv) ToolCacheDir() string { return e.spec.ToolCache }
+
 func (e *fakeEnv) Close(context.Context) error {
 	e.mu.Lock()
 	e.closes++
@@ -214,6 +216,9 @@ type fakeExecutor struct {
 	prepareErr error
 	prepared   int
 	mu         sync.Mutex
+	// name is what Name reports, "fake" when empty; a test about behaviour
+	// that depends on the executor's kind sets it.
+	name string
 }
 
 func (f *fakeExecutor) Prepare(_ context.Context, spec executor.Spec) (executor.Env, error) {
@@ -230,7 +235,12 @@ func (f *fakeExecutor) Prepare(_ context.Context, spec executor.Spec) (executor.
 	return f.env, nil
 }
 
-func (f *fakeExecutor) Name() string { return "fake" }
+func (f *fakeExecutor) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	return "fake"
+}
 
 // Reap satisfies executor.Executor (amendment A23). The orchestrator does not
 // call it — startup reconciliation belongs to the agent (§6 step 5) — so this

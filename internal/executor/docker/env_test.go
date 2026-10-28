@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -482,5 +483,34 @@ func TestContainerID_IsExposedForReconciliation(t *testing.T) {
 	}
 	if ided.ContainerID() == "" {
 		t.Error("ContainerID is empty")
+	}
+}
+
+// A51: the tool cache is a volume of its own at GitHub's path, exported under
+// both names, and absent when the run has none.
+func TestPrepare_ToolCacheVolume(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir(), ToolCache: "latem-toolcache-linux"})
+	if !slices.Contains(f.createdHosts[0].Mounts, mount.Mount{
+		Type: mount.TypeVolume, Source: "latem-toolcache-linux", Target: ToolCachePath,
+	}) {
+		t.Errorf("mounts = %v, want the tool cache volume", f.createdHosts[0].Mounts)
+	}
+	if env.ToolCacheDir() != ToolCachePath {
+		t.Errorf("ToolCacheDir() = %q", env.ToolCacheDir())
+	}
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "s", Run: "true"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	for _, kv := range []string{"RUNNER_TOOL_CACHE=" + ToolCachePath, "AGENT_TOOLSDIRECTORY=" + ToolCachePath} {
+		if !slices.Contains(f.execOpts[0].Env, kv) {
+			t.Errorf("%s missing from %q", kv, f.execOpts[0].Env)
+		}
+	}
+
+	f2 := &fakeAPI{envFileMissing: true}
+	none := prepared(t, f2, executor.Spec{RunID: "run-2", Workspace: t.TempDir()})
+	if none.ToolCacheDir() != "" {
+		t.Error("a run with no tool cache should report none")
 	}
 }

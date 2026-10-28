@@ -273,6 +273,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		pathFile:    filepath.Join(dir, PathFileName),
 		summaryFile: filepath.Join(dir, SummaryFileName),
 		tempDir:     filepath.Join(dir, TempDirName),
+		toolCache:   spec.ToolCache,
 		grace:       e.grace,
 		drain:       e.drain,
 		carried:     map[string]string{},
@@ -293,6 +294,14 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 	// is the only thing that should read what it put there.
 	if err := os.Mkdir(env.tempDir, 0o700); err != nil {
 		return nil, wrapErr(protocol.ErrExecutor, err, "create $RUNNER_TEMP %s", env.tempDir)
+	}
+	if env.toolCache != "" {
+		if !filepath.IsAbs(env.toolCache) {
+			return nil, codeErr(protocol.ErrExecutor, "tool cache %q is not an absolute path", env.toolCache)
+		}
+		if err := os.MkdirAll(env.toolCache, 0o700); err != nil {
+			return nil, wrapErr(protocol.ErrExecutor, err, "create $RUNNER_TOOL_CACHE %s", env.toolCache)
+		}
 	}
 	return env, nil
 }

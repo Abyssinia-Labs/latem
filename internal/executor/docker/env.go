@@ -80,6 +80,14 @@ func (e *runEnv) ActionsDir() string {
 // TempDir is the container path exported as $RUNNER_TEMP (A50).
 func (e *runEnv) TempDir() string { return TempPath }
 
+// ToolCacheDir is where the tool cache volume is mounted, when there is one.
+func (e *runEnv) ToolCacheDir() string {
+	if e.spec.ToolCache == "" {
+		return ""
+	}
+	return ToolCachePath
+}
+
 // Exec runs one step.
 //
 // # This is finding F1
@@ -124,6 +132,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[executor.SummaryFileVar] = SummaryFilePath
 	env[executor.WorkspaceVar] = WorkspacePath
 	env[executor.RunnerTempVar] = TempPath
+	if e.spec.ToolCache != "" {
+		env[executor.ToolCacheVar] = ToolCachePath
+		env[executor.AgentToolsDirVar] = ToolCachePath
+	}
 	if len(e.pathAdds) > 0 {
 		// In front of whatever PATH the step would otherwise have had: one
 		// set explicitly, else the image's. Setting PATH in the exec's env

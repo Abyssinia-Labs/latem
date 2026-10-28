@@ -39,6 +39,10 @@ const (
 	// the container's own filesystem beside the files above, so it goes
 	// when the container does.
 	TempPath = "/tmp/latem/temp"
+	// ToolCachePath is where the runner's tool cache volume is mounted, and
+	// what $RUNNER_TOOL_CACHE says (A51): GitHub's own path on its Ubuntu
+	// runners, which some tooling assumes.
+	ToolCachePath = "/opt/hostedtoolcache"
 	// ActionsPath is where [Spec.ActionsDir] is mounted, read-only: a fetched
 	// action's files have to be readable from inside a container that has no
 	// other view of the host (A42 phase 5).
