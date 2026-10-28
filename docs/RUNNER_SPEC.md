@@ -2179,3 +2179,48 @@ like any other name.
 the run log now says so for each rather than dropping them silently. An event payload and
 `GITHUB_EVENT_PATH` (a made-up payload would mislead the actions that read it), `GITHUB_TOKEN`,
 `needs`, matrices and reusable workflows wait for workflow runs.
+
+### Amendment from running JavaScript actions
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A51 | §9, §13, §14, A42, A48 | **A `runs.using: node*` action runs. Its `main`, and its `pre` and `post` when it has them, compile into ordinary steps whose `run` latem writes and whose inputs, paths and state arrive as environment variables; a persistent tool cache is the executor's, exported as `RUNNER_TOOL_CACHE`** | `oven-sh/setup-bun` is in 164 of the surveyed fleet's 237 jobs, and with `setup-node`, `wrangler-action` and `paths-filter` it is most of why A50's workflows still could not run unedited. A42 put JavaScript actions in phase 5, which shipped composite actions, the gate and the fetch without them; the remaining question was the runtime, and the answer is that there is nothing to build — the action is a file and `node` is a program, and both are already reachable from a step |
+
+**One step per entry point.** `main` becomes a step that keeps the `uses:` step's id, name and
+condition, so `steps.<id>.outputs` reads what the action wrote to `$GITHUB_OUTPUT` with nothing
+declared — as on GitHub, where a JavaScript action's outputs need no `value:`. Its `run` is
+latem's and constant, `exec node "$GHA_ACTION_DIR/$GHA_ACTION_ENTRY"`; the action's directory
+and entry file are environment values, so INV-3 is untouched by what an action's metadata
+says. The directory is a fetched action's late `latem.action_dir` path (A42 phase 5) or a
+local action's path in the workspace, and `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY` and
+`GITHUB_ACTION_REF` are set beside it. `node` is the one on the step's PATH: the image's in a
+container, the service's natively. The runtime's major version is not enforced; an action
+built for node20 runs on a newer one, as GitHub itself now runs them.
+
+**Inputs.** Each declared input, and each `with:` key, reaches the step as `INPUT_<NAME>` —
+upper-cased with spaces made underscores and hyphens kept, which is GitHub's spelling and what
+`@actions/core` reads. That is the one environment key a step may carry that is not an
+identifier; the registry accepts `INPUT_` followed by letters, digits, `_`, `.` and `-`. A
+default is an expression like any other value, so a secret or a step output in one is late
+(A50). An undeclared `with:` key is passed and noted, as GitHub warns and passes it.
+
+**`pre` and `post`.** `pre` runs at the start of the job, in the order of the steps that
+declared it, under `pre-if` (default `always()`) and the step's own condition. `post` runs at
+the end, in reverse order, under `post-if` (default `always()`) and only if the main step ran —
+its outcome is not `skipped` — which is when GitHub registers a post step at all. State is
+GitHub's: a step writes `name=value` to `$GITHUB_STATE`, a fifth file beside the four, and every
+later step of the same use of the action receives it as `STATE_name`.
+
+**The tool cache.** `setup-node`, `setup-python` and their kind install into `$RUNNER_TOOL_CACHE`
+and expect to find the result there next time. It is a directory per runner that outlives
+runs: on the native executor a directory under the agent's own state, in a container a named
+volume `latem-toolcache-<runner>` mounted at `/opt/hostedtoolcache`, GitHub's path. Two runs on
+one runner writing the same tool rely on the toolkit's own extract-then-mark-complete; a runner
+at concurrency 1, which is every native runner, never has two. `AGENT_TOOLSDIRECTORY` names
+the same directory, for the actions that read that instead.
+
+**Policy is unchanged and now matters.** An action is fetched only when `[actions] allowed`
+names it. A tag is accepted only with `require_pinned = false`, and the commit it resolved to
+is written to the run log, so a moved tag is visible after the fact. A job that runs one needs
+an isolating runner unless `allow_unisolated = true` — which a Mac running native Apple builds
+will set, deciding that the owners in `allowed` are trusted with the agent's user.
