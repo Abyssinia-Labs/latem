@@ -62,6 +62,9 @@ type execution struct {
 	// steps' late bindings. Populated once that channel is wired (A42 phase
 	// 2); until then the compiler refuses steps.* and this stays empty.
 	outputs map[string]map[string]string
+	// results is every completed or skipped step's outcome and conclusion, by
+	// step id, for the steps context (A50).
+	results map[string]registry.StepResult
 
 	teardowns []teardownStep
 }

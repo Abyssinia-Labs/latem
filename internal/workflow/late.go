@@ -74,23 +74,29 @@ func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
 	}
 	out.Contexts["job"] = map[string]any{"status": statusName(sc.Status)}
 
-	steps := make(map[string]any, len(sc.Outputs))
+	// GitHub's steps context: every earlier step with an id, with its outputs,
+	// outcome and conclusion. The outcome is what happened and the conclusion
+	// what counts after continue-on-error (A50); a skipped step is present as
+	// skipped, with no outputs.
+	steps := make(map[string]any, len(sc.Results)+len(sc.Outputs))
+	entry := func(id string) map[string]any {
+		if e, ok := steps[id].(map[string]any); ok {
+			return e
+		}
+		e := map[string]any{"outputs": map[string]any{}, "outcome": "success", "conclusion": "success"}
+		steps[id] = e
+		return e
+	}
+	for id, r := range sc.Results {
+		e := entry(id)
+		e["outcome"], e["conclusion"] = r.Outcome, r.Conclusion
+	}
 	for id, outputs := range sc.Outputs {
 		o := make(map[string]any, len(outputs))
 		for k, v := range outputs {
 			o[k] = v
 		}
-		// GitHub's steps context carries outcome and conclusion alongside
-		// outputs. A step that has outputs in the map ran; it is recorded as
-		// having succeeded, because a failed step ends the run before any
-		// later step's scope is built, unless the later step's condition
-		// asked to run anyway — and in that case the failure is what
-		// job.status reports.
-		steps[id] = map[string]any{
-			"outputs":    o,
-			"outcome":    "success",
-			"conclusion": "success",
-		}
+		entry(id)["outputs"] = o
 	}
 	out.Contexts["steps"] = steps
 

@@ -133,6 +133,10 @@ type Step struct {
 	// jobs.yaml step, which keeps §9's (A50). Excluded from decoding: only the
 	// compiler writes it.
 	Shell string `json:"-"`
+	// ContinueOnError lets the job carry on past this step failing: the step's
+	// outcome is failure and its conclusion success, and the job's status is
+	// unchanged (A50). Excluded from decoding; only the compiler writes it.
+	ContinueOnError bool `json:"-"`
 
 	// Late holds env values that are computed as the step is about to run,
 	// and If is a condition evaluated then. Both are [LateValue]; see that

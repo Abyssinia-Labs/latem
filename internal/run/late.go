@@ -25,6 +25,7 @@ func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
 	return registry.StepScope{
 		Status:     status,
 		Outputs:    x.outputs,
+		Results:    x.results,
 		Runner:     runnerFacts(x.runner),
 		ActionsDir: actions,
 		TempDir:    temp,

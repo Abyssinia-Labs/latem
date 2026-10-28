@@ -265,11 +265,12 @@ type ResolvedStep struct {
 	ID   string
 	Name string
 	Run  string
-	// Shell is carried from [Step.Shell] unchanged (A50).
-	Shell string
-	Env   map[string]string
-	Late  map[string]LateValue
-	If    Condition
+	// Shell and ContinueOnError are carried from [Step] unchanged (A50).
+	Shell           string
+	ContinueOnError bool
+	Env             map[string]string
+	Late            map[string]LateValue
+	If              Condition
 	// Container is set for a container step, in which case Run is empty.
 	Container *ContainerStep
 	// Artifact is set for a step the run loop performs itself (A49).
@@ -361,16 +362,17 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			env[k] = substitute(v, inputs)
 		}
 		steps = append(steps, ResolvedStep{
-			ID:        s.ID,
-			Name:      s.Name,
-			Run:       s.Run,
-			Shell:     s.Shell,
-			Env:       env,
-			Late:      s.Late,
-			If:        s.If,
-			Container: s.Container,
-			Artifact:  s.Artifact,
-			Timeout:   s.Timeout.Duration(),
+			ID:              s.ID,
+			Name:            s.Name,
+			Run:             s.Run,
+			Shell:           s.Shell,
+			ContinueOnError: s.ContinueOnError,
+			Env:             env,
+			Late:            s.Late,
+			If:              s.If,
+			Container:       s.Container,
+			Artifact:        s.Artifact,
+			Timeout:         s.Timeout.Duration(),
 		})
 	}
 

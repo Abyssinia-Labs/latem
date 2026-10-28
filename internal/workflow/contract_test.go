@@ -1,0 +1,168 @@
+package workflow
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// A50: defaults.run.working-directory reaches the workflow's own run steps,
+// a step's own setting wins, and an action's steps are left alone.
+func TestDefaultWorkingDirectory(t *testing.T) {
+	job, err := compileWith(t, `
+defaults:
+  run:
+    working-directory: packages/web
+jobs:
+  b:
+    runs-on: [linux]
+    defaults:
+      run:
+        working-directory: packages/mobile
+    steps:
+      - run: make
+      - run: make
+        working-directory: tools
+      - uses: ./.github/actions/greet
+        with:
+          who: world
+`, mapLoader{".github/actions/greet": greet})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if !strings.HasPrefix(job.Steps[0].Run, "cd 'packages/mobile'\n") {
+		t.Errorf("the job's default should win over the workflow's: %q", job.Steps[0].Run)
+	}
+	if !strings.HasPrefix(job.Steps[1].Run, "cd 'tools'\n") {
+		t.Errorf("the step's own working-directory should win: %q", job.Steps[1].Run)
+	}
+	for _, st := range job.Steps[2:] {
+		if strings.HasPrefix(st.Run, "cd ") {
+			t.Errorf("a job default reached into an action's step: %q", st.Run)
+		}
+	}
+}
+
+// A50: ${{ env.X }} reads the workflow's and the job's env, the step's own
+// over them, and a value only known when the step runs is not guessed at.
+func TestEnvContext(t *testing.T) {
+	w := parse(t, `
+env:
+  STAGE: staging
+  WHERE: workflow
+jobs:
+  b:
+    runs-on: [linux]
+    env:
+      WHERE: job
+      SHA: ${{ github.sha }}
+    steps:
+      - id: first
+        run: echo first
+      - run: echo "${{ env.STAGE }} ${{ env.WHERE }} ${{ env.SHA }}"
+      - run: echo "${{ env.WHERE }}"
+        env:
+          WHERE: step
+      - run: echo "[${{ env.LATER }}]"
+        env:
+          LATER: ${{ steps.first.outputs.x }}
+`)
+	job, err := Compile(t.Context(), w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	s := job.Steps[1]
+	if got := []string{s.Env["GHA_EXPR_1"], s.Env["GHA_EXPR_2"], s.Env["GHA_EXPR_3"]}; strings.Join(got, "|") != "staging|job|deadbeef" {
+		t.Errorf("env context = %q, want staging|job|deadbeef", got)
+	}
+	if got := job.Steps[2].Env["GHA_EXPR_1"]; got != "step" {
+		t.Errorf("a step's own env should win in its expressions: %q", got)
+	}
+	if got := job.Steps[3].Env["GHA_EXPR_1"]; got != "" {
+		t.Errorf("a late env value should not be guessed at compile time: %q", got)
+	}
+	if _, late := job.Steps[3].Late["LATER"]; !late {
+		t.Error("the late value itself should still reach the step")
+	}
+}
+
+// A50: GitHub's 360 minutes unless the job says otherwise.
+func TestWorkflowJobTimeout(t *testing.T) {
+	w := parse(t, `
+jobs:
+  plain:
+    runs-on: [linux]
+    steps:
+      - run: make
+  short:
+    runs-on: [linux]
+    timeout-minutes: 15
+    steps:
+      - run: make
+`)
+	for job, want := range map[string]time.Duration{"plain": 360 * time.Minute, "short": 15 * time.Minute} {
+		j, err := Compile(t.Context(), w, job, testScope())
+		if err != nil {
+			t.Fatalf("Compile %s: %v", job, err)
+		}
+		if got := j.Timeout.Duration(); got != want {
+			t.Errorf("%s: timeout = %s, want %s", job, got, want)
+		}
+	}
+}
+
+// A50: a step's continue-on-error is a boolean, its string spelling, or an
+// expression answered now; one only answerable when the step runs is refused.
+func TestStepContinueOnError(t *testing.T) {
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - run: a
+        continue-on-error: true
+      - run: b
+        continue-on-error: "false"
+      - run: c
+        continue-on-error: ${{ github.event_name == 'push' }}
+      - run: d
+`)
+	job, err := Compile(t.Context(), w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	want := []bool{true, false, true, false}
+	for i, st := range job.Steps {
+		if st.ContinueOnError != want[i] {
+			t.Errorf("step %d: continue-on-error = %v, want %v", i+1, st.ContinueOnError, want[i])
+		}
+	}
+
+	w = parse(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - id: x
+        run: a
+      - run: b
+        continue-on-error: ${{ steps.x.outputs.flaky }}
+`)
+	if _, err := Compile(t.Context(), w, "b", testScope()); err == nil ||
+		!strings.Contains(err.Error(), "only known when the step runs") {
+		t.Errorf("a late continue-on-error should be refused, got %v", err)
+	}
+
+	w = parse(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    continue-on-error: true
+    steps:
+      - run: a
+`)
+	if _, err := Compile(t.Context(), w, "b", testScope()); err == nil ||
+		!strings.Contains(err.Error(), "continue-on-error: on a job") {
+		t.Errorf("a job's continue-on-error is still refused, got %v", err)
+	}
+}

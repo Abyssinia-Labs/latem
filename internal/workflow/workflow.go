@@ -123,6 +123,10 @@ type Step struct {
 	// artifact is set by the expander for upload-artifact and
 	// download-artifact (A49). Unexported for the same reason.
 	artifact *registry.ArtifactStep
+	// fromAction marks a step inlined from a composite action. A job's
+	// `defaults.run` does not reach into an action's steps on GitHub, and does
+	// not here (A50).
+	fromAction bool
 }
 
 // StringList accepts either a scalar or a sequence, which is how `runs-on` and

@@ -105,6 +105,12 @@ func CompileWith(
 		}
 	}
 
+	// A50: the env context holds the workflow's and the job's env:, which is
+	// what GitHub evaluates ${{ env.X }} against; a step's own is added per
+	// step. Before expansion, so an action's with: sees it too.
+	jobEnv := envContext(sc, nil, w.Env, declared.Env)
+	sc = withEnv(sc, jobEnv)
+
 	// A44: local and docker:// actions become steps before anything else
 	// looks at the job, so that the refusals, the hoisting and the late
 	// bindings below all see only kinds of step they already understand. The
@@ -147,18 +153,26 @@ func CompileWith(
 	for _, d := range x.caches {
 		out.Caches = append(out.Caches, d.Name)
 	}
+	// GitHub's default rather than §9's 30 minutes (A50): a workflow that
+	// relies on its jobs being allowed six hours never had to say so.
+	out.Timeout = protocol.Duration(DefaultJobTimeout)
 	if j.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*j.TimeoutMins) * float64(minute))
 	}
 
-	shell := defaultShell(w.Defaults, j.Defaults)
+	d := jobDefaults{
+		env:        baseEnv,
+		envContext: jobEnv,
+		shell:      defaultShell(w.Defaults, j.Defaults),
+		workingDir: defaultWorkingDirectory(w.Defaults, j.Defaults),
+	}
 
 	for i, st := range j.Steps {
 		where := fmt.Sprintf("%s: job %q step %d", w.Path, jobName, i+1)
 		if st.Name != "" {
 			where = fmt.Sprintf("%s: job %q step %q", w.Path, jobName, st.Name)
 		}
-		compiled, skip, err := compileStep(st, where, baseEnv, shell, sc)
+		compiled, skip, err := compileStep(st, where, d, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -175,6 +189,9 @@ func CompileWith(
 }
 
 const minute = 60 * 1_000_000_000 // protocol.Duration is nanoseconds
+
+// DefaultJobTimeout is GitHub's timeout-minutes default, 360 (A50).
+const DefaultJobTimeout = 360 * minute
 
 // unsupported refuses every construct this phase does not implement, by name.
 //
@@ -204,10 +221,10 @@ func (j *Job) unsupported(file, name string) error {
 		add("outputs:", "job outputs are consumed by needs:, which latem has no equivalent for")
 	}
 	if len(j.ContinueOnError) > 0 {
-		add("continue-on-error:", "a step either fails the run or it does not")
+		add("continue-on-error: on a job", "it decides a workflow run's result, and latem runs one job per run (N2, A50)")
 	}
 	if j.If != "" {
-		add("if: on a job", "a run targets one job; gate it with the hook's ref pattern instead")
+		add("if: on a job", "it decides the job's place in a workflow run, and latem runs one job per run (N2, A50)")
 	}
 	for i, st := range j.Steps {
 		if st.Uses != "" {
@@ -219,9 +236,6 @@ func (j *Job) unsupported(file, name string) error {
 		}
 		if st.Run == "" && st.Uses == "" && st.container == nil && st.artifact == nil {
 			found = append(found, fmt.Sprintf("  step %d — has neither run: nor uses:", i+1))
-		}
-		if len(st.ContinueOnError) > 0 {
-			found = append(found, fmt.Sprintf("  step %d continue-on-error: — not implemented", i+1))
 		}
 	}
 	if len(found) == 0 {
@@ -270,6 +284,25 @@ func compileLabels(runsOn StringList, file, job string) ([]string, error) {
 	return out, nil
 }
 
+// jobDefaults is what every step of a job starts from.
+type jobDefaults struct {
+	env        map[string]string // the workflow's env: under the job's
+	envContext map[string]any    // the same, answered, for ${{ env.X }}
+	shell      string
+	workingDir string
+}
+
+func defaultWorkingDirectory(wf, job *Defaults) string {
+	dir := ""
+	if wf != nil && wf.Run != nil && wf.Run.WorkingDirectory != "" {
+		dir = wf.Run.WorkingDirectory
+	}
+	if job != nil && job.Run != nil && job.Run.WorkingDirectory != "" {
+		dir = job.Run.WorkingDirectory
+	}
+	return dir
+}
+
 func defaultShell(wf, job *Defaults) string {
 	shell := ""
 	if wf != nil && wf.Run != nil && wf.Run.Shell != "" {
@@ -299,7 +332,16 @@ func mergeEnv(base, over map[string]string) map[string]string {
 // the step from the compiled job — there is nothing to gain from carrying a
 // step that will not run. A condition that needs the run loop becomes the
 // step's If, evaluated then.
-func compileStep(st Step, where string, baseEnv map[string]string, shell string, sc expr.Scope) (registry.Step, bool, error) {
+func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.Step, bool, error) {
+	baseEnv, shell := d.env, d.shell
+	// The step's own env: joins the env context for its own expressions (A50).
+	sc = withEnv(sc, envContext(sc, d.envContext, st.Env))
+
+	continueOnError, err := compileContinueOnError(st.ContinueOnError, sc)
+	if err != nil {
+		return registry.Step{}, false, badRegistry("%s: continue-on-error: %v", where, err)
+	}
+
 	var cond registry.Condition
 	if st.If != "" {
 		prog, err := conditionProgram(st.If)
@@ -327,7 +369,7 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 	// A step the run loop performs itself has no process, so it has no shell,
 	// environment or working directory — only its condition and its budget.
 	if st.artifact != nil {
-		out := registry.Step{ID: st.ID, Name: st.Name, If: cond, Artifact: st.artifact}
+		out := registry.Step{ID: st.ID, Name: st.Name, If: cond, Artifact: st.artifact, ContinueOnError: continueOnError}
 		if st.TimeoutMins != nil {
 			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 		}
@@ -383,7 +425,7 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 				return registry.Step{}, false, badRegistry("%s: env.%s: %v", where, k, err)
 			}
 		}
-		out := registry.Step{ID: st.ID, Name: st.Name, Env: env, If: cond, Container: c}
+		out := registry.Step{ID: st.ID, Name: st.Name, Env: env, If: cond, Container: c, ContinueOnError: continueOnError}
 		if st.TimeoutMins != nil {
 			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 		}
@@ -414,8 +456,14 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		late[k] = v
 	}
 
-	if st.WorkingDirectory != "" {
-		dir, err := expr.EvalString(st.WorkingDirectory, sc)
+	// A job's defaults.run.working-directory, unless the step names its own
+	// or came from an action, which GitHub's defaults do not reach (A50).
+	workingDir := st.WorkingDirectory
+	if workingDir == "" && !st.fromAction {
+		workingDir = d.workingDir
+	}
+	if workingDir != "" {
+		dir, err := expr.EvalString(workingDir, sc)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: working-directory: %v", where, err)
 		}
@@ -431,7 +479,10 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		}
 	}
 
-	out := registry.Step{ID: st.ID, Name: st.Name, Run: run, Shell: string(githubShell(shell)), Env: env, If: cond}
+	out := registry.Step{
+		ID: st.ID, Name: st.Name, Run: run, Shell: string(githubShell(shell)), Env: env, If: cond,
+		ContinueOnError: continueOnError,
+	}
 	if st.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 	}

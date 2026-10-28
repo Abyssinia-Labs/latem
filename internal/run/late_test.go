@@ -322,3 +322,65 @@ jobs:
 		t.Errorf("a later step read %q from the restored artifact", restored)
 	}
 }
+
+// A50: continue-on-error lets the job carry on as though the step had not
+// failed, and the steps context tells the truth about what happened — the
+// failure's outcome, continue-on-error's conclusion, a skipped step skipped.
+func TestExecute_ContinueOnErrorAndTheStepsContext(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.env.exec = func(_ context.Context, step executor.Step, _, _ io.Writer) (int, error) {
+		if step.Name == "flaky" || step.Name == "broken" {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	o := h.build()
+
+	req := h.request("test")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", `
+on: [push]
+jobs:
+  test:
+    runs-on: [linux]
+    steps:
+      - id: flaky
+        name: flaky
+        run: exit 1
+        continue-on-error: true
+      - id: cleanup
+        name: cleanup
+        if: failure()
+        run: never
+      - name: report
+        run: echo ${{ steps.flaky.outcome }} ${{ steps.flaky.conclusion }} ${{ steps.cleanup.outcome }}
+      - id: broken
+        name: broken
+        run: exit 1
+      - name: after
+        if: always()
+        run: echo ${{ steps.broken.outcome }} ${{ steps.broken.conclusion }}
+`)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	// broken has no continue-on-error, so it is what the run reports.
+	if res.State != protocol.StateFailed || res.ErrorCode != protocol.ErrStep {
+		t.Fatalf("got %s/%s, want failed/E_STEP from the step without continue-on-error", res.State, res.ErrorCode)
+	}
+	steps := h.env.executed()
+	if got := executedNames(steps); !slices.Equal(got, []string{"flaky", "report", "broken", "after"}) {
+		t.Fatalf("executed %v — failure() should stay false after a forgiven step", got)
+	}
+	report := steps[1].Env
+	if got := report["GHA_EXPR_1"] + "|" + report["GHA_EXPR_2"] + "|" + report["GHA_EXPR_3"]; got != "failure|success|skipped" {
+		t.Errorf("steps context = %q, want failure|success|skipped", got)
+	}
+	after := steps[3].Env
+	if got := after["GHA_EXPR_1"] + "|" + after["GHA_EXPR_2"]; got != "failure|failure" {
+		t.Errorf("an unforgiven failure = %q, want failure|failure", got)
+	}
+}

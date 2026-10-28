@@ -65,6 +65,10 @@ type StepScope struct {
 	Status StepStatus
 	// Outputs holds every earlier step's outputs, by step id.
 	Outputs map[string]map[string]string
+	// Results holds every earlier step's outcome and conclusion, by step id,
+	// for the steps context (A50). A step with an id appears here whether or
+	// not it wrote outputs, and a skipped one appears as skipped.
+	Results map[string]StepResult
 	// Runner describes the machine the run landed on. Chosen at gate 13, which
 	// is after the registry was compiled at gate 11, so it is late by
 	// construction rather than by nature.
@@ -86,6 +90,14 @@ const (
 	StatusFailure
 	StatusCancelled
 )
+
+// StepResult is GitHub's pair for one step: outcome is what happened, and
+// conclusion is what counts once continue-on-error has had its say. Each is
+// "success", "failure", "cancelled" or "skipped".
+type StepResult struct {
+	Outcome    string
+	Conclusion string
+}
 
 // RunnerFacts is what an expression may learn about the runner.
 type RunnerFacts struct {

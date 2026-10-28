@@ -307,6 +307,7 @@ func (x *expander) inlineComposite(ctx context.Context, outer Step, action *Acti
 			st.ID = ns + "/" + st.ID
 		}
 		st.Name = inlinedName(outer, st, i)
+		st.fromAction = true
 		st.Env = mergeEnv(outer.Env, st.Env)
 		if st.WorkingDirectory == "" {
 			st.WorkingDirectory = outer.WorkingDirectory
