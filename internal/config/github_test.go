@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGitHubRepository(t *testing.T) {
 	cases := []struct {
@@ -44,6 +47,35 @@ func TestGitHubSlugIsValidated(t *testing.T) {
 	} {
 		if got := githubSlugPattern.MatchString(slug); got != valid {
 			t.Errorf("%q: valid = %v, want %v", slug, got, valid)
+		}
+	}
+}
+
+func TestLabelAliases(t *testing.T) {
+	opts := Options{Home: "/nonexistent-home", Getenv: func(string) string { return "" }, LookupIP: testLookupIP}
+
+	cfg, err := Parse([]byte(minimalValid+`
+[label_aliases]
+"blacksmith-4vcpu-ubuntu-2404" = ["linux"]
+"blacksmith-6vcpu-macos-26"    = ["macos", "xcode"]
+`), opts)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.LabelAliases["blacksmith-6vcpu-macos-26"]; len(got) != 2 || got[1] != "xcode" {
+		t.Errorf("aliases = %v", cfg.LabelAliases)
+	}
+
+	for name, c := range map[string]struct{ toml, want string }{
+		"chained":     {`a = ["b"]` + "\n" + `b = ["linux"]`, `"b" is itself an alias`},
+		"empty":       {`a = []`, "maps onto no labels"},
+		"uppercase":   {`Ubuntu = ["linux"]`, "an alias must match"},
+		"bad label":   {`a = ["Linux"]`, `label "Linux" must match`},
+		"self-hosted": {`self-hosted = ["linux"]`, "can never match"},
+	} {
+		_, err := Parse([]byte(minimalValid+"\n[label_aliases]\n"+c.toml+"\n"), opts)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want an error containing %q", name, err, c.want)
 		}
 	}
 }

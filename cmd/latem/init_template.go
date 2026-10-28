@@ -115,6 +115,15 @@ concurrency = 2
 #   allow_unisolated = false       # default: such a job needs a docker runner,
 #                                  # because native runs steps as this user
 
+# --- runs-on aliases ------------------------------------------------------
+#
+# A workflow's runs-on is matched against the labels above. GitHub's hosted
+# labels (ubuntu-latest, macos-latest and their versions) already map onto
+# linux and macos; name anything else a workflow uses here.
+#
+# [label_aliases]
+#   "blacksmith-4vcpu-ubuntu-2404" = ["linux"]
+
 # --- optional ------------------------------------------------------------
 #
 # [broker.remote]

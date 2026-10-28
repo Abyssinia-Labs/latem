@@ -44,6 +44,7 @@ func validate(cfg *Config, md *toml.MetaData, opts Options) []error {
 	problems = append(problems, validateRepos(cfg)...)
 	problems = append(problems, validateRunners(cfg)...)
 	problems = append(problems, validateSecrets(cfg)...)
+	problems = append(problems, validateLabelAliases(cfg)...)
 	if !opts.skipFilesystem {
 		problems = append(problems, validateFilesystem(cfg)...)
 	}
@@ -646,6 +647,34 @@ func validateLabels(what string, labels []string) []error {
 			problems = append(problems, fmt.Errorf("%s: label %q appears twice", what, l))
 		}
 		seen[l] = true
+	}
+	return problems
+}
+
+// validateLabelAliases checks [Config.LabelAliases] (A50). An alias maps onto
+// labels, never onto another alias: one level is what the compiler applies,
+// and a chain would mean a label whose meaning depends on the order things
+// were read.
+func validateLabelAliases(cfg *Config) []error {
+	var problems []error
+	for _, alias := range sortedKeys(cfg.LabelAliases) {
+		what := fmt.Sprintf("label_aliases.%s", alias)
+		if !labelPattern.MatchString(alias) {
+			problems = append(problems, fmt.Errorf("%s: an alias must match %s, lowercase, as runs-on is compared lowercased", what, labelPattern))
+		}
+		if alias == "self-hosted" {
+			problems = append(problems, fmt.Errorf("%s: self-hosted is dropped from runs-on before aliases are applied, so this can never match", what))
+		}
+		labels := cfg.LabelAliases[alias]
+		if len(labels) == 0 {
+			problems = append(problems, fmt.Errorf("%s: maps onto no labels; a job naming it would match every runner", what))
+		}
+		problems = append(problems, validateLabels(what, labels)...)
+		for _, l := range labels {
+			if _, chained := cfg.LabelAliases[l]; chained && l != alias {
+				problems = append(problems, fmt.Errorf("%s: %q is itself an alias; name the labels it stands for", what, l))
+			}
+		}
 	}
 	return problems
 }

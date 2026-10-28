@@ -170,6 +170,11 @@ type Config struct {
 	Runners       []*Runner        `toml:"runner"`
 	Secrets       Secrets          `toml:"secrets"`
 	Actions       Actions          `toml:"actions"`
+	// LabelAliases maps a workflow's runs-on label onto this machine's runner
+	// labels (A50): `"blacksmith-4vcpu-ubuntu-2404" = ["linux"]`. GitHub's own
+	// hosted labels — ubuntu-latest, macos-latest and their versions — map
+	// without an entry; one here overrides that.
+	LabelAliases map[string][]string `toml:"label_aliases"`
 
 	// Paths is derived from the config directory, never decoded. It is the
 	// single answer to "where does this agent keep its state", so relocating

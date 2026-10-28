@@ -91,6 +91,10 @@ type Options struct {
 	// Fetcher resolves and fetches an allowed remote action. Nil refuses one
 	// by name rather than reaching for a cache that is not there.
 	Fetcher RemoteFetcher
+	// LabelAliases is the machine's [label_aliases] (A50): a runs-on label
+	// found here is replaced by the labels it names, before GitHub's hosted
+	// labels are mapped. See [compileLabels].
+	LabelAliases map[string][]string
 }
 
 // CompileWith is [Compile] against a machine's actions and its policy.
@@ -134,7 +138,7 @@ func CompileWith(
 	// applied per step below.
 	baseEnv := mergeEnv(w.Env, j.Env)
 
-	labels, err := compileLabels(j.RunsOn, w.Path, jobName)
+	labels, err := compileLabels(j.RunsOn, w.Path, jobName, opts.LabelAliases)
 	if err != nil {
 		return nil, err
 	}
@@ -253,11 +257,24 @@ func (j *Job) unsupported(file, name string) error {
 // that still does not fit the pattern is refused here rather than failing to
 // match anything later, which would present as "no runner" and send the
 // operator looking at their config.
-func compileLabels(runsOn StringList, file, job string) ([]string, error) {
+//
+// Since A50 a label is first looked up in the machine's aliases and then in
+// GitHub's hosted labels, and replaced by what it stands for: `ubuntu-latest`
+// is `linux` on a machine you own, and a vendor's label is whatever the
+// operator says it is. A Windows label is refused by name, because no latem
+// runner can be one (A47).
+func compileLabels(runsOn StringList, file, job string, aliases map[string][]string) ([]string, error) {
 	if len(runsOn) == 0 {
 		return nil, badRegistry("%s: job %q has no runs-on", file, job)
 	}
 	out := make([]string, 0, len(runsOn))
+	seen := map[string]bool{}
+	add := func(l string) {
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
 	for _, raw := range runsOn {
 		l := strings.ToLower(strings.TrimSpace(raw))
 		if expr.Has(l) {
@@ -271,10 +288,26 @@ func compileLabels(runsOn StringList, file, job string) ([]string, error) {
 		if l == "self-hosted" {
 			continue
 		}
+		if mapped, ok := aliases[l]; ok {
+			for _, m := range mapped {
+				add(m)
+			}
+			continue
+		}
+		if strings.HasPrefix(l, "windows") {
+			return nil, badRegistry(
+				"%s: job %q runs on %q, and no latem runner can be Windows (A47)", file, job, raw)
+		}
+		if mapped := hostedLabel(l); mapped != nil {
+			for _, m := range mapped {
+				add(m)
+			}
+			continue
+		}
 		if !labelPattern.MatchString(l) {
 			return nil, badRegistry("%s: job %q: runs-on label %q must match %s", file, job, raw, labelPattern)
 		}
-		out = append(out, l)
+		add(l)
 	}
 	if len(out) == 0 {
 		return nil, badRegistry(
@@ -282,6 +315,29 @@ func compileLabels(runsOn StringList, file, job string) ([]string, error) {
 				"name the labels that distinguish the machine you want", file, job)
 	}
 	return out, nil
+}
+
+var (
+	ubuntuLabel    = regexp.MustCompile(`^ubuntu-(latest|[0-9]+\.[0-9]+)$`)
+	ubuntuArmLabel = regexp.MustCompile(`^ubuntu-(latest|[0-9]+\.[0-9]+)-arm$`)
+	macosLabel     = regexp.MustCompile(`^macos-(latest|[0-9]+)(-x?large)?$`)
+)
+
+// hostedLabel maps one of GitHub's hosted-runner labels onto the labels a
+// machine you own carries for the same platform, or nil when l is not one
+// (A50). The version in the label is not kept: a machine is whatever release
+// it runs, and that is the operator's to say, through an alias, if a job has
+// to care.
+func hostedLabel(l string) []string {
+	switch {
+	case ubuntuLabel.MatchString(l):
+		return []string{"linux"}
+	case ubuntuArmLabel.MatchString(l):
+		return []string{"linux", "arm64"}
+	case macosLabel.MatchString(l):
+		return []string{"macos"}
+	}
+	return nil
 }
 
 // jobDefaults is what every step of a job starts from.

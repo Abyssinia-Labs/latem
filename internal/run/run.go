@@ -477,6 +477,14 @@ func truncate(s string, max int) string {
 // reload (§8) takes effect on the next build instead of on the next restart —
 // an operator who has just narrowed an allowlist because of something they
 // read should not have to remember that.
+// labelAliases is the machine's [label_aliases] (A50), nil without a config.
+func (o *Orchestrator) labelAliases() map[string][]string {
+	if o.cfg == nil {
+		return nil
+	}
+	return o.cfg.LabelAliases
+}
+
 func (o *Orchestrator) actionPolicy() actions.Policy {
 	if o.cfg == nil {
 		return actions.DefaultPolicy()

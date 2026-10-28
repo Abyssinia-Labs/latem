@@ -166,3 +166,40 @@ jobs:
 		t.Errorf("a job's continue-on-error is still refused, got %v", err)
 	}
 }
+
+// A50: runs-on goes through the machine's aliases, then GitHub's hosted
+// labels; a Windows label is refused by name.
+func TestRunsOnAliases(t *testing.T) {
+	aliases := map[string][]string{
+		"blacksmith-4vcpu-ubuntu-2404": {"linux"},
+		"macos-latest":                 {"macos", "xcode"}, // overrides the built-in
+	}
+	cases := map[string]string{
+		"ubuntu-latest":                          "linux",
+		"ubuntu-24.04":                           "linux",
+		"ubuntu-24.04-arm":                       "linux,arm64",
+		"macos-15":                               "macos",
+		"macos-14-xlarge":                        "macos",
+		"macos-latest":                           "macos,xcode",
+		"blacksmith-4vcpu-ubuntu-2404":           "linux",
+		"[self-hosted, ubuntu-latest, linux]":    "linux",
+		"[blacksmith-4vcpu-ubuntu-2404, docker]": "linux,docker",
+		"[macos, arm64]":                         "macos,arm64",
+	}
+	for runsOn, want := range cases {
+		w := parse(t, "jobs:\n  b:\n    runs-on: "+runsOn+"\n    steps:\n      - run: make\n")
+		job, err := CompileWith(t.Context(), w, "b", testScope(), Options{LabelAliases: aliases})
+		if err != nil {
+			t.Errorf("%s: %v", runsOn, err)
+			continue
+		}
+		if got := strings.Join(job.RunsOn, ","); got != want {
+			t.Errorf("runs-on %s compiled to %q, want %q", runsOn, got, want)
+		}
+	}
+
+	w := parse(t, "jobs:\n  b:\n    runs-on: windows-latest\n    steps:\n      - run: make\n")
+	if _, err := Compile(t.Context(), w, "b", testScope()); err == nil || !strings.Contains(err.Error(), "Windows") {
+		t.Errorf("windows-latest should be refused by name, got %v", err)
+	}
+}
