@@ -57,7 +57,17 @@ var (
 	cacheNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	// labelPattern shapes runs_on entries and runner labels.
 	labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	// actionInputPattern is the one environment key that is not an
+	// identifier: an action's input as @actions/core reads it, upper-cased
+	// with hyphens kept — INPUT_BUN-VERSION-FILE (A51).
+	actionInputPattern = regexp.MustCompile(`^INPUT_[A-Za-z0-9_.-]+$`)
 )
+
+// validEnvKey reports whether k may name a step's environment variable: an
+// identifier, or an action input (A51).
+func validEnvKey(k string) bool {
+	return identPattern.MatchString(k) || actionInputPattern.MatchString(k)
+}
 
 // Registry is a parsed and validated jobs.yaml.
 type Registry struct {
@@ -391,7 +401,7 @@ func (s Step) validate(inputs map[string]*Input) []error {
 	}
 
 	for _, k := range sortedKeys(s.Env) {
-		if !identPattern.MatchString(k) {
+		if !validEnvKey(k) {
 			add("env: key %q must match %s", k, identPattern)
 		}
 		if strings.HasPrefix(k, "LATEM_") {

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -72,14 +73,14 @@ type ActionRuns struct {
 	Args       []string          `json:"args,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 
-	// Modelled so that strict decoding accepts a real action.yml, and refused
-	// by name in [Action.kind]: JavaScript actions and the pre/post hooks are
-	// phase 5.
-	Main           string `json:"main,omitempty"`
-	Pre            string `json:"pre,omitempty"`
-	Post           string `json:"post,omitempty"`
-	PreIf          string `json:"pre-if,omitempty"`
-	PostIf         string `json:"post-if,omitempty"`
+	// node (A51): main is required, pre and post optional, each a file in
+	// the action's directory, each under its own condition.
+	Main   string `json:"main,omitempty"`
+	Pre    string `json:"pre,omitempty"`
+	Post   string `json:"post,omitempty"`
+	PreIf  string `json:"pre-if,omitempty"`
+	PostIf string `json:"post-if,omitempty"`
+	// docker's own hooks, refused by name in [Action.kind].
 	PreEntrypoint  string `json:"pre-entrypoint,omitempty"`
 	PostEntrypoint string `json:"post-entrypoint,omitempty"`
 }
@@ -89,7 +90,12 @@ type actionKind int
 const (
 	actionComposite actionKind = iota
 	actionDocker
+	actionNode // a JavaScript action (A51)
 )
+
+// nodeUsing is what `runs.using` says for a JavaScript action: node and a
+// major version.
+var nodeUsing = regexp.MustCompile(`^node[0-9]+$`)
 
 const dockerScheme = "docker://"
 
@@ -109,14 +115,38 @@ func (a *Action) kind() (actionKind, error) {
 					"and building one from a Dockerfile is a separate surface (A44, phase 5)", a.Path, a.Runs.Image)
 		}
 		return actionDocker, nil
-	case strings.HasPrefix(using, "node"):
-		return 0, fmt.Errorf(
-			"%s: a JavaScript action (%s) runs third-party code as the agent user, which is A42 phase 5; "+
-				"a composite or docker:// action is what runs today", a.Path, a.Runs.Using)
+	case nodeUsing.MatchString(using):
+		if strings.TrimSpace(a.Runs.Main) == "" {
+			return 0, fmt.Errorf("%s: a JavaScript action (%s) needs runs.main", a.Path, a.Runs.Using)
+		}
+		for field, file := range map[string]string{"main": a.Runs.Main, "pre": a.Runs.Pre, "post": a.Runs.Post} {
+			if err := entryFile(file); err != nil {
+				return 0, fmt.Errorf("%s: runs.%s: %w", a.Path, field, err)
+			}
+		}
+		return actionNode, nil
 	case using == "":
 		return 0, fmt.Errorf("%s: runs.using is required", a.Path)
 	}
-	return 0, fmt.Errorf("%s: runs.using %q is not one of composite, docker", a.Path, a.Runs.Using)
+	return 0, fmt.Errorf("%s: runs.using %q is not one of composite, docker, node<version>", a.Path, a.Runs.Using)
+}
+
+// entryFile checks a JavaScript action's main, pre or post: a relative path
+// inside the action's own directory. Empty is fine; the field is optional
+// except for main, which kind checks first.
+//
+// The file reaches a step as an environment value, never as command text, so
+// this is not what keeps INV-3; it is what keeps an action from naming a
+// script outside its own tree for node to run.
+func entryFile(f string) error {
+	if f == "" {
+		return nil
+	}
+	clean := path.Clean(f)
+	if path.IsAbs(f) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("%q must be a path inside the action", f)
+	}
+	return nil
 }
 
 // ActionLoader reads a local action's metadata at the resolved commit.

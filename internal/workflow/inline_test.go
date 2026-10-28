@@ -208,7 +208,9 @@ func TestCompositeRefusals(t *testing.T) {
 			"runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ${{ inputs.ghost }}\n", `declares no input "ghost"`},
 		"a run step without a shell": {"", "line",
 			"runs:\n  using: composite\n  steps:\n    - run: echo hi\n", "must name its shell"},
-		"a javascript action": {"", "line", "runs:\n  using: node20\n  main: index.js\n", "phase 5"},
+		"a javascript action with no main": {"", "line", "runs:\n  using: node20\n", "needs runs.main"},
+		"a javascript action outside itself": {"", "line",
+			"runs:\n  using: node20\n  main: ../../steal.js\n", "must be a path inside the action"},
 		"an action that uses itself": {"", "line",
 			"runs:\n  using: composite\n  steps:\n    - uses: ./a\n", "uses itself"},
 		"a dockerfile image": {"", "line", "runs:\n  using: docker\n  image: Dockerfile\n", "would have to be built"},
@@ -407,5 +409,40 @@ func TestResolveReadsLocalActionsFromTheCheckout(t *testing.T) {
 	}
 	if _, err := (rootLoader{}).Load("./../x"); err == nil {
 		t.Error("a path that climbs out of the repository is refused before any read")
+	}
+}
+
+// A51: a local JavaScript action is repository code: its directory is a path
+// in the workspace, known now, and it asks for no isolation.
+func TestLocalJavaScriptAction(t *testing.T) {
+	job, err := compileWith(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - uses: ./.github/actions/hello
+        id: hi
+        with:
+          who: world
+`, mapLoader{".github/actions/hello": "inputs:\n  who:\n    required: true\nruns:\n  using: node24\n  main: index.js\n"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	mustValidate(t, job)
+	st := job.Steps[0]
+	if st.Env["GHA_ACTION_DIR"] != ".github/actions/hello" || st.Env["INPUT_WHO"] != "world" {
+		t.Errorf("env = %v", st.Env)
+	}
+	if _, set := st.Env["GITHUB_ACTION_REPOSITORY"]; set {
+		t.Error("a local action has no action repository")
+	}
+	if job.RequiresIsolation {
+		t.Error("a local action is the repository's own code")
+	}
+
+	_, err = compileWith(t, "jobs:\n  b:\n    runs-on: [linux]\n    steps:\n      - uses: ./.github/actions/hello\n",
+		mapLoader{".github/actions/hello": "inputs:\n  who:\n    required: true\nruns:\n  using: node24\n  main: index.js\n"})
+	if err == nil || !strings.Contains(err.Error(), `requires the input "who"`) {
+		t.Errorf("a missing required input should be refused, got %v", err)
 	}
 }

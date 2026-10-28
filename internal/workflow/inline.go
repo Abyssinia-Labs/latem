@@ -61,6 +61,9 @@ type expander struct {
 	// serves every depth.
 	outputs map[string]map[string]*expr.Program
 	synth   int
+	// notes are what expansion learned that the run log should say: the
+	// commit a tag resolved to, an input an action did not declare (A51).
+	notes []string
 }
 
 func newExpander(loader ActionLoader, where string) *expander {
@@ -116,6 +119,9 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 		kind, err := action.kind()
 		if err != nil {
 			return nil, err
+		}
+		if kind == actionNode {
+			return x.nodeSteps(st, action, nodeOrigin{})
 		}
 		if kind == actionDocker {
 			rewrite, err := x.actionRewrite(st, action, "")
@@ -198,6 +204,11 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 		return nil, err
 	}
 	x.usedRemote = true
+	if !ref.Pinned() {
+		// A tag can be moved by whoever owns it; the commit it named for this
+		// run is what anyone reading the log later needs (A51).
+		x.notes = append(x.notes, fmt.Sprintf("uses: %s resolved to %s", st.Uses, got.SHA))
+	}
 
 	action, err := dirLoader{dir: got.Dir, rel: got.Rel}.Load(st.Uses)
 	if err != nil {
@@ -206,6 +217,9 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 	kind, err := action.kind()
 	if err != nil {
 		return nil, err
+	}
+	if kind == actionNode {
+		return x.nodeSteps(st, action, originOf(ref))
 	}
 	if kind == actionDocker {
 		rewrite, err := x.actionRewrite(st, action, "")

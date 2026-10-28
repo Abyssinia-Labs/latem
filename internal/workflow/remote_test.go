@@ -178,12 +178,75 @@ func TestRemoteCompositeWithANestedLocalUsesIsRefused(t *testing.T) {
 }
 
 // A JavaScript action is still refused, and says which phase it waits for.
-func TestRemoteJavaScriptActionIsRefused(t *testing.T) {
-	ref, _ := actions.ParseRef("acme/js@" + pinned)
-	f := newFetcher(t, ref, "runs:\n  using: node20\n  main: index.js\n")
-	_, err := compileRemote(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: acme/js@"+pinned+"\n", f)
-	if err == nil || !strings.Contains(err.Error(), "phase 5") {
-		t.Errorf("want the JavaScript refusal: %v", err)
+// A51: a fetched JavaScript action becomes one step that keeps the uses:
+// step's id and condition, runs latem's constant command, and carries the
+// action's directory, entry file and inputs as environment values.
+func TestRemoteJavaScriptActionRuns(t *testing.T) {
+	ref, _ := actions.ParseRef("oven-sh/setup-bun@v2")
+	f := newFetcher(t, ref, `
+inputs:
+  bun-version:
+    description: the version
+  bun-version-file:
+    description: a file naming it
+  no-cache:
+    default: "false"
+  token:
+    default: ${{ github.sha }}
+runs:
+  using: node20
+  main: dist/setup/index.js
+`)
+	job, err := CompileWith(t.Context(), parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - id: bun
+        if: github.event_name == 'push'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+          surprise: hello
+`), "b", testScope(), Options{Policy: actions.Policy{Allowed: []string{"oven-sh/*"}}, Fetcher: f})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	mustValidate(t, job)
+	if len(job.Steps) != 1 {
+		t.Fatalf("steps = %d, want main alone", len(job.Steps))
+	}
+	st := job.Steps[0]
+	if st.ID != "bun" || st.Name != "Run oven-sh/setup-bun@v2" || st.Run != NodeRun {
+		t.Errorf("step = id %q, name %q, run %q", st.ID, st.Name, st.Run)
+	}
+	want := map[string]string{
+		"INPUT_BUN-VERSION-FILE":   ".bun-version",
+		"INPUT_NO-CACHE":           "false",
+		"INPUT_TOKEN":              "deadbeef",
+		"INPUT_SURPRISE":           "hello",
+		"GHA_ACTION_ENTRY":         "dist/setup/index.js",
+		"GITHUB_ACTION_REPOSITORY": "oven-sh/setup-bun",
+		"GITHUB_ACTION_REF":        "v2",
+		"GITHUB_ACTION":            "bun",
+	}
+	for k, v := range want {
+		if st.Env[k] != v {
+			t.Errorf("%s = %q, want %q", k, st.Env[k], v)
+		}
+	}
+	if _, set := st.Env["INPUT_BUN-VERSION"]; set {
+		t.Error("an input with neither a value nor a default should be absent")
+	}
+	if _, late := st.Late["GHA_ACTION_DIR"]; !late {
+		t.Error("a fetched action's directory is only known to the executor, so it should be late")
+	}
+	if !job.RequiresIsolation {
+		t.Error("a fetched action is third-party code and should require isolation")
+	}
+	notes := strings.Join(job.Notes, "\n")
+	if !strings.Contains(notes, "resolved to "+pinned) || !strings.Contains(notes, "surprise") {
+		t.Errorf("notes = %q, want the resolved commit and the undeclared input", job.Notes)
 	}
 }
 

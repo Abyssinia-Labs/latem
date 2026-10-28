@@ -127,7 +127,7 @@ func validateLate(s Step, earlier map[string]bool) []error {
 	}
 
 	for _, k := range sortedKeys(s.Late) {
-		if !identPattern.MatchString(k) {
+		if !validEnvKey(k) {
 			add("late env: key %q must match %s", k, identPattern)
 		}
 		if strings.HasPrefix(k, "LATEM_") {

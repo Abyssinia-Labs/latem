@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -727,5 +729,44 @@ func TestExec_ContainerStepIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "alpine:3.19") {
 		t.Errorf("the error should name the image: %v", err)
+	}
+}
+
+// A51 for real: the command latem writes for a JavaScript action finds node,
+// makes the action's path absolute, and hands the action its inputs, so a
+// script written against @actions/core's conventions works unchanged.
+func TestExec_JavaScriptActionStep(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("no node on PATH")
+	}
+	env, ws := live(t, executor.Spec{}, Options{})
+	dir := filepath.Join(ws, "act")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `const fs = require("fs");
+fs.appendFileSync(process.env.GITHUB_OUTPUT, "greeting=hello " + process.env["INPUT_WHO-TO-GREET"] + "\n");
+console.log("path " + process.env.GITHUB_ACTION_PATH);`
+	if err := os.WriteFile(filepath.Join(dir, "index.js"), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	res, err := env.Exec(t.Context(), executor.Step{
+		Run:   workflow.NodeRun,
+		Shell: executor.ShellGitHubBash,
+		Env: map[string]string{
+			"GHA_ACTION_DIR":     "act",
+			"GHA_ACTION_ENTRY":   "index.js",
+			"INPUT_WHO-TO-GREET": "world",
+		},
+	}, &stdout, io.Discard)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("exit %d, %v: %s", res.ExitCode, err, stdout.String())
+	}
+	if res.Outputs["greeting"] != "hello world" {
+		t.Errorf("outputs = %v", res.Outputs)
+	}
+	if !strings.Contains(stdout.String(), "path "+dir) {
+		t.Errorf("GITHUB_ACTION_PATH should be absolute (%s): %s", dir, stdout.String())
 	}
 }

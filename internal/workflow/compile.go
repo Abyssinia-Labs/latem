@@ -209,7 +209,7 @@ func CompileWith(
 	// value with the redactor before the first step.
 	out.Secrets = secretNames(out.Steps)
 	out.Environment = environment
-	out.Notes = ignoredNotes(w, j)
+	out.Notes = append(append([]string(nil), x.notes...), ignoredNotes(w, j)...)
 	return out, nil
 }
 
