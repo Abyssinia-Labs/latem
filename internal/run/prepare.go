@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -24,6 +26,12 @@ import (
 // which resolves without anyone editing a commit. internal/secrets already
 // tells the two apart, so this only has to not flatten them.
 func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
+	// The token is registered before anything else, whether or not the job
+	// reads it: a step that finds it some other way still cannot print it
+	// (A52, INV-4).
+	if x.req.Token != "" && x.red != nil {
+		x.red.Register([]byte(x.req.Token))
+	}
 	names := x.resolved.Secrets
 	if len(names) == 0 {
 		return outcome{}, true
@@ -64,6 +72,18 @@ func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
 // on, and the log names it so that an unset secret is never a mystery. A
 // backend that cannot answer still fails the run, as it does for jobs.yaml.
 func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) (outcome, bool) {
+	// The job's token is GITHUB_TOKEN when it has one (A52), and is never
+	// looked up on the machine. One a restart lost falls back to the
+	// machine's GITHUB_TOKEN, if it has one, and the log says which.
+	if slices.Contains(names, workflow.TokenSecret) {
+		switch {
+		case x.req.Token != "":
+			names = slices.DeleteFunc(slices.Clone(names), func(n string) bool { return n == workflow.TokenSecret })
+		case x.isWorkflowRun():
+			x.note("this job's GitHub token is not held — the agent restarted after the job arrived, or none was " +
+				"sent — so GITHUB_TOKEN is this machine's secret of that name, if it has one")
+		}
+	}
 	scopes := [][]string{{x.req.Repo}, nil}
 	if env := x.resolved.Job.Environment; env != "" {
 		scopes = append([][]string{{x.req.Repo, env}}, scopes...)
@@ -187,6 +207,7 @@ func (x *execution) prepareEnv(ctx context.Context, mounts []executor.CacheMount
 		Caches:     mounts,
 		ActionsDir: actionsDir,
 		ToolCache:  x.toolCache(),
+		Event:      x.eventJSON(),
 		Labels: map[string]string{
 			"latem.run-id": x.run.ID,
 			"latem.repo":   x.run.Repo,

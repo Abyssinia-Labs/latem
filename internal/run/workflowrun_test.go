@@ -1,0 +1,181 @@
+package run
+
+import (
+	"context"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
+)
+
+const runWorkflowFile = `
+name: Checks
+on: [push]
+jobs:
+  web:
+    needs: lint
+    runs-on: [linux]
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      leaked: ${{ steps.v.outputs.token }}
+    steps:
+      - id: v
+        run: ./build.sh
+        env:
+          TAG: ${{ needs.lint.outputs.tag }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  web2:
+    runs-on: [linux]
+    steps: [{run: ./other.sh}]
+  deploy:
+    if: github.event_name == 'release'
+    runs-on: [linux]
+    steps: [{run: ./deploy.sh}]
+  lint:
+    runs-on: [linux]
+    steps: [{run: make lint}]
+`
+
+const testToken = "ghs_0123456789abcdefABCDEF"
+
+func workflowRequest(h *harness, job string) protocol.RunRequest {
+	req := h.request(job)
+	req.Ref = "refs/heads/main"
+	req.Workflow = ".github/workflows/checks.yml"
+	req.SHA = h.source.sha
+	req.Event = &protocol.Event{Name: "push", Ref: "refs/heads/main", SHA: h.source.sha, Actor: "octocat",
+		Payload: []byte(`{"head_commit":{"message":"; rm -rf /"}}`)}
+	req.Needs = map[string]protocol.NeedResult{"lint": {Result: protocol.NeedSuccess, Outputs: map[string]string{"tag": "abc"}}}
+	req.WorkflowRunID, req.RunNumber, req.RunAttempt = "wr7", 12, 1
+	req.Token = testToken
+	return req
+}
+
+func lastUpdate(h *harness, runID string) protocol.Update {
+	var u protocol.Update
+	for _, r := range h.broker.updates() {
+		if r.runID == runID {
+			u = r.update
+		}
+	}
+	return u
+}
+
+// A workflow run's job reads its needs and its event, gets its token as
+// GITHUB_TOKEN and nowhere else, and reports its outputs as it ends (A52).
+func TestExecute_WorkflowRunJob(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.cfg.Repos["app"].GitHub = "acme/app"
+	h.env.outputs = func(executor.Step) map[string]string {
+		return map[string]string{"version": "1.2.3", "token": testToken}
+	}
+	h.env.exec = func(_ context.Context, step executor.Step, stdout, _ io.Writer) (int, error) {
+		_, _ = io.WriteString(stdout, "token is "+step.Env["TOKEN"]+"\n")
+		return 0, nil
+	}
+	o := h.build()
+
+	req := workflowRequest(h, "web")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", runWorkflowFile)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s: %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+
+	step := h.env.executed()[0]
+	if step.Env["TAG"] != "abc" || step.Env["TOKEN"] != testToken {
+		t.Errorf("TAG=%q TOKEN set=%v", step.Env["TAG"], step.Env["TOKEN"] == testToken)
+	}
+	spec := h.env.runSpec()
+	for k, want := range map[string]string{
+		"GITHUB_EVENT_NAME": "push", "GITHUB_ACTOR": "octocat", "GITHUB_RUN_ID": "wr7",
+		"GITHUB_RUN_NUMBER": "12", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_JOB": "web", "GITHUB_WORKFLOW": "Checks",
+	} {
+		if spec.Env[k] != want {
+			t.Errorf("%s = %q, want %q", k, spec.Env[k], want)
+		}
+	}
+	if _, ok := spec.Env["GITHUB_TOKEN"]; ok {
+		t.Error("the token is in every step's environment; it is a secret a step names")
+	}
+	if !strings.Contains(string(spec.Event), `"; rm -rf /"`) {
+		t.Errorf("event file %s", spec.Event)
+	}
+
+	u := lastUpdate(h, req.ID)
+	if u.State != protocol.StateSucceeded || u.Outputs["version"] != "1.2.3" {
+		t.Errorf("terminal update %+v", u)
+	}
+	if _, ok := u.Outputs["leaked"]; ok {
+		t.Error("an output holding the token was reported")
+	}
+	logs := h.logContents(req.ID)
+	if strings.Contains(logs, testToken) {
+		t.Error("the token reached the log")
+	}
+	if !strings.Contains(logs, "output leaked was dropped") {
+		t.Errorf("the dropped output is not named in the log:\n%s", logs)
+	}
+}
+
+// A job whose if: is false is skipped before a runner is chosen.
+func TestExecute_WorkflowRunJobSkipped(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	o := h.build()
+	req := workflowRequest(h, "deploy")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", runWorkflowFile)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != protocol.StateSkipped || len(h.env.executed()) != 0 {
+		t.Fatalf("got %s with %d step(s), want skipped and none", res.State, len(h.env.executed()))
+	}
+	if got := h.broker.states(req.ID); got[len(got)-1] != protocol.StateSkipped {
+		t.Errorf("reported %v", got)
+	}
+}
+
+// The job builds the commit its event named, and only if that commit is on
+// the ref (A52, INV-5).
+func TestExecute_WorkflowRunJobPinsItsCommit(t *testing.T) {
+	const older = "1111111111111111111111111111111111111111"
+	const elsewhere = "2222222222222222222222222222222222222222"
+
+	h := newHarness(t)
+	h.source.registry = ""
+	h.source.commits = map[string]bool{older: true, elsewhere: false}
+	o := h.build()
+
+	req := workflowRequest(h, "web2")
+	req.SHA = older
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", runWorkflowFile)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s: %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	if co := h.source.checkedOut; len(co) == 0 || co[len(co)-1][1] != older {
+		t.Errorf("checked out %v, want %s — the event's commit, not the ref's tip", co, older)
+	}
+
+	req = workflowRequest(h, "web2")
+	req.ID, req.SHA = "run2", elsewhere
+	res = h.run(o, req)
+	if res.State != protocol.StateRejected || res.ErrorCode != protocol.ErrInvalidRef ||
+		!strings.Contains(res.ErrorMsg, "is not on refs/heads/main") {
+		t.Errorf("a commit off the ref: %s/%s %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+}

@@ -30,7 +30,7 @@ func envContext(sc expr.Scope, base map[string]any, layers ...map[string]string)
 				out[k] = v
 				continue
 			}
-			if !answerableNow(v) {
+			if !answerableNow(v, sc) {
 				delete(out, k)
 				continue
 			}
@@ -47,13 +47,13 @@ func envContext(sc expr.Scope, base map[string]any, layers ...map[string]string)
 
 // answerableNow reports whether every expression in v can be evaluated at
 // admission.
-func answerableNow(v string) bool {
+func answerableNow(v string, sc expr.Scope) bool {
 	spans, err := expr.Spans(v)
 	if err != nil {
 		return false
 	}
 	for _, sp := range spans {
-		w, err := classify(sp.Prog)
+		w, err := classify(sp.Prog, sc)
 		if err != nil || w == whenLate {
 			return false
 		}
@@ -116,7 +116,7 @@ func compileContinueOnError(raw json.RawMessage, sc expr.Scope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	w, err := classify(prog)
+	w, err := classify(prog, sc)
 	if err != nil {
 		return false, err
 	}

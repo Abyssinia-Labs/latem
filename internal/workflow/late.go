@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
@@ -114,6 +115,17 @@ func lateScope(base expr.Scope, sc registry.StepScope) expr.Scope {
 		secrets[k] = v
 	}
 	out.Contexts["secrets"] = secrets
+
+	// github.token is the job's token, which is the GITHUB_TOKEN secret (A52):
+	// the github context is copied, never edited, since one base scope serves
+	// every step.
+	if tok, ok := sc.Secrets[TokenSecret]; ok {
+		if gh, isMap := out.Contexts["github"].(map[string]any); isMap {
+			withToken := maps.Clone(gh)
+			withToken["token"] = tok
+			out.Contexts["github"] = withToken
+		}
+	}
 
 	switch sc.Status {
 	case registry.StatusFailure:

@@ -125,7 +125,7 @@ func cacheTarget(line string, sc expr.Scope, uses string) (string, error) {
 			return "", fmt.Errorf("uses: %s path %q: %w", uses, line, err)
 		}
 		for _, sp := range spans {
-			w, err := classify(sp.Prog)
+			w, err := classify(sp.Prog, sc)
 			if err != nil {
 				return "", fmt.Errorf("uses: %s path %q: %w", uses, line, err)
 			}

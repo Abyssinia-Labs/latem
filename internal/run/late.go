@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -122,14 +123,20 @@ func statusAfter(current registry.StepStatus, out outcome) registry.StepStatus {
 // here, at the last moment, as buildEnv converts a jobs.yaml job's; the map is
 // dropped with the step's scope. Nil for a jobs.yaml job.
 func (x *execution) workflowSecrets() map[string]string {
-	if x.workflow == nil || x.sec == nil {
+	if x.workflow == nil {
 		return nil
 	}
-	out := make(map[string]string, x.sec.Len())
-	for _, name := range x.sec.Names() {
-		if v, ok := x.sec.Value(name); ok {
-			out[name] = string(v)
+	out := map[string]string{}
+	if x.sec != nil {
+		for _, name := range x.sec.Names() {
+			if v, ok := x.sec.Value(name); ok {
+				out[name] = string(v)
+			}
 		}
+	}
+	// The job's own token, over any machine secret of the same name (A52).
+	if x.req.Token != "" {
+		out[workflow.TokenSecret] = x.req.Token
 	}
 	return out
 }

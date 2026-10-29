@@ -232,3 +232,19 @@ func (i treeInfo) Mode() fs.FileMode  { return 0o444 }
 func (i treeInfo) ModTime() time.Time { return time.Time{} }
 func (i treeInfo) IsDir() bool        { return false }
 func (i treeInfo) Sys() any           { return nil }
+
+// IsAncestor reports whether ancestor is reachable from descendant — whether a
+// commit an event named is on the ref a run builds (A52). A commit is its own
+// ancestor.
+func (mi *Mirror) IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error) {
+	for _, sha := range []string{ancestor, descendant} {
+		if err := validateSHA(sha); err != nil {
+			return false, err
+		}
+	}
+	ok, err := mi.mgr.runQuery(ctx, mi.path, "merge-base", "--is-ancestor", "--end-of-options", ancestor, descendant)
+	if err != nil {
+		return false, gitErr(err, "checking whether %s is on %s in %s", ancestor, descendant, mi.repo.Key)
+	}
+	return ok, nil
+}

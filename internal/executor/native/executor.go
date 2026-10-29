@@ -295,6 +295,15 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 	if err := os.Mkdir(env.tempDir, 0o700); err != nil {
 		return nil, wrapErr(protocol.ErrExecutor, err, "create $RUNNER_TEMP %s", env.tempDir)
 	}
+	if len(spec.Event) > 0 {
+		// 0o600: the event is the run's, and a step running as this user is
+		// the only reader it has.
+		eventFile := filepath.Join(dir, EventFileName)
+		if err := os.WriteFile(eventFile, spec.Event, 0o600); err != nil {
+			return nil, wrapErr(protocol.ErrExecutor, err, "write $GITHUB_EVENT_PATH %s", eventFile)
+		}
+		env.eventFile = eventFile
+	}
 	if env.toolCache != "" {
 		if !filepath.IsAbs(env.toolCache) {
 			return nil, codeErr(protocol.ErrExecutor, "tool cache %q is not an absolute path", env.toolCache)

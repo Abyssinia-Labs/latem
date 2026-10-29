@@ -32,6 +32,10 @@ type Mirror interface {
 	Resolve(ctx context.Context, normalizedRef string) (string, error)
 	// Checkout is gate 10: a workspace at exactly that commit.
 	Checkout(ctx context.Context, runID, normalizedRef, sha string) (*source.Workspace, error)
+	// HasCommit and IsAncestor pin a workflow run's job to the commit its
+	// event named, on its ref (A52).
+	HasCommit(ctx context.Context, sha string) (bool, error)
+	IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error)
 }
 
 // Source is the subset of [source.Manager] the gate chain uses.

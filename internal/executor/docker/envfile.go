@@ -35,6 +35,9 @@ const (
 	// StateFilePath is the container-visible path exported as
 	// $GITHUB_STATE (A51), handled like $GITHUB_OUTPUT.
 	StateFilePath = "/tmp/latem/state"
+	// EventFilePath is $GITHUB_EVENT_PATH: the event a workflow run started
+	// from (A52). Written once at Prepare, read-only to the step.
+	EventFilePath = "/tmp/latem/event.json"
 	// TempPath is the directory exported as $RUNNER_TEMP (A50). It lives in
 	// the container's own filesystem beside the files above, so it goes
 	// when the container does.
@@ -279,6 +282,33 @@ func (e *runEnv) createDir(ctx context.Context, dir string) error {
 	if err := e.api.CopyToContainer(ctx, e.containerID, path.Dir(dir), &buf,
 		container.CopyToContainerOptions{}); err != nil {
 		return wrapErr(protocol.ErrExecutor, err, "create %s", dir)
+	}
+	return nil
+}
+
+// writeFile puts a read-only file with the given content into the container,
+// through the archive API like the files above, into a directory that already
+// exists there.
+func (e *runEnv) writeFile(ctx context.Context, file string, data []byte) error {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     path.Base(file),
+		Typeflag: tar.TypeReg,
+		Mode:     0o644,
+		Size:     int64(len(data)),
+	}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", file)
+	}
+	if _, err := tw.Write(data); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", file)
+	}
+	if err := tw.Close(); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", file)
+	}
+	if err := e.api.CopyToContainer(ctx, e.containerID, path.Dir(file), &buf,
+		container.CopyToContainerOptions{}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create %s", file)
 	}
 	return nil
 }

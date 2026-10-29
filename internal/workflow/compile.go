@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -39,9 +40,11 @@ var lateContexts = map[string]bool{
 	"latem": true,
 }
 
-// refusedContexts cannot be compiled at all, each for its own reason.
+// refusedContexts cannot be compiled at all, each for its own reason — unless
+// the scope answers them: a workflow run's job carries its needs' results and
+// outputs, so for it needs is known when the run is admitted (A52).
 var refusedContexts = map[string]string{
-	"needs": "latem runs one job per run, so there is nothing for needs to refer to (N2)",
+	"needs": "this run is not a workflow run's job, so there is nothing for needs to refer to (A52)",
 }
 
 // lateFuncs are the status functions. They answer against the job's status,
@@ -54,6 +57,10 @@ var refusedContexts = map[string]string{
 // admission-time true would drop the condition and leave an ordinary step,
 // which stops at the first failure like any other. A test holds this.
 var lateFuncs = map[string]bool{"success": true, "failure": true, "cancelled": true, "always": true}
+
+// TokenSecret is the secret a workflow run's job token is read as —
+// secrets.GITHUB_TOKEN, and github.token, which is the same value (A52).
+const TokenSecret = "GITHUB_TOKEN" //nolint:gosec // a secret's name, not a secret
 
 // secretsContext is read by name only: `secrets.X` or `secrets['X']`. A name
 // computed at run time could be any secret on the machine, so it is refused
@@ -97,6 +104,10 @@ type Options struct {
 	// Vars answers the vars context for a job in an environment (empty for
 	// none), from the repository's config (A50). Nil leaves vars empty.
 	Vars func(environment string) map[string]string
+	// WorkflowRun compiles a workflow run's job (A52): needs, a job's if:,
+	// outputs: and continue-on-error are then its own to honour, and the
+	// scope carries the needs context they read.
+	WorkflowRun bool
 }
 
 // CompileWith is [Compile] against a machine's actions and its policy.
@@ -115,6 +126,26 @@ func CompileWith(
 	// so the environment is answered first, against the repository's.
 	if opts.Vars != nil {
 		sc = withContext(sc, "vars", stringsToAny(opts.Vars("")))
+	}
+	if opts.WorkflowRun {
+		// A dispatch's inputs arrive as strings; the inputs context holds
+		// them as the workflow declares them, so `inputs.dry == true` is
+		// true for a boolean input set to "true", as on GitHub.
+		var err error
+		if sc, err = typedInputs(w, sc); err != nil {
+			return nil, badRegistry("%s: %v", w.Path, err)
+		}
+		// The job's if:, against its needs and the event, before anything
+		// else about the job is read: a skipped job's steps are not
+		// compiled, because none of them runs (A52).
+		run, err := jobCondition(declared.If, sc)
+		if err != nil {
+			return nil, badRegistry("%s: job %q: if: %v", w.Path, jobName, err)
+		}
+		if !run {
+			return &registry.Job{Description: declared.Name, Skip: true,
+				SkipReason: strings.TrimSpace(declared.If)}, nil
+		}
 	}
 	environment, err := environmentName(declared.Environment, sc)
 	if err != nil {
@@ -156,7 +187,7 @@ func CompileWith(
 	copied.Steps = expanded
 	j := &copied
 
-	if err := j.unsupported(w.Path, jobName); err != nil {
+	if err := j.unsupported(w.Path, jobName, opts.WorkflowRun); err != nil {
 		return nil, err
 	}
 
@@ -215,12 +246,22 @@ func CompileWith(
 	if len(out.Steps) == 0 {
 		return nil, badRegistry("%s: job %q has no steps to run", w.Path, jobName)
 	}
+	if opts.WorkflowRun {
+		if out.Outputs, err = compileOutputs(j.Outputs, sc); err != nil {
+			return nil, badRegistry("%s: job %q: outputs: %v", w.Path, jobName, err)
+		}
+		out.Inputs = dispatchDeclarations(w)
+	}
 	// A50: the names, never the values. The run resolves them on the
 	// machine, scoped by repository and environment, and registers every
 	// value with the redactor before the first step.
 	out.Secrets = secretNames(out.Steps)
+	out.Secrets = mergeNames(out.Secrets, outputSecrets(out.Outputs))
 	out.Environment = environment
-	out.Notes = append(append([]string(nil), x.notes...), ignoredNotes(w, j)...)
+	out.Notes = append([]string(nil), x.notes...)
+	if !opts.WorkflowRun {
+		out.Notes = append(out.Notes, ignoredNotes(w, j)...)
+	}
 	return out, nil
 }
 
@@ -246,6 +287,9 @@ func secretNames(steps []registry.Step) []string {
 		names, _ := p.ContextKeys(secretsContext)
 		for _, n := range names {
 			set[n] = true
+		}
+		if keys, _ := p.ContextKeys("github"); slices.Contains(keys, "token") {
+			set[TokenSecret] = true
 		}
 	}
 	visit := func(v any) {
@@ -285,7 +329,7 @@ func environmentName(raw json.RawMessage, sc expr.Scope) (string, error) {
 	if err != nil || name == "" {
 		return "", err
 	}
-	if !answerableNow(name) {
+	if !answerableNow(name, sc) {
 		return "", fmt.Errorf("%q is only known when the job runs, and an environment decides which secrets it gets before it starts", name)
 	}
 	out, err := expr.EvalString(name, sc)
@@ -324,7 +368,7 @@ const DefaultJobTimeout = 360 * minute
 // One error listing all of them, rather than the first: a workflow being
 // adopted usually trips several at once, and making the author discover them
 // one build at a time is the slow version of the same conversation.
-func (j *Job) unsupported(file, name string) error {
+func (j *Job) unsupported(file, name string, workflowRun bool) error {
 	var found []string
 	add := func(what, why string) { found = append(found, fmt.Sprintf("  %s — %s", what, why)) }
 
@@ -334,7 +378,7 @@ func (j *Job) unsupported(file, name string) error {
 	if len(j.Strategy) > 0 {
 		add("strategy:", "a matrix expands one job into several; latem runs the job you named")
 	}
-	if len(j.Needs) > 0 {
+	if len(j.Needs) > 0 && !workflowRun {
 		add("needs:", refusedContexts["needs"])
 	}
 	if len(j.Services) > 0 {
@@ -343,14 +387,19 @@ func (j *Job) unsupported(file, name string) error {
 	if len(j.Container) > 0 {
 		add("container:", "set the executor's image in config.toml instead")
 	}
-	if len(j.Outputs) > 0 {
-		add("outputs:", "job outputs are consumed by needs:, which latem has no equivalent for")
-	}
-	if len(j.ContinueOnError) > 0 {
-		add("continue-on-error: on a job", "it decides a workflow run's result, and latem runs one job per run (N2, A50)")
-	}
-	if j.If != "" {
-		add("if: on a job", "it decides the job's place in a workflow run, and latem runs one job per run (N2, A50)")
+	// A workflow run's job honours these (A52): its if: was answered before
+	// this, its outputs are reported as it ends, and continue-on-error
+	// decides the workflow run's conclusion, which is the control plane's.
+	if !workflowRun {
+		if len(j.Outputs) > 0 {
+			add("outputs:", "job outputs are read by the jobs that need this one, and this run is not a workflow run's job (A52)")
+		}
+		if len(j.ContinueOnError) > 0 {
+			add("continue-on-error: on a job", "it decides a workflow run's result, and this run is not a workflow run's job (A52)")
+		}
+		if j.If != "" {
+			add("if: on a job", "it decides the job's place in a workflow run, and this run is not a workflow run's job (A52)")
+		}
 	}
 	for i, st := range j.Steps {
 		if st.Uses != "" {
@@ -526,7 +575,7 @@ func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
 		}
-		w, err := classify(prog)
+		w, err := classify(prog, sc)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
 		}
@@ -686,7 +735,7 @@ func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, err
 	}
 	anyLate := false
 	for _, sp := range spans {
-		w, err := classify(sp.Prog)
+		w, err := classify(sp.Prog, sc)
 		if err != nil {
 			return nil, badRegistry("%s: env.%s: %v", where, k, err)
 		}
@@ -748,7 +797,7 @@ func hoist(run string, existing map[string]string, sc expr.Scope, where string) 
 	var b strings.Builder
 	last, n := 0, 0
 	for _, sp := range spans {
-		w, err := classify(sp.Prog)
+		w, err := classify(sp.Prog, sc)
 		if err != nil {
 			return "", nil, nil, badRegistry("%s: run: %v", where, err)
 		}
@@ -800,9 +849,14 @@ const (
 //
 // secrets is checked first and separately: it is neither now nor late, and the
 // reason is not timing (INV-4, §15).
-func classify(p *expr.Program) (when, error) {
+func classify(p *expr.Program, sc expr.Scope) (when, error) {
 	contexts, funcs := p.References()
 	result := whenNow
+	// github.token is a secret by another name (A52): never compiled into the
+	// registry, answered as the step runs from the job's token.
+	if keys, _ := p.ContextKeys("github"); slices.Contains(keys, "token") {
+		result = whenLate
+	}
 	for _, c := range contexts {
 		if c == secretsContext {
 			if _, computed := p.ContextKeys(secretsContext); computed {
@@ -810,7 +864,7 @@ func classify(p *expr.Program) (when, error) {
 					"one chosen at run time could be any secret on the machine", strings.TrimSpace(p.Source()))
 			}
 		}
-		if why, refused := refusedContexts[c]; refused {
+		if why, refused := refusedContexts[c]; refused && sc.Contexts[c] == nil {
 			return whenNow, fmt.Errorf("${{ %s }}: the %s context cannot be used here — %s",
 				strings.TrimSpace(p.Source()), c, why)
 		}
@@ -904,7 +958,7 @@ func compileContainer(c *containerSpec, sc expr.Scope, where string) (*registry.
 			return "", badRegistry("%s: %s: %v", where, field, err)
 		}
 		for _, sp := range spans {
-			w, err := classify(sp.Prog)
+			w, err := classify(sp.Prog, sc)
 			if err != nil {
 				return "", badRegistry("%s: %s: %v", where, field, err)
 			}

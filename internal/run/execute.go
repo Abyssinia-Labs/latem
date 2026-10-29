@@ -102,7 +102,10 @@ func (o *Orchestrator) Execute(ctx context.Context, r store.Run) (Result, error)
 	defer o.end(h)
 	defer o.reporter.forget(r.ID)
 
-	x := &execution{o: o, req: requestOf(r), run: r, h: h, started: o.now()}
+	req := requestOf(r)
+	// The job's GitHub token, from memory: it was never written down (A52).
+	req.Token = o.store.Token(r.ID)
+	x := &execution{o: o, req: req, run: r, h: h, started: o.now()}
 	return x.drive(runCtx), nil
 }
 
@@ -131,6 +134,11 @@ func (x *execution) drive(ctx context.Context) Result {
 		return x.awaitApproval(ctx, dec)
 	case !dec.OK():
 		return x.finish(ctx, fromDecision(dec))
+	}
+	// A workflow run's job whose if: was false is over before a runner is
+	// chosen: nothing of it runs (A52).
+	if job := reg.Jobs[x.req.Job]; job != nil && job.Skip {
+		return x.skip(ctx, job.SkipReason)
 	}
 
 	// Gates 12-15: job lookup, label match, typed inputs, declared secrets.
@@ -252,6 +260,13 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}
+	if x.isWorkflowRun() {
+		pinned, dec, err := x.pin(ctx, mirror, normalized, sha)
+		if err != nil || !dec.OK() {
+			return nil, dec, err
+		}
+		sha = pinned
+	}
 
 	// Record what INV-5 decided, in the columns §22 keeps for it (amendment
 	// A21). The pair is settled here, at gates 7 and 9, long after store.Create
@@ -300,11 +315,22 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// a *registry.Registry, so nothing downstream of this line knows or cares
 	// which one the job was written in — that is the point, and it is what
 	// keeps §5's invariants true in one place instead of two.
-	reg, src, err := workflow.ResolveWith(ctx, ws.Path, x.req.Job, x.workflowScope(),
-		workflow.Options{
-			Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache(),
-			LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
-		})
+	//
+	// A workflow run's job names its file, so it is compiled from that file
+	// and no other, and .latem/jobs.yaml is not consulted (A52).
+	opts := workflow.Options{
+		Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache(),
+		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
+	}
+	var (
+		reg *registry.Registry
+		src workflow.Source
+	)
+	if x.isWorkflowRun() {
+		reg, src, err = workflow.ResolveWorkflowJob(ctx, ws.Path, x.req.Workflow, x.req.Job, x.workflowScope(), opts)
+	} else {
+		reg, src, err = workflow.ResolveWith(ctx, ws.Path, x.req.Job, x.workflowScope(), opts)
+	}
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}
@@ -511,6 +537,9 @@ func (x *execution) terminateWith(ctx context.Context, out outcome, refs []proto
 	u := x.o.terminalUpdate(out, refs)
 	if x.runner != nil {
 		u.Runner = x.runner.Name
+	}
+	if x.isWorkflowRun() {
+		u.Outputs = x.jobOutputs()
 	}
 	if err := x.to(ctx, out.state, u); err != nil {
 		return x.raced(err)

@@ -89,6 +89,9 @@ func (x *execution) githubEnv() map[string]string {
 	if x.run.Number > 0 {
 		env["GITHUB_RUN_NUMBER"] = strconv.FormatInt(x.run.Number, 10)
 	}
+	if x.isWorkflowRun() {
+		x.workflowRunEnv(env)
+	}
 	if facts.Name != "" {
 		env["RUNNER_NAME"] = facts.Name
 	}

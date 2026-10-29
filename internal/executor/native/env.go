@@ -68,6 +68,7 @@ type runEnv struct {
 	envFile     string
 	outFile     string // $GITHUB_OUTPUT, a sibling of envFile
 	stateFile   string // $GITHUB_STATE (A51)
+	eventFile   string // $GITHUB_EVENT_PATH, or "" (A52)
 	pathFile    string // $GITHUB_PATH
 	summaryFile string // $GITHUB_STEP_SUMMARY
 	tempDir     string // $RUNNER_TEMP, inside envDir so Close empties it
@@ -195,6 +196,9 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[executor.SummaryFileVar] = e.summaryFile
 	env[executor.WorkspaceVar] = e.workspace
 	env[executor.RunnerTempVar] = e.tempDir
+	if e.eventFile != "" {
+		env[executor.EventPathVar] = e.eventFile
+	}
 	if e.toolCache != "" {
 		env[executor.ToolCacheVar] = e.toolCache
 		env[executor.AgentToolsDirVar] = e.toolCache

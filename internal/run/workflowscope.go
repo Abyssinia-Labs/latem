@@ -3,6 +3,7 @@ package run
 import (
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
@@ -34,36 +35,42 @@ func (x *execution) workflowScope() expr.Scope {
 		workspace = x.ws.Path
 	}
 
+	github := map[string]any{
+		// owner/name since A50, from config or the URL; the config
+		// key when neither names one.
+		"repository":       slug,
+		"repository_owner": owner,
+		"server_url":       githubServerURL,
+		"api_url":          githubAPIURL,
+		"graphql_url":      githubGraphQLURL,
+		"ref":              x.refNormalized,
+		"ref_name":         refName,
+		"ref_type":         refType,
+		"sha":              x.sha,
+		"job":              x.req.Job,
+		"run_id":           x.run.ID,
+		// run_number is the machine's own sequence, which is what
+		// A36 made the build number. A workflow that tags a build with
+		// github.run_number therefore names the run that produced it,
+		// the same as one using $LATEM_BUILD_NUMBER.
+		"run_number":  float64(x.run.Number),
+		"run_attempt": float64(1),
+		"event_name":  eventName(x.req.Origin.Kind),
+		"actor":       x.req.Origin.Actor,
+		"workspace":   workspace,
+	}
+	contexts := map[string]expr.Value{
+		"github": github,
+		"inputs": inputs,
+		"env":    map[string]any{},
+		"vars":   map[string]any{},
+	}
+	if x.isWorkflowRun() {
+		x.workflowRunContext(github)
+		contexts["needs"] = workflow.NeedsContext(x.req.Needs)
+	}
 	return expr.Scope{
-		Contexts: map[string]expr.Value{
-			"github": map[string]any{
-				// owner/name since A50, from config or the URL; the config
-				// key when neither names one.
-				"repository":       slug,
-				"repository_owner": owner,
-				"server_url":       githubServerURL,
-				"api_url":          githubAPIURL,
-				"graphql_url":      githubGraphQLURL,
-				"ref":              x.refNormalized,
-				"ref_name":         refName,
-				"ref_type":         refType,
-				"sha":              x.sha,
-				"job":              x.req.Job,
-				"run_id":           x.run.ID,
-				// run_number is the machine's own sequence, which is what
-				// A36 made the build number. A workflow that tags a build with
-				// github.run_number therefore names the run that produced it,
-				// the same as one using $LATEM_BUILD_NUMBER.
-				"run_number":  float64(x.run.Number),
-				"run_attempt": float64(1),
-				"event_name":  eventName(x.req.Origin.Kind),
-				"actor":       x.req.Origin.Actor,
-				"workspace":   workspace,
-			},
-			"inputs": inputs,
-			"env":    map[string]any{},
-			"vars":   map[string]any{},
-		},
+		Contexts:     contexts,
 		Status:       expr.StatusSuccess,
 		WorkspaceDir: workspace,
 	}

@@ -184,7 +184,7 @@ func staticValue(uses, field, v string, sc expr.Scope) (string, error) {
 		return "", fmt.Errorf("uses: %s %s: %w", uses, field, err)
 	}
 	for _, sp := range spans {
-		w, err := classify(sp.Prog)
+		w, err := classify(sp.Prog, sc)
 		if err != nil {
 			return "", fmt.Errorf("uses: %s %s: %w", uses, field, err)
 		}

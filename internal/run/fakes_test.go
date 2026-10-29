@@ -47,6 +47,9 @@ type fakeSource struct {
 	// what proves the checkout used the commit gate 8 admitted rather than
 	// resolving the name a second time.
 	checkedOut [][2]string
+	// commits are the commits the mirror holds besides the ref's tip, each
+	// mapped to whether it is on the ref (A52's pin).
+	commits map[string]bool
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -83,6 +86,19 @@ func (m *fakeMirror) HasRef(_ context.Context, fullyQualified string) (bool, err
 	m.src.mu.Lock()
 	defer m.src.mu.Unlock()
 	return m.src.refs[fullyQualified], nil
+}
+
+func (m *fakeMirror) HasCommit(_ context.Context, sha string) (bool, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	_, ok := m.src.commits[sha]
+	return ok || sha == m.src.sha, nil
+}
+
+func (m *fakeMirror) IsAncestor(_ context.Context, ancestor, descendant string) (bool, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	return ancestor == descendant || (descendant == m.src.sha && m.src.commits[ancestor]), nil
 }
 
 // Resolve is gate 9. It answers with whatever the ref points at *now*, which

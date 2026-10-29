@@ -122,10 +122,19 @@ type Job struct {
 	// Notes are things the compiler read and did not act on, for the run log
 	// (A50): a workflow's permissions and concurrency, until workflow runs
 	// can honour them. Excluded from decoding.
-	Notes     []string       `json:"-"`
-	Secrets   []string       `json:"secrets,omitempty"`
-	Artifacts []ArtifactDecl `json:"artifacts,omitempty"`
-	Steps     []Step         `json:"steps"`
+	Notes []string `json:"-"`
+	// Skip is set for a workflow run's job whose if: was false when it was
+	// compiled — its needs and event arrive with the run, so that is when it
+	// is known — and SkipReason is the condition, for the log (A52). A skipped
+	// job is not validated: none of it runs.
+	Skip       bool   `json:"-"`
+	SkipReason string `json:"-"`
+	// Outputs are a workflow run's job's outputs:, each evaluated as the job
+	// ends, against its steps (A52). Excluded from decoding.
+	Outputs   map[string]LateValue `json:"-"`
+	Secrets   []string             `json:"secrets,omitempty"`
+	Artifacts []ArtifactDecl       `json:"artifacts,omitempty"`
+	Steps     []Step               `json:"steps"`
 }
 
 // Step is one command.

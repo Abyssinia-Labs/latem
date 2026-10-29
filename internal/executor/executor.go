@@ -159,6 +159,11 @@ type Spec struct {
 	// the runner that sets up a tool.
 	ToolCache string
 
+	// Event is the event that started a workflow run, as JSON, written to
+	// a file named by $GITHUB_EVENT_PATH (A52). It is data: nothing reads it
+	// but a step that asks. Nil writes nothing and leaves the variable unset.
+	Event []byte
+
 	Caches    []CacheMount
 	Labels    map[string]string // includes latem.run-id, for crash reaping
 	Resources Resources
@@ -217,6 +222,11 @@ const (
 	WorkspaceVar  = "GITHUB_WORKSPACE"
 	RunnerTempVar = "RUNNER_TEMP"
 )
+
+// EventPathVar names the file holding the event that started a workflow run
+// (A52): GitHub's webhook payload, which @actions/github reads as
+// context.payload.
+const EventPathVar = "GITHUB_EVENT_PATH"
 
 // ToolCacheVar names the tool cache for a step, and AgentToolsDirVar names it
 // again for the actions that read the older name (A51).

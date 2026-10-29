@@ -30,6 +30,8 @@ const (
 	// StateFileName is the basename of the file exported as $GITHUB_STATE
 	// (A51), beside the four above and handled like $GITHUB_OUTPUT.
 	StateFileName = "state"
+	// EventFileName holds the event a workflow run started from (A52).
+	EventFileName = "event.json"
 	// TempDirName is the basename of the directory exported as $RUNNER_TEMP
 	// (A50), beside the files above so that removing the run's directory
 	// empties it.

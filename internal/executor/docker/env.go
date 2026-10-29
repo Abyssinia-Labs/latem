@@ -132,6 +132,9 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[executor.SummaryFileVar] = SummaryFilePath
 	env[executor.WorkspaceVar] = WorkspacePath
 	env[executor.RunnerTempVar] = TempPath
+	if len(e.spec.Event) > 0 {
+		env[executor.EventPathVar] = EventFilePath
+	}
 	if e.spec.ToolCache != "" {
 		env[executor.ToolCacheVar] = ToolCachePath
 		env[executor.AgentToolsDirVar] = ToolCachePath

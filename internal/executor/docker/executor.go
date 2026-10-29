@@ -357,6 +357,12 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 		_ = env.Close(context.WithoutCancel(ctx))
 		return nil, err
 	}
+	if len(spec.Event) > 0 {
+		if err := env.writeFile(ctx, EventFilePath, spec.Event); err != nil {
+			_ = env.Close(context.WithoutCancel(ctx))
+			return nil, err
+		}
+	}
 	return env, nil
 }
 
