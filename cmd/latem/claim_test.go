@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -312,6 +313,17 @@ func TestNewClaimRequest_FitsTheControlPlanesLimits(t *testing.T) {
 	}
 	if got := newClaimRequest(strings.Repeat("n", 70), nil, "dev"); len(got.Name) != 64 || got.Labels == nil {
 		t.Errorf("name %d bytes, labels %v", len(got.Name), got.Labels)
+	}
+	// A cut never splits a character, and a blank label is not sent.
+	got := newClaimRequest(strings.Repeat("n", 63)+"é", []string{"  ", "linux"}, "dev")
+	if got.Name != strings.Repeat("n", 63) || !utf8.ValidString(got.Name) {
+		t.Errorf("name %q split a rune", got.Name)
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "linux" {
+		t.Errorf("labels = %q, want the blank one dropped", got.Labels)
+	}
+	if got := newClaimRequest("   ", nil, "dev"); got.Name != "latem" {
+		t.Errorf("a blank name became %q", got.Name)
 	}
 }
 

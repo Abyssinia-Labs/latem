@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Device-code registration (A54), the RFC 8628 shape: the machine asks the
@@ -179,7 +180,7 @@ const (
 // as `latem init` calls it.
 func newClaimRequest(name string, labels []string, agentVersion string) claimRequest {
 	req := claimRequest{
-		Name:         clip(displayText(name), maxClaimNameLen),
+		Name:         clip(strings.TrimSpace(displayText(name)), maxClaimNameLen),
 		OS:           clip(runtime.GOOS, maxClaimFieldLen),
 		Arch:         clip(runtime.GOARCH, maxClaimFieldLen),
 		Labels:       []string{},
@@ -192,16 +193,22 @@ func newClaimRequest(name string, labels []string, agentVersion string) claimReq
 		if len(req.Labels) == maxClaimLabels {
 			break
 		}
-		if l = clip(displayText(l), maxClaimLabelLen); l != "" {
+		if l = clip(strings.TrimSpace(displayText(l)), maxClaimLabelLen); l != "" {
 			req.Labels = append(req.Labels, l)
 		}
 	}
 	return req
 }
 
+// clip shortens s to at most n bytes, at a rune boundary: half a character
+// would reach the control plane as U+FFFD, and the person approving would see
+// a name ending in "�".
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }
