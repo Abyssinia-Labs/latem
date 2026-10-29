@@ -95,6 +95,55 @@ to restart every affected agent by hand.
 handshake was exercised by hand — no `Authorization` → 401, unreachable Convex →
 503. See README.md.)*
 
+### Registration: the claim endpoints (A54)
+
+How a machine gets its token without anybody copying one: the device
+authorization grant of RFC 8628, over two plain HTTPS endpoints beside the
+WebSocket. Their base is the agent URL's HTTPS origin — `wss://gw.latem.dev/agent`
+claims at `https://gw.latem.dev`; a trailing `/agent` is dropped and any path
+before it kept. Plain `http` is used only for a loopback host. The agent does
+not follow redirects on either.
+
+```
+POST <base>/claim
+{"name":"mac-mini","os":"darwin","arch":"arm64","labels":["macos","arm64"],"agent_version":"v0.2.0"}
+
+200 {"device_code":"…","user_code":"WDJB-MJHT",
+     "verification_uri":"https://app.latem.dev/connect",
+     "verification_uri_complete":"https://app.latem.dev/connect?code=WDJB-MJHT",
+     "expires_in":600,"interval":5}
+```
+
+`labels` is always an array, `[]` when there are none; the agent sends its
+runners' labels unless `--label` overrides them. `name`, `os`, `arch` and
+`labels` are what the person approving sees, and display only.
+
+```
+POST <base>/claim/token
+{"device_code":"…"}
+
+200 {"machine_id":"mch_…","token":"…"}       exactly once; the claim is then spent
+400 {"error":"authorization_pending"}       keep polling
+400 {"error":"slow_down"}                   keep polling, 5 s slower from now on
+400 {"error":"expired_token"}               stop: the code expired
+400 {"error":"access_denied"}               stop: the person declined
+```
+
+The agent polls every `interval` seconds (5 when absent), adds 5 on every
+`slow_down` and keeps the slower pace, and stops at `expires_in` (600 when
+absent) without a further poll. A `503` (latem-cloud's
+`temporarily_unavailable`, its database out of reach) or a `429` (which also
+slows the poll by 5 s) is waited out like a dropped connection: up to five
+polls in a row may fail before it gives up. Any other `400` error, or any
+other status, ends the wait with the body's `error` printed. The token is then proven with the
+handshake above, and only after that written to `agent.key` — the same order
+as a token supplied by hand, so a claim that does not verify writes nothing.
+`machine_id` is recorded when the `hello` carries none.
+
+The agent prints `user_code` and the link after removing control characters,
+and opens `verification_uri_complete` (else `verification_uri`) in a browser
+only when it is `https` (or loopback `http`) and stdout is a terminal.
+
 ### Where this endpoint lives
 
 **Convex HTTP actions cannot accept a WebSocket upgrade.** They take a `Request`

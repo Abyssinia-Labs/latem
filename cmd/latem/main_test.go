@@ -214,7 +214,8 @@ func TestArgumentValidation(t *testing.T) {
 		{"unknown state", []string{"list", "--state", "wat"}, ExitUsage},
 		{"malformed input", []string{"run", "a", "b", "--input", "novalue"}, ExitUsage},
 		{"duplicate input", []string{"run", "a", "b", "--input", "k=1", "--input", "k=2"}, ExitUsage},
-		{"register with no url", []string{"register", "--token", "t"}, ExitUsage},
+		{"register with a url that is not a control plane's", []string{"register", "--url", "ftp://x/agent", "--token", "t"}, ExitUsage},
+		{"register's device flow over plaintext to a remote host", []string{"register", "--url", "ws://cp.example.com/agent"}, ExitUsage},
 		{"register with both token forms", []string{"register", "--url", "wss://x", "--token", "t", "--token-file", "f"}, ExitUsage},
 	}
 	for _, tt := range tests {

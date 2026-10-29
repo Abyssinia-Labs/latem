@@ -51,6 +51,10 @@ func init() {
 	originURL = func(context.Context, string) string {
 		panic("a test reached a real git remote get-url; use fakeOrigin")
 	}
+	// Nothing listens on port 1: a register that forgot --url fails at once,
+	// here, instead of introducing itself to the production control plane.
+	registerURL = "ws://127.0.0.1:1/agent"
+	openBrowser = func(string) error { panic("a test tried to open a browser") }
 }
 
 // configDirWith is a 0700 config directory holding body as config.toml, or

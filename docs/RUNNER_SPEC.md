@@ -1285,7 +1285,7 @@ latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
 latem cancel <run-id>
 latem approve <run-id>               Local-only; pins the run's commit (INV-5)
-latem register --url U --token T     Write config + machine token, verify connectivity
+latem register [--url U] [--token-file F]   Write config + machine token, verify connectivity; no token: approve in the browser (A54)
 latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
@@ -2556,3 +2556,13 @@ Vars referenced in the file with no value are a warning, as they read as empty. 
 the alias and allowlist entries, through the same text edit and load gate as the other commands,
 and reloads; it never changes `require_pinned` or stores a secret. The checkout is matched to a
 `[repos.*]` entry by its `origin` remote or `--repo`.
+
+**`latem register` with no token** runs RFC 8628's device flow against the control plane behind
+`--url`, which now defaults to the hosted one, `wss://gw.latem.dev/agent`: `POST <base>/claim` with
+the machine's name, OS, architecture, labels and version, then `POST <base>/claim/token` every
+`interval` seconds — slower by 5 s after each `slow_down` — until the person who opened the
+printed link approves it, declines it, or it expires. The contract is PROTOCOL.md §1's. What
+follows is unchanged and is the point: the claimed token goes through `remote.Verify` before
+`remote.WriteToken` and `writeRegistration`, so a token that came from a browser is held to the
+same rule as one pasted in — proven, then written, and nothing written on any failure. No token
+is ever printed, and the device code is not either.

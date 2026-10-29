@@ -188,7 +188,29 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 ```
 
 Never as root. The script detects your OS and architecture, verifies the
-download, installs to `~/.local/bin`, and runs `latem doctor`.
+download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
+
+```console
+$ latem register
+to register this machine, open
+
+  https://app.latem.dev/connect?code=WDJB-MJHT
+
+and approve the code  WDJB-MJHT
+(opened in your browser)
+
+waiting for approval — the code expires in 10m0s …
+  approved
+verifying wss://gw.latem.dev/agent …
+  connection verified
+```
+
+With no token, `latem register` asks the control plane for a code and opens
+the page to approve it on; you approve it signed in, seeing the machine's
+name, OS and labels, and the machine collects its own token. Over ssh the link
+is printed instead — open it anywhere you are signed in. `--url` points at a
+control plane other than the hosted one, and `--token-file` still takes a
+token you already have.
 
 **Verify what you installed**, or have the script do it for you — it does both
 checks below before it writes anything. By hand, for a release downloaded
@@ -807,7 +829,7 @@ latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f]
 latem cancel <run-id> [--reason R]
 latem approve <run-id>               Local only; pins that run's commit (INV-5)
-latem register --url U --token T
+latem register [--url U] [--token-file F]   no token: approve this machine in the browser
 latem repo add <owner/name> | list | remove <name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]
