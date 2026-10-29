@@ -137,6 +137,52 @@ func TestExec_EveryStepIsFullyConfigured(t *testing.T) {
 	}
 }
 
+// A name no shell keeps — a JavaScript action's hyphenated input — is carried
+// past the wrapper's /bin/sh rather than handed to it, where dash and ash drop
+// it, and a step's own variable cannot pose as a carrier.
+func TestStepEnv_CarriesNamesAShellWouldDrop(t *testing.T) {
+	got := stepEnv(map[string]string{
+		"CI":                "true",
+		"INPUT_NO-CACHE":    "false",
+		"INPUT_BUN-VERSION": "1.3.3",
+		"9LIVES":            "x",
+		"LATEM_ENVX_0":      "PATH=/evil",
+	})
+	want := []string{
+		"CI=true",
+		"LATEM_ENVX_0=9LIVES=x",
+		"LATEM_ENVX_1=INPUT_BUN-VERSION=1.3.3",
+		"LATEM_ENVX_2=INPUT_NO-CACHE=false",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stepEnv = %q, want %q", got, want)
+	}
+	if !strings.Contains(stepWrapper, carryPrefix) {
+		t.Errorf("the wrapper does not read %s, the prefix stepEnv carries under", carryPrefix)
+	}
+}
+
+// The exec of a step gets its environment from stepEnv, so a hyphenated input
+// travels carried, and nowhere in the exec's command.
+func TestExec_CarriesHyphenatedNames(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
+	step := executor.Step{Name: "bun", Run: "true", Env: map[string]string{"INPUT_NO-CACHE": "false"}}
+	if _, err := env.Exec(context.Background(), step, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	opts := f.execOpts[0]
+	if !slices.Contains(opts.Env, "LATEM_ENVX_0=INPUT_NO-CACHE=false") {
+		t.Errorf("env %q does not carry INPUT_NO-CACHE", opts.Env)
+	}
+	if slices.Contains(opts.Env, "INPUT_NO-CACHE=false") {
+		t.Errorf("env %q hands INPUT_NO-CACHE to the shell, which drops it", opts.Env)
+	}
+	if strings.Contains(strings.Join(opts.Cmd, " "), "false") {
+		t.Errorf("a carried value reached the exec's command: %q", opts.Cmd)
+	}
+}
+
 func TestExec_StepEnvOverridesRunEnv(t *testing.T) {
 	f := &fakeAPI{envFileMissing: true}
 	env := prepared(t, f, executor.Spec{
