@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -43,9 +46,13 @@ in-flight runs finish for up to agent.shutdown_grace before signalling their
 process groups. Containers and VMs are torn down even on the kill path — a
 leaked Tart VM carrying an Xcode image costs about 90 GB.
 
-SIGHUP reloads the reloadable half of the config. Changes to [[runner]],
-machine.id, agent.work_dir, agent.metrics_addr, and broker.local.socket need a
-restart, and the agent says which ones it read but did not apply.`,
+SIGHUP — or ` + "`latem service reload`" + `, which sends it and prints the answer —
+reloads the reloadable half of the config: [repos.*] with their refs, vars and
+environments, [label_aliases], [actions], and log retention. Changes to
+[[runner]], [machine] id, [broker.*], [secrets], and the [agent] knobs other
+than log_retention need a restart, and the agent says which ones it read but
+did not apply. A file that does not load is refused and the agent keeps the
+config it had.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Step 1 of §6, and the reason it is here rather than inside
@@ -55,6 +62,14 @@ restart, and the agent says which ones it read but did not apply.`,
 			if err != nil {
 				return err
 			}
+
+			// Before anything else can take long: until Notify is in place a
+			// SIGHUP takes Go's default action, which is to exit. The agent
+			// advertises that it reloads only once it is ready, and nothing
+			// that reads that advertisement signals before then.
+			hup := make(chan os.Signal, 1)
+			signal.Notify(hup, syscall.SIGHUP)
+			defer signal.Stop(hup)
 
 			var drain time.Duration
 			if drainFor != "" {
@@ -75,6 +90,7 @@ restart, and the agent says which ones it read but did not apply.`,
 			if err != nil {
 				return err
 			}
+			go reloadOnHangup(cmd.Context(), a, hup)
 			// The context is already wired to SIGINT and SIGTERM by main, so
 			// §6 step 9 is a plain block on it. Run returns after draining.
 			return a.Run(cmd.Context())
@@ -85,6 +101,20 @@ restart, and the agent says which ones it read but did not apply.`,
 	cmd.Flags().StringVar(&drainFor, "drain-after", "",
 		"stop accepting new runs after this duration and exit when they finish (e.g. 8h)")
 	return cmd
+}
+
+// reloadOnHangup turns each SIGHUP into a config reload (§8, A54). The agent
+// logs the outcome and records it for `latem service reload`; a refused file
+// is an operator mid-edit, never a reason to stop.
+func reloadOnHangup(ctx context.Context, a *agent.Agent, hup <-chan os.Signal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			_, _ = a.Reload()
+		}
+	}
 }
 
 // agentLogger is the daemon's narration.

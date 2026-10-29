@@ -472,7 +472,7 @@ WebSocket to the control plane. `Authorization: Bearer <machine-token>`.
 
 ## 8. Configuration
 
-`~/.latem/config.toml`, mode `0600`. Reloaded on `SIGHUP`; changes to `[[runner]]` require a restart.
+`~/.latem/config.toml`, mode `0600`. Reloaded on `SIGHUP` — `latem service reload` sends it and prints the answer — which applies `[repos.*]` with their refs, vars and environments, `[label_aliases]`, `[actions]` and `log_retention`; changes to `[[runner]]`, `[machine] id`, `[broker.*]`, `[secrets]` and the other `[agent]` keys require a restart, and the agent names each one it read and did not apply (amendment A54).
 
 ```toml
 schema_version = 1
@@ -1285,6 +1285,7 @@ latem logs <run-id> [-f]
 latem cancel <run-id>
 latem approve <run-id>               Local-only; pins the run's commit (INV-5)
 latem register --url U --token T     Write config + machine token, verify connectivity
+latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem version
@@ -2469,3 +2470,29 @@ additive, and §2.3's strictness makes every additive change a refusal at the ot
 agent refuses a run carrying `matrix`, and a control plane that does not know the plan's new
 fields refuses the plan. So the control plane is upgraded first, and sends a leg only to a
 machine whose frames say 2.1 or later.
+
+### Amendment from making a machine easy to adopt
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A54 | §8, §15, §19, §23 | **Onboarding is commands, not hand-written TOML. `latem service reload` and a wired SIGHUP make a config edit take effect without a restart, and the list of what reloads is narrowed to what the agent actually re-reads** | Bringing the first real machine onto Path B took a hand-written `config.toml` (repo URLs, `refs/pull/*/merge`, `[label_aliases]` for Blacksmith labels, an `[actions]` allowlist), a machine token pasted into `register`, and a restart after every edit, because SIGHUP was documented and nothing handled it. Go's default action for an unhandled SIGHUP is to exit, so the documented way to reload was a way to stop the machine |
+
+**Reload.** `latem agent` handles SIGHUP. The agent re-reads `config.toml` through
+`config.Reloader`; a file that does not load is refused and the agent keeps the config it had,
+because an operator mid-edit is not a reason to kill builds in flight. What a reload applies is
+what the agent reads afresh: the repo allowlist with each repo's refs, vars and environments,
+`[label_aliases]`, `[actions]`, and `log_retention`. It reaches the next admission, the next
+plan, and the next heartbeat's advertised repositories; a run already admitted keeps what it was
+admitted under. Everything consumed once at startup is restart-only and reported as such:
+`[[runner]]`, `[machine] id`, `agent.work_dir`, `metrics_addr`, `[broker.local]`, and — new in
+this amendment, because no reload ever reached them and §8 said they reloaded — `[broker.remote]`,
+`[secrets]`, `queue_ttl`, `remote_logs`, `shutdown_grace` and `auto_update`. Rotating the machine
+token's contents still needs nothing: the remote broker re-reads its file on every dial.
+
+`latem service reload` checks the file first and sends nothing if it does not load. It signals
+only the process holding the config directory's flock — the kernel's word that it is the agent,
+which a pid file alone cannot give — and only when that process has written
+`~/.latem/agent.reload` naming itself. The agent writes that file when it has started and after
+every reload, with the reload count, the error if it refused one, and the changes it deferred;
+the command waits for the count to move and prints the outcome. An agent built before this
+amendment writes no such file, and is not signalled: SIGHUP would stop it.

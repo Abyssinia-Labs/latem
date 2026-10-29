@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
@@ -1079,6 +1081,74 @@ func TestDoctorConfigLoadedByAgent(t *testing.T) {
 		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
 		if got == nil || got.Level != levelPass {
 			t.Errorf("check = %+v, want a pass", got)
+		}
+	})
+
+	// A54: an agent that reloads says when it last read the file.
+	reloaded := func(t *testing.T, d *doctor, pid int, at time.Time, refused string) {
+		t.Helper()
+		st := agent.ReloadStatus{PID: pid, Started: agentStarted, Reloads: 1, At: at, Error: refused}
+		b, err := json.Marshal(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.DerivePaths(d.dir).ReloadStatus, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	running := func() map[string]fakeCmd {
+		cmds := healthyRunner("darwin")
+		cmds["launchctl print gui/501/com.latem.agent"] = fakeCmd{
+			out: "com.latem.agent = {\n\tstate = running\n\tpid = 2566\n}\n"}
+		cmds[psKey] = fakeCmd{out: psOut}
+		return cmds
+	}
+
+	t.Run("config edited, then reloaded", func(t *testing.T) {
+		edited := time.Now().Add(-5 * time.Minute)
+		d := newDoctor(t, running(), edited)
+		installed(t, d.dir)
+		reloaded(t, d, 2566, edited.Add(time.Minute), "")
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelPass {
+			t.Errorf("check = %+v, want a pass", got)
+		}
+	})
+
+	t.Run("config edited after the last reload", func(t *testing.T) {
+		d := newDoctor(t, running(), time.Now())
+		installed(t, d.dir)
+		reloaded(t, d, 2566, time.Now().Add(-10*time.Minute), "")
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn {
+			t.Fatalf("check = %+v, want a warning", got)
+		}
+		if !strings.Contains(strings.Join(got.Fix, " "), "latem service reload") {
+			t.Errorf("fix = %q; an agent that reloads should be told to", got.Fix)
+		}
+	})
+
+	t.Run("a reload status from another process vouches for nothing", func(t *testing.T) {
+		d := newDoctor(t, running(), time.Now())
+		installed(t, d.dir)
+		reloaded(t, d, 1, time.Now().Add(time.Minute), "")
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn || !strings.Contains(strings.Join(got.Fix, " "), "restart") {
+			t.Errorf("check = %+v, want a warning naming a restart", got)
+		}
+	})
+
+	t.Run("the agent refused the last reload", func(t *testing.T) {
+		d := newDoctor(t, running(), time.Now().Add(-time.Minute))
+		installed(t, d.dir)
+		reloaded(t, d, 2566, time.Now(), `unknown key "repos.app.urll"`)
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn || !strings.Contains(got.Detail, "refused") {
+			t.Errorf("check = %+v, want a warning that the reload was refused", got)
 		}
 	})
 

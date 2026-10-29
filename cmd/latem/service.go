@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
@@ -35,7 +37,7 @@ is enabled, and FileVault is either off or the operator knows what it costs.`,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
 	cmd.AddCommand(newServiceInstallCommand(), newServiceUninstallCommand(),
-		newServiceRestartCommand(), newServiceStatusCommand())
+		newServiceRestartCommand(), newServiceReloadCommand(), newServiceStatusCommand())
 	return cmd
 }
 
@@ -150,6 +152,80 @@ In-flight runs are not drained first — this is a restart, not a shutdown.`,
 			printServiceReport(cmd.OutOrStdout(), rep, false)
 			return err
 		},
+	}
+}
+
+func newServiceReloadCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Make the running agent re-read config.toml, without a restart",
+		Long: `Make the running agent re-read config.toml, without a restart.
+
+Applies [repos.*] — with each repo's allowed_refs, vars and environments —
+[label_aliases], [actions], and agent.log_retention to the next run, plan and
+heartbeat. Runs already admitted keep what they were admitted under, and
+nothing in flight is interrupted.
+
+Everything else the agent consumed when it started — [[runner]], [machine] id,
+[broker.*], [secrets], and the other [agent] knobs — still needs
+"latem service restart", and this command lists each such change it saw.
+
+The file is checked here first. One that does not load is not sent at all:
+the agent would refuse it and keep the config it has, and the problems are
+easier to read here than in its log.
+
+This is SIGHUP, delivered to the process holding the config directory's lock
+and answered through ~/.latem/agent.reload. An agent too old to answer is not
+signalled, because SIGHUP stops one of those instead of reloading it.
+
+Exit codes:
+  0  reloaded (any change that needs a restart is listed)
+  1  the config does not load, the agent refused it, or it cannot reload
+  3  no agent is running against this config directory`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return fmt.Errorf("%w\n\nnothing was sent: the agent would refuse this file and keep the config it has", err)
+			}
+			return reloadAgent(cmd.OutOrStdout(), cfg.Paths)
+		},
+	}
+}
+
+// signalReload is agent.SignalReload, as a seam: a test cannot hand a SIGHUP
+// to an agent it did not start, and must never deliver one to the machine's
+// real agent.
+var signalReload = agent.SignalReload
+
+// reloadAgent asks the running agent to reload and prints its answer.
+func reloadAgent(w io.Writer, paths config.Paths) error {
+	st, err := signalReload(paths, agent.DefaultReloadWait)
+	switch {
+	case errors.Is(err, agent.ErrNoAgent):
+		return &ExitError{Code: ExitAgentDown, Err: fmt.Errorf(
+			"%w (%s)\n\nthe next agent to start reads config.toml as it is now; start one with:\n  latem service install",
+			err, paths.Dir)}
+	case errors.Is(err, agent.ErrCannotReload):
+		return fmt.Errorf("%w — it predates `latem service reload`, and SIGHUP would stop it.\n"+
+			"apply the change with a restart instead:\n  latem service restart", err)
+	case err != nil:
+		return err
+	case st.Error != "":
+		return fmt.Errorf("the agent refused the reload and kept the config it had:\n%s", st.Error)
+	}
+	printReloaded(w, st)
+	return nil
+}
+
+// printReloaded is the answer to a reload that was applied.
+func printReloaded(w io.Writer, st agent.ReloadStatus) {
+	printf(w, "the agent (pid %d) reloaded config.toml\n", st.PID)
+	if len(st.Deferred) > 0 {
+		printf(w, "\nread but not applied — these need `latem service restart`:\n")
+		for _, d := range st.Deferred {
+			printf(w, "  - %s\n", d)
+		}
 	}
 }
 

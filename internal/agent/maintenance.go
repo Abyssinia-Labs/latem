@@ -143,7 +143,7 @@ func (a *Agent) belowAnyFloor(ctx context.Context) bool {
 }
 
 func (a *Agent) logRetention() time.Duration {
-	if d := a.cfg.Agent.LogRetention.Duration(); d > 0 {
+	if d := a.current().Agent.LogRetention.Duration(); d > 0 {
 		return d
 	}
 	return config.DefaultLogRetention

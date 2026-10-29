@@ -50,6 +50,11 @@ type Paths struct {
 	// resolved to (A42 phase 5). Shared across runs like a cache, because
 	// that is what it is.
 	Actions string
+	// ReloadStatus is the running agent's account of its config: written when
+	// it starts and after every SIGHUP, read by `latem service reload` to say
+	// what a reload applied and to know that the agent holding the lock is one
+	// that reloads at all (A54).
+	ReloadStatus string
 }
 
 // Base filenames under the config directory.
@@ -65,6 +70,7 @@ const (
 	actionsName    = "actions"
 	secretsEnvName = "secrets.env"
 	tokenName      = "agent.key"
+	reloadName     = "agent.reload"
 )
 
 // maxSocketPathLen is the shorter of the two platform limits on a Unix socket
@@ -117,6 +123,8 @@ func derivePaths(dir string) Paths {
 		Actions:    filepath.Join(dir, actionsName),
 		SecretsEnv: filepath.Join(dir, secretsEnvName),
 		TokenFile:  filepath.Join(dir, tokenName),
+
+		ReloadStatus: filepath.Join(dir, reloadName),
 	}
 }
 

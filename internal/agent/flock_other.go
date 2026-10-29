@@ -23,4 +23,8 @@ func lockExclusive(*os.File) error {
 	return errors.New("agent: the agent lock needs flock, which this platform does not provide")
 }
 
+func lockShared(*os.File) error {
+	return errors.New("agent: the agent lock needs flock, which this platform does not provide")
+}
+
 func unlock(*os.File) error { return nil }

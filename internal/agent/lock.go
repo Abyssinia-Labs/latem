@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -98,6 +99,36 @@ func (l *lockFile) Close() error {
 	}
 	l.f = nil
 	return err
+}
+
+// Holder reports whether an agent holds the lock at path, and its pid when the
+// file names one.
+//
+// It asks the kernel rather than the pid: a shared lock is refused exactly
+// while an agent holds the exclusive one, and is released at once when it is
+// granted. A pid alone can outlive its process and come to name another one.
+//
+// Taking the shared lock, however briefly, can make an agent starting in that
+// same instant fail as though it had a competitor. A service manager restarts
+// it; the window is a person typing a command.
+func Holder(path string) (pid int, held bool, err error) {
+	// #nosec G304 -- see acquireLock.
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("agent: opening %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := lockShared(f); err != nil {
+		if errors.Is(err, errWouldBlock) {
+			return readPID(path), true, nil
+		}
+		return 0, false, fmt.Errorf("agent: probing %s: %w", path, err)
+	}
+	_ = unlock(f)
+	return 0, false, nil
 }
 
 // readPID reads the holder's pid, best effort. A lock file with no readable
