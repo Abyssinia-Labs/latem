@@ -162,18 +162,6 @@ allowed_refs = ["main"]
 			want: "no execution slot",
 		},
 		{
-			name: "no repos at all",
-			toml: `
-schema_version = 1
-
-[[runner]]
-name = "linux"
-executor = "docker"
-labels = ["linux"]
-`,
-			want: "reject every run",
-		},
-		{
 			name: "unknown executor",
 			toml: `
 schema_version = 1
@@ -848,6 +836,25 @@ func TestParse_SkipsFilesystemChecks(t *testing.T) {
 
 	if _, err := Parse([]byte("schema_version = 1\n"), opts); err == nil {
 		t.Error("Parse accepted a config with no repos and no runners")
+	}
+}
+
+// A54: a machine with a runner and no repo yet is what `latem setup` leaves
+// behind, and it has to start so that `latem repo add` can reach it.
+func TestParse_NoReposIsAMachineWaitingForOne(t *testing.T) {
+	cfg, err := Parse([]byte(`
+schema_version = 1
+
+[[runner]]
+name     = "linux"
+executor = "docker"
+labels   = ["linux"]
+`), Options{Home: "/nonexistent-home", Getenv: func(string) string { return "" }, LookupIP: testLookupIP})
+	if err != nil {
+		t.Fatalf("a config with a runner and no repos was refused: %v", err)
+	}
+	if len(cfg.Repos) != 0 {
+		t.Errorf("repos = %v", cfg.Repos)
 	}
 }
 

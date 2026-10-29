@@ -650,12 +650,31 @@ ref outside `allowed_refs` is rejected rather than parked:
 latem: r_… rejected (E_INVALID_REF): ref "refs/heads/feature/x" is outside allowed_refs for "myapp" and approval is disabled
 ```
 
-**To add a second repository, edit `config.toml` by hand** and add another
-`[repos.<name>]` block. `latem init` refuses to run against an existing config,
-and its `--force` flag *overwrites* the file rather than merging into it — it
-would drop the repos already there. `latem doctor` validates what you added.
+**To add a repository, use `latem repo add`:**
 
-**Then tell the running agent**, or the edit does nothing:
+```console
+$ latem repo add me/myapp
+checking https://github.com/me/myapp.git the way the agent will fetch it …
+added repos.myapp to /Users/me/.latem/config.toml
+  url           https://github.com/me/myapp.git
+  allowed refs  main, refs/pull/*/merge
+
+the agent (pid 4182) reloaded config.toml
+```
+
+It writes `[repos.<name>]` with the https URL and the refs a build may use
+without approval — the repository's default branch, and `refs/pull/*/merge`,
+which is what a pull request's checks are built from (`--allowed-refs`
+replaces both, `--require-approval` parks anything else). It checks the
+repository first with `git ls-remote` the way the agent runs git: no terminal
+to prompt on, and none of your shell's ssh agent, which a service does not
+inherit — so a repository only your terminal can read is refused here rather
+than failing every run at fetch. `latem repo list` shows what is allowed and
+`latem repo remove <name>` takes one out. All three edit `config.toml` as
+text and leave the rest of the file, comments included, as you wrote it.
+
+**Edit `config.toml` by hand for anything else**, then tell the running
+agent, or the edit does nothing:
 
 ```console
 $ latem service reload
@@ -738,6 +757,7 @@ latem logs <run-id> [-f]
 latem cancel <run-id> [--reason R]
 latem approve <run-id>               Local only; pins that run's commit (INV-5)
 latem register --url U --token T
+latem repo add <owner/name> | list | remove <name>
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | restart | reload | status

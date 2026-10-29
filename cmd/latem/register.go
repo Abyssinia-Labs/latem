@@ -285,8 +285,8 @@ type registration struct {
 // unloadable". Those differ in exactly the case that matters most, which is the
 // first one anybody meets: a machine with no config.toml at all. What register
 // can write there is necessarily incomplete, because §8 requires a [[runner]]
-// block and a [repos.*] entry and this command has no way to know what this
-// machine can build. Refusing to write anything would leave a new user with a
+// block and this command has no way to know what this machine can build
+// (`latem setup` runs `init` first for exactly this reason). Refusing to write anything would leave a new user with a
 // verified token, a proven URL, and nothing on disk to show for it.
 //
 // So the gate is conditional on the original: if it loaded, the result must

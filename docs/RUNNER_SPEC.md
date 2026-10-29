@@ -1286,6 +1286,7 @@ latem cancel <run-id>
 latem approve <run-id>               Local-only; pins the run's commit (INV-5)
 latem register --url U --token T     Write config + machine token, verify connectivity
 latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
+latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem version
@@ -2496,3 +2497,19 @@ which a pid file alone cannot give — and only when that process has written
 every reload, with the reload count, the error if it refused one, and the changes it deferred;
 the command waits for the count to move and prints the outcome. An agent built before this
 amendment writes no such file, and is not signalled: SIGHUP would stop it.
+
+**No repos is a legal config.** It is the state `latem setup` leaves a machine in — registered,
+serving, and rejecting every run — until `latem repo add` gives it one; the loader used to
+refuse it, which meant the agent could not start until a repo was written by hand. `latem
+doctor` warns about it and names the fix.
+
+**`latem repo add <owner/name>`** writes `[repos.<key>]` — the key is the repository's name,
+lowercased into §8's key characters, or `--key` — with `url = "https://github.com/<owner>/<name>.git"`
+and `allowed_refs` set to the repository's default branch (as `git ls-remote --symref` names it)
+and `refs/pull/*/merge`. It first runs that `ls-remote` in the agent's git environment: prompting
+off, the git state variables dropped as `internal/source` drops them, and no `SSH_AUTH_SOCK`,
+since a service does not inherit one. A repository that answers only with the operator's ssh
+agent is refused with that diagnosis, as `doctor`'s repo check gives it; `--no-verify` skips the
+probe. `repo remove` deletes the table and its `vars` and `environments` subtables. Both edit the
+file as text — the table found by its header, everything else byte for byte — and refuse an edit
+whose result would not load when the original did, then ask the running agent to reload.

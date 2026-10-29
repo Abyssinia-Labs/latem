@@ -229,6 +229,28 @@ func printReloaded(w io.Writer, st agent.ReloadStatus) {
 	}
 }
 
+// announceConfigChange tells a running agent about an edit a command has just
+// made to config.toml, and says what came of it.
+//
+// It never fails the command. The edit is on disk and is what the next agent
+// reads; whether the one running now could take it is something to report, not
+// a reason to call the edit a failure.
+func announceConfigChange(w io.Writer, paths config.Paths) {
+	st, err := signalReload(paths, agent.DefaultReloadWait)
+	switch {
+	case errors.Is(err, agent.ErrNoAgent):
+		printf(w, "no agent is running; the next one to start reads this\n")
+	case errors.Is(err, agent.ErrCannotReload):
+		printf(w, "the running agent predates `latem service reload`; apply this with:\n  latem service restart\n")
+	case err != nil:
+		printf(w, "the running agent was not reloaded: %v\napply this with:\n  latem service restart\n", err)
+	case st.Error != "":
+		printf(w, "the running agent refused the reload and kept the config it had:\n%s\n", st.Error)
+	default:
+		printReloaded(w, st)
+	}
+}
+
 // runningWord reports the three states that matter, rather than folding the
 // middle one into "no".
 func runningWord(st system.ServiceState) string {

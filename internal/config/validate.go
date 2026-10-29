@@ -283,11 +283,11 @@ func validateRepos(cfg *Config) []error {
 		problems = append(problems, fmt.Errorf(format, args...))
 	}
 
-	if len(cfg.Repos) == 0 {
-		add("no [repos.*] entries; a repo absent from this table cannot be built (§8), so this agent would reject every run — add at least one")
-		return problems
-	}
-
+	// No repos at all is legal (A54): it is the state `latem setup` leaves a
+	// machine in, registered and serving and waiting for `latem repo add`,
+	// which a reload then applies. The agent rejects every run until then,
+	// and `latem doctor` says so; refusing to load would instead stop the
+	// agent from starting until a repo was written by hand.
 	for _, name := range sortedKeys(cfg.Repos) {
 		repo := cfg.Repos[name]
 		// The key becomes a mirror directory, mirrors/<key>.git (§12), so it

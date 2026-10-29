@@ -760,7 +760,8 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 		return []check{skip("repo.reach", "repositories", "config did not load")}
 	}
 	if len(d.cfg.Repos) == 0 {
-		return []check{warn("repo.reach", "repositories", "no [repos.*] entries; this agent would reject every run")}
+		return []check{warn("repo.reach", "repositories", "no [repos.*] entries; this agent would reject every run",
+			"latem repo add <owner/name>")}
 	}
 
 	out := make([]check, 0, len(d.cfg.Repos))

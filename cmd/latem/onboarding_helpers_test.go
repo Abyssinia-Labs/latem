@@ -78,3 +78,30 @@ func fakeReload(t *testing.T, answer func(config.Paths) (agent.ReloadStatus, err
 	t.Cleanup(func() { signalReload = prev })
 	return &calls
 }
+
+// readConfigFile is config.toml in dir, as text.
+func readConfigFile(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, config.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// loadConfigIn loads dir's config through the real loader.
+func loadConfigIn(t *testing.T, dir string) *config.Config {
+	t.Helper()
+	cfg, err := config.Load(config.Options{Dir: dir})
+	if err != nil {
+		t.Fatalf("the config does not load: %v", err)
+	}
+	return cfg
+}
+
+// noAgentRunning is the fake for the common case: nothing to reload.
+func noAgentRunning(t *testing.T) *int {
+	return fakeReload(t, func(config.Paths) (agent.ReloadStatus, error) {
+		return agent.ReloadStatus{}, agent.ErrNoAgent
+	})
+}
