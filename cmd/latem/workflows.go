@@ -65,8 +65,11 @@ For every job it reports whether a runner here takes it, and if not why:
   - a remote action not in [actions] allowed, or not pinned to a commit
   - secrets with no value in any scope a run would look in (names only)
   - vars with no value, which a job reads as empty
-  - what latem refuses outright: a matrix, a reusable workflow, services:,
-    container:, and anything else the compiler names
+  - what latem refuses outright: a reusable workflow, services:, container:,
+    and anything else the compiler names
+
+A matrix job is checked leg by leg, as the plan expands it, and each leg's
+runs-on — which may read the matrix — is matched on its own (A55).
 
 A job's if: is not evaluated: the question is whether this machine could run
 the job, not whether this event would.
@@ -628,6 +631,9 @@ func checkJob(
 		LabelAliases: cfg.LabelAliases,
 		Vars:         vars,
 		WorkflowRun:  true,
+		// A matrix job is compiled one leg at a time (A55): the leg the plan
+		// made, exactly what a run of it would be given as run.matrix.
+		Matrix: pj.Matrix,
 	})
 	checkActions(cfg, fetcher.seen(), rep, fail)
 	if err != nil {
@@ -635,7 +641,7 @@ func checkJob(
 		return jr
 	}
 
-	jr.runner = checkRunner(cfg, w, pj.Key, job, rep, fail)
+	jr.runner = checkRunner(cfg, job, rep, fail)
 	checkSecrets(t, inv, job, &jr)
 	return jr
 }
@@ -772,8 +778,7 @@ func checkActions(cfg *config.Config, refs []actions.Ref, rep *checkReport, fail
 
 // checkRunner is gate 13 for a compiled job: the first runner carrying its
 // labels, and able to run its kind of steps (internal/run's selectRunner).
-func checkRunner(cfg *config.Config, w *workflow.Workflow, key string, job *registry.Job, rep *checkReport,
-	fail func(string, ...string)) string {
+func checkRunner(cfg *config.Config, job *registry.Job, rep *checkReport, fail func(string, ...string)) string {
 	needDocker := job.RequiredExecutor() == registry.ExecutorDocker
 	var labelsOnly *config.Runner
 	for _, r := range cfg.Runners {
@@ -790,7 +795,7 @@ func checkRunner(cfg *config.Config, w *workflow.Workflow, key string, job *regi
 	}
 	switch {
 	case labelsOnly == nil:
-		if !suggestAliases(cfg, w, key, job.RunsOn, rep, fail) {
+		if !suggestAliases(cfg, job.RunsOn, rep, fail) {
 			fail(fmt.Sprintf("no runner here carries all of %s", strings.Join(job.RunsOn, ", ")))
 		}
 	case needDocker && labelsOnly.Executor != config.ExecutorDocker:
@@ -803,48 +808,48 @@ func checkRunner(cfg *config.Config, w *workflow.Workflow, key string, job *regi
 	return ""
 }
 
-// suggestAliases names the runs-on labels no runner carries, with the alias
-// that maps each onto this machine when the label says which platform it
-// means. It reports whether it said anything.
-func suggestAliases(cfg *config.Config, w *workflow.Workflow, key string, compiled []string, rep *checkReport,
-	fail func(string, ...string)) bool {
-	if w == nil || w.Jobs[key] == nil {
-		return false
-	}
+// suggestAliases names the labels a compiled job asks for that no runner
+// carries, with the alias that maps each onto this machine when the label says
+// which platform it means. It reports whether it said anything.
+//
+// It reads the compiled labels, not the file's runs-on: since A55 runs-on may
+// be an expression over the matrix, so a leg's labels exist only once it is
+// compiled. A label the compiler produced itself — linux, macos or arm64 from a
+// GitHub-hosted label, or a label some alias already maps onto — is a platform
+// this machine lacks, which no alias supplies. Any other is a vendor's label
+// as written, and an alias is the fix.
+func suggestAliases(cfg *config.Config, compiled []string, rep *checkReport, fail func(string, ...string)) bool {
 	have := map[string]bool{}
 	for _, r := range cfg.Runners {
 		for _, l := range r.Labels {
 			have[l] = true
 		}
 	}
+	produced := map[string]bool{"linux": true, "macos": true, "arm64": true}
+	for _, targets := range cfg.LabelAliases {
+		for _, l := range targets {
+			produced[l] = true
+		}
+	}
 	said := false
-	for _, raw := range w.Jobs[key].RunsOn {
-		l := strings.ToLower(strings.TrimSpace(raw))
-		if l == "self-hosted" || have[l] || cfg.LabelAliases[l] != nil || expr.Has(l) {
+	for _, l := range compiled {
+		switch {
+		case have[l]:
 			continue
-		}
-		if !slices.Contains(compiled, l) {
-			// A hosted label the compiler mapped (ubuntu-latest → linux): the
-			// missing label is the platform, which no alias supplies.
-			continue
-		}
-		target := aliasTarget(l, have)
-		if target == nil {
-			fail(fmt.Sprintf("runs-on %q: no runner here carries it, and nothing says which one should", l),
-				fmt.Sprintf(`[label_aliases] %q = [<the labels of the runner that should take it>]`, l))
-		} else {
-			fail(fmt.Sprintf("runs-on %q: no runner here carries it", l),
-				fmt.Sprintf(`[label_aliases] %q = %s`, l, tomlStringList(target)))
-			rep.aliases[l] = target
+		case produced[l]:
+			fail(fmt.Sprintf("needs a runner labelled %q, and this machine has none — it is a job for another machine", l))
+		default:
+			target := aliasTarget(l, have)
+			if target == nil {
+				fail(fmt.Sprintf("runs-on %q: no runner here carries it, and nothing says which one should", l),
+					fmt.Sprintf(`[label_aliases] %q = [<the labels of the runner that should take it>]`, l))
+			} else {
+				fail(fmt.Sprintf("runs-on %q: no runner here carries it", l),
+					fmt.Sprintf(`[label_aliases] %q = %s`, l, tomlStringList(target)))
+				rep.aliases[l] = target
+			}
 		}
 		said = true
-	}
-	for _, l := range compiled {
-		raw := slices.ContainsFunc(w.Jobs[key].RunsOn, func(r string) bool { return strings.EqualFold(strings.TrimSpace(r), l) })
-		if !have[l] && !raw {
-			fail(fmt.Sprintf("needs a runner labelled %q, and this machine has none — it is a job for another machine", l))
-			said = true
-		}
 	}
 	return said
 }
@@ -1011,7 +1016,10 @@ func printCheckReport(w io.Writer, t checkTarget, rep checkReport) {
 		for _, j := range wr.jobs {
 			lv := j.level()
 			label := j.key
-			if j.name != j.key {
+			switch {
+			case strings.HasPrefix(j.name, j.key+" ("):
+				label = j.name // a matrix leg, already named after its key (A55)
+			case j.name != j.key:
 				label += " (" + j.name + ")"
 			}
 			detail := ""

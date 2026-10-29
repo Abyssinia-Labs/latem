@@ -2553,6 +2553,11 @@ the next. Nothing is fetched and nothing runs. Per job it reports: the runner ga
 to `linux` or `macos` when its name says which; an action outside the allowlist or not pinned;
 secrets the compiled job declares (less `GITHUB_TOKEN`, which the control plane mints) that no
 store holds under any scope the run looks in, from names alone; and the compiler's own refusals.
+A matrix job (A55) is compiled once per leg the plan made, with that leg as `Options.Matrix` —
+exactly the `run.matrix` a run of it would carry — and reported per leg, because `runs-on` may
+read the matrix. Alias suggestions therefore come from the compiled labels: one the compiler
+produced itself (`linux`, `macos`, `arm64`, or an existing alias's target) is a platform this
+machine lacks; any other is a vendor's label as written, and an alias is the fix.
 Vars referenced in the file with no value are a warning, as they read as empty. `--fix` writes
 the alias and allowlist entries, through the same text edit and load gate as the other commands,
 and reloads; it never changes `require_pinned` or stores a secret. The checkout is matched to a

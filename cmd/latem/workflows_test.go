@@ -60,10 +60,11 @@ jobs:
     steps:
       - run: xcodebuild -version
   legs:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        node: [20, 22]
+        os: [ubuntu-latest, blacksmith-2vcpu-ubuntu-2204]
+        node: [22]
     steps:
       - run: node --version
   db:
@@ -140,8 +141,12 @@ func TestWorkflowsCheck_NamesEveryProblemAndItsFix(t *testing.T) {
 		"require_pinned = false",
 		// A platform no alias supplies.
 		`needs a runner labelled "macos"`,
+		// A matrix is compiled leg by leg (A55), and runs-on read per leg:
+		// one leg runs here, the other needs an alias.
+		"[ ok ] legs (ubuntu-latest, 22)",
+		"[FAIL] legs (blacksmith-2vcpu-ubuntu-2204, 22)",
+		`runs-on "blacksmith-2vcpu-ubuntu-2204": no runner here carries it`,
 		// Refused features, by name.
-		"a matrix is not planned yet",
 		"services:",
 		// Secrets: names only, scoped as the run looks them up.
 		"secrets with no value on this machine: NPM_TOKEN",
@@ -163,6 +168,9 @@ func TestWorkflowsCheck_NamesEveryProblemAndItsFix(t *testing.T) {
 	}
 	if strings.Contains(out, "GITHUB_TOKEN") {
 		t.Error("GITHUB_TOKEN is minted per job and must not be reported missing")
+	}
+	if strings.Contains(out, "names none (A55)") {
+		t.Error("a matrix job was compiled without its leg")
 	}
 	if t.Failed() {
 		t.Logf("output:\n%s", out)
@@ -193,6 +201,10 @@ func TestWorkflowsCheck_FixWritesTheAliasAndTheAllowlist(t *testing.T) {
 	cfg := loadConfigIn(t, dir)
 	if got := cfg.LabelAliases["blacksmith-4vcpu-ubuntu-2404"]; !slices.Equal(got, []string{"linux"}) {
 		t.Errorf("label alias = %v\n%s", got, out)
+	}
+	// The label only a matrix leg's runs-on named is fixed too.
+	if got := cfg.LabelAliases["blacksmith-2vcpu-ubuntu-2204"]; !slices.Equal(got, []string{"linux"}) {
+		t.Errorf("the matrix leg's alias = %v", got)
 	}
 	if !slices.Equal(cfg.Actions.Allowed, []string{"actions/setup-node"}) {
 		t.Errorf("[actions] allowed = %v", cfg.Actions.Allowed)
