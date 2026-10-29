@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,22 @@ labels   = ["linux", "docker"]
   [runner.docker]
   default_image = "ghcr.io/me/ci:latest"
 `
+
+// init makes the seams that reach outside the test fail loudly by default. A
+// test that wants one says so — fakeReload, fakeLsRemote, fakeStores — and a
+// test that forgets cannot signal the machine's real agent, query a real
+// remote, or read the Keychain of whoever is running the suite.
+func init() {
+	signalReload = func(config.Paths, time.Duration) (agent.ReloadStatus, error) {
+		panic("a test reached the real agent.SignalReload; use fakeReload or noAgentRunning")
+	}
+	lsRemote = func(context.Context, string, bool) (string, error) {
+		panic("a test reached a real git ls-remote; use fakeLsRemote")
+	}
+	newSecretStores = func(config.Paths) (secretStores, error) {
+		panic("a test reached the real secret stores; use fakeStores")
+	}
+}
 
 // configDirWith is a 0700 config directory holding body as config.toml, or
 // nothing when body is empty. It is under /tmp for the socket-length reason

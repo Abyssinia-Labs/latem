@@ -30,6 +30,11 @@ const MaxNameLength = 128
 // registry never saw.
 var namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// ValidName reports why name cannot be a secret's name, or nil. It is the rule
+// every provider applies, exported so that a command storing a value can
+// refuse a name before it asks anything to store it.
+func ValidName(name string) error { return validName(name) }
+
 func validName(name string) error {
 	if name == "" {
 		return errors.New("secret name is empty")

@@ -133,6 +133,8 @@ func newRootCommand() *cobra.Command {
 		newApproveCommand(),
 		newRegisterCommand(),
 		newRepoCommand(),
+		newSecretsCommand(),
+		newVarsCommand(),
 		newDoctorCommand(),
 		newCacheCommand(),
 		newServiceCommand(),

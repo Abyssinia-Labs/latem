@@ -1094,7 +1094,7 @@ Resolution chain, first hit wins. Only names declared in the job's `secrets:` bl
 
 1. `LATEM_SECRET_<NAME>` in the agent's own environment
 2. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
-3. macOS Keychain — `security find-generic-password -s latem -a <NAME> -w`
+3. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
 4. `pass` / `gopass`, if configured
 5. A shell command per secret, defined in config
 
@@ -1117,6 +1117,7 @@ Rules:
 - Never written to sqlite, never included in `Update.ErrorMsg`, never sent to a broker (INV-4).
 - A declared secret that resolves empty is `E_MISSING_SECRET` at admission, not a runtime surprise 40 minutes in.
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
+- `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value.
 
 ---
 
@@ -1287,6 +1288,8 @@ latem approve <run-id>               Local-only; pins the run's commit (INV-5)
 latem register --url U --token T     Write config + machine token, verify connectivity
 latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
+latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
+latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem version
@@ -2513,3 +2516,20 @@ agent is refused with that diagnosis, as `doctor`'s repo check gives it; `--no-v
 probe. `repo remove` deletes the table and its `vars` and `environments` subtables. Both edit the
 file as text — the table found by its header, everything else byte for byte — and refuse an edit
 whose result would not load when the original did, then ask the running agent to reload.
+
+**`latem secrets set|list|rm [--repo R] [--env E] NAME`** stores a value under
+`secrets.ScopedName(NAME, R[, E])` — exactly the name a workflow job's lookup tries first for that
+scope, so the command cannot file a value under a name no run reads. The value comes from stdin
+(a one-line value loses the one trailing newline `echo` adds; a multi-line value is kept as it is)
+or from a prompt with echo off, and the command takes no argument that could carry it. On macOS it
+goes to the Keychain through `security -i`, which reads `add-generic-password -U -s latem -a <name>
+-X <hex>` from stdin: the value is never in a process's argv, and hex carries a PEM's newlines
+without quoting. Elsewhere, and with `--store file`, it is a line of `secrets.env` in the double
+quoting the file provider reads back exactly, every other line kept, written through a 0600
+temporary and a rename; a file that does not parse is refused rather than rewritten. `list` reads
+names only — the Keychain's from `security dump-keychain` without `-d`, the file's from its keys,
+and `[secrets.commands]` from config — and decodes each back into its scope. `set` warns when
+`secrets.env` holds the same name, because the file is read before the Keychain.
+
+**`latem vars set|list|rm --repo R [--env E] NAME [VALUE]`** edits `[repos.R.vars]` or
+`[repos.R.environments.E.vars]` as text, creating the table beside its repository, and reloads.
