@@ -51,6 +51,16 @@ type Broker interface {
 	// Heartbeat publishes liveness and capacity.
 	Heartbeat(ctx context.Context, h protocol.MachineHealth) error
 
+	// ReportPlan answers a plan command (A52): which workflow runs an event
+	// starts at a commit, or why it could not be planned.
+	//
+	// A plan is durable nowhere on the agent. It reads files and decides
+	// nothing, so making it again is cheap and always gives the same answer
+	// for the same commit — an answer that does not arrive is the control
+	// plane's to ask for again, and a transport that cannot carry one says
+	// so rather than dropping it.
+	ReportPlan(ctx context.Context, p protocol.PlanResult) error
+
 	// Close releases the transport: a listener for the local broker, a
 	// connection for the remote one.
 	//
@@ -110,6 +120,10 @@ func (NotImplemented) Logs(context.Context, string) (LogSink, error) {
 
 func (NotImplemented) Heartbeat(context.Context, protocol.MachineHealth) error {
 	return fmt.Errorf("broker: Heartbeat: %w", errors.ErrUnsupported)
+}
+
+func (NotImplemented) ReportPlan(context.Context, protocol.PlanResult) error {
+	return fmt.Errorf("broker: ReportPlan: %w", errors.ErrUnsupported)
 }
 
 func (NotImplemented) Close() error { return nil }

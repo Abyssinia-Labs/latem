@@ -33,6 +33,9 @@ const (
 	// StateInterrupted is terminal: the agent died mid-run. Set during startup
 	// reconciliation, never by a running agent about itself.
 	StateInterrupted RunState = "interrupted"
+	// StateSkipped is terminal: a workflow job whose if: was false as it
+	// started. Neither success nor failure, as on GitHub (A52).
+	StateSkipped RunState = "skipped"
 )
 
 // terminalStates is the closed set of states from which no transition exists.
@@ -46,6 +49,7 @@ var terminalStates = map[RunState]bool{
 	StateCancelled:   true,
 	StateRejected:    true,
 	StateInterrupted: true,
+	StateSkipped:     true,
 }
 
 // allStates is every legal value, used by [RunState.Valid].
@@ -62,6 +66,7 @@ var allStates = map[RunState]bool{
 	StateCancelled:        true,
 	StateRejected:         true,
 	StateInterrupted:      true,
+	StateSkipped:          true,
 }
 
 // IsTerminal reports whether the run has finished and will not transition again.

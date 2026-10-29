@@ -90,6 +90,9 @@ func TestConformance_AgentEmissions(t *testing.T) {
 			Available: false, Unavailable: "the docker daemon is not answering",
 		}},
 		DiskFreeGB: 412.5,
+		// A52: how an installation's repository finds its machines. A
+		// repository not on GitHub has a key and no slug.
+		Repos: []protocol.RepoInfo{{Key: "myapp", GitHub: "Abyssinia-Labs/myapp"}, {Key: "scratch"}},
 	}); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -136,8 +139,49 @@ func TestConformance_AgentEmissions(t *testing.T) {
 		SHA:           "3bf12613f4a2a8f9d24a5e0c1b7d9e3a5c8f0b21",
 		ErrorCode:     protocol.ErrStep,
 		ErrorMsg:      "step 2 exited 1",
+		Outputs:       map[string]string{"version": "1.4.0", "changed-web": "true"},
 	}); err != nil {
 		t.Fatalf("report: %v", err)
+	}
+
+	// --- plan (A52), twice: a plan and a refusal to make one ----------------
+	if err := b.ReportPlan(ctx, protocol.PlanResult{
+		ID: "p-alpha",
+		Workflows: []protocol.PlannedWorkflow{{
+			File: ".github/workflows/checks.yml", Name: "Checks", RunName: "Checks on main",
+			Concurrency: &protocol.Concurrency{Group: "checks-refs/heads/main", CancelInProgress: true},
+			Jobs: []protocol.PlannedJob{{
+				Key: "lint", Name: "lint", Labels: []string{"linux"},
+				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+			}, {
+				Key: "web", Name: "Web build", Needs: []string{"lint"}, Labels: []string{"linux"},
+				Environment: "staging", Permissions: map[string]string{},
+				Concurrency:    &protocol.Concurrency{Group: "deploy-staging"},
+				IfChecksStatus: true, ContinueOnError: true, TimeoutMinutes: 30,
+			}, {
+				Key: "matrix", Name: "matrix", Permissions: map[string]string{"contents": "read"},
+				TimeoutMinutes: 360, Error: "strategy: a matrix is not planned yet (A52)",
+			}},
+		}, {
+			File: ".github/workflows/deploy-production.yml", Name: "Deploy production",
+			Inputs: map[string]string{"ref": "v1.2.3", "dry": "false"},
+		}, {
+			File: ".github/workflows/broken.yml", Name: ".github/workflows/broken.yml",
+			Error: "parsing .github/workflows/broken.yml: unknown field \"stepz\"",
+		}},
+	}); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	// The second documented null: a plan that triggers nothing writes
+	// `"workflows": []`, and one that could not be made writes null — both are
+	// in the corpus because a reader that assumed an array crashes on the second.
+	if err := b.ReportPlan(ctx, protocol.PlanResult{
+		ID: "p-beta", ErrorCode: protocol.ErrSource, Error: "fetching myapp: exit status 128",
+	}); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if err := b.ReportPlan(ctx, protocol.PlanResult{ID: "p-gamma", Workflows: []protocol.PlannedWorkflow{}}); err != nil {
+		t.Fatalf("plan: %v", err)
 	}
 
 	// --- logs (§4.3) --------------------------------------------------------
@@ -251,7 +295,7 @@ func compareCorpus(t *testing.T, want, got []string) {
 }
 
 // agentKinds is docs/PROTOCOL.md §2.4's agent-to-server half.
-var agentKinds = []string{"resume", "update", "logs", "heartbeat", "claim", "ack"}
+var agentKinds = []string{"resume", "update", "logs", "heartbeat", "claim", "ack", "plan"}
 
 // assertEveryAgentKindIsCovered stops the corpus from silently shrinking.
 //
@@ -279,7 +323,7 @@ func assertEveryAgentKindIsCovered(t *testing.T, got []string) {
 	}
 	for _, k := range agentKinds {
 		if seen[k] == 0 {
-			t.Errorf("the corpus covers no %q frame; docs/PROTOCOL.md §2.4 lists six kinds the "+
+			t.Errorf("the corpus covers no %q frame; docs/PROTOCOL.md §2.4 lists seven kinds the "+
 				"agent emits and this test must drive all of them", k)
 		}
 	}
@@ -300,6 +344,7 @@ func TestConformance_EnvelopeIDsMatchTheDocumentedTable(t *testing.T) {
 		"update":    true,
 		"logs":      true,
 		"ack":       true,
+		"plan":      true,
 	}
 
 	for _, line := range readCorpus(t, agentCorpus) {

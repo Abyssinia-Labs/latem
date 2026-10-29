@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // GitHub's public endpoints. A job compiled from a workflow gets these
@@ -36,97 +37,6 @@ const (
 	EventRepositoryDispatch = "repository_dispatch"
 	EventWorkflowDispatch   = "workflow_dispatch"
 )
-
-// Event is one GitHub event as the planner reads it (A52): what triggering
-// and a plan's expressions need, as data.
-type Event struct {
-	// Name is GitHub's event name: push, pull_request.
-	Name string `json:"name"`
-	// Action is the activity type — a pull request's opened or synchronize, a
-	// release's published — and a repository_dispatch's event_type.
-	Action string `json:"action,omitempty"`
-	// Ref is the full ref the event is about: refs/heads/main for a push or a
-	// dispatch, refs/pull/7/merge for a pull request.
-	Ref string `json:"ref"`
-	// SHA is the commit planned, and later built.
-	SHA string `json:"sha"`
-	// BaseRef and HeadRef are a pull request's branches, by name. Its
-	// branches filter reads BaseRef, as GitHub's does.
-	BaseRef string `json:"base_ref,omitempty"`
-	HeadRef string `json:"head_ref,omitempty"`
-	// Workflow is the file a workflow_dispatch names. No other event names one.
-	Workflow string `json:"workflow,omitempty"`
-	// Inputs are a workflow_dispatch's, as given.
-	Inputs map[string]string `json:"inputs,omitempty"`
-	// Actor is who caused the event.
-	Actor string `json:"actor,omitempty"`
-	// Payload is the webhook's body, for github.event.
-	Payload map[string]any `json:"payload,omitempty"`
-}
-
-// Plan is what an event triggers at a commit: one entry per workflow, in file
-// order. Structure and names, never steps (A52).
-type Plan struct {
-	Workflows []PlannedWorkflow `json:"workflows"`
-}
-
-// PlannedWorkflow is one workflow run the event starts.
-type PlannedWorkflow struct {
-	// File is the workflow's path in the repository.
-	File string `json:"file"`
-	// Name is the workflow's name:, or its path when it has none, as GitHub
-	// shows it.
-	Name string `json:"name"`
-	// RunName is run-name: evaluated. Empty when the workflow has none, and
-	// the control plane names the run as GitHub would.
-	RunName     string       `json:"run_name,omitempty"`
-	Concurrency *Concurrency `json:"concurrency,omitempty"`
-	// Inputs are a dispatch's inputs with the workflow's defaults filled in,
-	// which every job of the run is then given.
-	Inputs map[string]string `json:"inputs,omitempty"`
-	// Jobs are in an order where every job comes after those it needs.
-	Jobs []PlannedJob `json:"jobs,omitempty"`
-	// Error is why the workflow could not be planned. It is in the plan so
-	// that it is reported as a failed run rather than missing from the
-	// checks — which is what GitHub does with an invalid workflow file.
-	Error string `json:"error,omitempty"`
-}
-
-// PlannedJob is one job of a planned workflow run.
-type PlannedJob struct {
-	// Key is the job's id under jobs:, which needs: names.
-	Key string `json:"key"`
-	// Name is the job's name: evaluated, or its key. A check run is named
-	// by it, which is what branch protection already requires.
-	Name  string   `json:"name"`
-	Needs []string `json:"needs,omitempty"`
-	// Labels are runs-on, after the machine's aliases and GitHub's hosted
-	// labels (A50). A runner whose labels cover these can take the job.
-	Labels      []string `json:"labels,omitempty"`
-	Environment string   `json:"environment,omitempty"`
-	// Permissions scope the job's token: the job's permissions:, else the
-	// workflow's, else GitHub's restricted default. Scope names are the
-	// workflow's (pull-requests, not pull_requests), levels read or write;
-	// a scope it does not name has none.
-	Permissions map[string]string `json:"permissions"`
-	Concurrency *Concurrency      `json:"concurrency,omitempty"`
-	// IfChecksStatus is set when the job's if: calls success(), failure(),
-	// always() or cancelled(). Only then may the job run after a job it needs
-	// did not succeed, and whether it does is the machine's to evaluate;
-	// otherwise the job is skipped, as on GitHub, without asking one.
-	IfChecksStatus  bool    `json:"if_checks_status,omitempty"`
-	ContinueOnError bool    `json:"continue_on_error,omitempty"`
-	TimeoutMinutes  float64 `json:"timeout_minutes"`
-	// Error is why this job cannot run. The rest of the run still can: the
-	// job fails, and those that need it are skipped as after any failure.
-	Error string `json:"error,omitempty"`
-}
-
-// Concurrency is a concurrency: block, evaluated.
-type Concurrency struct {
-	Group            string `json:"group"`
-	CancelInProgress bool   `json:"cancel_in_progress,omitempty"`
-}
 
 // PlanOptions is what planning needs from the machine besides the commit.
 type PlanOptions struct {
@@ -153,9 +63,15 @@ type PlanOptions struct {
 // not plan, or a dispatch its workflow refuses — GitHub refuses those before
 // anything starts, too. A workflow that cannot be read, parsed or planned is
 // in the plan with its error.
-func PlanEvent(fsys fs.FS, ev Event, opts PlanOptions) (*Plan, error) {
-	if err := ev.check(); err != nil {
+func PlanEvent(fsys fs.FS, ev protocol.Event, opts PlanOptions) ([]protocol.PlannedWorkflow, error) {
+	if err := checkEvent(ev); err != nil {
 		return nil, err
+	}
+	payload := map[string]any{}
+	if len(ev.Payload) > 0 {
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("%s: the event's payload is not a JSON object: %w", ev.Name, err)
+		}
 	}
 	files, err := workflowFiles(fsys)
 	if err != nil {
@@ -167,15 +83,15 @@ func PlanEvent(fsys fs.FS, ev Event, opts PlanOptions) (*Plan, error) {
 		}
 		files = []string{ev.Workflow}
 	}
-	p := &planner{fsys: fsys, ev: ev, opts: opts}
-	plan := &Plan{Workflows: []PlannedWorkflow{}}
+	p := &planner{fsys: fsys, ev: ev, payload: payload, opts: opts}
+	plan := []protocol.PlannedWorkflow{}
 	for _, f := range files {
 		pw, triggered, err := p.workflow(f)
 		if err != nil {
 			return nil, err
 		}
 		if triggered {
-			plan.Workflows = append(plan.Workflows, pw)
+			plan = append(plan, pw)
 		}
 	}
 	return plan, nil
@@ -183,8 +99,8 @@ func PlanEvent(fsys fs.FS, ev Event, opts PlanOptions) (*Plan, error) {
 
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
-// check refuses an event the planner cannot read, before any file is.
-func (ev Event) check() error {
+// checkEvent refuses an event the planner cannot read, before any file is.
+func checkEvent(ev protocol.Event) error {
 	switch ev.Name {
 	case EventPush, EventPullRequest, EventPullRequestTarget, EventRelease,
 		EventRepositoryDispatch, EventWorkflowDispatch:
@@ -238,9 +154,10 @@ func refNameAndType(ref string) (name, kind string) {
 }
 
 type planner struct {
-	fsys fs.FS
-	ev   Event
-	opts PlanOptions
+	fsys    fs.FS
+	ev      protocol.Event
+	payload map[string]any
+	opts    PlanOptions
 
 	diffDone bool
 	diff     []string
@@ -248,10 +165,10 @@ type planner struct {
 }
 
 // workflow plans one file, reporting whether the event triggers it.
-func (p *planner) workflow(file string) (PlannedWorkflow, bool, error) {
-	pw := PlannedWorkflow{File: file, Name: file}
+func (p *planner) workflow(file string) (protocol.PlannedWorkflow, bool, error) {
+	pw := protocol.PlannedWorkflow{File: file, Name: file}
 	dispatch := p.ev.Name == EventWorkflowDispatch
-	broken := func(err error) (PlannedWorkflow, bool, error) {
+	broken := func(err error) (protocol.PlannedWorkflow, bool, error) {
 		if dispatch {
 			return pw, false, err // whoever dispatched it hears why, now
 		}
@@ -330,10 +247,7 @@ func (p *planner) workflow(file string) (PlannedWorkflow, bool, error) {
 func (p *planner) scope(workflow string, inputs map[string]any, given map[string]string) expr.Scope {
 	refName, refType := refNameAndType(p.ev.Ref)
 	owner, _, _ := strings.Cut(p.opts.Repository, "/")
-	event := maps.Clone(p.ev.Payload)
-	if event == nil {
-		event = map[string]any{}
-	}
+	event := maps.Clone(p.payload)
 	if p.ev.Name == EventWorkflowDispatch {
 		// github.event.inputs holds them as strings, the inputs context typed.
 		event["inputs"] = stringsToAny(given)
@@ -371,9 +285,9 @@ func (p *planner) scope(workflow string, inputs map[string]any, given map[string
 
 // job plans one job. What is wrong with it is collected rather than stopped
 // at, for the reason [Job.unsupported] gives.
-func (p *planner) job(w *Workflow, key string, sc expr.Scope, perms map[string]string) (pj PlannedJob) {
+func (p *planner) job(w *Workflow, key string, sc expr.Scope, perms map[string]string) (pj protocol.PlannedJob) {
 	j := w.Jobs[key]
-	pj = PlannedJob{
+	pj = protocol.PlannedJob{
 		Key:            key,
 		Name:           key,
 		Needs:          uniqueNeeds(j.Needs),
@@ -839,7 +753,7 @@ func planPermissions(raw json.RawMessage) (map[string]string, bool, error) {
 
 // planConcurrency reads a concurrency: block — a group, or {group,
 // cancel-in-progress} — and evaluates it.
-func planConcurrency(raw json.RawMessage, sc expr.Scope) (*Concurrency, error) {
+func planConcurrency(raw json.RawMessage, sc expr.Scope) (*protocol.Concurrency, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
@@ -868,7 +782,7 @@ func planConcurrency(raw json.RawMessage, sc expr.Scope) (*Concurrency, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cancel-in-progress: %w", err)
 	}
-	return &Concurrency{Group: g, CancelInProgress: c}, nil
+	return &protocol.Concurrency{Group: g, CancelInProgress: c}, nil
 }
 
 // planContexts are what a plan's expressions may read. needs, steps, job,

@@ -452,6 +452,20 @@ func (b *Broker) handleCommand(ctx context.Context, id string, cmd protocol.Comm
 			return
 		}
 		b.reply(ctx, id, protocol.Ack{OK: true, RunID: cmd.Cancel.ID})
+
+	case protocol.CommandPlan:
+		// A plan is durable nowhere either (A52): "ok" means the agent has
+		// the question, and the answer follows as a plan frame of its own,
+		// because fetching and reading a repository takes longer than an
+		// acknowledgement should.
+		if !b.deliver(cmd) {
+			b.reply(ctx, id, protocol.Ack{
+				RunID: cmd.Plan.ID,
+				Error: "the agent is not reading commands; the plan was not delivered",
+			})
+			return
+		}
+		b.reply(ctx, id, protocol.Ack{OK: true, RunID: cmd.Plan.ID})
 	}
 }
 

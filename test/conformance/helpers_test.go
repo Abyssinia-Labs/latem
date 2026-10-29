@@ -162,7 +162,7 @@ func (r *recorder) maybeAck(ctx context.Context, conn *websocket.Conn, data []by
 		return
 	}
 	switch env.Kind {
-	case "claim", "update", "logs":
+	case "claim", "update", "logs", "plan":
 	default:
 		return // resume, heartbeat and ack want no answer (PROTOCOL §2.1)
 	}

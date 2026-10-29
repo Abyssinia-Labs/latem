@@ -322,6 +322,8 @@ func (b *fakeBroker) Logs(_ context.Context, runID string) (broker.LogSink, erro
 
 func (b *fakeBroker) Heartbeat(context.Context, protocol.MachineHealth) error { return nil }
 
+func (b *fakeBroker) ReportPlan(context.Context, protocol.PlanResult) error { return nil }
+
 // Close satisfies broker.Broker (amendment A19).
 func (b *fakeBroker) Close() error { return nil }
 

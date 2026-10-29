@@ -518,6 +518,23 @@ func (b *Broker) Report(ctx context.Context, runID string, u protocol.Update) er
 	return nil
 }
 
+// ReportPlan sends a plan's answer and waits for the control plane to accept
+// it (A52). Nothing remembers it on failure: a plan is cheap to make again,
+// and the control plane, which is waiting for it, is the one that knows to.
+func (b *Broker) ReportPlan(ctx context.Context, p protocol.PlanResult) error {
+	if err := protocol.ValidateID(p.ID); err != nil {
+		return fmt.Errorf("remote: ReportPlan: %w", err)
+	}
+	ack, err := b.request(ctx, frame{Kind: kindPlan, Plan: &p})
+	switch {
+	case err != nil:
+		return fmt.Errorf("remote: ReportPlan %s: %w", p.ID, err)
+	case !ack.OK:
+		return fmt.Errorf("remote: ReportPlan %s refused: %s", p.ID, ackReason(ack))
+	}
+	return nil
+}
+
 // markReported records a delivery in broker_state under this transport's key.
 //
 // Best effort on purpose. A failed write leaves the run in

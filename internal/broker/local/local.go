@@ -425,6 +425,12 @@ func (b *Broker) Logs(ctx context.Context, runID string) (broker.LogSink, error)
 // missed beats, and no control plane is involved here. The value is kept so
 // `latem doctor` and `latem status` can show what the agent last believed
 // about itself without asking every subsystem again.
+// ReportPlan refuses: a plan is a control plane's question (A52), and the
+// local socket never asks it, so there is nobody here to answer.
+func (b *Broker) ReportPlan(context.Context, protocol.PlanResult) error {
+	return fmt.Errorf("local: ReportPlan: the local socket does not plan events: %w", errors.ErrUnsupported)
+}
+
 func (b *Broker) Heartbeat(_ context.Context, h protocol.MachineHealth) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

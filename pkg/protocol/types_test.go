@@ -103,7 +103,7 @@ func TestDuration_TextRoundTrip(t *testing.T) {
 func TestRunState_TerminalSet(t *testing.T) {
 	terminal := []RunState{
 		StateSucceeded, StateFailed, StateTimedOut,
-		StateCancelled, StateRejected, StateInterrupted,
+		StateCancelled, StateRejected, StateInterrupted, StateSkipped,
 	}
 	nonTerminal := []RunState{
 		StateQueued, StateAwaitingApproval, StateClaimed,

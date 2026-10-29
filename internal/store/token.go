@@ -1,0 +1,24 @@
+package store
+
+// HoldToken keeps a workflow job's GitHub token for the life of this process
+// (A52). It is never written: a token is an hour's credential for one job, and
+// the database outlives both. An agent that restarts with the job still queued
+// builds it without one, and the job's log says so.
+//
+// The token is dropped when the run reaches a terminal state.
+func (d *DB) HoldToken(runID, token string) {
+	if token == "" {
+		return
+	}
+	d.tokens.Store(runID, token)
+}
+
+// Token returns the token [DB.HoldToken] kept for a run, or "".
+func (d *DB) Token(runID string) string {
+	v, ok := d.tokens.Load(runID)
+	if !ok {
+		return ""
+	}
+	tok, _ := v.(string)
+	return tok
+}

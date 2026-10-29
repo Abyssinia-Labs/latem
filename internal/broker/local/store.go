@@ -29,6 +29,8 @@ import (
 type Store interface {
 	Create(ctx context.Context, r store.Run) error
 	Get(ctx context.Context, runID string) (store.Run, error)
+	// HoldToken keeps a workflow job's GitHub token in memory (A52).
+	HoldToken(runID, token string)
 	Enqueue(ctx context.Context, runID string, priority int) error
 
 	// Claim is the conditional UPDATE behind [Broker.Claim]. Its atomicity is

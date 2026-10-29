@@ -110,6 +110,8 @@ func TestMigrate_RunsColumns(t *testing.T) {
 		// column added to one and not the other is a failure here rather than a
 		// mis-scanned row somewhere else.
 		"number",
+		// 0005, amendment A52: what a workflow run's job carries beyond a run.
+		"workflow_json",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("runs columns =\n %v\nwant\n %v", got, want)

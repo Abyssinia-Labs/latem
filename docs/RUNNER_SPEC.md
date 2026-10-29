@@ -2247,7 +2247,9 @@ name, `needs`, `runs-on` after aliases (A50), environment, `permissions`, job-le
 `concurrency`, `continue-on-error` and `timeout-minutes`. Structure and names, never steps.
 Triggering is evaluated as GitHub evaluates it: the event's name and, for pull requests,
 `types` (default opened, synchronize, reopened); `branches`/`branches-ignore`, `tags`/
-`tags-ignore`; `paths`/`paths-ignore` against the event's diff, computed in the mirror;
+`tags-ignore`; `paths`/`paths-ignore` against the event's diff, computed in the mirror — a push's `before`
+against its commit, or the commit against its first parent for a new branch, and a pull
+request's merge commit against its first parent, which is the base branch's tip;
 `workflow_dispatch` inputs validated against their declarations. A workflow that cannot be
 parsed is in the plan as an error, so it becomes a failed check rather than a silent absence.
 One parser, Go's, serves planning and execution, so the plan and the job that runs cannot
@@ -2258,8 +2260,9 @@ job it needs has finished, to a machine that is online, has the repository, and 
 runner whose labels cover the job's. A job no online machine can take stays queued and says
 which labels it is waiting for. Workflow- and job-level `concurrency` is enforced here, with
 `cancel-in-progress` cancelling the older run, because no single machine sees both. Machines
-advertise their repositories by `owner/name` (A50's `github`) in their heartbeat, which is how
-an installation's repository finds its machines.
+advertise their repositories in their heartbeat — each one's config key beside its `owner/name`
+(A50's `github`) — which is how an installation's repository finds its machines, and which key
+to name it by in `plan` and `run`.
 
 **`run` in 2.0.** Beside `id`, `repo`, `job`, `ref`, `inputs` and `origin`, a run of a workflow job
 carries: `workflow`, the file, constrained to `.github/workflows/<name>.y(a)ml`; `sha`, the
@@ -2267,8 +2270,9 @@ commit to build, which must be reachable from `ref` — the run builds what the 
 whatever the branch says by the time the job starts; `event`, the event's name, action, refs,
 pull-request number and payload (capped, and data: it reaches a step only as an environment
 value or through `GITHUB_EVENT_PATH`, A42's rule); `needs`, each needed job's result and outputs;
-`run_number` and `run_attempt`, GitHub's per-workflow numbers, which `github.run_number` and
-`GITHUB_RUN_NUMBER` now read ($LATEM_BUILD_NUMBER keeps the machine's own, A36); and `token`.
+`workflow_run_id`, `run_number` and `run_attempt`, the workflow run's, shared by its jobs, which
+`github.run_id`, `github.run_number` and `GITHUB_RUN_NUMBER` now read ($LATEM_BUILD_NUMBER keeps
+the machine's own, A36); and `token`. These fields are all set or all absent.
 Still no field can express a command, an image, an executor, a timeout or a label: the job is
 compiled from the agent's disk at `sha`, as every job is.
 

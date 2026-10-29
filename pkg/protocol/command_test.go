@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-// The inbound command set is closed at two kinds (INV-2). A decoder that
+// The inbound command set is closed at three kinds (INV-2). A decoder that
 // tolerates a third turns "I do not understand this" into "there is nothing to
 // do", which is the difference between a refusal and a silent no-op.
 func TestCommandUnmarshal_RejectsUnknownKind(t *testing.T) {
@@ -217,5 +217,80 @@ func TestCommand_RoundTrip(t *testing.T) {
 	}
 	if back.Run.Ref != orig.Run.Ref || back.Run.Inputs["k"] != "v" {
 		t.Errorf("round trip lost data: %+v", back.Run)
+	}
+}
+
+const testSHA = "0123456789abcdef0123456789abcdef01234567"
+
+// A plan carries an id, a repository key and an event: names and data (A52).
+func TestCommandUnmarshal_Plan(t *testing.T) {
+	ok := `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"name":"push","ref":"refs/heads/main","sha":"` +
+		testSHA + `","payload":{"head_commit":{"message":"x"}}}}}`
+	var c Command
+	if err := json.Unmarshal([]byte(ok), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Plan == nil || c.Plan.Event.SHA != testSHA || string(c.Plan.Event.Payload) != `{"head_commit":{"message":"x"}}` {
+		t.Fatalf("%+v", c.Plan)
+	}
+
+	big := `{"k":"` + strings.Repeat("x", MaxEventPayloadBytes) + `"}`
+	for name, body := range map[string]string{
+		"no payload":         `{"kind":"plan"}`,
+		"run payload":        `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"name":"push","sha":"` + testSHA + `"}},"run":{"id":"r1"}}`,
+		"traversal id":       `{"kind":"plan","plan":{"id":"../x","repo":"app","event":{"name":"push","sha":"` + testSHA + `"}}}`,
+		"no repo":            `{"kind":"plan","plan":{"id":"p1","event":{"name":"push","sha":"` + testSHA + `"}}}`,
+		"no event name":      `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"sha":"` + testSHA + `"}}}`,
+		"short sha":          `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"name":"push","sha":"abc"}}}`,
+		"a path, not a file": `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"name":"workflow_dispatch","sha":"` + testSHA + `","workflow":"../../etc/x.yml"}}}`,
+		"payload not object": `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"name":"push","sha":"` + testSHA + `","payload":[1]}}}`,
+		"payload too large":  `{"kind":"plan","plan":{"id":"p1","repo":"app","event":{"name":"push","sha":"` + testSHA + `","payload":` + big + `}}}`,
+		"unknown field":      `{"kind":"plan","plan":{"id":"p1","repo":"app","script":"x","event":{"name":"push","sha":"` + testSHA + `"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var c Command
+			if err := json.Unmarshal([]byte(body), &c); err == nil {
+				t.Fatalf("accepted %s", name)
+			}
+		})
+	}
+}
+
+// A workflow run's job carries its fields all together, each in its shape.
+func TestCommandUnmarshal_WorkflowRun(t *testing.T) {
+	run := func(extra string) string {
+		return `{"kind":"run","run":{"id":"r1","repo":"app","job":"web","ref":"refs/heads/main",` +
+			`"origin":{"kind":"webhook","requested_at":"2026-10-28T00:00:00Z"}` + extra + `}}`
+	}
+	full := `,"workflow":".github/workflows/checks.yml","sha":"` + testSHA + `",` +
+		`"event":{"name":"push","ref":"refs/heads/main","sha":"` + testSHA + `"},` +
+		`"needs":{"lint":{"result":"success","outputs":{"v":"1"}}},` +
+		`"workflow_run_id":"wr1","run_number":3,"run_attempt":1,"token":"ghs_abc"`
+	var c Command
+	if err := json.Unmarshal([]byte(run(full)), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Run.Token != "ghs_abc" || c.Run.Needs["lint"].Outputs["v"] != "1" || c.Run.RunNumber != 3 {
+		t.Fatalf("%+v", c.Run)
+	}
+	if err := json.Unmarshal([]byte(run("")), &c); err != nil {
+		t.Fatalf("a 1.0 run is still a run: %v", err)
+	}
+	for name, extra := range map[string]string{
+		"fields without a workflow": `,"sha":"` + testSHA + `","token":"t"`,
+		"workflow outside the dir":  strings.Replace(full, ".github/workflows/checks.yml", ".github/actions/x.yml", 1),
+		"dot-dot workflow":          strings.Replace(full, "checks.yml", "../x.yml", 1),
+		"no event":                  strings.Replace(full, `"event":{"name":"push","ref":"refs/heads/main","sha":"`+testSHA+`"},`, "", 1),
+		"bad need result":           strings.Replace(full, `"result":"success"`, `"result":"ok"`, 1),
+		"bad need key":              strings.Replace(full, `"lint":{`, `"a b":{`, 1),
+		"token with a space":        strings.Replace(full, `"ghs_abc"`, `"ghs abc"`, 1),
+		"no workflow run id":        strings.Replace(full, `"workflow_run_id":"wr1",`, "", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var c Command
+			if err := json.Unmarshal([]byte(run(extra)), &c); err == nil {
+				t.Fatalf("accepted %s", name)
+			}
+		})
 	}
 }

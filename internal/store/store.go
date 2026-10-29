@@ -91,6 +91,43 @@ type Run struct {
 	// only while the freshly resolved commit still equals this one.
 	ApprovedAt  *time.Time
 	ApprovedSHA string
+
+	// Workflow is set for a workflow run's job (A52), nil otherwise.
+	Workflow *WorkflowRun
+}
+
+// WorkflowRunOf is the part of a run request [WorkflowRun] keeps, or nil for
+// a run that is not a workflow run's job. The token is not part of it.
+func WorkflowRunOf(req protocol.RunRequest) *WorkflowRun {
+	if req.Workflow == "" {
+		return nil
+	}
+	w := &WorkflowRun{
+		Workflow:      req.Workflow,
+		SHA:           req.SHA,
+		Needs:         req.Needs,
+		WorkflowRunID: req.WorkflowRunID,
+		RunNumber:     req.RunNumber,
+		RunAttempt:    req.RunAttempt,
+	}
+	if req.Event != nil {
+		w.Event = *req.Event
+	}
+	return w
+}
+
+// WorkflowRun is what a workflow run's job carries beyond a run (A52), kept
+// with the run so an agent that restarts with it queued still knows what to
+// build. Not the job's token: that is held in memory only — see
+// [DB.HoldToken].
+type WorkflowRun struct {
+	Workflow      string                         `json:"workflow"`
+	SHA           string                         `json:"sha"`
+	Event         protocol.Event                 `json:"event"`
+	Needs         map[string]protocol.NeedResult `json:"needs,omitempty"`
+	WorkflowRunID string                         `json:"workflow_run_id"`
+	RunNumber     int64                          `json:"run_number,omitempty"`
+	RunAttempt    int64                          `json:"run_attempt,omitempty"`
 }
 
 // The broker keys of the broker_state table (amendment A28).
@@ -121,6 +158,11 @@ type Store interface {
 	// Migrate applies embedded migrations. Called once at startup, before
 	// anything else touches the database.
 	Migrate(ctx context.Context) error
+
+	// HoldToken and Token keep a workflow job's GitHub token in memory, never
+	// on disk, until the run is terminal (A52).
+	HoldToken(runID, token string)
+	Token(runID string) string
 
 	Create(ctx context.Context, r Run) error
 	Get(ctx context.Context, runID string) (Run, error)
@@ -232,6 +274,11 @@ var _ Store = NotImplemented{}
 func unsupported(method string) error {
 	return fmt.Errorf("store: %s: %w", method, errors.ErrUnsupported)
 }
+
+// HoldToken keeps nothing, and Token has nothing: there is no store to hold
+// a token for a run in.
+func (NotImplemented) HoldToken(string, string) {}
+func (NotImplemented) Token(string) string      { return "" }
 
 func (NotImplemented) Migrate(context.Context) error     { return unsupported("Migrate") }
 func (NotImplemented) Create(context.Context, Run) error { return unsupported("Create") }

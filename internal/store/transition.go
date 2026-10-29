@@ -66,6 +66,10 @@ var legalTransitions = map[protocol.RunState][]protocol.RunState{
 	},
 	protocol.StatePreparing: {
 		protocol.StateRunning,
+		// A workflow job whose if: is false as it starts (A52). The
+		// condition is read from the registry compiled during preparing,
+		// so this is the one place the answer is known.
+		protocol.StateSkipped,
 		protocol.StateQueued,
 		protocol.StateAwaitingApproval,
 		protocol.StateCollecting,
@@ -139,10 +143,14 @@ func (d *DB) Transition(ctx context.Context, runID string, to protocol.RunState,
 		return fmt.Errorf("store: Transition: %w", err)
 	}
 
-	return d.tx(ctx, func(t *sql.Tx) error {
+	err := d.tx(ctx, func(t *sql.Tx) error {
 		_, err := d.apply(ctx, t, runID, to, u, "")
 		return err
 	})
+	if err == nil && to.IsTerminal() {
+		d.tokens.Delete(runID)
+	}
+	return err
 }
 
 // ReapplyIfCurrent re-applies an update the run is still in the state of, and

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 const planSHA = "0123456789abcdef0123456789abcdef01234567"
@@ -102,10 +104,10 @@ func changedFiles(paths ...string) func() ([]string, error) {
 	return func() ([]string, error) { return paths, nil }
 }
 
-func planned(t *testing.T, plan *Plan) []string {
+func planned(t *testing.T, plan []protocol.PlannedWorkflow) []string {
 	t.Helper()
 	var out []string
-	for _, w := range plan.Workflows {
+	for _, w := range plan {
 		if w.Error != "" {
 			t.Errorf("%s: %s", w.File, w.Error)
 		}
@@ -114,7 +116,7 @@ func planned(t *testing.T, plan *Plan) []string {
 	return out
 }
 
-func mustPlan(t *testing.T, files map[string]string, ev Event, opts PlanOptions) *Plan {
+func mustPlan(t *testing.T, files map[string]string, ev protocol.Event, opts PlanOptions) []protocol.PlannedWorkflow {
 	t.Helper()
 	if ev.SHA == "" {
 		ev.SHA = planSHA
@@ -129,36 +131,36 @@ func mustPlan(t *testing.T, files map[string]string, ev Event, opts PlanOptions)
 func TestPlanTriggers(t *testing.T) {
 	cases := []struct {
 		name    string
-		ev      Event
+		ev      protocol.Event
 		changed []string
 		want    []string
 	}{
 		{"push to main touching the app",
-			Event{Name: EventPush, Ref: "refs/heads/main"}, []string{"apps/web/src/a.ts"},
+			protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, []string{"apps/web/src/a.ts"},
 			[]string{"checks.yml", "deploy-staging.yml"}},
 		{"push to main touching only the app's docs",
-			Event{Name: EventPush, Ref: "refs/heads/main"}, []string{"apps/web/docs/a.md", "README.md"},
+			protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, []string{"apps/web/docs/a.md", "README.md"},
 			[]string{"checks.yml"}},
 		{"push to a feature branch",
-			Event{Name: EventPush, Ref: "refs/heads/feature/x"}, []string{"apps/web/src/a.ts"},
+			protocol.Event{Name: EventPush, Ref: "refs/heads/feature/x"}, []string{"apps/web/src/a.ts"},
 			nil},
 		{"a release tag",
-			Event{Name: EventPush, Ref: "refs/tags/v1.2.3"}, nil,
+			protocol.Event{Name: EventPush, Ref: "refs/tags/v1.2.3"}, nil,
 			[]string{"release.yml"}},
 		{"a tag the release filter does not match",
-			Event{Name: EventPush, Ref: "refs/tags/nightly"}, nil,
+			protocol.Event{Name: EventPush, Ref: "refs/tags/nightly"}, nil,
 			nil},
 		{"a pull request opened",
-			Event{Name: EventPullRequest, Action: "opened", Ref: "refs/pull/7/merge", BaseRef: "main", HeadRef: "x"}, nil,
+			protocol.Event{Name: EventPullRequest, Action: "opened", Ref: "refs/pull/7/merge", BaseRef: "main", HeadRef: "x"}, nil,
 			[]string{"checks.yml"}},
 		{"a pull request labeled",
-			Event{Name: EventPullRequest, Action: "labeled", Ref: "refs/pull/7/merge", BaseRef: "main"}, nil,
+			protocol.Event{Name: EventPullRequest, Action: "labeled", Ref: "refs/pull/7/merge", BaseRef: "main"}, nil,
 			nil},
 		{"a pull request closed into main",
-			Event{Name: EventPullRequest, Action: "closed", Ref: "refs/pull/7/merge", BaseRef: "main"}, nil,
+			protocol.Event{Name: EventPullRequest, Action: "closed", Ref: "refs/pull/7/merge", BaseRef: "main"}, nil,
 			[]string{"changelog.yml"}},
 		{"a pull request closed into another base",
-			Event{Name: EventPullRequest, Action: "closed", Ref: "refs/pull/7/merge", BaseRef: "next"}, nil,
+			protocol.Event{Name: EventPullRequest, Action: "closed", Ref: "refs/pull/7/merge", BaseRef: "next"}, nil,
 			nil},
 	}
 	for _, c := range cases {
@@ -172,12 +174,12 @@ func TestPlanTriggers(t *testing.T) {
 }
 
 func TestPlanJobs(t *testing.T) {
-	plan := mustPlan(t, fleet, Event{Name: EventPush, Ref: "refs/heads/main", Actor: "octo"}, PlanOptions{
+	plan := mustPlan(t, fleet, protocol.Event{Name: EventPush, Ref: "refs/heads/main", Actor: "octo"}, PlanOptions{
 		Repository:   "Abyssinia-Labs/start",
 		LabelAliases: map[string][]string{"blacksmith-4vcpu-ubuntu-2404": {"linux", "big"}},
 		Changed:      changedFiles("apps/web/a.ts"),
 	})
-	checks, staging := plan.Workflows[0], plan.Workflows[1]
+	checks, staging := plan[0], plan[1]
 
 	if checks.Name != "Checks" || checks.Concurrency == nil ||
 		checks.Concurrency.Group != "checks-refs/heads/main" || !checks.Concurrency.CancelInProgress {
@@ -212,13 +214,13 @@ func TestPlanJobs(t *testing.T) {
 }
 
 func TestPlanDispatch(t *testing.T) {
-	ev := Event{Name: EventWorkflowDispatch, Ref: "refs/heads/main", Workflow: Dir + "/deploy-production.yml",
+	ev := protocol.Event{Name: EventWorkflowDispatch, Ref: "refs/heads/main", Workflow: Dir + "/deploy-production.yml",
 		Inputs: map[string]string{"ref": "v1.2.3", "dry": "true"}}
 	plan := mustPlan(t, fleet, ev, PlanOptions{})
 	if got := planned(t, plan); !slices.Equal(got, []string{"deploy-production.yml"}) {
 		t.Fatalf("planned %v", got)
 	}
-	w := plan.Workflows[0]
+	w := plan[0]
 	if w.RunName != "Production from v1.2.3 (dry run)" {
 		t.Errorf("run-name %q: a boolean input must be a boolean in the inputs context", w.RunName)
 	}
@@ -229,7 +231,7 @@ func TestPlanDispatch(t *testing.T) {
 		t.Errorf("job %+v", w.Jobs[0])
 	}
 
-	refused := map[string]Event{
+	refused := map[string]protocol.Event{
 		"declares no input":       withInputs(ev, map[string]string{"ref": "x", "force": "1"}),
 		`input "ref" is required`: withInputs(ev, map[string]string{"dry": "true"}),
 		"is a boolean":            withInputs(ev, map[string]string{"ref": "x", "dry": "yes"}),
@@ -246,7 +248,7 @@ func TestPlanDispatch(t *testing.T) {
 	}
 }
 
-func withInputs(ev Event, in map[string]string) Event {
+func withInputs(ev protocol.Event, in map[string]string) protocol.Event {
 	ev.SHA = planSHA
 	ev.Inputs = in
 	return ev
@@ -288,7 +290,7 @@ jobs:
   a: {runs-on: ubuntu-latest, steps: [{run: x}]}
 `,
 	}
-	plan, err := PlanEvent(fleetFS(files), Event{Name: EventPush, SHA: planSHA, Ref: "refs/heads/main"}, PlanOptions{})
+	plan, err := PlanEvent(fleetFS(files), protocol.Event{Name: EventPush, SHA: planSHA, Ref: "refs/heads/main"}, PlanOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,10 +302,10 @@ jobs:
 		"runid.yml":   "github.run_id is not known when a run is planned",
 		"paths.yml":   "no diff to read",
 	}
-	if len(plan.Workflows) != len(want) {
-		t.Fatalf("planned %d workflows, want %d", len(plan.Workflows), len(want))
+	if len(plan) != len(want) {
+		t.Fatalf("planned %d workflows, want %d", len(plan), len(want))
 	}
-	for _, w := range plan.Workflows {
+	for _, w := range plan {
 		name := strings.TrimPrefix(w.File, Dir+"/")
 		if !strings.Contains(w.Error, want[name]) {
 			t.Errorf("%s: error %q, want it to contain %q", name, w.Error, want[name])
@@ -340,10 +342,10 @@ jobs:
     runs-on: [self-hosted, macOS]
     steps: [{run: x}]
 `}
-	plan := mustPlan(t, files, Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{})
+	plan := mustPlan(t, files, protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{})
 	errs := map[string]string{}
-	var fine PlannedJob
-	for _, j := range plan.Workflows[0].Jobs {
+	var fine protocol.PlannedJob
+	for _, j := range plan[0].Jobs {
 		errs[j.Key] = j.Error
 		if j.Key == "fine" {
 			fine = j
@@ -365,7 +367,7 @@ jobs:
 }
 
 func TestPlanEventsRefused(t *testing.T) {
-	for want, ev := range map[string]Event{
+	for want, ev := range map[string]protocol.Event{
 		"schedule events are not planned yet": {Name: "schedule", SHA: planSHA},
 		`does not plan "issues" events`:       {Name: "issues", SHA: planSHA},
 		"is not a commit id":                  {Name: EventPush, SHA: "main", Ref: "refs/heads/main"},
@@ -386,13 +388,28 @@ func TestPlanDiffIsLazy(t *testing.T) {
 		calls++
 		return nil, errors.New("no mirror")
 	}}
-	mustPlan(t, fleet, Event{Name: EventPush, Ref: "refs/tags/v1.0.0"}, opts)
+	mustPlan(t, fleet, protocol.Event{Name: EventPush, Ref: "refs/tags/v1.0.0"}, opts)
 	if calls != 0 {
 		t.Errorf("a tag push read the diff %d times; no workflow it triggers filters on paths", calls)
 	}
 	files := map[string]string{"a.yml": fleet["deploy-staging.yml"], "b.yml": fleet["deploy-staging.yml"]}
-	mustPlan(t, files, Event{Name: EventPush, Ref: "refs/heads/main"}, opts)
+	mustPlan(t, files, protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, opts)
 	if calls != 1 {
 		t.Errorf("read the diff %d times, want once", calls)
+	}
+}
+
+// github.event is the webhook's payload, as an expression in the plan reads it.
+func TestPlanReadsThePayload(t *testing.T) {
+	files := map[string]string{"changelog.yml": `
+on: pull_request
+concurrency: changelog-${{ github.event.pull_request.number }}
+jobs:
+  a: {runs-on: ubuntu-latest, steps: [{run: x}]}
+`}
+	plan := mustPlan(t, files, protocol.Event{Name: EventPullRequest, Action: "opened",
+		Ref: "refs/pull/42/merge", BaseRef: "main", Payload: []byte(`{"pull_request":{"number":42}}`)}, PlanOptions{})
+	if got := plan[0].Concurrency.Group; got != "changelog-42" {
+		t.Errorf("group %q", got)
 	}
 }
