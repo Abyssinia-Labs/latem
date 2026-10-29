@@ -792,11 +792,17 @@ func TestExec_GitHubStateIsReadBackAndTruncated(t *testing.T) {
 
 // A51: the tool cache is the runner's, created if missing, exported under
 // both names, and still there after the run.
+//
+// Under GitHub's shell, which reads no profile: the tool cache is for workflow
+// steps, and a login shell lets the host's profile rewrite both names. GitHub's
+// own macOS images export them as /Users/runner/hostedtoolcache, so under
+// `bash -l` this read the CI machine rather than latem.
 func TestExec_ToolCacheOutlivesTheRun(t *testing.T) {
 	tools := filepath.Join(t.TempDir(), "toolcache", "mini")
 	env, _ := live(t, executor.Spec{ToolCache: tools}, Options{})
 	code, stdout, _ := run(t, env, executor.Step{
-		Run: `echo "tc=$RUNNER_TOOL_CACHE agent=$AGENT_TOOLSDIRECTORY"; mkdir -p "$RUNNER_TOOL_CACHE/node/22.0.0" && touch "$RUNNER_TOOL_CACHE/node/22.0.0.complete"`,
+		Run:   `echo "tc=$RUNNER_TOOL_CACHE agent=$AGENT_TOOLSDIRECTORY"; mkdir -p "$RUNNER_TOOL_CACHE/node/22.0.0" && touch "$RUNNER_TOOL_CACHE/node/22.0.0.complete"`,
+		Shell: executor.ShellGitHubBash,
 	})
 	if code != 0 || !strings.Contains(stdout, "tc="+tools+" agent="+tools) {
 		t.Fatalf("exit %d: %s", code, stdout)

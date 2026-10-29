@@ -53,13 +53,22 @@ func workflowRequest(h *harness, job string) protocol.RunRequest {
 	return req
 }
 
-func lastUpdate(h *harness, runID string) protocol.Update {
+// terminalUpdate is the run's terminal update, once the reporter has
+// delivered it. Execute returns before it is delivered — reporting is
+// asynchronous — so reading the last update straight away found `queued` on
+// a busy CI machine and the terminal one only on a fast laptop.
+func terminalUpdate(t *testing.T, h *harness, runID string) protocol.Update {
+	t.Helper()
 	var u protocol.Update
-	for _, r := range h.broker.updates() {
-		if r.runID == runID {
-			u = r.update
+	waitFor(t, "the terminal update", func() bool {
+		for _, r := range h.broker.updates() {
+			if r.runID == runID && r.update.State.IsTerminal() {
+				u = r.update
+				return true
+			}
 		}
-	}
+		return false
+	})
 	return u
 }
 
@@ -109,7 +118,7 @@ func TestExecute_WorkflowRunJob(t *testing.T) {
 		t.Errorf("event file %s", spec.Event)
 	}
 
-	u := lastUpdate(h, req.ID)
+	u := terminalUpdate(t, h, req.ID)
 	if u.State != protocol.StateSucceeded || u.Outputs["version"] != "1.2.3" {
 		t.Errorf("terminal update %+v", u)
 	}
@@ -140,8 +149,8 @@ func TestExecute_WorkflowRunJobSkipped(t *testing.T) {
 	if res.State != protocol.StateSkipped || len(h.env.executed()) != 0 {
 		t.Fatalf("got %s with %d step(s), want skipped and none", res.State, len(h.env.executed()))
 	}
-	if got := h.broker.states(req.ID); got[len(got)-1] != protocol.StateSkipped {
-		t.Errorf("reported %v", got)
+	if u := terminalUpdate(t, h, req.ID); u.State != protocol.StateSkipped {
+		t.Errorf("reported %s, want skipped", u.State)
 	}
 }
 
