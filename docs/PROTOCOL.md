@@ -140,6 +140,16 @@ handshake above, and only after that written to `agent.key` — the same order
 as a token supplied by hand, so a claim that does not verify writes nothing.
 `machine_id` is recorded when the `hello` carries none.
 
+Outside the happy path, as latem-cloud answers (its `docs/protocol.md` §1
+"Registering"):
+
+| Answer | Where | What the agent does |
+|---|---|---|
+| `400 invalid_request` + `error_description` | `/claim` | Stops, printing both. The agent fits its claim to the limits first: `name` 1–64 bytes (`latem` when the hostname is not spellable), `os`, `arch`, `agent_version` ≤ 32, at most 32 labels of ≤ 64, no control characters |
+| `429 slow_down` + `Retry-After: 600` | `/claim` | Stops and says when to try again: 20 claims from one network (IPv6 /64) in 10 minutes |
+| `503 temporarily_unavailable` | either | Retried like a partition: up to 3 attempts at `/claim`, 5 polls in a row at `/claim/token` |
+| `400 expired_token` | `/claim/token` | Stops. It also means a device code that is unknown or already spent |
+
 The agent prints `user_code` and the link after removing control characters,
 and opens `verification_uri_complete` (else `verification_uri`) in a browser
 only when it is `https` (or loopback `http`) and stdout is a terminal.

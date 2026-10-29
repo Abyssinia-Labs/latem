@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -233,9 +232,7 @@ func claimMachineToken(cmd *cobra.Command, f registerFlags, name string, labels 
 		return claimToken{}, usageErrorf("--url: %v", err)
 	}
 	c := newClaimClient(base)
-	st, err := c.start(cmd.Context(), claimRequest{
-		Name: name, OS: runtime.GOOS, Arch: runtime.GOARCH, Labels: labels, AgentVersion: version,
-	})
+	st, err := c.start(cmd.Context(), newClaimRequest(name, labels, version))
 	if err != nil {
 		return claimToken{}, fmt.Errorf("%w\n\nnothing was written. check the url and that this machine can reach it", err)
 	}

@@ -12,6 +12,7 @@ import (
 	neturl "net/url"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -80,7 +81,8 @@ type claimToken struct {
 }
 
 type claimError struct {
-	Error string `json:"error"`
+	Error       string `json:"error"`
+	Description string `json:"error_description"`
 }
 
 // claimClient speaks the two endpoints.
@@ -160,17 +162,94 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// Limits latem-cloud applies to a claim, and refuses past with 400
+// invalid_request. The request is fitted to them rather than refused: every
+// field is display text for the person approving, and a long version string
+// or a machine with many labels is not a reason to fail a registration.
+const (
+	maxClaimNameLen  = 64
+	maxClaimFieldLen = 32
+	maxClaimLabels   = 32
+	maxClaimLabelLen = 64
+)
+
+// newClaimRequest is the claim this machine sends, fitted to those limits. An
+// empty name is refused by the control plane, so a machine whose hostname is
+// not spellable as a name (defaultMachineName gives up on those) is "latem",
+// as `latem init` calls it.
+func newClaimRequest(name string, labels []string, agentVersion string) claimRequest {
+	req := claimRequest{
+		Name:         clip(displayText(name), maxClaimNameLen),
+		OS:           clip(runtime.GOOS, maxClaimFieldLen),
+		Arch:         clip(runtime.GOARCH, maxClaimFieldLen),
+		Labels:       []string{},
+		AgentVersion: clip(displayText(agentVersion), maxClaimFieldLen),
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		req.Name = "latem"
+	}
+	for _, l := range labels {
+		if len(req.Labels) == maxClaimLabels {
+			break
+		}
+		if l = clip(displayText(l), maxClaimLabelLen); l != "" {
+			req.Labels = append(req.Labels, l)
+		}
+	}
+	return req
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// maxClaimStartAttempts bounds how often a claim is asked for while the
+// control plane says it is temporarily unavailable.
+const maxClaimStartAttempts = 3
+
 // start asks for a code.
+//
+// A 503 — latem-cloud's temporarily_unavailable, its database out of reach —
+// or a connection that fails is retried, as the agent's transport retries a
+// partition. A 429 is not: it is twenty claims from this network in ten
+// minutes, and its Retry-After is ten minutes, which nobody at a terminal is
+// going to wait out.
 func (c *claimClient) start(ctx context.Context, req claimRequest) (claimStart, error) {
 	if req.Labels == nil {
 		req.Labels = []string{}
 	}
-	var st claimStart
-	status, body, err := c.post(ctx, "/claim", req)
+	var (
+		st     claimStart
+		status int
+		header http.Header
+		body   []byte
+		err    error
+	)
+	for attempt := 1; ; attempt++ {
+		status, header, body, err = c.post(ctx, "/claim", req)
+		transient := err != nil || status == http.StatusServiceUnavailable
+		if !transient || attempt == maxClaimStartAttempts || ctx.Err() != nil {
+			break
+		}
+		if serr := c.sleep(ctx, defaultClaimInterval); serr != nil {
+			return st, serr
+		}
+	}
 	if err != nil {
 		return st, err
 	}
-	if status != http.StatusOK {
+	switch {
+	case status == http.StatusTooManyRequests:
+		wait := "later"
+		if secs, perr := strconv.Atoi(header.Get("Retry-After")); perr == nil && secs > 0 {
+			wait = "in " + (time.Duration(secs) * time.Second).String()
+		}
+		return st, fmt.Errorf("%s/claim is refusing more registrations from this network for now (%s); try again %s",
+			c.base, describeBody(body), wait)
+	case status != http.StatusOK:
 		return st, fmt.Errorf("%s/claim answered %d: %s", c.base, status, describeBody(body))
 	}
 	if err := json.Unmarshal(body, &st); err != nil {
@@ -185,8 +264,10 @@ func (c *claimClient) start(ctx context.Context, req claimRequest) (claimStart, 
 // errClaimDenied and errClaimExpired are the two ends of a claim that are the
 // person's doing rather than a fault.
 var (
-	errClaimDenied  = errors.New("the request was declined in the browser")
-	errClaimExpired = errors.New("the code expired before it was approved")
+	errClaimDenied = errors.New("the request was declined in the browser")
+	// expired_token also answers a device code the control plane does not
+	// know or has already spent.
+	errClaimExpired = errors.New("the code expired, or was already used, before it was approved")
 )
 
 // wait polls until the claim is approved, declined or expired, honouring the
@@ -210,7 +291,7 @@ func (c *claimClient) wait(ctx context.Context, st claimStart) (claimToken, erro
 		if !c.now().Before(deadline) {
 			return claimToken{}, errClaimExpired
 		}
-		status, body, err := c.post(ctx, "/claim/token", map[string]string{"device_code": st.DeviceCode})
+		status, _, body, err := c.post(ctx, "/claim/token", map[string]string{"device_code": st.DeviceCode})
 		if err == nil && (status == http.StatusTooManyRequests || status >= http.StatusInternalServerError) {
 			// The control plane is there and cannot answer yet — latem-cloud
 			// says 503 temporarily_unavailable while its database is out of
@@ -258,37 +339,41 @@ func (c *claimClient) wait(ctx context.Context, st claimStart) (claimToken, erro
 	}
 }
 
-func (c *claimClient) post(ctx context.Context, path string, v any) (int, []byte, error) {
+func (c *claimClient) post(ctx context.Context, path string, v any) (int, http.Header, []byte, error) {
 	payload, err := json.Marshal(v)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(payload))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxClaimResponseBytes+1))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	if len(body) > maxClaimResponseBytes {
-		return 0, nil, fmt.Errorf("%s%s answered with more than %d bytes", c.base, path, maxClaimResponseBytes)
+		return 0, nil, nil, fmt.Errorf("%s%s answered with more than %d bytes", c.base, path, maxClaimResponseBytes)
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, resp.Header, body, nil
 }
 
-// describeBody is a response body fit to print: the error field when there is
-// one, otherwise the first line, without control characters either way.
+// describeBody is a response body fit to print: the error, with its
+// error_description when the control plane gave one, otherwise the first line,
+// without control characters either way.
 func describeBody(body []byte) string {
 	var e claimError
 	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		if d := strings.TrimSpace(e.Description); d != "" {
+			return displayText(clip(e.Error+": "+d, 300))
+		}
 		return displayText(e.Error)
 	}
 	line, _, _ := strings.Cut(strings.TrimSpace(string(body)), "\n")

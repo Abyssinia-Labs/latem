@@ -195,7 +195,7 @@ func TestRegister_DeviceFlowEndToEnd(t *testing.T) {
 func TestRegister_DeviceFlowEndsWithNothingWritten(t *testing.T) {
 	for answer, want := range map[string]string{
 		"access_denied": "declined in the browser",
-		"expired_token": "expired before it was approved",
+		"expired_token": "expired, or was already used",
 		"server_error":  "refused the claim: server_error",
 	} {
 		t.Run(answer, func(t *testing.T) {
@@ -235,6 +235,83 @@ func TestClaimWait_RidesOutAnUnavailableControlPlane(t *testing.T) {
 	if _, err := c.wait(context.Background(), claimStart{DeviceCode: "dc_secret_device_code", Interval: 1}); err == nil ||
 		!strings.Contains(err.Error(), "temporarily_unavailable") {
 		t.Errorf("five 503s in a row: %v", err)
+	}
+}
+
+// latem-cloud's answers outside the contract's happy path (its protocol.md §1
+// "Registering"): a 503 while its database is unreachable is retried; a 429
+// from the per-network limit says when to come back; an invalid_request says
+// why, from its error_description.
+func TestClaimStart_LatemCloudsEdgeCases(t *testing.T) {
+	answer := func(status int, header map[string]string, body string, after int) *httptest.Server {
+		calls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			calls++
+			if calls > after {
+				writeJSON(w, http.StatusOK, map[string]any{"device_code": "d", "user_code": "BCDF-GHJK",
+					"verification_uri": "https://app.latem.dev/connect", "expires_in": 600, "interval": 5})
+				return
+			}
+			for k, v := range header {
+				w.Header().Set(k, v)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	client := func(srv *httptest.Server) *claimClient {
+		c := newClaimClient(srv.URL)
+		c.sleep = func(context.Context, time.Duration) error { return nil }
+		return c
+	}
+	req := newClaimRequest("m", nil, "dev")
+
+	if st, err := client(answer(503, nil, `{"error":"temporarily_unavailable"}`, 2)).start(context.Background(), req); err != nil ||
+		st.UserCode != "BCDF-GHJK" {
+		t.Errorf("two 503s then a claim: %+v, %v", st, err)
+	}
+	if _, err := client(answer(503, nil, `{"error":"temporarily_unavailable"}`, 99)).start(context.Background(), req); err == nil ||
+		!strings.Contains(err.Error(), "temporarily_unavailable") {
+		t.Errorf("a control plane that stays unavailable: %v", err)
+	}
+	_, err := client(answer(429, map[string]string{"Retry-After": "600"},
+		`{"error":"slow_down","error_description":"too many claims from this network"}`, 99)).start(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "try again in 10m0s") || !strings.Contains(err.Error(), "too many claims") {
+		t.Errorf("the per-network limit: %v", err)
+	}
+	_, err = client(answer(400, nil, `{"error":"invalid_request","error_description":"name is required"}`, 99)).start(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "invalid_request: name is required") {
+		t.Errorf("a refused request: %v", err)
+	}
+}
+
+// What a claim carries is fitted to latem-cloud's limits rather than refused
+// over them: name ≤ 64 and never empty, os/arch/version ≤ 32, ≤ 32 labels of
+// ≤ 64, no control characters.
+func TestNewClaimRequest_FitsTheControlPlanesLimits(t *testing.T) {
+	many := make([]string, 40)
+	for i := range many {
+		many[i] = "label-" + strings.Repeat("x", i)
+	}
+	req := newClaimRequest("", append([]string{"bad\x1b[31mlabel", strings.Repeat("l", 80)}, many...),
+		"v0.2.0-rc.1-1234-gabcdef0123-dirty-and-then-some")
+	if req.Name != "latem" {
+		t.Errorf("an empty name became %q, want latem", req.Name)
+	}
+	if len(req.AgentVersion) > 32 || len(req.Labels) != 32 {
+		t.Errorf("version %q (%d), %d labels", req.AgentVersion, len(req.AgentVersion), len(req.Labels))
+	}
+	for _, l := range req.Labels {
+		if len(l) > 64 || strings.ContainsRune(l, 0x1b) {
+			t.Errorf("label %q", l)
+		}
+	}
+	if got := newClaimRequest(strings.Repeat("n", 70), nil, "dev"); len(got.Name) != 64 || got.Labels == nil {
+		t.Errorf("name %d bytes, labels %v", len(got.Name), got.Labels)
 	}
 }
 
