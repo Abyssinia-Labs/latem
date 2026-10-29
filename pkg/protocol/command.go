@@ -116,6 +116,10 @@ type RunRequest struct {
 	// before the request is made durable — and registers it with the
 	// redactor before the first step (A52, §12 as narrowed).
 	Token string `json:"token,omitempty"`
+	// Matrix is a matrix leg's values, a JSON object, as the plan reported
+	// them (A55, 2.1). Data: the machine builds the leg only if it is one its
+	// own expansion of the pinned commit's matrix yields.
+	Matrix json.RawMessage `json:"matrix,omitempty"`
 }
 
 // CancelRequest carries an identifier and nothing executable.

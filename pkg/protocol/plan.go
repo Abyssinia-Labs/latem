@@ -149,10 +149,34 @@ type PlannedJob struct {
 	IfChecksStatus  bool    `json:"if_checks_status,omitempty"`
 	ContinueOnError bool    `json:"continue_on_error,omitempty"`
 	TimeoutMinutes  float64 `json:"timeout_minutes"`
+	// Matrix and Strategy are set on a matrix leg (A55, 2.1): the leg's
+	// values, a JSON object to send back as run.matrix, and its place among
+	// the legs that share its key.
+	Matrix   json.RawMessage `json:"matrix,omitempty"`
+	Strategy *Strategy       `json:"strategy,omitempty"`
 	// Error is why this job cannot run. It fails alone, and the jobs that
 	// need it are skipped as after any failure.
 	Error string `json:"error,omitempty"`
 }
+
+// Strategy is a matrix leg's place among its siblings, and how the control
+// plane schedules them (A55). Every leg of a job carries the same FailFast,
+// MaxParallel and JobTotal.
+type Strategy struct {
+	// JobIndex is the leg's position in the expansion, from zero; JobTotal is
+	// how many legs there are.
+	JobIndex int `json:"job_index"`
+	JobTotal int `json:"job_total"`
+	// FailFast cancels the queued and running siblings of a leg that fails
+	// without continue-on-error. GitHub's default is true.
+	FailFast bool `json:"fail_fast"`
+	// MaxParallel caps how many legs run at once; zero is no cap.
+	MaxParallel int `json:"max_parallel,omitempty"`
+}
+
+// MaxMatrixBytes bounds [RunRequest.Matrix]. A leg is a handful of short
+// values; the cap stops the field being a way to make the agent hold data.
+const MaxMatrixBytes = 16 << 10
 
 // Concurrency is a concurrency: block, evaluated.
 type Concurrency struct {
@@ -189,7 +213,7 @@ const maxTokenBytes = 1024
 // validateWorkflowRun checks the fields a workflow run's job carries (A52).
 func (r RunRequest) validateWorkflowRun() error {
 	set := r.SHA != "" || r.Event != nil || len(r.Needs) > 0 || r.WorkflowRunID != "" ||
-		r.RunNumber != 0 || r.RunAttempt != 0 || r.Token != ""
+		r.RunNumber != 0 || r.RunAttempt != 0 || r.Token != "" || len(r.Matrix) > 0
 	if r.Workflow == "" {
 		if set {
 			return fmt.Errorf("protocol: run %s carries a workflow run's fields and names no workflow", r.ID)
@@ -229,6 +253,15 @@ func (r RunRequest) validateWorkflowRun() error {
 	}
 	if r.Token != "" && (len(r.Token) > maxTokenBytes || !tokenPattern.MatchString(r.Token)) {
 		return fmt.Errorf("protocol: run token is not one printable word")
+	}
+	if len(r.Matrix) > 0 {
+		if len(r.Matrix) > MaxMatrixBytes {
+			return fmt.Errorf("protocol: run matrix is %d bytes, limit %d", len(r.Matrix), MaxMatrixBytes)
+		}
+		var leg map[string]json.RawMessage
+		if err := json.Unmarshal(r.Matrix, &leg); err != nil || leg == nil {
+			return fmt.Errorf("protocol: run matrix must be a JSON object")
+		}
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,9 +175,8 @@ jobs:
   build:
     runs-on: [macos]
     needs: [other]
-    strategy:
-      matrix:
-        go: [1.24, 1.25]
+    services:
+      db: {image: postgres}
     steps:
       - run: make
 `)
@@ -184,7 +184,7 @@ jobs:
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
-	for _, want := range []string{"strategy:", "needs:"} {
+	for _, want := range []string{"services:", "needs:"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should name %s: %v", want, err)
 		}
@@ -465,19 +465,30 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 			// implementation — which is the fact A42 measured these files for.
 			opts := Options{Policy: actions.Policy{Allowed: []string{"*/*"}}}
 			for _, name := range w.JobNames() {
-				_, err := CompileWith(t.Context(), w, name, testScope(), opts)
-				if err == nil {
-					continue // a job with no uses: is allowed to compile
+				// A matrix job is compiled a leg at a time, as a run builds
+				// it (A55); every leg is tried.
+				legs := []json.RawMessage{nil}
+				if ms, err := MatrixLegs(w, name, testScope()); err != nil {
+					t.Errorf("job %q: the matrix does not expand: %v", name, err)
+				} else if ms != nil {
+					legs = ms
 				}
-				// Two honest refusals remain with no cache wired: an action
-				// that would have to be fetched, and this repository's own
-				// release.yml asking checkout for a different ref — which is
-				// `latem run --ref` here, and the shim says so.
-				msg := err.Error()
-				if !strings.Contains(msg, "no action cache") &&
-					!strings.Contains(msg, "latem has already checked this repository out") &&
-					!strings.Contains(msg, "latem does not implement yet") {
-					t.Errorf("job %q refused for an unexpected reason: %v", name, err)
+				for _, leg := range legs {
+					opts.Matrix = leg
+					_, err := CompileWith(t.Context(), w, name, testScope(), opts)
+					if err == nil {
+						continue // a job with no uses: is allowed to compile
+					}
+					// Two honest refusals remain with no cache wired: an action
+					// that would have to be fetched, and this repository's own
+					// release.yml asking checkout for a different ref — which is
+					// `latem run --ref` here, and the shim says so.
+					msg := err.Error()
+					if !strings.Contains(msg, "no action cache") &&
+						!strings.Contains(msg, "latem has already checked this repository out") &&
+						!strings.Contains(msg, "latem does not implement yet") {
+						t.Errorf("job %q (leg %s) refused for an unexpected reason: %v", name, leg, err)
+					}
 				}
 			}
 		})

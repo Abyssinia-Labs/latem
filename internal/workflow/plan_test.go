@@ -323,7 +323,8 @@ func TestPlanJobErrors(t *testing.T) {
 on: push
 jobs:
   matrix:
-    strategy: {matrix: {node: [20, 22]}}
+    needs: [called]
+    strategy: {matrix: {node: "${{ fromJSON(needs.called.outputs.nodes) }}"}}
     runs-on: ubuntu-latest
     steps: [{run: x}]
   called:
@@ -352,7 +353,7 @@ jobs:
 		}
 	}
 	for key, want := range map[string]string{
-		"matrix": "a matrix is not planned yet",
+		"matrix": "a matrix computed by another job is not planned yet",
 		"called": "reusable workflows are not planned yet",
 		"win":    "no latem runner can be Windows",
 		"late":   "reads needs, which is only known once the job runs",

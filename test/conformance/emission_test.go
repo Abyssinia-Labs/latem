@@ -159,8 +159,20 @@ func TestConformance_AgentEmissions(t *testing.T) {
 				Concurrency:    &protocol.Concurrency{Group: "deploy-staging"},
 				IfChecksStatus: true, ContinueOnError: true, TimeoutMinutes: 30,
 			}, {
-				Key: "matrix", Name: "matrix", Permissions: map[string]string{"contents": "read"},
-				TimeoutMinutes: 360, Error: "strategy: a matrix is not planned yet (A52)",
+				// A55: a matrix job's legs, each with its values and its place.
+				Key: "check", Name: "check (linux, 22)", Labels: []string{"linux"},
+				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+				Matrix:   json.RawMessage(`{"node":22,"os":"linux"}`),
+				Strategy: &protocol.Strategy{JobIndex: 0, JobTotal: 2, FailFast: true},
+			}, {
+				Key: "check", Name: "check (macos, 22)", Labels: []string{"macos"},
+				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+				Matrix:   json.RawMessage(`{"node":22,"os":"macos"}`),
+				Strategy: &protocol.Strategy{JobIndex: 1, JobTotal: 2, FailFast: true, MaxParallel: 1},
+			}, {
+				Key: "called", Name: "called", Permissions: map[string]string{"contents": "read"},
+				TimeoutMinutes: 360, Error: "uses: calls the reusable workflow ./.github/workflows/r.yml, and " +
+					"reusable workflows are not planned yet (A52)",
 			}},
 		}, {
 			File: ".github/workflows/deploy-production.yml", Name: "Deploy production",
