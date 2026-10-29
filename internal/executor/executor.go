@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -113,10 +114,29 @@ type Env interface {
 	// `runner.tool_cache` (A51), or "" when the run has none.
 	ToolCacheDir() string
 
+	// PutTemp writes a file into the run's temporary directory, replacing
+	// one of the same name, and returns its environment-visible path (A53).
+	//
+	// It is how the agent hands a step something it prepared on the host —
+	// a checkout's credential, a pack of objects — without the value passing
+	// through a step's environment or argv, and without the agent writing
+	// into the workspace, which every step can rewrite. name is a base name
+	// ([ValidTempName]). The file goes when the environment does.
+	PutTemp(ctx context.Context, name string, data []byte) (string, error)
+
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
 	Close(ctx context.Context) error
+}
+
+// ValidTempName reports why name cannot be a [Env.PutTemp] file: it must
+// name a file directly inside the temporary directory, not a path.
+func ValidTempName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return fmt.Errorf("%q is not a file name in the temporary directory", name)
+	}
+	return nil
 }
 
 // Spec describes the environment one run needs.

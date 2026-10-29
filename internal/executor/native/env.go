@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -106,6 +107,39 @@ func (e *runEnv) TempDir() string { return e.tempDir }
 
 // ToolCacheDir is the host path itself, likewise.
 func (e *runEnv) ToolCacheDir() string { return e.toolCache }
+
+// PutTemp writes the file 0o600 into $RUNNER_TEMP, which is this run's and
+// 0o700 (A53). It is written beside its name and renamed over it, so the
+// write replaces whatever a step left there — a symlink included — rather
+// than following it.
+func (e *runEnv) PutTemp(_ context.Context, name string, data []byte) (string, error) {
+	if err := executor.ValidTempName(name); err != nil {
+		return "", wrapErr(protocol.ErrExecutor, err, "write into $RUNNER_TEMP")
+	}
+	e.mu.Lock()
+	closed := e.closed
+	e.mu.Unlock()
+	if closed {
+		return "", codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
+	}
+	f, err := os.CreateTemp(e.tempDir, ".put-*")
+	if err != nil {
+		return "", wrapErr(protocol.ErrExecutor, err, "write %s into $RUNNER_TEMP", name)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	dest := filepath.Join(e.tempDir, name)
+	if werr == nil {
+		werr = os.Rename(f.Name(), dest)
+	}
+	if werr != nil {
+		_ = os.Remove(f.Name())
+		return "", wrapErr(protocol.ErrExecutor, werr, "write %s into $RUNNER_TEMP", name)
+	}
+	return dest, nil
+}
 
 // Workspace is the directory every step starts in. Not part of [executor.Env];
 // it exists for diagnostics and for tests.

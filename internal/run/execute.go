@@ -68,6 +68,10 @@ type execution struct {
 	// actionState is what each use of a JavaScript action saved through
 	// $GITHUB_STATE, by use (A51).
 	actionState map[string]map[string]string
+	// credentialWritten is whether a checkout step put the job's token in
+	// the environment, for a later one that does not persist to take back
+	// (A53).
+	credentialWritten bool
 
 	teardowns []teardownStep
 }

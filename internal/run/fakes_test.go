@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +51,11 @@ type fakeSource struct {
 	// commits are the commits the mirror holds besides the ref's tip, each
 	// mapped to whether it is on the ref (A52's pin).
 	commits map[string]bool
+	// containing is, per commit, every ref whose history holds it (A53); a
+	// commit with no entry is held by the ref's tip alone.
+	containing map[string][]string
+	// packed records each PackSince the mirror was asked for, as sha^have.
+	packed []string
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -99,6 +105,35 @@ func (m *fakeMirror) IsAncestor(_ context.Context, ancestor, descendant string) 
 	m.src.mu.Lock()
 	defer m.src.mu.Unlock()
 	return ancestor == descendant || (descendant == m.src.sha && m.src.commits[ancestor]), nil
+}
+
+func (m *fakeMirror) ContainingRefs(_ context.Context, sha string, prefixes []string) ([]string, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	held, ok := m.src.containing[sha]
+	if !ok && sha == m.src.sha {
+		held = []string{"refs/heads/main"}
+	}
+	var out []string
+	for _, r := range held {
+		for _, p := range prefixes {
+			if r == p || strings.HasPrefix(r, strings.TrimSuffix(p, "/")+"/") {
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *fakeMirror) PackSince(_ context.Context, sha, have string) ([]byte, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	if sha == have {
+		return nil, nil
+	}
+	m.src.packed = append(m.src.packed, sha+"^"+have)
+	return []byte("PACK " + sha), nil
 }
 
 // Resolve is gate 9. It answers with whatever the ref points at *now*, which
@@ -167,6 +202,8 @@ type fakeEnv struct {
 	state      func(step executor.Step) map[string]string
 	actionsDir string
 	tempDir    string
+	// puts is what PutTemp was handed, by name (A53).
+	puts map[string][]byte
 }
 
 func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
@@ -201,6 +238,30 @@ func (e *fakeEnv) ActionsDir() string { return e.actionsDir }
 func (e *fakeEnv) TempDir() string { return e.tempDir }
 
 func (e *fakeEnv) ToolCacheDir() string { return e.spec.ToolCache }
+
+func (e *fakeEnv) PutTemp(_ context.Context, name string, data []byte) (string, error) {
+	if err := executor.ValidTempName(name); err != nil {
+		return "", err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.puts == nil {
+		e.puts = map[string][]byte{}
+	}
+	e.puts[name] = append([]byte(nil), data...)
+	dir := e.tempDir
+	if dir == "" {
+		dir = "/tmp/latem/temp"
+	}
+	return dir + "/" + name, nil
+}
+
+func (e *fakeEnv) put(name string) ([]byte, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b, ok := e.puts[name]
+	return b, ok
+}
 
 func (e *fakeEnv) Close(context.Context) error {
 	e.mu.Lock()

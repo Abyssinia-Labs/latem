@@ -204,6 +204,10 @@ func (e *fakeEnv) TempDir() string { return "" }
 
 func (e *fakeEnv) ToolCacheDir() string { return "" }
 
+func (e *fakeEnv) PutTemp(_ context.Context, name string, _ []byte) (string, error) {
+	return filepath.Join(e.ex.dir, e.runID+"-"+name), nil
+}
+
 // fakeExecutor stands in for docker, tart, and native.
 //
 // Its resources are marker files in a directory, which is enough to make the

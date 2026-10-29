@@ -69,12 +69,17 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 			out     outcome
 			outputs map[string]string
 		)
-		if s.Artifact != nil {
+		switch {
+		case s.Artifact != nil:
 			// Performed by the agent, not an executor: it is a copy between
 			// the workspace and this run's artifact store, both of which the
 			// agent reaches from the host whichever executor is running.
 			out = x.runArtifactStep(ctx, s, label)
-		} else {
+		case s.Checkout != nil:
+			// Split: the agent decides and prepares in the mirror, the
+			// environment switches the workspace (A53).
+			out = x.runCheckoutStep(ctx, s, label, sc, budget)
+		default:
 			out, outputs = x.runStep(ctx, s, label, budget, late)
 		}
 		if s.ID != "" && len(outputs) > 0 {

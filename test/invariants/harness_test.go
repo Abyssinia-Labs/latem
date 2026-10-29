@@ -234,6 +234,10 @@ func (e *recordingEnv) TempDir() string { return "" }
 
 func (e *recordingEnv) ToolCacheDir() string { return "" }
 
+func (e *recordingEnv) PutTemp(_ context.Context, name string, _ []byte) (string, error) {
+	return filepath.Join(e.ex.dir, e.spec.RunID+"-"+name), nil
+}
+
 func (e *recordingEnv) Close(context.Context) error { return nil }
 
 // noSecrets refuses every name, which is right for jobs that declare none and

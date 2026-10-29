@@ -2365,11 +2365,25 @@ detached at the pinned commit.
 checked out, the run's commit beside it, and the policy ref whose history admitted it. A run is
 reproducible from its commit and the commits its log names.
 
+**Where it runs.** The agent runs git only in the mirror, which it owns: the ref's resolution,
+the reachability question, and the pack below. Everything that touches the workspace's `.git`
+runs in the job's environment as the step's own process — fixed text, `sh -e`, handed the commit,
+the branch, and the paths of the pack and the credential file through its environment (INV-3).
+Every earlier step can rewrite the workspace's `.git`, through docker's bind mount as much as
+natively, and a git the agent ran there on the host would execute what it found: a hook, an
+fsmonitor, a filter driver, a `url.insteadOf` that turns the mirror's path into an ssh command.
+That is a container step running code as the agent. Run as the step, the same git is the job
+acting on itself, which it always could. The environment therefore needs git, as GitHub's
+checkout needs it in a container job.
+
 **History.** Nothing is built. The workspace already holds every object, branch and tag the
-mirror has; a switch fetches anything newer from the mirror's path into the workspace, a local
-transport that needs no credential and touches no network. `fetch-depth` of any value and
-`fetch-tags` are accepted and answered by that. A tool that runs `git fetch --unshallow` fails,
-as it does on GitHub with `fetch-depth: 0`.
+mirror had when gate 10 cloned it. For a commit the mirror has fetched since — the one an
+earlier job pushed — the agent packs, in the mirror, the objects that commit's history holds and
+the run's commit's does not, hands the pack over through `PutTemp`, and the switch indexes it
+before it checks out: no credential, no network, and refused past 256 MB, because a checkout is
+not a second clone. `fetch-depth` of any value and `fetch-tags` are accepted and answered by
+that. A tool that runs `git fetch --unshallow` fails, as it does on GitHub with
+`fetch-depth: 0`.
 
 **The credential.** A52 offered the job's token "to the checkout as its credential"; this is
 where it is taken. Unless `persist-credentials: false`, the token — the job's, or `token:`'s
@@ -2390,8 +2404,10 @@ the native executor the operator's `~/.gitconfig` could route a push elsewhere �
 `insteadOf`, a keychain credential helper — and send it as a person, which would re-trigger the
 workflow on every push. So `origin` and `remote.origin.pushurl` are set to
 `https://github.com/<repository>.git`, a self-mapping `url.<that>.insteadOf` outranks the
-operator's prefix, the GitHub credential helper is emptied for the workspace, and the step fails
-if `git remote get-url --push origin` then answers anything else.
+operator's prefix, the credential helpers are emptied for the workspace, and the step fails —
+taking the credential's include back out — if `git remote get-url --push origin` then answers
+anything else. An operator rule for the very same URL, read first, wins a tie, which is why the
+check is there.
 
 **Still refused, by name.** Another repository; `submodules` and `lfs` other than false (§12
 already handles both for the run's own commit); `sparse-checkout`, `filter`, and the `ssh-*`
