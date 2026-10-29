@@ -32,12 +32,6 @@ func appendConfig(t *testing.T, cfg *config.Config, extra string) {
 	}
 }
 
-// besidesGates drops the note an orchestrator without SetConfig adds, so a
-// test can say "nothing else needed a restart".
-func besidesGates(deferred []string) []string {
-	return slices.DeleteFunc(slices.Clone(deferred), func(d string) bool { return d == gatesNotLive })
-}
-
 func healthRepos(a *Agent) []protocol.RepoInfo {
 	return a.health(context.Background()).Repos
 }
@@ -66,8 +60,8 @@ allowed_refs = ["main", "refs/pull/*/merge"]
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if extra := besidesGates(deferred); len(extra) != 0 {
-		t.Errorf("nothing restart-only changed, but the reload deferred %v", extra)
+	if len(deferred) != 0 {
+		t.Errorf("nothing restart-only changed, but the reload deferred %v", deferred)
 	}
 
 	repos := healthRepos(ta.Agent)

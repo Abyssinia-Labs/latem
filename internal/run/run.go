@@ -61,6 +61,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/broker"
@@ -205,7 +206,10 @@ func NewRunner(c *config.Runner, ex executor.Executor) Runner {
 // execute at once, and [Orchestrator.Cancel] may arrive for any of them at any
 // moment from a different goroutine.
 type Orchestrator struct {
-	cfg          *config.Config
+	cfg *config.Config
+	// liveCfg is the config a reload last applied (A54); [Orchestrator.config]
+	// reads it. cfg stays the one the agent started with.
+	liveCfg      atomic.Pointer[config.Config]
 	store        Store
 	brks         []broker.Broker
 	alwaysRedact [][]byte
@@ -304,13 +308,41 @@ type Result struct {
 	Requeued bool
 }
 
+// SetConfig makes c the config the next admission reads: the repo allowlist
+// and each repo's refs and vars, [label_aliases] and [actions] (§8, A54). A
+// run already admitted keeps what it was admitted under. The agent calls this
+// on a reload, with a config whose restart-only fields — the runners, the
+// paths — are the ones this orchestrator was built with.
+func (o *Orchestrator) SetConfig(c *config.Config) {
+	if c != nil {
+		o.liveCfg.Store(c)
+	}
+}
+
+// config is the live config: the last one [Orchestrator.SetConfig] gave, or
+// the one the orchestrator was built with. Read once per decision rather than
+// field by field, so one admission never sees half of each.
+//
+// A stored config is never edited: a reload builds a new one and publishes it
+// here, so a run holding the previous one keeps a consistent view of it. What
+// is restart-only — Paths above all, read straight from o.cfg by actionsDir,
+// toolCacheDir and actionCache — is the startup config's, which no reload
+// replaces and config.Reloader carries forward unchanged.
+func (o *Orchestrator) config() *config.Config {
+	if c := o.liveCfg.Load(); c != nil {
+		return c
+	}
+	return o.cfg
+}
+
 // policy adapts the config allowlist to what gates 1-5 consult.
 func (o *Orchestrator) policy(ctx context.Context) registry.Policy {
+	cfg := o.config()
 	p := registry.Policy{
-		Repos:     make(map[string]registry.RepoPolicy, len(o.cfg.Repos)),
-		MinFreeGB: o.cfg.WeakestMinFreeGB(),
+		Repos:     make(map[string]registry.RepoPolicy, len(cfg.Repos)),
+		MinFreeGB: cfg.WeakestMinFreeGB(),
 	}
-	for name, r := range o.cfg.Repos {
+	for name, r := range cfg.Repos {
 		p.Repos[name] = registry.RepoPolicy{
 			AllowedRefs:              r.AllowedRefs,
 			RequireApprovalOtherwise: r.RequireApprovalOtherwise,
@@ -335,7 +367,7 @@ func (o *Orchestrator) policy(ctx context.Context) registry.Policy {
 
 // repoPolicy returns the policy for one repo, and whether it is allowlisted.
 func (o *Orchestrator) repoPolicy(name string) (registry.RepoPolicy, *config.Repo, bool) {
-	r, ok := o.cfg.Repos[name]
+	r, ok := o.config().Repos[name]
 	if !ok {
 		return registry.RepoPolicy{}, nil, false
 	}
@@ -361,7 +393,7 @@ func (o *Orchestrator) approvalTTLFor(repo string) time.Duration {
 }
 
 func (o *Orchestrator) queueTTL() time.Duration {
-	if d := o.cfg.Agent.QueueTTL.Duration(); d > 0 {
+	if d := o.config().Agent.QueueTTL.Duration(); d > 0 {
 		return d
 	}
 	return config.DefaultQueueTTL
@@ -479,20 +511,22 @@ func truncate(s string, max int) string {
 // read should not have to remember that.
 // labelAliases is the machine's [label_aliases] (A50), nil without a config.
 func (o *Orchestrator) labelAliases() map[string][]string {
-	if o.cfg == nil {
+	cfg := o.config()
+	if cfg == nil {
 		return nil
 	}
-	return o.cfg.LabelAliases
+	return cfg.LabelAliases
 }
 
 func (o *Orchestrator) actionPolicy() actions.Policy {
-	if o.cfg == nil {
+	cfg := o.config()
+	if cfg == nil {
 		return actions.DefaultPolicy()
 	}
 	return actions.Policy{
-		Allowed:         o.cfg.Actions.Allowed,
-		RequirePinned:   o.cfg.Actions.PinningRequired(),
-		AllowUnisolated: o.cfg.Actions.AllowUnisolated,
+		Allowed:         cfg.Actions.Allowed,
+		RequirePinned:   cfg.Actions.PinningRequired(),
+		AllowUnisolated: cfg.Actions.AllowUnisolated,
 	}
 }
 

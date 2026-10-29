@@ -21,7 +21,7 @@ const (
 // A50: a repository reached by a local path has no owner/name to read, and
 // the key is still more use to a step than nothing. ok reports which one it is.
 func (x *execution) githubRepository() (slug string, ok bool) {
-	if r, found := x.o.cfg.Repos[x.req.Repo]; found {
+	if r, found := x.o.config().Repos[x.req.Repo]; found {
 		if s, isGitHub := r.GitHubRepository(); isGitHub {
 			return s, true
 		}
@@ -131,10 +131,11 @@ const toolCacheVolumePrefix = "latem-toolcache-"
 // repoVars answers the vars context from this repository's config (A50), or
 // nil without one, which leaves vars empty as it was before.
 func (x *execution) repoVars() func(environment string) map[string]string {
-	if x.o.cfg == nil {
+	cfg := x.o.config()
+	if cfg == nil {
 		return nil
 	}
-	r, ok := x.o.cfg.Repos[x.req.Repo]
+	r, ok := cfg.Repos[x.req.Repo]
 	if !ok {
 		return nil
 	}

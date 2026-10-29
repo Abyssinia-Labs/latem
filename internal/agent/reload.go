@@ -68,20 +68,6 @@ func ReadReloadStatus(path string) (ReloadStatus, error) {
 	return st, nil
 }
 
-// liveConfigured is an orchestrator whose gates read the config a reload
-// applies. internal/run's does not yet: it keeps the *config.Config it was
-// built with, and swapping the struct under it would race every admission in
-// flight. Until it implements this, a reload reaches the plan, the heartbeat
-// and maintenance, and says that the gates did not move.
-type liveConfigured interface {
-	SetConfig(*config.Config)
-}
-
-// gatesNotLive is the deferred note for an orchestrator that is not
-// [liveConfigured].
-const gatesNotLive = "the run gates (repo allowlist, refs, vars, [label_aliases], [actions]) keep the config " +
-	"the agent started with until a restart"
-
 // errNotReady is a SIGHUP that arrived while the agent was still starting.
 var errNotReady = errors.New("agent: still starting; the config it is starting with is the one on disk")
 
@@ -129,11 +115,7 @@ func (a *Agent) Reload() ([]string, error) {
 
 	a.live.Store(next)
 	if a.orch != nil {
-		if live, ok := any(a.orch).(liveConfigured); ok {
-			live.SetConfig(next)
-		} else {
-			deferred = append(deferred, gatesNotLive)
-		}
+		a.orch.SetConfig(next)
 	}
 
 	if len(deferred) > 0 {
