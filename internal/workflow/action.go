@@ -198,7 +198,7 @@ func (l rootLoader) Load(dir string) (*Action, error) {
 	}
 	for _, name := range []string{"action.yml", "action.yaml"} {
 		file := path.Join(clean, name)
-		data, err := readCapped(l.root, file, MaxWorkflowBytes)
+		data, err := readCapped(l.root.FS(), file, MaxWorkflowBytes)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}

@@ -281,6 +281,22 @@ func secretNames(steps []registry.Step) []string {
 // any expression in the name now (A50). Its url is GitHub's deployment UI and
 // has nothing to scope here.
 func environmentName(raw json.RawMessage, sc expr.Scope) (string, error) {
+	name, err := environmentField(raw)
+	if err != nil || name == "" {
+		return "", err
+	}
+	if !answerableNow(name) {
+		return "", fmt.Errorf("%q is only known when the job runs, and an environment decides which secrets it gets before it starts", name)
+	}
+	out, err := expr.EvalString(name, sc)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// environmentField is the name an `environment:` gives, unevaluated.
+func environmentField(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", nil
 	}
@@ -295,14 +311,7 @@ func environmentName(raw json.RawMessage, sc expr.Scope) (string, error) {
 		}
 		name = obj.Name
 	}
-	if !answerableNow(name) {
-		return "", fmt.Errorf("%q is only known when the job runs, and an environment decides which secrets it gets before it starts", name)
-	}
-	out, err := expr.EvalString(name, sc)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
+	return name, nil
 }
 
 const minute = 60 * 1_000_000_000 // protocol.Duration is nanoseconds

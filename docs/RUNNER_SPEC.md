@@ -2277,7 +2277,15 @@ compiled from the agent's disk at `sha`, as every job is.
 is neither success nor failure, as on GitHub. The job's `outputs:` are evaluated as it ends and
 reported in its final update; an output containing a value the redactor holds is dropped and
 named in the log, as GitHub drops one carrying a secret. `continue-on-error` on a job is the
-control plane's to honour, in the workflow run's conclusion.
+control plane's to honour, in the workflow run's conclusion. A job whose needs did not all
+succeed is skipped by the control plane without asking a machine — GitHub's implicit
+`success()` — unless its `if:` calls a status function (`always()`, `failure()`,
+`cancelled()`, `success()`), which the plan reports per job; then the machine evaluates it.
+A plan's own expressions — `run-name`, `concurrency`, a job's `name` and `environment` — read
+`github`, `inputs` and `vars` only; `github.run_id`, `run_number` and `job` are not known yet
+and are refused by name rather than read as empty, since a concurrency group that silently
+lost its run id would put every run in one group. GitHub stops matching `paths` after 300
+changed files; the planner does not.
 
 **Checks.** The control plane creates a check run per job when the plan arrives — queued — and
 moves it with the job: in progress, then completed as success, failure, cancelled, timed out

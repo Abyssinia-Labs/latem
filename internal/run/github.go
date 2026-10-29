@@ -8,14 +8,11 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 )
 
-// GitHub's public endpoints. A job compiled from a workflow gets these
-// whatever host its repository is on: they are what github.server_url and the
-// API clients a workflow calls default to, and latem has no GitHub Enterprise
-// host to substitute (A50).
+// GitHub's public endpoints; see [workflow.GitHubServerURL].
 const (
-	githubServerURL  = "https://github.com"
-	githubAPIURL     = "https://api.github.com"
-	githubGraphQLURL = "https://api.github.com/graphql"
+	githubServerURL  = workflow.GitHubServerURL
+	githubAPIURL     = workflow.GitHubAPIURL
+	githubGraphQLURL = workflow.GitHubGraphQLURL
 )
 
 // githubRepository is the repository as GitHub names it, owner/name (A50).

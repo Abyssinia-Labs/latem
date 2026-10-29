@@ -91,7 +91,7 @@ func ResolveWith(
 		}
 	}
 
-	files, err := workflowFiles(root)
+	files, err := workflowFiles(root.FS())
 	if err != nil {
 		return nil, Source{}, err
 	}
@@ -103,7 +103,7 @@ func ResolveWith(
 	var hits []hit
 	var allNames []string
 	for _, f := range files {
-		data, err := readCapped(root, f, MaxWorkflowBytes)
+		data, err := readCapped(root.FS(), f, MaxWorkflowBytes)
 		if err != nil {
 			return nil, Source{}, err
 		}
@@ -193,7 +193,7 @@ func available(native *registry.Registry, workflowNames []string) string {
 
 // readNative reads .latem/jobs.yaml, answering (nil, nil) when it is absent.
 func readNative(root *os.Root) (*registry.Registry, error) {
-	data, err := readCapped(root, registry.Path, MaxWorkflowBytes)
+	data, err := readCapped(root.FS(), registry.Path, MaxWorkflowBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -212,12 +212,13 @@ func readNative(root *os.Root) (*registry.Registry, error) {
 
 // workflowFiles lists .github/workflows/*.yml and *.yaml, sorted.
 //
-// Read through [os.Root.FS] rather than by joining paths onto the workspace,
+// Read through an [fs.FS] — a workspace's [os.Root.FS], or a commit in the
+// mirror when planning (A52) — rather than by joining paths onto a directory,
 // for the reason gate 11 gives: a workspace holds whatever a repository and a
 // build put there, and `.github/workflows` being a symlink to somewhere else on
 // the machine is a plain thing to commit.
-func workflowFiles(root *os.Root) ([]string, error) {
-	entries, err := fs.ReadDir(root.FS(), Dir)
+func workflowFiles(fsys fs.FS) ([]string, error) {
+	entries, err := fs.ReadDir(fsys, Dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -250,13 +251,13 @@ func workflowFiles(root *os.Root) ([]string, error) {
 	return out, nil
 }
 
-// readCapped reads a file through the root, refusing one byte past the cap so
+// readCapped reads a file through fsys, refusing one byte past the cap so
 // an oversized file is an error rather than a silent truncation that happens to
 // parse. The shape matches gate 11's, deliberately: two readers of
 // repository-supplied files that differ in their limits differ in what they
 // admit.
-func readCapped(root *os.Root, name string, max int) ([]byte, error) {
-	f, err := root.Open(path.Clean(name))
+func readCapped(fsys fs.FS, name string, max int) ([]byte, error) {
+	f, err := fsys.Open(path.Clean(name))
 	if err != nil {
 		return nil, err // fs.ErrNotExist is meaningful to the caller
 	}
