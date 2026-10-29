@@ -36,6 +36,11 @@ type Mirror interface {
 	// event named, on its ref (A52).
 	HasCommit(ctx context.Context, sha string) (bool, error)
 	IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error)
+	// ContainingRefs and PackSince are a checkout step's: which policy refs
+	// hold the commit it moves to, and the objects the workspace lacks for
+	// it (A53).
+	ContainingRefs(ctx context.Context, sha string, prefixes []string) ([]string, error)
+	PackSince(ctx context.Context, sha, have string) ([]byte, error)
 }
 
 // Source is the subset of [source.Manager] the gate chain uses.

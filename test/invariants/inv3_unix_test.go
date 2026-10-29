@@ -375,6 +375,12 @@ func TestINV3_EveryGitArgumentFromOutsideSitsAfterATerminator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A checkout step's question of the mirror (A53). The prefixes come from
+	// config, and are held to the same rule as a broker's ref.
+	prefixes := []string{"refs/heads/", "refs/tags/"}
+	if refs, err := mirror.ContainingRefs(ctx, ws.SHA, prefixes); err != nil || len(refs) == 0 {
+		t.Fatalf("ContainingRefs = %q, %v", refs, err)
+	}
 
 	invocations := readArgvLog(t, argvLog)
 	if len(invocations) == 0 {
@@ -383,7 +389,7 @@ func TestINV3_EveryGitArgumentFromOutsideSitsAfterATerminator(t *testing.T) {
 	}
 
 	// Values that came from outside this package, or that it built from one.
-	external := []string{"refs/tags/v1.0", ws.SHA, upstream, ws.Path}
+	external := append([]string{"refs/tags/v1.0", ws.SHA, upstream, ws.Path}, prefixes...)
 
 	sawTerminator := false
 	for _, argv := range invocations {

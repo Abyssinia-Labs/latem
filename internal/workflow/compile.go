@@ -309,6 +309,10 @@ func secretNames(steps []registry.Step) []string {
 		if st.If != nil {
 			visit(st.If)
 		}
+		if c := st.Checkout; c != nil {
+			visit(c.RefLate)
+			visit(c.Token)
+		}
 	}
 	if len(set) == 0 {
 		return nil
@@ -409,7 +413,7 @@ func (j *Job) unsupported(file, name string, workflowRun bool) error {
 			// empty command, which is the silent version of this.
 			found = append(found, fmt.Sprintf("  step %d uses: %s — unresolved", i+1, st.Uses))
 		}
-		if st.Run == "" && st.Uses == "" && st.container == nil && st.artifact == nil {
+		if st.Run == "" && st.Uses == "" && st.container == nil && st.artifact == nil && st.checkout == nil {
 			found = append(found, fmt.Sprintf("  step %d — has neither run: nor uses:", i+1))
 		}
 	}
@@ -595,6 +599,17 @@ func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.
 
 	// A step the run loop performs itself has no process, so it has no shell,
 	// environment or working directory — only its condition and its budget.
+	if st.checkout != nil {
+		c, err := compileCheckout(st.checkout, sc, where)
+		if err != nil {
+			return registry.Step{}, false, err
+		}
+		out := registry.Step{ID: st.ID, Name: st.Name, If: cond, Checkout: c, ContinueOnError: continueOnError}
+		if st.TimeoutMins != nil {
+			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
+		}
+		return out, false, nil
+	}
 	if st.artifact != nil {
 		out := registry.Step{ID: st.ID, Name: st.Name, If: cond, Artifact: st.artifact, ContinueOnError: continueOnError}
 		if st.TimeoutMins != nil {

@@ -226,6 +226,35 @@ func TestExec_WorkspaceAndRunnerTemp(t *testing.T) {
 	}
 }
 
+// A53: PutTemp is a copy into $RUNNER_TEMP through the archive API, named as
+// the container sees it.
+func TestPutTemp(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
+	before := len(f.copiedTo)
+	p, err := env.PutTemp(context.Background(), "git-credentials.config", []byte("[http]"))
+	if err != nil {
+		t.Fatalf("PutTemp: %v", err)
+	}
+	if p != TempPath+"/git-credentials.config" {
+		t.Errorf("path = %q", p)
+	}
+	if len(f.copiedTo) != before+1 {
+		t.Fatalf("copies = %d, want one more than %d", len(f.copiedTo), before)
+	}
+	got := f.copiedTo[len(f.copiedTo)-1]
+	if got.dst != TempPath || got.entries["git-credentials.config"] != "[http]" {
+		t.Errorf("copied %+v, want the file into %s", got, TempPath)
+	}
+	if _, err := env.PutTemp(context.Background(), "../escape", nil); err == nil {
+		t.Error("a path was accepted as a name")
+	}
+	_ = env.Close(context.Background())
+	if _, err := env.PutTemp(context.Background(), "late", nil); err == nil {
+		t.Error("PutTemp on a closed environment succeeded")
+	}
+}
+
 // The between-step channel: what step one writes to $LATEM_ENV, step two
 // reads from its environment. This is the only thing that crosses a step
 // boundary, because §9 leaves nothing else that can.

@@ -148,6 +148,14 @@ func validateLate(s Step, earlier map[string]bool) []error {
 			add("if: %s", p)
 		}
 	}
+	if c := s.Checkout; c != nil {
+		for _, p := range refProblems(c.RefLate, earlier) {
+			add("checkout ref: %s", p)
+		}
+		for _, p := range refProblems(c.Token, earlier) {
+			add("checkout token: %s", p)
+		}
+	}
 	return problems
 }
 

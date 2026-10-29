@@ -147,6 +147,20 @@ A path inside the workspace (`node_modules`) is refused, because a mount there
 would shadow the checkout — cache `~/.npm` instead. `upload-artifact` and
 `download-artifact` work too, collecting into §17's store when their step runs.
 
+**`uses: actions/checkout` is a step latem performs**, with no action fetched.
+Left bare, it checks out the run's commit — on a push, as the branch, with
+`origin/<branch>` as its upstream — and makes the job's GitHub token the
+workspace's git credential, as GitHub does. So a version-stamp job's bare
+`git push` works, and goes out as the latem-ci App, which latem-cloud ignores
+rather than re-running the workflow. `ref:` reaches any commit your
+`allowed_refs` already trusts: one in the history of an admitted branch or tag,
+such as `ref: main` after an earlier job pushed, a rollback tag, or
+`needs.bump.outputs.sha`. Anything else fails the step. `fetch-depth` and
+`fetch-tags` are answered by the full clone, `token:` must be a secret, and
+`persist-credentials: false` leaves no credential. The step's git runs inside
+the job's environment, so a docker image needs git, and `main`'s branch
+protection has to let the App push.
+
 ### 3. Five security invariants, written down and tested
 
 A self-hosted runner is a machine on your network holding your signing

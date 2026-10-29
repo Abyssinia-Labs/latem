@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -80,6 +81,29 @@ func (e *runEnv) ActionsDir() string {
 
 // TempDir is the container path exported as $RUNNER_TEMP (A50).
 func (e *runEnv) TempDir() string { return TempPath }
+
+// PutTemp copies the file into $RUNNER_TEMP through the archive API (A53).
+//
+// It is readable by every user in the container, because this package cannot
+// know which uid the image's step user is (the reason the files beside it are
+// permissive too). The container is this run's alone, so that is the job's
+// own steps and nothing else.
+func (e *runEnv) PutTemp(ctx context.Context, name string, data []byte) (string, error) {
+	if err := executor.ValidTempName(name); err != nil {
+		return "", wrapErr(protocol.ErrExecutor, err, "write into $RUNNER_TEMP")
+	}
+	e.mu.Lock()
+	closed := e.closed
+	e.mu.Unlock()
+	if closed {
+		return "", codeErr(protocol.ErrExecutor, "environment for run %s is closed", e.spec.RunID)
+	}
+	dest := path.Join(TempPath, name)
+	if err := e.writeFile(ctx, dest, data); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
 
 // ToolCacheDir is where the tool cache volume is mounted, when there is one.
 func (e *runEnv) ToolCacheDir() string {

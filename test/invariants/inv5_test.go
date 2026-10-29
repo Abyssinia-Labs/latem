@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -431,4 +432,86 @@ func (m *machine) waitForStateSHA(t *testing.T, id, sha string, timeout time.Dur
 	t.Fatalf("run %s never settled at sha %s; it is %s at %s (%s: %s)",
 		id, sha, last.State, last.SHA, last.ErrorCode, last.ErrorMsg)
 	return last
+}
+
+// checkoutWorkflow has two jobs that move the working tree (A53): one to a
+// tag in main's history, which the policy already trusts, and one to a branch
+// it does not name.
+const checkoutWorkflow = `on: [push]
+jobs:
+  rollback:
+    runs-on: [test]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: v1
+      - run: ./ci/build.sh
+  sneak:
+    runs-on: [test]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feature/x
+      - run: ./ci/build.sh
+`
+
+// TestINV5_ACheckoutReachesOnlyWhatThePolicyAdmits is A53's half of INV-5,
+// against a real mirror. A checkout may move the working tree to a commit in
+// the history of a ref allowed_refs admits — a rollback tag on main — and the
+// job it runs is still the run's commit's. It may not move it to a commit
+// only an unadmitted branch holds: the job fails before anything of it runs.
+func TestINV5_ACheckoutReachesOnlyWhatThePolicyAdmits(t *testing.T) {
+	m := newMachine(t, machineOptions{allowedRefs: `["main"]`})
+	base := git(t, m.repo, "rev-parse", "HEAD")
+	git(t, m.repo, "tag", "v1")
+	writeFile(t, filepath.Join(m.repo, ".github", "workflows", "deploy.yml"), checkoutWorkflow)
+	git(t, m.repo, "add", "-A")
+	git(t, m.repo, "commit", "-q", "-m", "a workflow that checks out elsewhere")
+	tip := git(t, m.repo, "rev-parse", "HEAD")
+	git(t, m.repo, "checkout", "-q", "-b", "feature/x")
+	writeFile(t, filepath.Join(m.repo, "ci", "build.sh"), "#!/bin/sh\necho unreviewed\n")
+	git(t, m.repo, "commit", "-q", "-am", "code main has not seen")
+	git(t, m.repo, "checkout", "-q", "main")
+
+	// --- positive control: a tag in main's history is reachable ------------
+	if got := m.submit(t, runFrame("r_rollback", "app", "rollback", "main", nil)); !got.OK {
+		t.Fatalf("refused at the transport: %s", got.Error)
+	}
+	rb := m.waitForState(t, "r_rollback", 90*time.Second,
+		protocol.StateSucceeded, protocol.StateFailed, protocol.StateRejected)
+	if rb.State != protocol.StateSucceeded {
+		t.Fatalf("the rollback finished %s (%s): %s", rb.State, rb.ErrorCode, rb.ErrorMsg)
+	}
+	if rb.SHA != tip {
+		t.Errorf("the run records %s, want the run's own commit %s: a checkout moves the tree, not the run", rb.SHA, tip)
+	}
+	var switched string
+	for _, s := range m.exec.recorded() {
+		if s.RunID == "r_rollback" && s.Step.Run == source.SwitchScript {
+			switched = s.Env["LATEM_CHECKOUT_SHA"]
+		}
+	}
+	if switched != base {
+		t.Errorf("the checkout switched to %q, want v1's commit %s", switched, base)
+	}
+	if got := commandsFor(m, "r_rollback"); len(got) != 2 || got[1] != "./ci/build.sh" {
+		t.Errorf("the rollback ran %q; its steps are the run's commit's", got)
+	}
+
+	// --- the invariant: a commit the policy does not trust is refused ------
+	if got := m.submit(t, runFrame("r_sneak", "app", "sneak", "main", nil)); !got.OK {
+		t.Fatalf("refused at the transport: %s", got.Error)
+	}
+	sn := m.waitForState(t, "r_sneak", 90*time.Second,
+		protocol.StateSucceeded, protocol.StateFailed, protocol.StateRejected)
+	if sn.State != protocol.StateFailed || sn.ErrorCode != protocol.ErrStep {
+		t.Fatalf("the checkout of feature/x finished %s (%s): %s; want failed/E_STEP (INV-5, A53)",
+			sn.State, sn.ErrorCode, sn.ErrorMsg)
+	}
+	if !strings.Contains(sn.ErrorMsg, "allowed_refs") {
+		t.Errorf("the refusal %q does not say which policy refused it", sn.ErrorMsg)
+	}
+	if got := commandsFor(m, "r_sneak"); len(got) != 0 {
+		t.Errorf("a refused checkout still ran %q", got)
+	}
 }

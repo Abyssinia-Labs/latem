@@ -140,14 +140,18 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 		}
 		return x.inlineComposite(ctx, st, action, append(stack, action.Path))
 	}
-	// A checkout latem has already performed. Asked before the allowlist:
-	// nothing is fetched and nothing third-party runs, so there is no decision
-	// for an operator to make, and requiring it to be allowlisted would fail
-	// every workflow on a machine that opted into no actions at all.
-	if satisfied, err := checkoutShim(st); err != nil {
+	// A checkout, which the run loop performs itself (A53). Asked before the
+	// allowlist: nothing is fetched and nothing third-party runs, so there is
+	// no decision for an operator to make, and requiring it to be allowlisted
+	// would fail every workflow on a machine that opted into no actions at all.
+	if spec, ok, err := checkoutShim(st, x.scope); err != nil {
 		return nil, err
-	} else if satisfied {
-		return nil, nil
+	} else if ok {
+		if st.Name == "" {
+			st.Name = "Run " + st.Uses
+		}
+		st.Uses, st.With, st.checkout = "", nil, spec
+		return []Step{st}, nil
 	}
 
 	// The cache, as a mount (A49). Also before the allowlist, for the same

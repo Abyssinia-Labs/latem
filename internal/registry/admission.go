@@ -277,6 +277,9 @@ type ResolvedStep struct {
 	Container *ContainerStep
 	// Artifact is set for a step the run loop performs itself (A49).
 	Artifact *ArtifactStep
+	// Checkout is set for `actions/checkout`, which the run loop also
+	// performs (A53).
+	Checkout *CheckoutStep
 	// Timeout of zero means "whatever remains of the job budget". Resolving
 	// that needs a clock and a start time, so it belongs to the orchestrator
 	// rather than here.
@@ -375,6 +378,7 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			If:              s.If,
 			Container:       s.Container,
 			Artifact:        s.Artifact,
+			Checkout:        s.Checkout,
 			Timeout:         s.Timeout.Duration(),
 		})
 	}

@@ -201,6 +201,47 @@ func TestExec_WorkspaceAndRunnerTemp(t *testing.T) {
 	}
 }
 
+// A53: what the agent hands a step arrives in $RUNNER_TEMP, readable only by
+// this user, replacing — never following — whatever a step left at the name.
+func TestPutTemp(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Symlink(elsewhere, filepath.Join(env.TempDir(), "creds")); err != nil {
+		t.Fatal(err)
+	}
+	p, err := env.PutTemp(t.Context(), "creds", []byte("secret"))
+	if err != nil {
+		t.Fatalf("PutTemp: %v", err)
+	}
+	if p != filepath.Join(env.TempDir(), "creds") {
+		t.Errorf("path = %q, want it in $RUNNER_TEMP", p)
+	}
+	info, err := os.Lstat(p)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Errorf("the file is %v, %v; want a regular 0600 file", info.Mode(), err)
+	}
+	if _, err := os.Stat(elsewhere); !os.IsNotExist(err) {
+		t.Error("the write followed a symlink a step planted")
+	}
+	if _, err := env.PutTemp(t.Context(), "creds", []byte("again")); err != nil {
+		t.Fatalf("a second PutTemp: %v", err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "again" {
+		t.Errorf("content = %q, want the second write", b)
+	}
+	for _, bad := range []string{"", ".", "..", "a/b", "../x"} {
+		if _, err := env.PutTemp(t.Context(), bad, nil); err == nil {
+			t.Errorf("PutTemp(%q) was accepted", bad)
+		}
+	}
+	if err := env.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.PutTemp(t.Context(), "late", nil); err == nil {
+		t.Error("PutTemp on a closed environment succeeded")
+	}
+}
+
 // A non-zero exit is a result, not an error: the agent maps it to E_STEP and
 // puts the number in the update. Returning an error here would lose the code.
 func TestExec_NonZeroExitIsAResult(t *testing.T) {

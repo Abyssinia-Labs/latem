@@ -226,6 +226,8 @@ Secret values MUST NOT appear in any structure sent to a broker, including run m
 
 `jobs.yaml` is read from the checked-out workspace after checkout, never fetched from the broker. Jobs are resolved against the registry at the resolved commit, so a run is reproducible from the commit alone.
 
+A job's definition is the pinned commit's. A checkout step may move its working tree to the pinned commit or to one reachable from a ref the policy admits, and the run's log names it (amendment A53). A run is reproducible from its commit and the commits its log names.
+
 Because a `ref` can point at a branch a contributor controls, config gates which refs may run without approval:
 
 ```toml
@@ -875,7 +877,7 @@ Three requirements make the hardlinking safe and keep it fast:
 - Submodules: `git submodule update --init --recursive --depth 1` inside the workspace, only when `.gitmodules` exists.
 - LFS: `git lfs fetch --all` in the mirror, `git lfs checkout` in the workspace, only when `.gitattributes` mentions LFS.
 - A per-repo mutex serialises fetches into one mirror; concurrent `fetch` into a bare repo is not reliably safe. Clones out of the mirror are reads and need no lock, so parallel runs on the same repo do not queue behind each other.
-- Credentials are the machine's own — SSH agent or a credential helper. The agent never receives, stores, or forwards git credentials.
+- Credentials are the machine's own — SSH agent or a credential helper. The agent never receives, stores, or forwards git credentials, with one exception: a workflow run's job token (A52), which a checkout step makes the workspace's credential for that job, from a file outside the workspace (A53).
 - The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, `LATEM_JOB`, and `LATEM_BUILD_NUMBER` (§22's run counter, amendment A36) into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
 - Startup reconciliation deletes `work/<run-id>` for any run id not in a non-terminal state. With clones there is no worktree administrative state in the mirror, so there is nothing to prune and nothing to leak — one of the smaller reasons this model is easier to make crash-safe.
 - **An Xcode scheme must be committed, and `latem doctor` checks it** (amendment A34). This section guarantees a fresh clone for every run, which turns an uncommitted scheme from a machine quirk into a certainty: `xcodebuild -scheme X` fails with "does not contain a scheme named X" because Xcode auto-creates schemes into `xcuserdata/`, which nobody commits. It must be under `<project>.xcodeproj/xcshareddata/xcschemes/`. `doctor` reads it from the repo's own bare mirror rather than from a checkout, since between runs that is the only copy this machine has; before the first fetch it reports that it has nothing to read yet rather than passing.
@@ -2030,6 +2032,9 @@ fetched and nothing third-party executes, so there is no judgement for an operat
 whereas requiring `actions/checkout` to be allowlisted would fail every workflow on a machine
 that had deliberately opted into no actions at all, for a step that does nothing.
 
+*A53 supersedes this paragraph's `fetch-depth` answer and the next paragraph's `ref:` answer:
+the workspace was never one commit, and a checkout may now move to a commit the policy admits.*
+
 **What it will stand in for is enumerated, and everything else is refused by name.**
 `persist-credentials` either way, because nothing is left in the workspace; `clean`, because
 §12 gives every run a fresh clone; `fetch-depth: 1`, because one commit is what §12 checks
@@ -2327,3 +2332,83 @@ as unsupported in the plan, by name); artifacts across machines; reviewer approv
 environment. Each has a place in this model — a matrix leg is a job key, a called workflow's
 jobs are planned into the caller's graph, a schedule is a cron the plan of the default branch
 reports — and each arrives as its own amendment.
+
+| A53 | §5 INV-5, §9, §12, §13, A48, A52 | **`uses: actions/checkout` is a step the agent performs. `ref:` moves the job's working tree — never its definition — to another commit of the same repository, resolved as the step runs against a freshly fetched mirror, and only to a commit the repository's policy already admits. `fetch-depth` and `fetch-tags` are satisfied by §12's clone, which was always complete. The job's token is the checkout's credential for the rest of the job, kept outside the workspace, unless `persist-credentials: false`. `executor.Env` gains `PutTemp`** | The fleet's deploy workflows stamp a version in one job — `checkout` with `token:`, `git commit`, `git push` — and deploy it in the next, which checks out `ref: main` to get the commit the first one pushed. Production rolls back with `ref: ${{ inputs.ref \|\| 'main' }}`. A48 refused all three, so no deploy workflow ran unedited. Its reason for refusing `fetch-depth: 0`, "the workspace has one commit", was never true: `git clone --local` hard-links the mirror's whole object store and copies every branch and tag |
+
+**What still comes from the pinned commit.** Everything gate 11 compiles: the job, its steps,
+its expressions, its local actions' metadata. `github.sha`, `GITHUB_SHA` and `LATEM_SHA` stay
+the run's commit, which is also what GitHub does. A checkout changes only what is on disk, so
+two things now differ from the commit the run names, and both are stated rather than left to be
+discovered: a `run: ./script` reads the checked-out tree, and so do a local action's files,
+whose metadata was compiled from the run's commit.
+
+**Which commits a checkout may reach.** The pinned commit, or a commit reachable from the tip of
+a ref the repository's `allowed_refs` admits, in the mirror as just fetched. Reachability rather
+than a name match is what lets the deploy workflows through — `needs.bump.outputs.sha` is a
+commit on `main`, and a rollback tag is a tag whose commit is on `main` — and it is what keeps
+INV-5's meaning: a checkout target's code runs with the job's secrets (`bun install`,
+`convex deploy`), so it may only be code the policy already trusts. Anything else fails the step
+with `E_STEP`. It does not park: there is no `running → awaiting_approval` edge, and an approval
+names only the run's own commit. `repository:` is accepted when it is the run's own repository;
+any other is refused.
+
+**Resolved as the step runs.** `ref:` is evaluated in the step's scope, so admission-time values
+(`inputs`, `needs`, `github`) and late ones (`steps.*`) both work. The mirror is fetched first,
+because `ref: main` exists to see a commit an earlier job of the same run pushed. A full hex
+value is a commit; anything else is normalized as gate 7 normalizes a run's ref, ambiguity
+included. A branch is checked out as a local branch at that commit with `origin/<branch>` and
+an upstream set, so a bare `git push` works, as after GitHub's checkout; a tag or a commit
+detaches. Gate 10's own checkout is unchanged: a job without a checkout step still starts
+detached at the pinned commit.
+
+**What is recorded.** The run log names the ref as written, the ref it normalized to, the commit
+checked out, the run's commit beside it, and the policy ref whose history admitted it. A run is
+reproducible from its commit and the commits its log names.
+
+**Where it runs.** The agent runs git only in the mirror, which it owns: the ref's resolution,
+the reachability question, and the pack below. Everything that touches the workspace's `.git`
+runs in the job's environment as the step's own process — fixed text, `sh -e`, handed the commit,
+the branch, and the paths of the pack and the credential file through its environment (INV-3).
+Every earlier step can rewrite the workspace's `.git`, through docker's bind mount as much as
+natively, and a git the agent ran there on the host would execute what it found: a hook, an
+fsmonitor, a filter driver, a `url.insteadOf` that turns the mirror's path into an ssh command.
+That is a container step running code as the agent. Run as the step, the same git is the job
+acting on itself, which it always could. The environment therefore needs git, as GitHub's
+checkout needs it in a container job.
+
+**History.** Nothing is built. The workspace already holds every object, branch and tag the
+mirror had when gate 10 cloned it. For a commit the mirror has fetched since — the one an
+earlier job pushed — the agent packs, in the mirror, the objects that commit's history holds and
+the run's commit's does not, hands the pack over through `PutTemp`, and the switch indexes it
+before it checks out: no credential, no network, and refused past 256 MB, because a checkout is
+not a second clone. `fetch-depth` of any value and `fetch-tags` are accepted and answered by
+that. A tool that runs `git fetch --unshallow` fails, as it does on GitHub with
+`fetch-depth: 0`.
+
+**The credential.** A52 offered the job's token "to the checkout as its credential"; this is
+where it is taken. Unless `persist-credentials: false`, the token — the job's, or `token:`'s
+value, which must be an expression; a literal token in a workflow is refused — is written as
+an `http.https://github.com/.extraheader` into a file in the job's temp directory through
+`executor.Env.PutTemp`, and the workspace's `.git/config` only includes that file. So the token
+is never in the workspace (an upload of `.` cannot carry it), never in a step's environment
+(A50's rule), and never in a git argv (`ps`, and `gitError`, which quotes argv); it is gone when
+the environment is closed or reaped. The token and its base64 form are registered with the
+redactor before the file is written. This narrows §12's "the agent never receives, stores, or
+forwards git credentials" by exactly this much: a job token, for one job, used by that job's
+own git. Any later step of the job can use it, third-party actions included — GitHub's exposure,
+taken on purpose so the fleet's workflows run unedited.
+
+**The push goes out as the App.** latem-cloud ignores an event whose sender is the App itself
+(A52), which is what keeps a version-stamp push from triggering the workflow that made it. On
+the native executor the operator's `~/.gitconfig` could route a push elsewhere — an SSH
+`insteadOf`, a keychain credential helper — and send it as a person, which would re-trigger the
+workflow on every push. So `origin` and `remote.origin.pushurl` are set to
+`https://github.com/<repository>.git`, a self-mapping `url.<that>.insteadOf` outranks the
+operator's prefix, the credential helpers are emptied for the workspace, and the step fails —
+taking the credential's include back out — if `git remote get-url --push origin` then answers
+anything else. An operator rule for the very same URL, read first, wins a tie, which is why the
+check is there.
+
+**Still refused, by name.** Another repository; `submodules` and `lfs` other than false (§12
+already handles both for the run's own commit); `sparse-checkout`, `filter`, and the `ssh-*`
+inputs. A48's other answers stand.
