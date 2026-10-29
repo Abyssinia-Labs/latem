@@ -2224,3 +2224,94 @@ names it. A tag is accepted only with `require_pinned = false`, and the commit i
 is written to the run log, so a moved tag is visible after the fact. A job that runs one needs
 an isolating runner unless `allow_unisolated = true` — which a Mac running native Apple builds
 will set, deciding that the owners in `allowed` are trusted with the agent's user.
+
+### Amendment from running workflow runs
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A52 | §1 N2, §5 INV-2 and G5, §7, §11, §12, A42 | **A GitHub event becomes a workflow run: the machine plans it from its own disk, the control plane schedules the plan's jobs across machines, and each job is one run on one machine, as before. The inbound command set grows to `plan`, `run` and `cancel`; `run` gains the event, its job's needs, and a GitHub installation token minted by the control plane. Protocol 2.0** | A42 made a workflow a registry and ran one of its jobs at a time, chosen by name. In the fleet this is for, 130 of 237 jobs use `needs:`, 87 an `if:` on the job, 25 files gate merges on pull-request checks, 20 use `GITHUB_TOKEN`, and every template repository has a job named `web` in three files — so "a job, by name" is ambiguous before it is anything else. N2's "fan-out is a v2 concern" is that concern arriving |
+
+**The model.** An event (push, pull request, release, repository dispatch, or a dispatch or
+schedule the control plane makes) produces zero or more workflow runs — one per workflow whose
+`on:` it matches — and each workflow run is a graph of jobs. Every job is still exactly one
+run on exactly one machine (N2 holds per job); a workflow run spans as many machines as its
+jobs land on. A machine never coordinates with another: everything between jobs goes through
+the control plane, outbound, as everything already does (INV-1).
+
+**Planning is the machine's (INV-5).** The control plane holds no workflow definitions and does
+not parse workflow files. It sends a `plan` command to one machine that has the repository;
+that machine fetches, checks the event's commit out of its own mirror, reads
+`.github/workflows` there, and answers with a plan: for each workflow the event triggers, its
+file, name, evaluated `run-name`, evaluated `concurrency`, and its jobs — each a key, a display
+name, `needs`, `runs-on` after aliases (A50), environment, `permissions`, job-level
+`concurrency`, `continue-on-error` and `timeout-minutes`. Structure and names, never steps.
+Triggering is evaluated as GitHub evaluates it: the event's name and, for pull requests,
+`types` (default opened, synchronize, reopened); `branches`/`branches-ignore`, `tags`/
+`tags-ignore`; `paths`/`paths-ignore` against the event's diff, computed in the mirror;
+`workflow_dispatch` inputs validated against their declarations. A workflow that cannot be
+parsed is in the plan as an error, so it becomes a failed check rather than a silent absence.
+One parser, Go's, serves planning and execution, so the plan and the job that runs cannot
+disagree about what the file says.
+
+**Scheduling is the control plane's.** It keeps the workflow run and dispatches a job when every
+job it needs has finished, to a machine that is online, has the repository, and advertises a
+runner whose labels cover the job's. A job no online machine can take stays queued and says
+which labels it is waiting for. Workflow- and job-level `concurrency` is enforced here, with
+`cancel-in-progress` cancelling the older run, because no single machine sees both. Machines
+advertise their repositories by `owner/name` (A50's `github`) in their heartbeat, which is how
+an installation's repository finds its machines.
+
+**`run` in 2.0.** Beside `id`, `repo`, `job`, `ref`, `inputs` and `origin`, a run of a workflow job
+carries: `workflow`, the file, constrained to `.github/workflows/<name>.y(a)ml`; `sha`, the
+commit to build, which must be reachable from `ref` — the run builds what the event named, not
+whatever the branch says by the time the job starts; `event`, the event's name, action, refs,
+pull-request number and payload (capped, and data: it reaches a step only as an environment
+value or through `GITHUB_EVENT_PATH`, A42's rule); `needs`, each needed job's result and outputs;
+`run_number` and `run_attempt`, GitHub's per-workflow numbers, which `github.run_number` and
+`GITHUB_RUN_NUMBER` now read ($LATEM_BUILD_NUMBER keeps the machine's own, A36); and `token`.
+Still no field can express a command, an image, an executor, a timeout or a label: the job is
+compiled from the agent's disk at `sha`, as every job is.
+
+**A job's place in the run.** The job's `if:` is evaluated on the machine as the run starts, with
+`needs` and the event in scope; false ends the run in a new terminal state, `skipped`, which
+is neither success nor failure, as on GitHub. The job's `outputs:` are evaluated as it ends and
+reported in its final update; an output containing a value the redactor holds is dropped and
+named in the log, as GitHub drops one carrying a secret. `continue-on-error` on a job is the
+control plane's to honour, in the workflow run's conclusion.
+
+**Checks.** The control plane creates a check run per job when the plan arrives — queued — and
+moves it with the job: in progress, then completed as success, failure, cancelled, timed out
+or skipped. Its name is the job's display name, which is what branch protection already
+requires, so cutting a repository over changes which app reports the check and not what it is
+called. Its details link to the run on app.latem.dev.
+
+**`GITHUB_TOKEN`, and the narrowing of G5 and §12.** The GitHub App's key is the control plane's
+(the operator's decision for this fleet). It mints an installation token per job, scoped to
+the repository and to the job's `permissions` (the workflow's when the job has none, GitHub's
+restricted default when neither does), and sends it in `run.token`. §12 said the agent never
+receives a credential and G5 that it is safe to point at an untrusted control plane; both are
+narrowed, deliberately and only this far: the agent may receive one short-lived token for one
+job. It is held in memory only — stripped from the run request before the request is made
+durable, registered with the redactor before the first step — and offered to the job as
+`secrets.GITHUB_TOKEN` and `github.token`, and to the checkout as its credential. A control
+plane that turns hostile can mint tokens with the app's permissions, which it can do with or
+without latem; it still cannot make a machine run anything not in the repository at the
+commit, nor read a secret the machine holds (INV-4 is unchanged). A token is valid for an hour;
+a job that outlives it is on its own until refresh exists. An event whose sender is the app
+itself is ignored on arrival, which is GitHub's rule that a push made with `GITHUB_TOKEN`
+triggers nothing, and what the fleet's version-stamp jobs rely on.
+
+**INV-2 in 2.0.** The inbound set is `plan`, `run`, `cancel`, and no more. `plan` carries an id, a
+repository key, the commit and the event: names and data. Nothing inbound can name a path
+other than a workflow file, and that only by pattern.
+
+**What 2.0 costs.** Strict decoding at both ends (PROTOCOL.md §2.3) means a 1.0 agent refuses a
+2.0 frame, loudly; the control plane speaks the version the agent sends at the handshake, so a
+machine is upgraded before it is pointed at workflow runs, and a 1.0 agent keeps working for
+the hooks it has.
+
+**Not in this amendment.** Matrices, reusable workflows and `schedule` (the planner reports them
+as unsupported in the plan, by name); artifacts across machines; reviewer approval on an
+environment. Each has a place in this model — a matrix leg is a job key, a called workflow's
+jobs are planned into the caller's graph, a schedule is a cron the plan of the default branch
+reports — and each arrives as its own amendment.
