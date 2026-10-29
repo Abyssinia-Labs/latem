@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,4 +109,132 @@ func TestAgent_PlansAnEventFromItsMirror(t *testing.T) {
 		defer cp.mu.Unlock()
 		return len(cp.lastHealth.Repos) == 1 && cp.lastHealth.Repos[0].Key == "app"
 	})
+}
+
+const runFlow = `
+name: CI
+on: push
+jobs:
+  build:
+    runs-on: [test]
+    outputs:
+      tag: v-${{ github.run_number }}
+    steps: [{run: make}]
+  deploy:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: [test]
+    steps: [{run: ./deploy.sh}]
+  report:
+    needs: build
+    runs-on: [test]
+    outputs:
+      got: ${{ needs.build.outputs.tag }}
+    steps: [{run: ./report.sh}]
+`
+
+// A workflow run, the way a control plane drives one (A52): plan the push,
+// then send each job as its needs finish, carrying their results and
+// outputs, a token, and the event. The token never reaches the database.
+func TestAgent_RunsAWorkflowRunFromItsPlan(t *testing.T) {
+	if !hasGit(t) {
+		t.Skip("git is not installed; a plan is read from a real mirror (INV-5)")
+	}
+	cp := newControlPlane(t)
+	repo := shortTempDir(t)
+	newRepo(t, repo, testJobs)
+	path := filepath.Join(repo, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(runFlow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-q", "-m", "ci")
+	sha := runGit(t, repo, "rev-parse", "HEAD")
+
+	cfg := newConfigDir(t, configOptions{repoURL: repo, remoteURL: cp.URL()})
+	ta := newTestAgent(t, cfg, nil)
+	ta.run(t)
+	waitFor(t, "the agent to connect", 20*time.Second, func() bool {
+		cp.mu.Lock()
+		defer cp.mu.Unlock()
+		return len(cp.resumes) > 0
+	})
+
+	event := protocol.Event{Name: "push", Ref: "refs/heads/main", SHA: sha, Actor: "octocat",
+		Payload: []byte(`{"head_commit":{"message":"ci"}}`)}
+	cp.push(t, protocol.NewPlanCommand(protocol.PlanRequest{ID: "p1", Repo: "app", Event: event}))
+	var plan protocol.PlanResult
+	waitFor(t, "the plan", 60*time.Second, func() bool {
+		cp.mu.Lock()
+		defer cp.mu.Unlock()
+		if len(cp.plans) > 0 {
+			plan = cp.plans[0]
+		}
+		return len(cp.plans) > 0
+	})
+	if len(plan.Workflows) != 1 || len(plan.Workflows[0].Jobs) != 3 || plan.Workflows[0].Jobs[0].Key != "build" {
+		t.Fatalf("plan %+v", plan)
+	}
+
+	const token = "ghs_agentTestToken0123456789"
+	terminal := func(id string) protocol.Update {
+		var last protocol.Update
+		waitFor(t, id+" to finish", 120*time.Second, func() bool {
+			cp.mu.Lock()
+			defer cp.mu.Unlock()
+			for _, u := range cp.updates {
+				if u.RunID == id && u.Update.State.IsTerminal() {
+					last = u.Update
+					return true
+				}
+			}
+			return false
+		})
+		return last
+	}
+	send := func(id, job string, needs map[string]protocol.NeedResult) {
+		ev := event
+		cp.push(t, protocol.NewRunCommand(protocol.RunRequest{
+			ID: id, Repo: "app", Job: job, Ref: "refs/heads/main",
+			Origin:   protocol.Origin{Kind: "webhook", Actor: "octocat"},
+			Workflow: plan.Workflows[0].File, SHA: sha, Event: &ev, Needs: needs,
+			WorkflowRunID: "wr1", RunNumber: 12, RunAttempt: 1, Token: token,
+		}))
+	}
+
+	send("r-build", "build", nil)
+	build := terminal("r-build")
+	if build.State != protocol.StateSucceeded || build.Outputs["tag"] != "v-12" {
+		t.Fatalf("build: %+v", build)
+	}
+	needs := map[string]protocol.NeedResult{"build": {Result: protocol.NeedSuccess, Outputs: build.Outputs}}
+	send("r-deploy", "deploy", needs)
+	send("r-report", "report", needs)
+	if u := terminal("r-deploy"); u.State != protocol.StateSkipped {
+		t.Errorf("deploy: %+v, want skipped — its if: is false on a push", u)
+	}
+	if u := terminal("r-report"); u.State != protocol.StateSucceeded || u.Outputs["got"] != "v-12" {
+		t.Errorf("report: %+v, want build's output through needs", u)
+	}
+
+	raw, err := os.ReadFile(cfg.Paths.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal"} {
+		if b, err := os.ReadFile(cfg.Paths.DB + suffix); err == nil && strings.Contains(string(b), token) {
+			t.Errorf("the token reached %s", filepath.Base(cfg.Paths.DB+suffix))
+		}
+	}
+	if !strings.Contains(string(raw)+mustRead(cfg.Paths.DB+"-wal"), ".github/workflows/ci.yml") {
+		t.Error("the workflow run's fields were not kept with the run")
+	}
+}
+
+func mustRead(path string) string {
+	b, _ := os.ReadFile(path)
+	return string(b)
 }
