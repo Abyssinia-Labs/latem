@@ -108,6 +108,10 @@ type Options struct {
 	// outputs: and continue-on-error are then its own to honour, and the
 	// scope carries the needs context they read.
 	WorkflowRun bool
+	// Matrix is the leg of a matrix job a run builds, as run.matrix carried
+	// it (A55). The job's matrix is expanded here, from the file, and this
+	// must be exactly one of its legs.
+	Matrix json.RawMessage
 }
 
 // CompileWith is [Compile] against a machine's actions and its policy.
@@ -146,6 +150,12 @@ func CompileWith(
 			return &registry.Job{Description: declared.Name, Skip: true,
 				SkipReason: strings.TrimSpace(declared.If)}, nil
 		}
+	}
+	// A55: the matrix leg, after the job's if: — which cannot read it — and
+	// before everything that can.
+	sc, err := withLeg(w, declared, jobName, sc, opts.Matrix)
+	if err != nil {
+		return nil, err
 	}
 	environment, err := environmentName(declared.Environment, sc)
 	if err != nil {
@@ -195,7 +205,7 @@ func CompileWith(
 	// applied per step below.
 	baseEnv := mergeEnv(w.Env, j.Env)
 
-	labels, err := compileLabels(j.RunsOn, w.Path, jobName, opts.LabelAliases)
+	labels, err := compileLabels(j.RunsOn, w.Path, jobName, opts.LabelAliases, sc)
 	if err != nil {
 		return nil, err
 	}
@@ -367,6 +377,45 @@ const minute = 60 * 1_000_000_000 // protocol.Duration is nanoseconds
 // DefaultJobTimeout is GitHub's timeout-minutes default, 360 (A50).
 const DefaultJobTimeout = 360 * minute
 
+// runsOnValues evaluates an expression in runs-on to its labels: a string, or
+// a list of strings.
+func runsOnValues(raw string, sc expr.Scope) ([]string, error) {
+	spans, err := expr.Spans(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, sp := range spans {
+		if err := planReads(sp.Prog, sc); err != nil {
+			return nil, err
+		}
+	}
+	v, err := expr.EvalValue(raw, sc)
+	if err != nil {
+		return nil, err
+	}
+	var labels []string
+	switch t := v.(type) {
+	case string:
+		labels = []string{t}
+	case []any:
+		for _, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s yields %s, which is not a label", raw, describe(e))
+			}
+			labels = append(labels, s)
+		}
+	default:
+		return nil, fmt.Errorf("%s yields %s, not a label or a list of labels", raw, describe(v))
+	}
+	for _, l := range labels {
+		if strings.TrimSpace(l) == "" {
+			return nil, fmt.Errorf("%s yields an empty label", raw)
+		}
+	}
+	return labels, nil
+}
+
 // unsupported refuses every construct this phase does not implement, by name.
 //
 // One error listing all of them, rather than the first: a workflow being
@@ -378,9 +427,6 @@ func (j *Job) unsupported(file, name string, workflowRun bool) error {
 
 	if j.Uses != "" {
 		add("uses: (reusable workflow)", "calling another workflow is not implemented")
-	}
-	if len(j.Strategy) > 0 {
-		add("strategy:", "a matrix expands one job into several; latem runs the job you named")
 	}
 	if len(j.Needs) > 0 && !workflowRun {
 		add("needs:", refusedContexts["needs"])
@@ -438,10 +484,26 @@ func (j *Job) unsupported(file, name string, workflowRun bool) error {
 // is `linux` on a machine you own, and a vendor's label is whatever the
 // operator says it is. A Windows label is refused by name, because no latem
 // runner can be one (A47).
-func compileLabels(runsOn StringList, file, job string, aliases map[string][]string) ([]string, error) {
+func compileLabels(runsOn StringList, file, job string, aliases map[string][]string, sc expr.Scope) ([]string, error) {
 	if len(runsOn) == 0 {
 		return nil, badRegistry("%s: job %q has no runs-on", file, job)
 	}
+	// An expression is answered as a plan is (A55): from the event, the
+	// inputs, the vars and the matrix leg, all known before a machine is
+	// chosen. Each label it yields is checked as a written one is.
+	var written StringList
+	for _, raw := range runsOn {
+		if !expr.Has(raw) {
+			written = append(written, raw)
+			continue
+		}
+		labels, err := runsOnValues(raw, sc)
+		if err != nil {
+			return nil, badRegistry("%s: job %q: runs-on: %v", file, job, err)
+		}
+		written = append(written, labels...)
+	}
+	runsOn = written
 	out := make([]string, 0, len(runsOn))
 	seen := map[string]bool{}
 	add := func(l string) {
@@ -452,11 +514,6 @@ func compileLabels(runsOn StringList, file, job string, aliases map[string][]str
 	}
 	for _, raw := range runsOn {
 		l := strings.ToLower(strings.TrimSpace(raw))
-		if expr.Has(l) {
-			return nil, badRegistry(
-				"%s: job %q has an expression in runs-on; a run is matched to a machine before "+
-					"anything is evaluated, so the label has to be written out", file, job)
-		}
 		// self-hosted is GitHub's marker for "not a hosted runner". Every
 		// latem runner is self-hosted, so it carries no information and is
 		// dropped rather than demanded of the operator's label set.

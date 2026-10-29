@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -186,5 +187,62 @@ func TestExecute_WorkflowRunJobPinsItsCommit(t *testing.T) {
 	if res.State != protocol.StateRejected || res.ErrorCode != protocol.ErrInvalidRef ||
 		!strings.Contains(res.ErrorMsg, "is not on refs/heads/main") {
 		t.Errorf("a commit off the ref: %s/%s %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+}
+
+const matrixWorkflowFile = `
+on: [push]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [linux, macos]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: ./test.sh
+        env:
+          OS: ${{ matrix.os }}
+          LEG: ${{ strategy.job-index }}/${{ strategy.job-total }}
+`
+
+// A55: a leg arrives as run.matrix, survives the row it is queued in, and is
+// built only if the file at the pinned commit declares it — its runs-on read
+// from the leg, so the macos leg finds no runner on a linux-only machine.
+func TestExecute_MatrixLeg(t *testing.T) {
+	for name, c := range map[string]struct {
+		leg       string
+		state     protocol.RunState
+		code      protocol.ErrorCode
+		wantInMsg string
+	}{
+		"the linux leg":        {`{"os":"linux"}`, protocol.StateSucceeded, "", ""},
+		"the macos leg":        {`{"os":"macos"}`, protocol.StateRejected, protocol.ErrNoRunner, ""},
+		"a leg the file lacks": {`{"os":"windows"}`, protocol.StateFailed, protocol.ErrBadRegistry, "is not one of the 2 legs"},
+		"no leg for a matrix":  {``, protocol.StateFailed, protocol.ErrBadRegistry, "is a matrix of 2 jobs"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.source.registry = ""
+			o := h.build()
+			req := workflowRequest(h, "test")
+			req.Needs = nil
+			req.Matrix = json.RawMessage(c.leg)
+			r := h.admitAndClaim(o, req)
+			h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", matrixWorkflowFile)
+			res, err := o.Execute(t.Context(), r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.State != c.state || res.ErrorCode != c.code || !strings.Contains(res.ErrorMsg, c.wantInMsg) {
+				t.Fatalf("got %s/%s %q, want %s/%s containing %q", res.State, res.ErrorCode, res.ErrorMsg,
+					c.state, c.code, c.wantInMsg)
+			}
+			if c.state != protocol.StateSucceeded {
+				return
+			}
+			if env := h.env.executed()[0].Env; env["OS"] != "linux" || env["LEG"] != "0/2" {
+				t.Errorf("OS=%q LEG=%q, want the leg's values and its place", env["OS"], env["LEG"])
+			}
+		})
 	}
 }

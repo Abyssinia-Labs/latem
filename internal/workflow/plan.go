@@ -237,7 +237,7 @@ func (p *planner) workflow(file string) (protocol.PlannedWorkflow, bool, error) 
 		return broken(err)
 	}
 	for _, key := range order {
-		pw.Jobs = append(pw.Jobs, p.job(w, key, sc, perms))
+		pw.Jobs = append(pw.Jobs, p.jobs(w, key, sc, perms)...)
 	}
 	return pw, true, nil
 }
@@ -283,9 +283,31 @@ func (p *planner) scope(workflow string, inputs map[string]any, given map[string
 	}
 }
 
-// job plans one job. What is wrong with it is collected rather than stopped
-// at, for the reason [Job.unsupported] gives.
-func (p *planner) job(w *Workflow, key string, sc expr.Scope, perms map[string]string) (pj protocol.PlannedJob) {
+// jobs plans one job: one planned job, or one per leg of its matrix (A55).
+// A matrix that cannot be expanded is one planned job carrying the error.
+func (p *planner) jobs(w *Workflow, key string, sc expr.Scope, perms map[string]string) []protocol.PlannedJob {
+	st, err := expandStrategy(w.Jobs[key], sc)
+	if err != nil {
+		pj := p.job(w, key, legScope(sc, nil, 0), perms, nil, 0)
+		pj.Labels, pj.Error = nil, err.Error()
+		return []protocol.PlannedJob{pj}
+	}
+	if st == nil {
+		return []protocol.PlannedJob{p.job(w, key, legScope(sc, nil, 0), perms, nil, 0)}
+	}
+	out := make([]protocol.PlannedJob, 0, len(st.legs))
+	for i := range st.legs {
+		out = append(out, p.job(w, key, legScope(sc, st, i), perms, st, i))
+	}
+	return out
+}
+
+// job plans one job, or one leg of a matrix job when st is set. What is wrong
+// with it is collected rather than stopped at, for the reason
+// [Job.unsupported] gives.
+func (p *planner) job(
+	w *Workflow, key string, sc expr.Scope, perms map[string]string, st *matrixStrategy, leg int,
+) (pj protocol.PlannedJob) {
 	j := w.Jobs[key]
 	pj = protocol.PlannedJob{
 		Key:            key,
@@ -302,17 +324,6 @@ func (p *planner) job(w *Workflow, key string, sc expr.Scope, perms map[string]s
 		}
 	}()
 
-	if len(j.Strategy) > 0 {
-		var s struct {
-			Matrix json.RawMessage `json:"matrix"`
-		}
-		if err := json.Unmarshal(j.Strategy, &s); err != nil || len(s.Matrix) > 0 {
-			// A matrix's legs are what its name, runs-on and environment
-			// read, so nothing else about the job can be planned without them.
-			problems = append(problems, "strategy: a matrix is not planned yet (A52)")
-			return pj
-		}
-	}
 	if j.Name != "" {
 		name, err := planString(j.Name, sc)
 		if err != nil {
@@ -321,12 +332,27 @@ func (p *planner) job(w *Workflow, key string, sc expr.Scope, perms map[string]s
 			pj.Name = name
 		}
 	}
+	if st != nil {
+		// GitHub names a leg by its values unless the name already reads
+		// them, and the check run, and so branch protection, goes by it.
+		if !nameReadsMatrix(j.Name) {
+			pj.Name += legSuffix(st.legs[leg])
+		}
+		m, err := legMatrix(st.legs[leg])
+		if err != nil {
+			fail("strategy.matrix", err)
+		}
+		pj.Matrix = m
+		pj.Strategy = &protocol.Strategy{
+			JobIndex: leg, JobTotal: len(st.legs), FailFast: st.failFast, MaxParallel: st.maxParallel,
+		}
+	}
 	if j.Uses != "" {
 		problems = append(problems, fmt.Sprintf(
 			"uses: calls the reusable workflow %s, and reusable workflows are not planned yet (A52)", j.Uses))
 		return pj
 	}
-	if labels, err := compileLabels(j.RunsOn, w.Path, key, p.opts.LabelAliases); err != nil {
+	if labels, err := compileLabels(j.RunsOn, w.Path, key, p.opts.LabelAliases, sc); err != nil {
 		problems = append(problems, err.Error())
 	} else {
 		pj.Labels = labels
@@ -788,7 +814,7 @@ func planConcurrency(raw json.RawMessage, sc expr.Scope) (*protocol.Concurrency,
 // planContexts are what a plan's expressions may read. needs, steps, job,
 // runner, secrets and the status functions are only answered as a job runs,
 // and a plan is made before any does.
-var planContexts = map[string]bool{"github": true, "inputs": true, "vars": true}
+var planContexts = map[string]bool{"github": true, "inputs": true, "vars": true, "matrix": true, "strategy": true}
 
 // planString evaluates a value — run-name, a concurrency group, a job's name
 // or environment — against the plan's scope.

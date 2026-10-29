@@ -114,6 +114,7 @@ func requestOf(r store.Run) protocol.RunRequest {
 		ev := w.Event
 		req.Workflow, req.SHA, req.Event, req.Needs = w.Workflow, w.SHA, &ev, w.Needs
 		req.WorkflowRunID, req.RunNumber, req.RunAttempt = w.WorkflowRunID, w.RunNumber, w.RunAttempt
+		req.Matrix = w.Matrix
 	}
 	return req
 }

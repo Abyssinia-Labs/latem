@@ -325,6 +325,7 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	opts := workflow.Options{
 		Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache(),
 		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
+		Matrix: x.req.Matrix,
 	}
 	var (
 		reg *registry.Registry

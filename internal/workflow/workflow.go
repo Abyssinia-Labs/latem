@@ -101,6 +101,10 @@ type Job struct {
 	Uses            string          `json:"uses,omitempty"`
 	With            json.RawMessage `json:"with,omitempty"`
 	Secrets         json.RawMessage `json:"secrets,omitempty"`
+
+	// matrixOrder is the written order of strategy.matrix's keys, which
+	// decoding through JSON sorts (A55). Nil without a matrix mapping.
+	matrixOrder *matrixOrder
 }
 
 // Step is one step in a job.
@@ -202,6 +206,11 @@ func Parse(data []byte, filename string) (*Workflow, error) {
 					"%s: a job key resolved to the boolean %s — YAML reads a bare on/off/yes/no "+
 						"as a boolean, so quote the job's name", filename, name),
 			}
+		}
+	}
+	for name, order := range readMatrixOrders(data) {
+		if j := w.Jobs[name]; j != nil {
+			j.matrixOrder = order
 		}
 	}
 	return &w, nil

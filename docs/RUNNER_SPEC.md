@@ -2333,6 +2333,10 @@ environment. Each has a place in this model — a matrix leg is a job key, a cal
 jobs are planned into the caller's graph, a schedule is a cron the plan of the default branch
 reports — and each arrives as its own amendment.
 
+### Amendment from deploying with a workflow
+
+| # | Section | Change | Why |
+|---|---|---|---|
 | A53 | §5 INV-5, §9, §12, §13, A48, A52 | **`uses: actions/checkout` is a step the agent performs. `ref:` moves the job's working tree — never its definition — to another commit of the same repository, resolved as the step runs against a freshly fetched mirror, and only to a commit the repository's policy already admits. `fetch-depth` and `fetch-tags` are satisfied by §12's clone, which was always complete. The job's token is the checkout's credential for the rest of the job, kept outside the workspace, unless `persist-credentials: false`. `executor.Env` gains `PutTemp`** | The fleet's deploy workflows stamp a version in one job — `checkout` with `token:`, `git commit`, `git push` — and deploy it in the next, which checks out `ref: main` to get the commit the first one pushed. Production rolls back with `ref: ${{ inputs.ref \|\| 'main' }}`. A48 refused all three, so no deploy workflow ran unedited. Its reason for refusing `fetch-depth: 0`, "the workspace has one commit", was never true: `git clone --local` hard-links the mirror's whole object store and copies every branch and tag |
 
 **What still comes from the pinned commit.** Everything gate 11 compiles: the job, its steps,
@@ -2412,3 +2416,56 @@ check is there.
 **Still refused, by name.** Another repository; `submodules` and `lfs` other than false (§12
 already handles both for the run's own commit); `sparse-checkout`, `filter`, and the `ssh-*`
 inputs. A48's other answers stand.
+
+### Amendment from planning a matrix
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A55 | §5 INV-2 and INV-5, A42, A52 | **`strategy.matrix` is planned. The machine expands a matrix into legs, by GitHub's rules, and each leg is a planned job: the job's key, its own name, labels, environment and concurrency, and its matrix values. The control plane schedules legs as jobs, and a job that needs a matrix waits for every leg. `run` gains `matrix`, which the machine accepts only if it is one of the legs it expands from the pinned commit. `runs-on` may be an expression the plan answers. Protocol 2.1** | A52 left matrices out, and the planner has reported them as unsupported since. Nine jobs in the fleet are matrices — latem's own `check` among them, one job on Linux and macOS through `runs-on: ${{ matrix.os }}` — and a matrix job cannot be run at all, because its name, its runs-on and its environment all read the matrix: there is no un-expanded version of it to run |
+
+**Expansion.** GitHub's, in its order. The matrix's keys, as written, are the dimensions; their
+cross product, first key outermost, is the base. `exclude` is applied first: an entry removes
+every combination whose values match all of the entry's keys. `include` is applied next, in
+order: an entry extends each combination whose original values it matches — adding its other
+keys, which may overwrite a value an earlier `include` added and never an original one — and an
+entry that matches no combination is a combination of its own. A value may be an expression,
+and so may the whole matrix, `include` or `exclude`, if the plan's scope answers it (`github`,
+`inputs`, `vars`); one that reads `needs` — a matrix computed by an earlier job — is not planned
+yet, and says so. A dimension with no values, a matrix with no combinations, and more than 256
+legs are the workflow's errors, as on GitHub. Equality is a value's: `14` is not `"14"`.
+
+**Key order is the file's.** The parser reads YAML into maps, which forgets order, and a leg's
+name and position depend on it: `{os: [a], node: [1]}` is `build (a, 1)` on GitHub, and branch
+protection names checks by that string. So the order of a matrix's keys, and of each `include`
+entry's, is read from the file itself.
+
+**A leg.** The job's key; its name — the job's `name:` evaluated with the leg's matrix, or the
+key, followed by ` (v1, v2, …)`, the leg's values in key order, unless the name reads `matrix`;
+and its labels, environment, concurrency, `continue-on-error` and `timeout-minutes`, each
+evaluated with the leg's matrix. `runs-on` may therefore be an expression, here and in a job
+without a matrix, if the plan's scope answers it; a label it yields is checked as a written one
+is. A leg carries its values as `matrix`, and `strategy`: its index, the number of legs,
+`fail-fast` (default true) and `max-parallel` (default unbounded). The job's `if:` cannot read
+`matrix`, as on GitHub: it is answered once, for every leg.
+
+**Scheduling is the control plane's.** Legs are jobs. A job that needs a matrix waits for every
+leg; `needs.<key>.result` is `failure` if a leg failed, else `cancelled` if one was cancelled,
+else `skipped` if every leg was skipped, else `success`; `needs.<key>.outputs` are the legs'
+outputs merged in the order the legs ended, last writer winning, as GitHub documents.
+`fail-fast` cancels a failed leg's queued and running siblings, unless the failed leg continues
+on error. `max-parallel` caps how many legs run at once.
+
+**A leg is the file's, not the control plane's.** `run.matrix` is data, as every inbound field is
+(INV-2): it reaches a step only through an expression, which A42 binds to an environment
+variable. And the machine does not take a leg on trust. Compiling a matrix job, it expands the
+matrix itself, from the pinned commit (INV-5), and requires the run's values to be exactly one
+of the legs — so a control plane cannot invent a leg the file does not declare, and cannot use
+one to reach a runner the file does not name. That expansion is also where `strategy.job-index`
+and `strategy.job-total` come from. A matrix job run without a leg, or a leg sent for a job with
+no matrix, is `E_BAD_REGISTRY`.
+
+**Protocol 2.1.** `run.matrix` and the plan's `jobs[].matrix` and `jobs[].strategy` are
+additive, and §2.3's strictness makes every additive change a refusal at the other end: a 2.0
+agent refuses a run carrying `matrix`, and a control plane that does not know the plan's new
+fields refuses the plan. So the control plane is upgraded first, and sends a leg only to a
+machine whose frames say 2.1 or later.

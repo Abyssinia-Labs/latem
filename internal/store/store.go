@@ -25,6 +25,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -109,6 +110,7 @@ func WorkflowRunOf(req protocol.RunRequest) *WorkflowRun {
 		WorkflowRunID: req.WorkflowRunID,
 		RunNumber:     req.RunNumber,
 		RunAttempt:    req.RunAttempt,
+		Matrix:        req.Matrix,
 	}
 	if req.Event != nil {
 		w.Event = *req.Event
@@ -128,6 +130,8 @@ type WorkflowRun struct {
 	WorkflowRunID string                         `json:"workflow_run_id"`
 	RunNumber     int64                          `json:"run_number,omitempty"`
 	RunAttempt    int64                          `json:"run_attempt,omitempty"`
+	// Matrix is a matrix leg's values (A55).
+	Matrix json.RawMessage `json:"matrix,omitempty"`
 }
 
 // The broker keys of the broker_state table (amendment A28).
