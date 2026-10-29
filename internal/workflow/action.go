@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -30,17 +32,54 @@ type Action struct {
 	Runs        ActionRuns              `json:"runs"`
 	Branding    json.RawMessage         `json:"branding,omitempty"`
 
-	// Path is the action's directory, relative to the repository root. It is
-	// what `github.action_path` means inside the action.
+	// Path is the action's directory. For a local action it is relative to the
+	// repository root, which is the working directory a step starts in, so it
+	// resolves on its own. For a fetched one it is relative to the action
+	// cache, which lives at a different absolute path inside a container than
+	// on the host — see Remote.
 	Path string `json:"-"`
+	// Remote marks an action fetched from another repository, whose Path has
+	// to be joined to whatever the executor says the cache is reachable at.
+	// That answer is only known once a runner is chosen, so it arrives as a
+	// late binding rather than a literal (A42 phase 5).
+	Remote bool `json:"-"`
 }
 
 // ActionInput is one declared input.
 type ActionInput struct {
-	Description        string  `json:"description,omitempty"`
-	Required           bool    `json:"required,omitempty"`
-	Default            *string `json:"default,omitempty"`
-	DeprecationMessage string  `json:"deprecationMessage,omitempty"`
+	Description        string        `json:"description,omitempty"`
+	Required           bool          `json:"required,omitempty"`
+	Default            *InputDefault `json:"default,omitempty"`
+	DeprecationMessage string        `json:"deprecationMessage,omitempty"`
+	// Type is not in GitHub's metadata syntax, and actions write it anyway
+	// (`type: boolean`, setup-bun among them); GitHub ignores it, and so does
+	// latem, since every input reaches the action as a string (A51).
+	Type string `json:"type,omitempty"`
+}
+
+// InputDefault is an input's default as the string the action receives.
+// Metadata writes it as a string, a boolean or a number — `default: false` —
+// and GitHub passes each as its text. `default: null` is no default at all,
+// which the pointer holding this already says.
+type InputDefault string
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (d *InputDefault) UnmarshalJSON(data []byte) error {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	switch t := v.(type) {
+	case string:
+		*d = InputDefault(t)
+	case bool:
+		*d = InputDefault(strconv.FormatBool(t))
+	case float64:
+		*d = InputDefault(strconv.FormatFloat(t, 'f', -1, 64))
+	default:
+		return fmt.Errorf("an input's default must be a string, a boolean or a number, got %s", string(data))
+	}
+	return nil
 }
 
 // ActionOutput is one declared output. Value is set for a composite action,
@@ -64,14 +103,14 @@ type ActionRuns struct {
 	Args       []string          `json:"args,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 
-	// Modelled so that strict decoding accepts a real action.yml, and refused
-	// by name in [Action.kind]: JavaScript actions and the pre/post hooks are
-	// phase 5.
-	Main           string `json:"main,omitempty"`
-	Pre            string `json:"pre,omitempty"`
-	Post           string `json:"post,omitempty"`
-	PreIf          string `json:"pre-if,omitempty"`
-	PostIf         string `json:"post-if,omitempty"`
+	// node (A51): main is required, pre and post optional, each a file in
+	// the action's directory, each under its own condition.
+	Main   string `json:"main,omitempty"`
+	Pre    string `json:"pre,omitempty"`
+	Post   string `json:"post,omitempty"`
+	PreIf  string `json:"pre-if,omitempty"`
+	PostIf string `json:"post-if,omitempty"`
+	// docker's own hooks, refused by name in [Action.kind].
 	PreEntrypoint  string `json:"pre-entrypoint,omitempty"`
 	PostEntrypoint string `json:"post-entrypoint,omitempty"`
 }
@@ -81,7 +120,12 @@ type actionKind int
 const (
 	actionComposite actionKind = iota
 	actionDocker
+	actionNode // a JavaScript action (A51)
 )
+
+// nodeUsing is what `runs.using` says for a JavaScript action: node and a
+// major version.
+var nodeUsing = regexp.MustCompile(`^node[0-9]+$`)
 
 const dockerScheme = "docker://"
 
@@ -101,14 +145,38 @@ func (a *Action) kind() (actionKind, error) {
 					"and building one from a Dockerfile is a separate surface (A44, phase 5)", a.Path, a.Runs.Image)
 		}
 		return actionDocker, nil
-	case strings.HasPrefix(using, "node"):
-		return 0, fmt.Errorf(
-			"%s: a JavaScript action (%s) runs third-party code as the agent user, which is A42 phase 5; "+
-				"a composite or docker:// action is what runs today", a.Path, a.Runs.Using)
+	case nodeUsing.MatchString(using):
+		if strings.TrimSpace(a.Runs.Main) == "" {
+			return 0, fmt.Errorf("%s: a JavaScript action (%s) needs runs.main", a.Path, a.Runs.Using)
+		}
+		for field, file := range map[string]string{"main": a.Runs.Main, "pre": a.Runs.Pre, "post": a.Runs.Post} {
+			if err := entryFile(file); err != nil {
+				return 0, fmt.Errorf("%s: runs.%s: %w", a.Path, field, err)
+			}
+		}
+		return actionNode, nil
 	case using == "":
 		return 0, fmt.Errorf("%s: runs.using is required", a.Path)
 	}
-	return 0, fmt.Errorf("%s: runs.using %q is not one of composite, docker", a.Path, a.Runs.Using)
+	return 0, fmt.Errorf("%s: runs.using %q is not one of composite, docker, node<version>", a.Path, a.Runs.Using)
+}
+
+// entryFile checks a JavaScript action's main, pre or post: a relative path
+// inside the action's own directory. Empty is fine; the field is optional
+// except for main, which kind checks first.
+//
+// The file reaches a step as an environment value, never as command text, so
+// this is not what keeps INV-3; it is what keeps an action from naming a
+// script outside its own tree for node to run.
+func entryFile(f string) error {
+	if f == "" {
+		return nil
+	}
+	clean := path.Clean(f)
+	if path.IsAbs(f) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("%q must be a path inside the action", f)
+	}
+	return nil
 }
 
 // ActionLoader reads a local action's metadata at the resolved commit.
@@ -130,7 +198,7 @@ func (l rootLoader) Load(dir string) (*Action, error) {
 	}
 	for _, name := range []string{"action.yml", "action.yaml"} {
 		file := path.Join(clean, name)
-		data, err := readCapped(l.root, file, MaxWorkflowBytes)
+		data, err := readCapped(l.root.FS(), file, MaxWorkflowBytes)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}

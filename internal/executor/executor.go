@@ -94,6 +94,25 @@ type Env interface {
 	// executor package to get it right, defeating the interface (amendment A9).
 	EnvFile() string
 
+	// ActionsDir is the environment-visible path of [Spec.ActionsDir]: where a
+	// fetched action's own files can be read from inside a step.
+	//
+	// Same shape as EnvFile and for the same reason (amendment A9) — only the
+	// executor knows it. A host path for native, a mount target for docker.
+	// Empty when no action was fetched.
+	ActionsDir() string
+
+	// TempDir is the environment-visible path of the run's temporary
+	// directory, exported as $RUNNER_TEMP and answered for `runner.temp`
+	// (A50). It is emptied with the run and lies outside the workspace, so
+	// nothing written there reaches `git status` or a collected artifact.
+	TempDir() string
+
+	// ToolCacheDir is the environment-visible path of the runner's tool
+	// cache, exported as $RUNNER_TOOL_CACHE and answered for
+	// `runner.tool_cache` (A51), or "" when the run has none.
+	ToolCacheDir() string
+
 	// Close tears the environment down. It MUST be idempotent and MUST make a
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
@@ -126,6 +145,25 @@ type Spec struct {
 	// overwrite; failing closed costs a confusing refusal.
 	Secrets []string
 
+	// ActionsDir is the host directory holding fetched actions, shared across
+	// runs (A42 phase 5). An executor that isolates has to make it reachable
+	// from inside; one that does not already has it. Empty means no action
+	// was fetched, and nothing need be arranged.
+	ActionsDir string
+
+	// ToolCache is the runner's persistent tool cache (A51): a host directory
+	// for an executor that runs on the host, a volume name for docker. Empty
+	// means the run has none. Not a [CacheMount]: it is never locked, because
+	// the toolkit that writes it extracts to a temporary path and marks a tool
+	// complete only once it is whole, and a lock would serialise every job on
+	// the runner that sets up a tool.
+	ToolCache string
+
+	// Event is the event that started a workflow run, as JSON, written to
+	// a file named by $GITHUB_EVENT_PATH (A52). It is data: nothing reads it
+	// but a step that asks. Nil writes nothing and leaves the variable unset.
+	Event []byte
+
 	Caches    []CacheMount
 	Labels    map[string]string // includes latem.run-id, for crash reaping
 	Resources Resources
@@ -138,10 +176,15 @@ type Result struct {
 	// and the error says why.
 	ExitCode int
 	// Outputs is what the step wrote to the file named by $GITHUB_OUTPUT,
-	// last writer winning. Keys are identifiers; the executor has already
-	// dropped anything else and said so in the step's log. Nil when the step
-	// wrote nothing, which is nearly always.
+	// last writer winning. Keys follow GitHub's rule for output names, which
+	// allows hyphens (A51); the executor has already dropped anything else
+	// and said so in the step's log. Nil when the step wrote nothing, which
+	// is nearly always.
 	Outputs map[string]string
+	// State is what the step wrote to $GITHUB_STATE, the same format. The run
+	// loop hands it to later steps of the same use of an action as STATE_*
+	// (A51). Nil when the step wrote nothing.
+	State map[string]string
 }
 
 // OutputFileVar names the environment variable through which a step learns
@@ -149,6 +192,11 @@ type Result struct {
 // workflow written for GitHub reads; a latem-specific alias would be a second
 // name for the same file with nothing to recommend it.
 const OutputFileVar = "GITHUB_OUTPUT"
+
+// StateFileVar names the fifth file a step may write: a JavaScript action's
+// state, read back after the step and handed to the same action's later steps
+// as STATE_<name> (A51).
+const StateFileVar = "GITHUB_STATE"
 
 // GitHubEnvVar is the second name for $LATEM_ENV's path. One file, one
 // parser, two names: a workflow written for GitHub appends to $GITHUB_ENV and
@@ -163,6 +211,28 @@ const GitHubEnvVar = "GITHUB_ENV"
 const (
 	PathFileVar    = "GITHUB_PATH"
 	SummaryFileVar = "GITHUB_STEP_SUMMARY"
+)
+
+// WorkspaceVar and RunnerTempVar are set by every executor beside the four
+// file paths: the workspace and the run's temporary directory, as the step
+// sees them (A50). GitHub's names, for the same reason as GITHUB_OUTPUT. Both
+// are set after the run's and the step's environment are merged, so a job
+// cannot point them elsewhere.
+const (
+	WorkspaceVar  = "GITHUB_WORKSPACE"
+	RunnerTempVar = "RUNNER_TEMP"
+)
+
+// EventPathVar names the file holding the event that started a workflow run
+// (A52): GitHub's webhook payload, which @actions/github reads as
+// context.payload.
+const EventPathVar = "GITHUB_EVENT_PATH"
+
+// ToolCacheVar names the tool cache for a step, and AgentToolsDirVar names it
+// again for the actions that read the older name (A51).
+const (
+	ToolCacheVar     = "RUNNER_TOOL_CACHE"
+	AgentToolsDirVar = "AGENT_TOOLSDIRECTORY"
 )
 
 // DefaultPath is the PATH a step gets when nothing else supplies one — an
@@ -182,12 +252,60 @@ type Step struct {
 	// Timeout bounds this step alone. Zero means "whatever remains of the job
 	// budget", so it is opt-in and never tightens a job by accident.
 	Timeout time.Duration
+	// Shell says how Run reaches a shell. The zero value is the executor's own
+	// §9 contract; the others are GitHub's, for a step compiled from a
+	// workflow (A50).
+	Shell Shell
 	// Container, when set, makes this step a container run from another image
 	// rather than a command in the run's environment (A44). Run is then empty.
 	// Only the docker executor can honour it, and admission has already
 	// routed the job there; an executor that cannot answers E_EXECUTOR rather
 	// than running nothing and reporting success.
 	Container *Container
+}
+
+// Shell is how a step's Run is handed to a shell.
+type Shell string
+
+const (
+	// ShellLatem is §9's contract and the zero value: the executor's own
+	// shell, `bash -lc` natively and `bash -c` in a container.
+	ShellLatem Shell = ""
+	// ShellGitHub is GitHub's for a step that names no shell: `bash -e`.
+	ShellGitHub Shell = "github"
+	// ShellGitHubBash is GitHub's `shell: bash`: no profile or rc file,
+	// errexit and pipefail.
+	ShellGitHubBash Shell = "bash"
+	// ShellGitHubSh is GitHub's `shell: sh`: `sh -e`.
+	ShellGitHubSh Shell = "sh"
+)
+
+// Valid reports whether s is one of the shells above.
+func (s Shell) Valid() bool {
+	switch s {
+	case ShellLatem, ShellGitHub, ShellGitHubBash, ShellGitHubSh:
+		return true
+	}
+	return false
+}
+
+// GitHubArgv is the argv for one of GitHub's shells, or nil for [ShellLatem],
+// whose argv belongs to the executor.
+//
+// INV-3 holds the same way it does for §9's shells: run is the last element,
+// whole, and nothing is joined to it. GitHub writes the script to a file and
+// passes the path; `-c` with the text as one argument is the same program
+// without a file the step could rewrite under itself.
+func GitHubArgv(s Shell, run string) []string {
+	switch s {
+	case ShellGitHub:
+		return []string{"bash", "-e", "-c", run}
+	case ShellGitHubBash:
+		return []string{"bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run}
+	case ShellGitHubSh:
+		return []string{"sh", "-e", "-c", run}
+	}
+	return nil
 }
 
 // Container is the image a container step runs and what it runs it with. Args

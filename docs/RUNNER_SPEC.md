@@ -927,7 +927,7 @@ type Step struct {
 
 ### 13.0 Choosing one
 
-Linux is not a choice: it is Docker (§13.1). macOS is, and the spec ships a default.
+Two executors ship: Docker (§13.1) and native (§13.3). Both are choices on every OS that runs them — native is Linux and macOS today, Windows being the gap A47 names — and the spec ships a default per platform. Tart (§13.2) is specified and backlogged (A31, A47).
 
 **The default for macOS is `native` (§13.3) — the host's own OS, no VM.** It requires nothing beyond a Mac that already has Xcode on it, adds no boot latency, and costs no disk. `latem init` writes it.
 
@@ -1945,3 +1945,385 @@ clock, and losing the later steps is the smaller of the two failures.
 **What it does not do**, and neither does the native executor: a process that has left the
 group — a daemon that called `setsid` — is not signalled. On docker it dies with the
 container at the end of the run.
+
+### Amendment from a flaky test that was not a flaky test
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A46 | §7.2, §11, §22 | **A broker's report persists only while the run is still in the state the report describes.** `store.ReapplyIfCurrent` is the guarded form, and the local broker's `Report` uses it | `TestARefOutsidePolicyIsParkedAndRunsOnceApproved` had been failing intermittently on loaded Linux runners for weeks and was carried as a flake. It was not one. It was reproducible with `GOMAXPROCS=1 -race`, at about one run in twenty, and the instrumentation added for it — printing the approval columns on failure — named the mechanism on the first capture |
+
+**The defect.** §11 has the agent write local truth before it reports, and the local broker's
+`Report` applied the transition again, reasoning that this made it "a self-transition — legal
+and idempotent by construction (§7.2)". The word carrying too much weight was *construction*.
+Reports are queued per run and delivered on a goroutine, so between the agent's write and the
+broker's re-application the run can legitimately move — and the run that moves furthest is
+precisely the one this test exercises. A run parked at gate 8; a human approves it, which pins
+the commit and re-queues it (A27); the pool claims it; and only then does the park's own report
+arrive. Re-applying it rewound the row to `awaiting_approval`, and A27's rule that entering that
+state clears the approval did exactly what it should to a row nobody had re-parked. The
+operator's decision was gone, the in-flight execution was left transitioning from a state the
+row no longer held, and the run sat waiting to be approved a second time.
+
+**Why the state machine could not catch it.** `preparing → awaiting_approval` is a real edge —
+it is how a park happens — so a rewind along it is indistinguishable from a park by legality
+alone. Nothing in an `Update` says which moment it describes, and the states either side of the
+rewind are both legitimate, so the graph has no opinion.
+
+**The guard, and what it cost.** `ReapplyIfCurrent` writes only while the run is still in
+`u.State`; otherwise it writes nothing and says so, because a late report is a true statement
+about the past rather than a fault. That makes §11's ordering a *precondition* of `Report`
+rather than an expectation of it, which is the contract change: the previous doc comment claimed
+`Report` was "correct for a caller that has not already written", and it cannot be, because such
+a caller is indistinguishable from a stale one. Four tests in `internal/broker/local` relied on
+that claim and now persist first, as §11 requires of the agent — and so did one caller that was
+not a test: `Agent.report`, which reconciliation uses to mark a crashed run interrupted, leaned
+on `Report` to do the persisting. It now writes local truth and then reports, which is the
+ordering §11 always specified and the reason that caller was the one to notice. A report is still marked
+reported when it is skipped: what a transport has seen is a fact about delivery, not about the
+row, and leaving it unmarked would keep the update in `store.Unreported`'s replay set forever.
+
+**What this says about the other flakes.** The instrumentation that solved this was added by the
+commit that gave up on solving it, and it worked on the first failure it saw. An intermittent
+test that has been rationalised as a flake is an unread bug report; the cheap move is not to
+re-run it but to make its next failure explain itself.
+
+### Amendment from saying what the project is
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A47 | §1, §13.0, §13.2, §13.3 | **Docker and native are the two shipping executors, and native's target is every OS an operator runs — Linux and macOS today, Windows named as unimplemented. Tart is backlogged and nothing depends on it** | A positioning correction, and it is recorded because the documents had drifted into describing a narrower product than the one being built. §13.0 opened "Linux is not a choice: it is Docker", which was true when the native executor was written for macOS and is not true now — native builds and runs on Linux. The README had drifted further, opening on iOS. The thesis is owning the machines your CI runs on, whatever you build; an iOS release is the hardest case it has to pass, not its subject |
+
+**What this settles about isolation, which phase 5 needs.** Docker isolates: a job reaches the
+workspace, the caches it declared, and nothing else. Native does not, on any OS — a step runs as
+the agent's user with everything that user can reach, and that is a property of running on the
+host rather than a gap waiting on a VM. A42's §13.0 inversion was written as "Tart becomes the
+floor" for a workflow containing third-party actions; with Tart backlogged that sentence has no
+referent. It is replaced by: such a job requires an isolating executor, docker is the one, and
+on native it is a per-machine opt-in that ships off (`[actions] allow_unisolated`). Refusing
+outright is not available, because native is a first-class target rather than a stopgap.
+
+**Windows native is a goal and is unimplemented.** A Windows host can run Docker jobs today; it
+cannot run native ones. The executor is Unix-only by construction rather than by omission, and
+the list is what a separate workstream has to answer:
+
+- `internal/executor/native/proc_unix.go` is `//go:build unix`, and `proc_other.go` is a stub.
+  The process-group contract §9 requires — SIGTERM, a grace, SIGKILL, to a step's whole tree —
+  has no direct Windows equivalent; a job object is the usual answer.
+- Every step runs `bash -lc` (§9, A33). Windows needs a shell decision that is not a
+  translation: PowerShell and `cmd` differ from a login shell in what they inherit, and §9's
+  "each step is a new process, the filesystem persists" has to survive whichever is chosen.
+- `$LATEM_ENV` and the four GitHub files are appended to with shell redirection in every example
+  and in §9's own. The channel is a file and survives; the idiom in the docs does not.
+- Paths, the agent's own service installation (§23), and `doctor`'s machine checks are all
+  written against Unix shapes.
+
+None of that is on phase 5's path, and phase 5 does not wait for it.
+
+### Amendment from shimming the action everything starts with
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A48 | §9, §12, §13 | **`uses: actions/checkout` is satisfied by the checkout gate 10 already performed, needs no allowlisting, and is refused by name when it asks for something that checkout did not do.** A fetched action's own files are reachable through a new per-executor path, `latem.action_dir` | Almost every workflow opens with it, so a marketplace implementation that could not answer it would be a marketplace implementation nobody could use. And running the real one is not merely wasteful: it re-resolves the ref, which is a second answer in exactly the window INV-5's approval exists to close |
+
+**The shim is asked before the allowlist**, and that ordering is the decision. Nothing is
+fetched and nothing third-party executes, so there is no judgement for an operator to make —
+whereas requiring `actions/checkout` to be allowlisted would fail every workflow on a machine
+that had deliberately opted into no actions at all, for a step that does nothing.
+
+**What it will stand in for is enumerated, and everything else is refused by name.**
+`persist-credentials` either way, because nothing is left in the workspace; `clean`, because
+§12 gives every run a fresh clone; `fetch-depth: 1`, because one commit is what §12 checks
+out; `submodules: false`; `path` at the root. The case that decides the shape is
+`fetch-depth: 0`: it asks for full history, the workspace has one commit, and a build that
+silently got a shallow tree fails later inside `git describe` or a version derived from tags —
+a failure nobody traces back to a checkout step that appeared to succeed. Refusing it names
+the input.
+
+**`ref:` gets its own answer**, because the honest one differs. A checkout at a ref other than
+the one the run named would resolve it a second time, which is the window INV-5 closes, so the
+fix is to name the ref when the run starts — `latem run <repo> <job> --ref <ref>` — rather
+than to re-check-out inside it. This repository's own `release.yml` is the worked example: it
+passes `ref: ${{ github.event.inputs.ref || github.ref }}`, and the refusal says what that is
+here.
+
+**`github.action_path` becomes late for a fetched action.** A local action's path is relative
+to the workspace, which is where a step starts, so it stays a literal. A fetched action lives
+in a cache that is at one absolute path on the host and another inside a container — and which
+of those applies is not known until a runner is chosen at gate 13, after the job was compiled
+at gate 11. So it resolves at step time against `latem.action_dir`, an agent-owned context
+filled from the executor's own answer, through the late-binding machinery A44 already built.
+The docker executor bind-mounts the cache read-only, because a fetched action is shared between
+runs and keyed on the commit it came from: a step that could write there would be editing what
+every later run believes that commit contains.
+
+**Still refused, by name:** a JavaScript action, which waits on the runtime question and on
+phase 6; and a fetched composite action's own `uses: ./path`, which is relative to *its*
+repository rather than to the checkout and needs a loader rooted at the fetched tree.
+
+### Amendment from phase 6: the cache and artifact services, as shims
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A49 | §14, §17, A42 | **`actions/cache` compiles into a mounted cache and `upload-artifact`/`download-artifact` into a step the run loop performs itself. GitHub's cache and artifact services are not implemented** | Phase 6 was scheduled as "the cache and artifact services" and was built as two shims instead, because the services cost more than the protocol: GitHub's current actions speak an RPC API at `ACTIONS_RESULTS_URL`, upload to a signed blob-storage URL it hands back, and authenticate with a runtime token the client decodes — and a container cannot reach the host's loopback, where INV-1 permits a listener, without either binding a non-loopback interface (INV-1) or host networking (the isolation phase 5 relies on). Both protocols also changed within the last two years with the old versions switched off. §14 already said caches are mounted rather than archived; the shim takes it at its word |
+
+**The cache.** The `path:` becomes a cache declaration mounted for the whole job, named from
+the path alone so that every job on a runner caching `~/.npm` shares one mount — §14.1's own
+reasoning. `actions/cache/restore` and `/save` are the same shim. `cache-hit` is `'false'`,
+substituted at compile time through A44's output machinery, so a condition gated on it is
+answered at admission; `false` is the safe answer, because the install it gates runs fast
+against a warm mount where `true` would let a stale mount skip needed work.
+
+The semantic difference is recorded rather than hidden: a keyed cache replaces, a mount
+accumulates. `key` and `restore-keys` change nothing about what is mounted — `runner.os` in a
+key is free, since §14 scopes per runner, and a lockfile hash is the part whose meaning
+changes. For content-addressed stores accumulating is what was wanted. Refused at compile
+time, naming the line: a path inside the workspace (it would shadow the checkout), a pattern,
+an exclusion, an environment variable, a path only known once the job is running, and
+`fail-on-cache-miss` or `lookup-only`, which ask for exact-key semantics a mount cannot give.
+
+**Artifacts.** A registry step may be an `ArtifactStep`, exclusive with a command and a
+container, performed by the run loop rather than an executor — both ends of the copy are host
+paths the agent owns, and a container reaching the artifact store would cross the boundary §17
+keeps. It is a step rather than an end-of-job declaration because its `if:` decides whether it
+happens. A literal naming a directory is collected recursively, decided at collection time
+since at compile time it usually does not exist yet; this does not contradict A30, which
+refuses a bare directory only because the author's intent is unknowable, whereas
+upload-artifact's documentation defines it. Hidden files are excluded unless
+`include-hidden-files` is set, matching upload-artifact v4.4's default — §17's globs match a
+leading dot, so the default has to be written down. Download restores within the run; another
+run's artifacts, and a selection across a matrix or job graph (N2), are refused by name.
+
+**What this does to JavaScript actions.** Actions such as `setup-node` with `cache: npm`, and
+`setup-go`, call the cache service themselves rather than through a `uses:` the compiler can
+see, so no shim reaches them. The expectation — to be verified against the toolkit's source
+when JavaScript actions are built — is that the toolkit finds no service configured and skips
+caching with a warning rather than failing, in which case a latem mount on the same directory
+does the job. The services remain possible later, under the same action names, if a workflow
+needs exact-key semantics; native could have them cheaply on loopback, and docker would need a
+relay inside the container's network namespace.
+
+### Amendment from running a workflow the way GitHub runs it
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A50 | §9, §15, A42, A47 | **A step compiled from a workflow runs under GitHub's contract rather than §9's: GitHub's shells, GitHub's environment variables, a per-run temporary directory, the repository as `owner/name`, `defaults.run.working-directory`, the `env` context, a 360-minute default, step `continue-on-error`, `runs-on` aliases, and `${{ secrets.* }}` and `${{ vars.* }}` resolved on the machine. `.latem/jobs.yaml` is unchanged** | A42 made a workflow file a registry and then ran its steps the way §9 runs a jobs.yaml step. The two contracts differ in places a workflow depends on without saying so. The one that decided this amendment: §9 hands `run` to `bash -c` (`-lc` natively), and GitHub hands it to `bash -e`, so a multi-line step whose middle line fails *succeeds* on latem and fails on GitHub: `bun test` followed by `bun run lint` in one `run:` reports whatever lint reports. Surveying the workflows of the first fleet this is meant to carry (79 files, 237 jobs) found the rest: `RUNNER_TEMP` read 96 times and never set, `defaults.run.working-directory` in 32 jobs and ignored, `${{ env.X }}` evaluating to "" although the job declares X, `github.repository` naming the config key rather than the repository, and `${{ secrets.X }}` in 46 files with no way for a workflow job to receive a secret at all |
+
+**Shells.** A compiled step carries one of GitHub's three shells, and the executor builds the
+argv from it: no `shell:` is `bash -e`, `shell: bash` is `bash --noprofile --norc -eo pipefail`,
+and `shell: sh` is `sh -e`. `run` is still the last element of the argv, whole (INV-3). None of
+them is a login shell, which is GitHub's behaviour and a departure from §13.3's `bash -lc`: on
+the native executor a workflow step sees the agent's own environment — the service's PATH,
+which `latem service install` writes with Homebrew's prefix in it — and not the operator's
+profile. A step that needs a tool the profile would have put on PATH gets it the way it would
+on GitHub, from a setup action or `$GITHUB_PATH`. A jobs.yaml step keeps `bash -lc`; §9's
+contract for it is unchanged.
+
+**The environment.** Every executor sets, beside the four `GITHUB_*` file paths it already
+sets, `GITHUB_WORKSPACE` (the workspace as the step sees it) and `RUNNER_TEMP` (a directory per
+run, emptied with the run, outside the workspace so that it never reaches `git status` or a
+collected artifact). `runner.temp` reads the same directory. The run adds, for a workflow job
+only: `CI` and `GITHUB_ACTIONS` set to `true`; `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`,
+`GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_REF_TYPE`, `GITHUB_EVENT_NAME`,
+`GITHUB_ACTOR`, `GITHUB_JOB`, `GITHUB_WORKFLOW`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`,
+`GITHUB_RUN_ATTEMPT`, `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_GRAPHQL_URL`; and
+`RUNNER_OS`, `RUNNER_ARCH` and `RUNNER_NAME`, from the runner as `runner.*` already is and in
+the same spelling (`Linux`, `macOS`, `X64`, `ARM64`).
+`GITHUB_ACTIONS=true` is a statement about the contract, not about the host: workflows and the
+tools they call test it to decide whether they are in CI, and a workflow adopted onto latem is.
+The agent's own `LATEM_*` names still win over all of these.
+
+**The repository.** `github.repository` and `GITHUB_REPOSITORY` are `owner/name`. They come from
+`[repos.<key>] github`, when set, and otherwise from the repository URL when it names a GitHub
+host; a URL that names neither (a local path) falls back to the config key, as before, and the
+run log says so. The config key remains what `latem run` takes.
+
+**Defaults, `env`, timeouts.** `defaults.run.working-directory` and `defaults.run.shell` apply
+at workflow and job level, a step's own setting winning. The `env` context holds the workflow's
+and job's `env:` while the job compiles and adds the step's own for that step, which is what
+GitHub evaluates `${{ env.X }}` against. A workflow job with no `timeout-minutes` gets GitHub's
+360 minutes rather than §9's 30. A step with `continue-on-error: true` that fails lets the job
+carry on: its `outcome` is `failure`, its `conclusion` `success`, and `failure()` in a later
+step stays false, as on GitHub. `continue-on-error` on a job, and `if:` on a job, remain refused
+here: both are about the job's place in a workflow run, which arrives with workflow runs
+(they are N2's business, not this amendment's).
+
+**`runs-on`.** A label passes through `[label_aliases]` before it is matched, each alias
+replaced by the labels it names. GitHub's hosted labels map by default — `ubuntu-latest` and
+`ubuntu-<version>` to `linux`, `macos-latest` and `macos-<version>` to `macos` — and a
+`[label_aliases]` entry overrides or adds to that, which is where a vendor's labels such as
+`blacksmith-4vcpu-ubuntu-2404` go. An alias may not name another alias. A `windows-*` label is
+refused by name, since no runner can carry it (A47).
+
+**Secrets and variables.** `${{ secrets.X }}` compiles into a late binding to the *name* X and
+adds X to the job's secrets, so the value is resolved by §15's chain and registered with the
+redactor before the first step, exactly as for a jobs.yaml job, and the compiled registry
+holds the name and never the value — which is what A42's refusal protected. The binding is
+evaluated at the step, so a value reaches a step only as an environment variable (A42's rule)
+and is never written into `run`. A secret that resolves nowhere evaluates to the empty string
+and the run log names it, which is GitHub's behaviour and what a workflow testing
+`secrets.X != ''` relies on; §15's refusal of an unresolvable name still applies to jobs.yaml.
+Resolution is scoped: a job naming an `environment` looks for `<repo>__<environment>__X`, then
+`<repo>__X`, then `X`; any other job for `<repo>__X`, then `X` — so two repositories on one
+machine can each have their own `CLOUDFLARE_API_TOKEN`. Two underscores, not a slash, because
+the scoped name has to work as an environment variable and a `secrets.env` key as well as a
+Keychain account; a character a name cannot hold becomes an underscore. A workflow job's
+secrets are not put in the run's environment the way a jobs.yaml job's are: each reaches only
+the step whose expression names it, which is GitHub's behaviour and keeps a credential away
+from steps — and third-party actions — that did not ask for it. `${{ vars.X }}` reads `[repos.<key>.vars]`,
+overridden by `[repos.<key>.environments.<environment>.vars]`; variables are not secrets, are
+answered at admission, and may appear in the compiled registry. `GITHUB_TOKEN` is neither: it
+arrives with workflow runs and the GitHub App, and until then `secrets.GITHUB_TOKEN` resolves
+like any other name.
+
+**What still is not GitHub's.** `permissions:` and `concurrency:` are parsed and not acted on;
+the run log now says so for each rather than dropping them silently. An event payload and
+`GITHUB_EVENT_PATH` (a made-up payload would mislead the actions that read it), `GITHUB_TOKEN`,
+`needs`, matrices and reusable workflows wait for workflow runs.
+
+### Amendment from running JavaScript actions
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A51 | §9, §13, §14, A42, A48 | **A `runs.using: node*` action runs. Its `main`, and its `pre` and `post` when it has them, compile into ordinary steps whose `run` latem writes and whose inputs, paths and state arrive as environment variables; a persistent tool cache is the executor's, exported as `RUNNER_TOOL_CACHE`** | `oven-sh/setup-bun` is in 164 of the surveyed fleet's 237 jobs, and with `setup-node`, `wrangler-action` and `paths-filter` it is most of why A50's workflows still could not run unedited. A42 put JavaScript actions in phase 5, which shipped composite actions, the gate and the fetch without them; the remaining question was the runtime, and the answer is that there is nothing to build — the action is a file and `node` is a program, and both are already reachable from a step |
+
+**One step per entry point.** `main` becomes a step that keeps the `uses:` step's id, name and
+condition, so `steps.<id>.outputs` reads what the action wrote to `$GITHUB_OUTPUT` with nothing
+declared — as on GitHub, where a JavaScript action's outputs need no `value:`. Its `run` is
+latem's and constant, `exec node "$GHA_ACTION_DIR/$GHA_ACTION_ENTRY"`; the action's directory
+and entry file are environment values, so INV-3 is untouched by what an action's metadata
+says. The directory is a fetched action's late `latem.action_dir` path (A42 phase 5) or a
+local action's path in the workspace, and `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY` and
+`GITHUB_ACTION_REF` are set beside it. `node` is the one on the step's PATH: the image's in a
+container, the service's natively. The runtime's major version is not enforced; an action
+built for node20 runs on a newer one, as GitHub itself now runs them.
+
+**Inputs.** Each declared input, and each `with:` key, reaches the step as `INPUT_<NAME>` —
+upper-cased with spaces made underscores and hyphens kept, which is GitHub's spelling and what
+`@actions/core` reads. That is the one environment key a step may carry that is not an
+identifier; the registry accepts `INPUT_` followed by letters, digits, `_`, `.` and `-`. A
+default is an expression like any other value, so a secret or a step output in one is late
+(A50). An undeclared `with:` key is passed and noted, as GitHub warns and passes it.
+
+**`pre` and `post`.** `pre` runs at the start of the job, in the order of the steps that
+declared it, under `pre-if` (default `always()`) and the step's own condition. `post` runs at
+the end, in reverse order, under `post-if` (default `always()`) and only if the main step ran —
+its outcome is not `skipped` — which is when GitHub registers a post step at all. State is
+GitHub's: a step writes `name=value` to `$GITHUB_STATE`, a fifth file beside the four, and every
+later step of the same use of the action receives it as `STATE_name`.
+
+**The tool cache.** `setup-node`, `setup-python` and their kind install into `$RUNNER_TOOL_CACHE`
+and expect to find the result there next time. It is a directory per runner that outlives
+runs: on the native executor a directory under the agent's own state, in a container a named
+volume `latem-toolcache-<runner>` mounted at `/opt/hostedtoolcache`, GitHub's path. Two runs on
+one runner writing the same tool rely on the toolkit's own extract-then-mark-complete; a runner
+at concurrency 1, which is every native runner, never has two. `AGENT_TOOLSDIRECTORY` names
+the same directory, for the actions that read that instead.
+
+**Policy is unchanged and now matters.** An action is fetched only when `[actions] allowed`
+names it. A tag is accepted only with `require_pinned = false`, and the commit it resolved to
+is written to the run log, so a moved tag is visible after the fact. A job that runs one needs
+an isolating runner unless `allow_unisolated = true` — which a Mac running native Apple builds
+will set, deciding that the owners in `allowed` are trusted with the agent's user.
+
+### Amendment from running workflow runs
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A52 | §1 N2, §5 INV-2 and G5, §7, §11, §12, A42 | **A GitHub event becomes a workflow run: the machine plans it from its own disk, the control plane schedules the plan's jobs across machines, and each job is one run on one machine, as before. The inbound command set grows to `plan`, `run` and `cancel`; `run` gains the event, its job's needs, and a GitHub installation token minted by the control plane. Protocol 2.0** | A42 made a workflow a registry and ran one of its jobs at a time, chosen by name. In the fleet this is for, 130 of 237 jobs use `needs:`, 87 an `if:` on the job, 25 files gate merges on pull-request checks, 20 use `GITHUB_TOKEN`, and every template repository has a job named `web` in three files — so "a job, by name" is ambiguous before it is anything else. N2's "fan-out is a v2 concern" is that concern arriving |
+
+**The model.** An event (push, pull request, release, repository dispatch, or a dispatch or
+schedule the control plane makes) produces zero or more workflow runs — one per workflow whose
+`on:` it matches — and each workflow run is a graph of jobs. Every job is still exactly one
+run on exactly one machine (N2 holds per job); a workflow run spans as many machines as its
+jobs land on. A machine never coordinates with another: everything between jobs goes through
+the control plane, outbound, as everything already does (INV-1).
+
+**Planning is the machine's (INV-5).** The control plane holds no workflow definitions and does
+not parse workflow files. It sends a `plan` command to one machine that has the repository;
+that machine fetches, checks the event's commit out of its own mirror, reads
+`.github/workflows` there, and answers with a plan: for each workflow the event triggers, its
+file, name, evaluated `run-name`, evaluated `concurrency`, and its jobs — each a key, a display
+name, `needs`, `runs-on` after aliases (A50), environment, `permissions`, job-level
+`concurrency`, `continue-on-error` and `timeout-minutes`. Structure and names, never steps.
+Triggering is evaluated as GitHub evaluates it: the event's name and, for pull requests,
+`types` (default opened, synchronize, reopened); `branches`/`branches-ignore`, `tags`/
+`tags-ignore`; `paths`/`paths-ignore` against the event's diff, computed in the mirror — a push's `before`
+against its commit, or the commit against its first parent for a new branch, and a pull
+request's merge commit against its first parent, which is the base branch's tip;
+`workflow_dispatch` inputs validated against their declarations. A workflow that cannot be
+parsed is in the plan as an error, so it becomes a failed check rather than a silent absence.
+One parser, Go's, serves planning and execution, so the plan and the job that runs cannot
+disagree about what the file says.
+
+**Scheduling is the control plane's.** It keeps the workflow run and dispatches a job when every
+job it needs has finished, to a machine that is online, has the repository, and advertises a
+runner whose labels cover the job's. A job no online machine can take stays queued and says
+which labels it is waiting for. Workflow- and job-level `concurrency` is enforced here, with
+`cancel-in-progress` cancelling the older run, because no single machine sees both. Machines
+advertise their repositories in their heartbeat — each one's config key beside its `owner/name`
+(A50's `github`) — which is how an installation's repository finds its machines, and which key
+to name it by in `plan` and `run`.
+
+**`run` in 2.0.** Beside `id`, `repo`, `job`, `ref`, `inputs` and `origin`, a run of a workflow job
+carries: `workflow`, the file, constrained to `.github/workflows/<name>.y(a)ml`; `sha`, the
+commit to build, which must be reachable from `ref` — the run builds what the event named, not
+whatever the branch says by the time the job starts; `event`, the event's name, action, refs,
+pull-request number and payload (capped, and data: it reaches a step only as an environment
+value or through `GITHUB_EVENT_PATH`, A42's rule); `needs`, each needed job's result and outputs;
+`workflow_run_id`, `run_number` and `run_attempt`, the workflow run's, shared by its jobs, which
+`github.run_id`, `github.run_number` and `GITHUB_RUN_NUMBER` now read ($LATEM_BUILD_NUMBER keeps
+the machine's own, A36); and `token`. These fields are all set or all absent.
+Still no field can express a command, an image, an executor, a timeout or a label: the job is
+compiled from the agent's disk at `sha`, as every job is.
+
+**A job's place in the run.** The job's `if:` is evaluated on the machine as the run starts, with
+`needs` and the event in scope; false ends the run in a new terminal state, `skipped`, which
+is neither success nor failure, as on GitHub. The job's `outputs:` are evaluated as it ends and
+reported in its final update; an output containing a value the redactor holds is dropped and
+named in the log, as GitHub drops one carrying a secret. `continue-on-error` on a job is the
+control plane's to honour, in the workflow run's conclusion. A job whose needs did not all
+succeed is skipped by the control plane without asking a machine — GitHub's implicit
+`success()` — unless its `if:` calls a status function (`always()`, `failure()`,
+`cancelled()`, `success()`), which the plan reports per job; then the machine evaluates it.
+A plan's own expressions — `run-name`, `concurrency`, a job's `name` and `environment` — read
+`github`, `inputs` and `vars` only; `github.run_id`, `run_number` and `job` are not known yet
+and are refused by name rather than read as empty, since a concurrency group that silently
+lost its run id would put every run in one group. GitHub stops matching `paths` after 300
+changed files; the planner does not.
+
+**Checks.** The control plane creates a check run per job when the plan arrives — queued — and
+moves it with the job: in progress, then completed as success, failure, cancelled, timed out
+or skipped. Its name is the job's display name, which is what branch protection already
+requires, so cutting a repository over changes which app reports the check and not what it is
+called. Its details link to the run on app.latem.dev.
+
+**`GITHUB_TOKEN`, and the narrowing of G5 and §12.** The GitHub App's key is the control plane's
+(the operator's decision for this fleet). It mints an installation token per job, scoped to
+the repository and to the job's `permissions` (the workflow's when the job has none, GitHub's
+restricted default when neither does), and sends it in `run.token`. §12 said the agent never
+receives a credential and G5 that it is safe to point at an untrusted control plane; both are
+narrowed, deliberately and only this far: the agent may receive one short-lived token for one
+job. It is held in memory only — stripped from the run request before the request is made
+durable, registered with the redactor before the first step — and offered to the job as
+`secrets.GITHUB_TOKEN` and `github.token`, and to the checkout as its credential. A control
+plane that turns hostile can mint tokens with the app's permissions, which it can do with or
+without latem; it still cannot make a machine run anything not in the repository at the
+commit, nor read a secret the machine holds (INV-4 is unchanged). A token is valid for an hour;
+a job that outlives it is on its own until refresh exists. An event whose sender is the app
+itself is ignored on arrival, which is GitHub's rule that a push made with `GITHUB_TOKEN`
+triggers nothing, and what the fleet's version-stamp jobs rely on.
+
+**INV-2 in 2.0.** The inbound set is `plan`, `run`, `cancel`, and no more. `plan` carries an id, a
+repository key, the commit and the event: names and data. Nothing inbound can name a path
+other than a workflow file, and that only by pattern.
+
+**What 2.0 costs.** Strict decoding at both ends (PROTOCOL.md §2.3) means a 1.0 agent refuses a
+2.0 frame, loudly; the control plane speaks the version the agent sends at the handshake, so a
+machine is upgraded before it is pointed at workflow runs, and a 1.0 agent keeps working for
+the hooks it has.
+
+**Not in this amendment.** Matrices, reusable workflows and `schedule` (the planner reports them
+as unsupported in the plan, by name); artifacts across machines; reviewer approval on an
+environment. Each has a place in this model — a matrix leg is a job key, a called workflow's
+jobs are planned into the caller's graph, a schedule is a cron the plan of the default branch
+reports — and each arrives as its own amendment.

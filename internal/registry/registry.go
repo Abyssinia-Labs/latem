@@ -57,7 +57,17 @@ var (
 	cacheNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	// labelPattern shapes runs_on entries and runner labels.
 	labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	// actionInputPattern is the one environment key that is not an
+	// identifier: an action's input as @actions/core reads it, upper-cased
+	// with hyphens kept — INPUT_BUN-VERSION-FILE (A51).
+	actionInputPattern = regexp.MustCompile(`^INPUT_[A-Za-z0-9_.-]+$`)
 )
+
+// validEnvKey reports whether k may name a step's environment variable: an
+// identifier, or an action input (A51).
+func validEnvKey(k string) bool {
+	return identPattern.MatchString(k) || actionInputPattern.MatchString(k)
+}
 
 // Registry is a parsed and validated jobs.yaml.
 type Registry struct {
@@ -90,9 +100,41 @@ type Job struct {
 	// most one run per group per machine; others queue rather than fail.
 	ConcurrencyGroup string            `json:"concurrency_group,omitempty"`
 	Inputs           map[string]*Input `json:"inputs,omitempty"`
-	Secrets          []string          `json:"secrets,omitempty"`
-	Artifacts        []ArtifactDecl    `json:"artifacts,omitempty"`
-	Steps            []Step            `json:"steps"`
+	// RequiresIsolation marks a job whose steps came from code the operator
+	// did not write — a remote action (A42 phase 5). It is set by the
+	// compiler and excluded from decoding: by the time a job reaches here the
+	// action has been inlined into ordinary steps, so nothing downstream can
+	// tell they were third-party unless the compiler says so.
+	//
+	// Whether an operator has opted out of the requirement is decided where
+	// the policy lives, at compile time; this field is only ever the answer.
+	RequiresIsolation bool `json:"-"`
+	// CacheDecls are caches this job declared for itself — `uses:
+	// actions/cache`, compiled into a mount (A49). A registry, not a job, is
+	// where caches are declared, so the resolver lifts these into
+	// [Registry.Caches]; they ride here only because a compiler produces a job
+	// before anything produces a registry. Excluded from decoding.
+	CacheDecls []CacheDecl `json:"-"`
+	// Environment is a workflow job's `environment:` name, which scopes the
+	// secrets it reads and the variables it sees (A50). Excluded from
+	// decoding: jobs.yaml has no environments.
+	Environment string `json:"-"`
+	// Notes are things the compiler read and did not act on, for the run log
+	// (A50): a workflow's permissions and concurrency, until workflow runs
+	// can honour them. Excluded from decoding.
+	Notes []string `json:"-"`
+	// Skip is set for a workflow run's job whose if: was false when it was
+	// compiled — its needs and event arrive with the run, so that is when it
+	// is known — and SkipReason is the condition, for the log (A52). A skipped
+	// job is not validated: none of it runs.
+	Skip       bool   `json:"-"`
+	SkipReason string `json:"-"`
+	// Outputs are a workflow run's job's outputs:, each evaluated as the job
+	// ends, against its steps (A52). Excluded from decoding.
+	Outputs   map[string]LateValue `json:"-"`
+	Secrets   []string             `json:"secrets,omitempty"`
+	Artifacts []ArtifactDecl       `json:"artifacts,omitempty"`
+	Steps     []Step               `json:"steps"`
 }
 
 // Step is one command.
@@ -113,6 +155,20 @@ type Step struct {
 	Env     map[string]string `json:"env,omitempty"`
 	Timeout protocol.Duration `json:"timeout,omitempty"`
 
+	// Shell is GitHub's shell for a step compiled from a workflow — "github",
+	// "bash" or "sh", as executor.Shell defines them — and empty for a
+	// jobs.yaml step, which keeps §9's (A50). Excluded from decoding: only the
+	// compiler writes it.
+	Shell string `json:"-"`
+	// ContinueOnError lets the job carry on past this step failing: the step's
+	// outcome is failure and its conclusion success, and the job's status is
+	// unchanged (A50). Excluded from decoding; only the compiler writes it.
+	ContinueOnError bool `json:"-"`
+	// ActionUse names one use of a JavaScript action, shared by its pre, main
+	// and post steps, so that what one writes to $GITHUB_STATE reaches the
+	// others as STATE_* (A51). Excluded from decoding.
+	ActionUse string `json:"-"`
+
 	// Late holds env values that are computed as the step is about to run,
 	// and If is a condition evaluated then. Both are [LateValue]; see that
 	// type for why they exist and why they are excluded from decoding. A
@@ -124,6 +180,9 @@ type Step struct {
 	// Container makes this step a container instead of a command (A44). It is
 	// exclusive with Run, and excluded from decoding; see [ContainerStep].
 	Container *ContainerStep `json:"-"`
+	// Artifact makes this step a collection the run loop performs itself
+	// (A49). Exclusive with Run and Container; see [ArtifactStep].
+	Artifact *ArtifactStep `json:"-"`
 }
 
 // ArtifactDecl is a glob relative to the workspace root, plus retention.
@@ -321,11 +380,19 @@ func (s Step) validate(inputs map[string]*Input) []error {
 		problems = append(problems, fmt.Errorf(format, args...))
 	}
 
+	kinds := 0
+	for _, set := range []bool{strings.TrimSpace(s.Run) != "", s.Container != nil, s.Artifact != nil} {
+		if set {
+			kinds++
+		}
+	}
 	switch {
-	case s.Container != nil && strings.TrimSpace(s.Run) != "":
-		// Exactly one. A step that is both would have to pick, and whichever
-		// it picked would be the wrong one for somebody.
-		add("a step is a command or a container, not both")
+	case kinds > 1:
+		// Exactly one. A step that is two things would have to pick, and
+		// whichever it picked would be the wrong one for somebody.
+		add("a step is a command, a container or an artifact, and only one")
+	case s.Artifact != nil:
+		problems = append(problems, s.Artifact.validate()...)
 	case s.Container != nil:
 		problems = append(problems, s.Container.validate()...)
 	case strings.TrimSpace(s.Run) == "":
@@ -347,7 +414,7 @@ func (s Step) validate(inputs map[string]*Input) []error {
 	}
 
 	for _, k := range sortedKeys(s.Env) {
-		if !identPattern.MatchString(k) {
+		if !validEnvKey(k) {
 			add("env: key %q must match %s", k, identPattern)
 		}
 		if strings.HasPrefix(k, "LATEM_") {

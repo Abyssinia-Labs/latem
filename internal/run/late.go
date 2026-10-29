@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -16,10 +17,22 @@ import (
 // Outputs is empty until the $GITHUB_OUTPUT channel is wired; the compiler
 // refuses steps.* until then, so nothing reads it yet.
 func (x *execution) stepScope(status registry.StepStatus) registry.StepScope {
+	actions := ""
+	temp, tools := "", ""
+	if x.env != nil {
+		actions = x.env.ActionsDir()
+		temp = x.env.TempDir()
+		tools = x.env.ToolCacheDir()
+	}
 	return registry.StepScope{
-		Status:  status,
-		Outputs: x.outputs,
-		Runner:  runnerFacts(x.runner),
+		Status:     status,
+		Outputs:    x.outputs,
+		Results:    x.results,
+		Runner:     runnerFacts(x.runner),
+		ActionsDir: actions,
+		TempDir:    temp,
+		ToolCache:  tools,
+		Secrets:    x.workflowSecrets(),
 	}
 }
 
@@ -103,4 +116,27 @@ func statusAfter(current registry.StepStatus, out outcome) registry.StepStatus {
 		return registry.StatusFailure
 	}
 	return current
+}
+
+// workflowSecrets is what ${{ secrets.X }} reads as a step is about to run
+// (A50): the values resolved for the names the job reads. Converted to strings
+// here, at the last moment, as buildEnv converts a jobs.yaml job's; the map is
+// dropped with the step's scope. Nil for a jobs.yaml job.
+func (x *execution) workflowSecrets() map[string]string {
+	if x.workflow == nil {
+		return nil
+	}
+	out := map[string]string{}
+	if x.sec != nil {
+		for _, name := range x.sec.Names() {
+			if v, ok := x.sec.Value(name); ok {
+				out[name] = string(v)
+			}
+		}
+	}
+	// The job's own token, over any machine secret of the same name (A52).
+	if x.req.Token != "" {
+		out[workflow.TokenSecret] = x.req.Token
+	}
+	return out
 }

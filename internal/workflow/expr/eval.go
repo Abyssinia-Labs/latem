@@ -18,6 +18,10 @@ const (
 	StatusSuccess Status = iota
 	StatusFailure
 	StatusCancelled
+	// StatusSkipped is a job's status when a job it needs was skipped and
+	// none failed: success(), failure() and cancelled() are all false, which
+	// is how GitHub answers a job's if: then (A52).
+	StatusSkipped
 )
 
 // Scope is everything an expression may read.

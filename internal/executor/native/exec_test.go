@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -122,6 +124,80 @@ func TestExec_IsALoginShell(t *testing.T) {
 	})
 	if code != 0 || !strings.Contains(stdout, "login shell") || strings.Contains(stdout, "NOT") {
 		t.Errorf("step did not run in a login shell (exit %d): %s", code, stdout)
+	}
+}
+
+// A50, the defect that decided it: under §9's shell a failing line in the
+// middle of a step is followed by the next one, and the step reports whatever
+// the last line reports. Under GitHub's it stops the step.
+func TestExec_GitHubShellStopsAtTheFirstFailure(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	script := "false\necho reached"
+
+	code, stdout, _ := run(t, env, executor.Step{Run: script})
+	if code != 0 || !strings.Contains(stdout, "reached") {
+		t.Fatalf("§9's shell should carry on past a failure (exit %d): %s", code, stdout)
+	}
+
+	for _, sh := range []executor.Shell{executor.ShellGitHub, executor.ShellGitHubBash, executor.ShellGitHubSh} {
+		code, stdout, _ := run(t, env, executor.Step{Run: script, Shell: sh})
+		if code == 0 || strings.Contains(stdout, "reached") {
+			t.Errorf("%s: a failing line should end the step (exit %d): %s", sh, code, stdout)
+		}
+	}
+
+	// pipefail is `shell: bash` only, as on GitHub.
+	code, _, _ = run(t, env, executor.Step{Run: "false | true", Shell: executor.ShellGitHubBash})
+	if code == 0 {
+		t.Error("shell: bash should fail a pipeline whose first command fails")
+	}
+	code, _, _ = run(t, env, executor.Step{Run: "false | true", Shell: executor.ShellGitHub})
+	if code != 0 {
+		t.Errorf("the default shell has no pipefail on GitHub; exit %d", code)
+	}
+}
+
+// GitHub's shells read no profile, so a step sees the agent's environment and
+// nothing a login shell would add.
+func TestExec_GitHubShellIsNotALoginShell(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	code, stdout, _ := run(t, env, executor.Step{
+		Run:   `shopt -q login_shell && echo "login shell" || echo "not a login shell"`,
+		Shell: executor.ShellGitHubBash,
+	})
+	if code != 0 || !strings.Contains(stdout, "not a login shell") {
+		t.Errorf("GitHub's bash should not be a login shell (exit %d): %s", code, stdout)
+	}
+}
+
+// A50: $RUNNER_TEMP is a directory of the run's own, outside the workspace,
+// and goes with the run; $GITHUB_WORKSPACE is where the step starts.
+func TestExec_WorkspaceAndRunnerTemp(t *testing.T) {
+	env, ws := live(t, executor.Spec{Env: map[string]string{"RUNNER_TEMP": "/elsewhere"}}, Options{})
+	code, stdout, _ := run(t, env, executor.Step{
+		Run: `echo "ws=$GITHUB_WORKSPACE"; echo "temp=$RUNNER_TEMP"; touch "$RUNNER_TEMP/scratch"`,
+	})
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stdout)
+	}
+	temp := env.TempDir()
+	if !strings.Contains(stdout, "temp="+temp+"\n") || temp == "/elsewhere" {
+		t.Errorf("RUNNER_TEMP should be the run's own directory %q:\n%s", temp, stdout)
+	}
+	if !strings.Contains(stdout, "ws="+env.Workspace()+"\n") {
+		t.Errorf("GITHUB_WORKSPACE should be the workspace %q:\n%s", env.Workspace(), stdout)
+	}
+	if strings.HasPrefix(temp, ws) {
+		t.Errorf("RUNNER_TEMP %q is inside the workspace %q", temp, ws)
+	}
+	if _, err := os.Stat(filepath.Join(temp, "scratch")); err != nil {
+		t.Errorf("the step could not write to RUNNER_TEMP: %v", err)
+	}
+	if err := env.Close(t.Context()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(temp); !os.IsNotExist(err) {
+		t.Errorf("RUNNER_TEMP survived the run: %v", err)
 	}
 }
 
@@ -653,5 +729,91 @@ func TestExec_ContainerStepIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "alpine:3.19") {
 		t.Errorf("the error should name the image: %v", err)
+	}
+}
+
+// A51 for real: the command latem writes for a JavaScript action finds node,
+// makes the action's path absolute, and hands the action its inputs, so a
+// script written against @actions/core's conventions works unchanged.
+func TestExec_JavaScriptActionStep(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("no node on PATH")
+	}
+	env, ws := live(t, executor.Spec{}, Options{})
+	dir := filepath.Join(ws, "act")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `const fs = require("fs");
+fs.appendFileSync(process.env.GITHUB_OUTPUT, "greeting=hello " + process.env["INPUT_WHO-TO-GREET"] + "\n");
+console.log("path " + process.env.GITHUB_ACTION_PATH);`
+	if err := os.WriteFile(filepath.Join(dir, "index.js"), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	res, err := env.Exec(t.Context(), executor.Step{
+		Run:   workflow.NodeRun,
+		Shell: executor.ShellGitHubBash,
+		Env: map[string]string{
+			"GHA_ACTION_DIR":     "act",
+			"GHA_ACTION_ENTRY":   "index.js",
+			"INPUT_WHO-TO-GREET": "world",
+		},
+	}, &stdout, io.Discard)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("exit %d, %v: %s", res.ExitCode, err, stdout.String())
+	}
+	if res.Outputs["greeting"] != "hello world" {
+		t.Errorf("outputs = %v", res.Outputs)
+	}
+	if !strings.Contains(stdout.String(), "path "+dir) {
+		t.Errorf("GITHUB_ACTION_PATH should be absolute (%s): %s", dir, stdout.String())
+	}
+}
+
+// A51: $GITHUB_STATE is read back after the step, in GitHub's format, and
+// emptied for the next.
+func TestExec_GitHubStateIsReadBackAndTruncated(t *testing.T) {
+	env, _ := live(t, executor.Spec{}, Options{})
+	res, err := env.Exec(t.Context(), executor.Step{
+		Run: `echo "cacheKey=abc" >> "$GITHUB_STATE"; printf 'multi<<EOF\nline1\nline2\nEOF\n' >> "$GITHUB_STATE"`,
+	}, io.Discard, io.Discard)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("exit %d, %v", res.ExitCode, err)
+	}
+	if res.State["cacheKey"] != "abc" || res.State["multi"] != "line1\nline2" {
+		t.Errorf("state = %q", res.State)
+	}
+	res, err = env.Exec(t.Context(), executor.Step{Run: `true`}, io.Discard, io.Discard)
+	if err != nil || len(res.State) != 0 {
+		t.Errorf("the next step should start with an empty state file: %v, %v", res.State, err)
+	}
+}
+
+// A51: the tool cache is the runner's, created if missing, exported under
+// both names, and still there after the run.
+//
+// Under GitHub's shell, which reads no profile: the tool cache is for workflow
+// steps, and a login shell lets the host's profile rewrite both names. GitHub's
+// own macOS images export them as /Users/runner/hostedtoolcache, so under
+// `bash -l` this read the CI machine rather than latem.
+func TestExec_ToolCacheOutlivesTheRun(t *testing.T) {
+	tools := filepath.Join(t.TempDir(), "toolcache", "mini")
+	env, _ := live(t, executor.Spec{ToolCache: tools}, Options{})
+	code, stdout, _ := run(t, env, executor.Step{
+		Run:   `echo "tc=$RUNNER_TOOL_CACHE agent=$AGENT_TOOLSDIRECTORY"; mkdir -p "$RUNNER_TOOL_CACHE/node/22.0.0" && touch "$RUNNER_TOOL_CACHE/node/22.0.0.complete"`,
+		Shell: executor.ShellGitHubBash,
+	})
+	if code != 0 || !strings.Contains(stdout, "tc="+tools+" agent="+tools) {
+		t.Fatalf("exit %d: %s", code, stdout)
+	}
+	if env.ToolCacheDir() != tools {
+		t.Errorf("ToolCacheDir() = %q", env.ToolCacheDir())
+	}
+	if err := env.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tools, "node", "22.0.0.complete")); err != nil {
+		t.Errorf("the tool cache should outlive the run: %v", err)
 	}
 }

@@ -29,6 +29,8 @@ import (
 type Store interface {
 	Create(ctx context.Context, r store.Run) error
 	Get(ctx context.Context, runID string) (store.Run, error)
+	// HoldToken keeps a workflow job's GitHub token in memory (A52).
+	HoldToken(runID, token string)
 	Enqueue(ctx context.Context, runID string, priority int) error
 
 	// Claim is the conditional UPDATE behind [Broker.Claim]. Its atomicity is
@@ -36,6 +38,12 @@ type Store interface {
 	Claim(ctx context.Context, runID string) error
 
 	Transition(ctx context.Context, runID string, to protocol.RunState, u protocol.Update) error
+
+	// ReapplyIfCurrent is Transition guarded on the run still being where the
+	// update says it is. [Broker.Report] uses it rather than Transition
+	// because a report is delivered asynchronously and may describe a state
+	// the run has since left.
+	ReapplyIfCurrent(ctx context.Context, runID string, u protocol.Update) (bool, error)
 
 	// The broker_state trio (amendment A28). Each takes the key of the
 	// transport asking, and this package always passes [store.BrokerLocal]:

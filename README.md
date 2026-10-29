@@ -1,52 +1,60 @@
 # Latem
 
-**Self-hosted CI that treats an Apple silicon Mac as a first-class build
-machine.** *(LAY-tem — "metal", reversed.)*
+**Self-hosted CI for machines you own.** *(LAY-tem — "metal", reversed.)*
 
 ## Why this exists
 
-If you ship an iOS app there is a Mac in the loop whatever else you decide. Not
-a container pretending and not a label pointing at something — a real machine,
-with Xcode on it, a logged-in session, an unlocked keychain and your signing
-identities. You almost certainly own one already, and it is almost certainly
-faster than the runner you are renting by the minute.
+You already own machines that can build your software. The laptop on your desk,
+the box under it, the server you are paying for anyway. They are faster than
+what you are renting by the minute, they are already configured the way your
+project needs, and they are sitting idle while a queue somewhere else bills you
+for a slower one.
 
-So the hardware is not the missing piece. The plumbing is.
+So the compute is not the missing piece. The plumbing is.
 
-**Hosted CI** charges its highest rate for macOS and then throws the machine
-away when the job ends. That one fact is why caching is a ritual — a save step,
-a restore step, a key to get wrong and a ceiling to hit — instead of a directory
-that is simply still there. It is also why your signing certificates spend their
-working life on somebody else's computer.
+**Hosted CI rents you a machine and then throws it away.** That single fact is
+where the cost and most of the ritual come from. Caching exists as a save step,
+a restore step, a key to get wrong and a ceiling to hit, because the machine
+that warmed the cache will not be there next time. Anything that takes real
+setup — a toolchain, a device, a signing identity, a licence — either gets
+rebuilt every run or gets handed to somebody else's computer to keep.
 
-**The self-hosted runners** — Buildkite, Woodpecker, Drone, Forgejo Actions,
-Actions Runner Controller — already run jobs on hardware you own. That is the
-right idea, and it is why latem does not try to replace them at that layer. But
-they were built for Linux containers, and macOS arrives as a label. Three things
-get left to you:
+**The self-hosted runners already run on hardware you own.** Buildkite,
+Woodpecker, Drone, Forgejo Actions, Actions Runner Controller — that is the
+right idea, and it is why latem does not try to replace them at that layer.
+What they leave you is everything between "I have a machine" and "it builds my
+software unattended":
 
-- **The Mac.** `runs-on: macos` points at a box somebody set up by hand. Nothing
-  in the tool knows about a keychain under launchd, a FileVault volume that
-  quietly breaks unattended reboots, or a simulator runtime that does not match
-  the SDK — and none of those fail with an error that names itself.
+- **The machine itself.** A label pointing at a box somebody set up by hand.
+  Nothing in the tool knows whether the toolchain is the one the project needs,
+  whether the credential works from a service rather than from your shell, or
+  whether the thing will come back after a reboot — and none of those fail with
+  an error that names itself.
 - **The cache**, still modelled as though the machine were disposable, when
   yours is the same machine every time.
-- **The threat model.** A box on your network, holding your signing
-  certificates, running what a webhook asked it to run, usually gets a
-  paragraph.
+- **The threat model.** A box on your network, holding your credentials,
+  running what a webhook asked it to run, usually gets a paragraph.
 
 Those three are what the rest of this page is about.
+
+**The hardest version of this is a Mac**, and latem is built to pass it: an iOS
+release needs a real user session, an unlocked keychain, signing identities and
+a simulator runtime that matches the SDK, and it is the job hosted CI charges
+the most for. If a runner can do that unattended it can do the rest. That is why
+iOS shows up throughout this page as evidence — not because latem is an iOS
+tool.
 
 ## Two ways to take it
 
 **Beside what you already have.** Leave your pipeline where it is and move one
-job — the iOS one, the long expensive one — onto the Mac on your desk. Nothing
-is ripped out and nothing is migrated. A hook binds one repository and one ref
+job — the long, expensive, awkward one — onto a machine you own. Nothing is
+ripped out and nothing is migrated. A hook binds one repository and one ref
 pattern to one job on one machine; the git host supplies the push, never the
 work; your existing CI never learns about it.
 [`app.latem.dev`](https://app.latem.dev) is the control plane that holds those
 hooks, and it only ever sends names — §5's INV-2 below is what makes pointing a
-signing machine at somebody else's server a reasonable thing to do.
+machine that holds your credentials at somebody else's server a reasonable
+thing to do.
 
 **Instead of what you already have.** Or take all of it. `latem run` needs no
 account, no hook and no network: the local broker is the default and the hosted
@@ -60,32 +68,39 @@ installs nothing new.
 
 Latem exists for the three things the other runners leave to you.
 
-### 1. Xcode is an executor, not a shell script
+### 1. Your machine is the build machine
 
-An iOS build gets a real user session, an unlocked keychain, and code signing
-that works. Not a `runs-on: macos` label pointing at a machine somebody set up
-by hand, and not a container pretending Xcode fits in one.
+Two executors, behind one interface.
 
-Latem ships three executors behind one interface: Docker for Linux, and two for
-macOS — **native**, which runs on the Mac's own OS, and **Tart**, which gives
-each build an ephemeral VM (`tart clone`, boot, run, delete).
+**Docker** runs a job in a container, on any host with a daemon. It is the
+isolating one: a build reaches the workspace, the caches it declared, and
+nothing else.
 
-**Native is the default**, because on a Mac you already own it needs nothing
-installed and no disk: your Xcode, your keychain, your simulators. Tart is one
-uncommented config block away, and it costs a 69 GB image pull and 140 GB of
-disk. The question that decides which you want is not how big your team is —
-it is **whose code runs on this machine**. Your own repositories, native is
-right. Anything a contributor outside the team can influence, you want the VM,
-because native runs steps as you, with your keychain and your signing
-certificates. `docs/RUNNER_SPEC.md` §13.0 is the long version, and
-[`docs/deploy.md`](docs/deploy.md) is the ordered runbook for bringing up a Mac
-from scratch.
+**Native** runs a job on the host's own OS, as the agent's user. It needs
+nothing installed and no disk, and it is how you use a machine that is already
+set up — the Xcode you have, the keychain you have, the devices plugged into
+it, the licence tied to it. A container cannot borrow any of that.
 
-A job picks a runner by label, not by executor, so switching a machine between
-the two is a config edit and touches no repository. The step contract is
-identical across all three — each step is a new process, the filesystem
-persists, `$LATEM_ENV` carries variables between them — so a job that works on
-one works on the others.
+The question that decides between them is not how big your team is. It is
+**whose code runs on this machine.** Your own repositories, native is the
+direct answer. Anything a contributor outside the team can influence, or a
+third-party action you did not write, wants the container — because native runs
+steps as you, with everything your user can reach.
+[`docs/RUNNER_SPEC.md`](docs/RUNNER_SPEC.md) §13.0 is the long version, and
+[`docs/deploy.md`](docs/deploy.md) is the ordered runbook for bringing a machine
+up from scratch.
+
+Native runs on Linux and macOS today. **Windows is a goal and is not
+implemented** — the executor is Unix-only by construction, and a Windows host
+needs its own answer for process groups, shells and the between-step channel
+(`RUNNER_SPEC` A47). A Windows machine can still run Docker jobs. Tart, which
+would give a macOS build an ephemeral VM, is specified in §13.2 and backlogged;
+nothing depends on it.
+
+A job picks a runner by label, not by executor, so moving a machine between the
+two is a config edit and touches no repository. The step contract is identical
+across both — each step is a new process, the filesystem persists, `$LATEM_ENV`
+carries variables between them — so a job that works on one works on the other.
 
 ### 2. Caches are mounted, not archived
 
@@ -113,6 +128,24 @@ concurrency > 1 takes a per-cache lock. Two runs writing one `~/.gradle`
 corrupt each other in ways that surface as intermittent failures nobody
 attributes to caching, so that is prevented structurally rather than
 documented.
+
+**A workflow's `uses: actions/cache` becomes one of these.** The `path:` is
+mounted for the whole job and the step compiles to nothing, so a workflow you
+already have gets a warm cache without being edited. Two things behave
+differently, and they follow from the model rather than from a shortcut:
+
+- **A mount accumulates; a keyed cache replaces.** `key` and `restore-keys`
+  change nothing about what is mounted. That is what you want for the stores
+  actions/cache is usually pointed at — npm, pnpm, Go modules, Gradle, Cargo,
+  pip — which are content-addressed and meant to be shared. For a cached
+  build-output directory it is not, so cache the store rather than the output.
+- **`cache-hit` is always `false`.** The install step it gates runs, and is fast
+  against a warm mount; `true` would let a stale mount skip work that was
+  needed.
+
+A path inside the workspace (`node_modules`) is refused, because a mount there
+would shadow the checkout — cache `~/.npm` instead. `upload-artifact` and
+`download-artifact` work too, collecting into §17's store when their step runs.
 
 ### 3. Five security invariants, written down and tested
 

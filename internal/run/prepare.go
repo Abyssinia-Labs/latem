@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
+	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
+	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -21,9 +26,18 @@ import (
 // which resolves without anyone editing a commit. internal/secrets already
 // tells the two apart, so this only has to not flatten them.
 func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
+	// The token is registered before anything else, whether or not the job
+	// reads it: a step that finds it some other way still cannot print it
+	// (A52, INV-4).
+	if x.req.Token != "" && x.red != nil {
+		x.red.Register([]byte(x.req.Token))
+	}
 	names := x.resolved.Secrets
 	if len(names) == 0 {
 		return outcome{}, true
+	}
+	if x.workflow != nil {
+		return x.resolveWorkflowSecrets(ctx, names)
 	}
 	if x.o.secrets == nil {
 		return fail(errors.New("no secret provider is configured on this machine"),
@@ -44,6 +58,55 @@ func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
 		x.note("secret %s", w)
 	}
 	x.note("resolved %d secret(s): %v", set.Len(), set.Names())
+	return outcome{}, true
+}
+
+// resolveWorkflowSecrets is resolveSecrets for a job compiled from a
+// workflow (A50).
+//
+// Two differences, both GitHub's. A name is looked up under the job's
+// environment and repository before the machine-wide name, so two
+// repositories on one machine can each have their own CLOUDFLARE_API_TOKEN.
+// And a name that resolves nowhere is not E_MISSING_SECRET: it reads as the
+// empty string, which a workflow testing whether `secrets.X` is empty relies
+// on, and the log names it so that an unset secret is never a mystery. A
+// backend that cannot answer still fails the run, as it does for jobs.yaml.
+func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) (outcome, bool) {
+	// The job's token is GITHUB_TOKEN when it has one (A52), and is never
+	// looked up on the machine. One a restart lost falls back to the
+	// machine's GITHUB_TOKEN, if it has one, and the log says which.
+	if slices.Contains(names, workflow.TokenSecret) {
+		switch {
+		case x.req.Token != "":
+			names = slices.DeleteFunc(slices.Clone(names), func(n string) bool { return n == workflow.TokenSecret })
+		case x.isWorkflowRun():
+			x.note("this job's GitHub token is not held — the agent restarted after the job arrived, or none was " +
+				"sent — so GITHUB_TOKEN is this machine's secret of that name, if it has one")
+		}
+	}
+	scopes := [][]string{{x.req.Repo}, nil}
+	if env := x.resolved.Job.Environment; env != "" {
+		scopes = append([][]string{{x.req.Repo, env}}, scopes...)
+	}
+	set, missing, err := secrets.ResolveScoped(ctx, x.o.secrets, x.red, names, scopes)
+	if err != nil {
+		return secretOutcome(err), false
+	}
+	x.sec = set
+	for _, w := range set.Warnings() {
+		x.note("secret %s", w)
+	}
+	for _, name := range missing {
+		var tried []string
+		for _, scope := range scopes {
+			tried = append(tried, secrets.ScopedName(name, scope...))
+		}
+		x.note("secret %s is not set on this machine (looked for %s); it reads as empty, as on GitHub",
+			name, strings.Join(tried, ", "))
+	}
+	if set.Len() > 0 {
+		x.note("resolved %d secret(s): %v", set.Len(), set.Names())
+	}
 	return outcome{}, true
 }
 
@@ -126,13 +189,25 @@ func (x *execution) prepareEnv(ctx context.Context, mounts []executor.CacheMount
 		image = x.runner.DefaultImage
 	}
 
+	// The action cache, if this machine has one. Created rather than assumed:
+	// docker binds it into the container, and a bind of a path that is not
+	// there fails the run rather than the fetch (A42 phase 5). An empty
+	// directory costs nothing on a machine that never fetched an action.
+	actionsDir, err := x.actionsDir()
+	if err != nil {
+		return err
+	}
+
 	spec := executor.Spec{
-		RunID:     x.run.ID,
-		Workspace: x.ws.Path,
-		Image:     image,
-		Env:       x.buildEnv(),
-		Secrets:   x.secretNames(),
-		Caches:    mounts,
+		RunID:      x.run.ID,
+		Workspace:  x.ws.Path,
+		Image:      image,
+		Env:        x.buildEnv(),
+		Secrets:    x.secretNames(),
+		Caches:     mounts,
+		ActionsDir: actionsDir,
+		ToolCache:  x.toolCache(),
+		Event:      x.eventJSON(),
 		Labels: map[string]string{
 			"latem.run-id": x.run.ID,
 			"latem.repo":   x.run.Repo,
@@ -149,3 +224,23 @@ func (x *execution) prepareEnv(ctx context.Context, mounts []executor.CacheMount
 	x.onTeardown("environment", env.Close)
 	return nil
 }
+
+// actionsDir is the host directory holding fetched actions, created if needed.
+func (x *execution) actionsDir() (string, error) {
+	if x.o.cfg == nil || x.o.cfg.Paths.Actions == "" {
+		return "", nil
+	}
+	dir := x.o.cfg.Paths.Actions
+	if err := os.MkdirAll(dir, actionsDirMode); err != nil {
+		return "", &registry.Error{
+			Code: protocol.ErrExecutor,
+			Msg:  "preparing the action cache",
+			Err:  err,
+		}
+	}
+	return dir, nil
+}
+
+// actionsDirMode is tight because the directory holds code that is about to
+// run, and matches internal/workflow/actions' own.
+const actionsDirMode = 0o700

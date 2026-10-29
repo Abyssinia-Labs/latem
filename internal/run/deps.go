@@ -32,6 +32,10 @@ type Mirror interface {
 	Resolve(ctx context.Context, normalizedRef string) (string, error)
 	// Checkout is gate 10: a workspace at exactly that commit.
 	Checkout(ctx context.Context, runID, normalizedRef, sha string) (*source.Workspace, error)
+	// HasCommit and IsAncestor pin a workflow run's job to the commit its
+	// event named, on its ref (A52).
+	HasCommit(ctx context.Context, sha string) (bool, error)
+	IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error)
 }
 
 // Source is the subset of [source.Manager] the gate chain uses.
@@ -50,6 +54,10 @@ type Source interface {
 // *artifact.Collector satisfies it directly.
 type Collector interface {
 	Collect(ctx context.Context, runID, workspace string, decls []artifact.Declaration) ([]protocol.ArtifactRef, error)
+	// The two upload-artifact and download-artifact need (A49). On the same
+	// interface rather than a second one, because they are the same store.
+	CollectNamed(ctx context.Context, runID, workspace string, up artifact.Upload) ([]protocol.ArtifactRef, error)
+	Restore(runID, workspace, name, dest string) (int, error)
 }
 
 // SourceManager adapts a *source.Manager to [Source].

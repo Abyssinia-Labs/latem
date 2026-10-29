@@ -62,7 +62,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -229,6 +231,9 @@ type Agent struct {
 	// never leaves this process.
 	machineToken []byte
 
+	// planSlots bounds the plans made at once; see [maxConcurrentPlans].
+	planSlots chan struct{}
+
 	// draining is set once shutdown begins or --drain-after fires. It is read
 	// by the pool before every claim and by every heartbeat.
 	draining atomic.Bool
@@ -295,6 +300,7 @@ func New(opts Options) (*Agent, error) {
 		teardownGrace:    orDuration(opts.TeardownGrace, DefaultTeardownGrace),
 		shutdownGrace:    grace,
 		wake:             make(chan struct{}, 1),
+		planSlots:        make(chan struct{}, maxConcurrentPlans),
 		ready:            make(chan struct{}),
 		activeRepos:      map[string]string{},
 	}
@@ -540,6 +546,8 @@ func (a *Agent) consumeFrom(ctx context.Context, t transport) {
 			a.ring()
 		case protocol.CommandCancel:
 			a.cancel(ctx, *cmd.Cancel)
+		case protocol.CommandPlan:
+			go a.plan(ctx, t, *cmd.Plan)
 		}
 	}
 }
@@ -613,6 +621,15 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	}
 	for _, r := range a.runners {
 		h.Runners = append(h.Runners, r.info())
+	}
+	// A52: the repositories this machine builds, by key and by owner/name,
+	// which is how an event on GitHub finds the machines that can plan it.
+	for _, key := range slices.Sorted(maps.Keys(a.cfg.Repos)) {
+		info := protocol.RepoInfo{Key: key}
+		if slug, ok := a.cfg.Repos[key].GitHubRepository(); ok {
+			info.GitHub = slug
+		}
+		h.Repos = append(h.Repos, info)
 	}
 	if a.caches != nil {
 		if free, err := a.caches.FreeGB(ctx); err == nil {

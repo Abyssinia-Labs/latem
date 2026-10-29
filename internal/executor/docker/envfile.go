@@ -32,6 +32,24 @@ const (
 	// as $GITHUB_PATH and $GITHUB_STEP_SUMMARY.
 	PathFilePath    = "/tmp/latem/path"
 	SummaryFilePath = "/tmp/latem/summary"
+	// StateFilePath is the container-visible path exported as
+	// $GITHUB_STATE (A51), handled like $GITHUB_OUTPUT.
+	StateFilePath = "/tmp/latem/state"
+	// EventFilePath is $GITHUB_EVENT_PATH: the event a workflow run started
+	// from (A52). Written once at Prepare, read-only to the step.
+	EventFilePath = "/tmp/latem/event.json"
+	// TempPath is the directory exported as $RUNNER_TEMP (A50). It lives in
+	// the container's own filesystem beside the files above, so it goes
+	// when the container does.
+	TempPath = "/tmp/latem/temp"
+	// ToolCachePath is where the runner's tool cache volume is mounted, and
+	// what $RUNNER_TOOL_CACHE says (A51): GitHub's own path on its Ubuntu
+	// runners, which some tooling assumes.
+	ToolCachePath = "/opt/hostedtoolcache"
+	// ActionsPath is where [Spec.ActionsDir] is mounted, read-only: a fetched
+	// action's files have to be readable from inside a container that has no
+	// other view of the host (A42 phase 5).
+	ActionsPath = "/tmp/latem/actions"
 
 	// MaxEnvFileBytes is §9's 64 KB cap per step. The file is job-authored
 	// data the agent then trusts, so it gets a size it cannot exceed as well
@@ -244,6 +262,57 @@ func (e *runEnv) createEnvFile(ctx context.Context, envFile string) error {
 	return nil
 }
 
+// createDir creates an empty directory in the container through the archive
+// API, for the same reasons [runEnv.createEnvFile] uses it: it works whatever
+// the image contains, and the mode is this package's rather than the image's
+// umask. The parent must already exist.
+func (e *runEnv) createDir(ctx context.Context, dir string) error {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     path.Base(dir) + "/",
+		Typeflag: tar.TypeDir,
+		Mode:     envDirMode,
+	}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", dir)
+	}
+	if err := tw.Close(); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", dir)
+	}
+	if err := e.api.CopyToContainer(ctx, e.containerID, path.Dir(dir), &buf,
+		container.CopyToContainerOptions{}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create %s", dir)
+	}
+	return nil
+}
+
+// writeFile puts a read-only file with the given content into the container,
+// through the archive API like the files above, into a directory that already
+// exists there.
+func (e *runEnv) writeFile(ctx context.Context, file string, data []byte) error {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     path.Base(file),
+		Typeflag: tar.TypeReg,
+		Mode:     0o644,
+		Size:     int64(len(data)),
+	}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", file)
+	}
+	if _, err := tw.Write(data); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", file)
+	}
+	if err := tw.Close(); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "build %s archive", file)
+	}
+	if err := e.api.CopyToContainer(ctx, e.containerID, path.Dir(file), &buf,
+		container.CopyToContainerOptions{}); err != nil {
+		return wrapErr(protocol.ErrExecutor, err, "create %s", file)
+	}
+	return nil
+}
+
 // readOutputs reads and truncates $GITHUB_OUTPUT after a step.
 //
 // The parser is shared with the workflow package because the format is
@@ -251,25 +320,36 @@ func (e *runEnv) createEnvFile(ctx context.Context, envFile string) error {
 // named value handed to later steps' expressions, not an environment entry,
 // so there is nothing for it to shadow.
 func (e *runEnv) readOutputs(ctx context.Context, out io.Writer) (map[string]string, error) {
-	data, err := e.readEnvFile(ctx, OutputFilePath)
+	return e.readKeyValues(ctx, OutputFilePath, "$GITHUB_OUTPUT", out)
+}
+
+// readState reads and truncates $GITHUB_STATE after a step (A51).
+func (e *runEnv) readState(ctx context.Context, out io.Writer) (map[string]string, error) {
+	return e.readKeyValues(ctx, StateFilePath, "$GITHUB_STATE", out)
+}
+
+// readKeyValues reads and truncates one of the key=value files, in GitHub's
+// format, heredoc and all.
+func (e *runEnv) readKeyValues(ctx context.Context, file, label string, out io.Writer) (map[string]string, error) {
+	data, err := e.readEnvFile(ctx, file)
 	if err != nil || len(data) == 0 {
 		return nil, err
 	}
-	assignments, warnings := ghcmd.ParseKeyValueFile(data, nil)
+	assignments, warnings := ghcmd.ParseOutputFile(data)
 	for _, w := range warnings {
-		writeNote(out, "$GITHUB_OUTPUT: "+w)
+		writeNote(out, label+": "+w)
 	}
-	if err := e.createEnvFile(ctx, OutputFilePath); err != nil {
+	if err := e.createEnvFile(ctx, file); err != nil {
 		return nil, err
 	}
 	if len(assignments) == 0 {
 		return nil, nil
 	}
-	outputs := make(map[string]string, len(assignments))
+	values := make(map[string]string, len(assignments))
 	for _, a := range assignments {
-		outputs[a.Key] = a.Value
+		values[a.Key] = a.Value
 	}
-	return outputs, nil
+	return values, nil
 }
 
 // readPathAndSummary reads and truncates $GITHUB_PATH and $GITHUB_STEP_SUMMARY

@@ -45,6 +45,8 @@ type controlPlane struct {
 	seen        map[string]map[uint64]bool
 	duplicates  map[string]int
 	heartbeats  int
+	lastHealth  protocol.MachineHealth
+	plans       []protocol.PlanResult
 }
 
 type cpUpdate struct {
@@ -70,6 +72,7 @@ type cpFrame struct {
 	Logs      []protocol.LogFrame     `json:"logs,omitempty"`
 	Heartbeat *protocol.MachineHealth `json:"heartbeat,omitempty"`
 	Claim     *cpClaim                `json:"claim,omitempty"`
+	Plan      *protocol.PlanResult    `json:"plan,omitempty"`
 }
 
 type cpHello struct {
@@ -176,7 +179,18 @@ func (cp *controlPlane) dispatch(ctx context.Context, conn *websocket.Conn, f cp
 	case "heartbeat":
 		cp.mu.Lock()
 		cp.heartbeats++
+		if f.Heartbeat != nil {
+			cp.lastHealth = *f.Heartbeat
+		}
 		cp.mu.Unlock()
+
+	case "plan":
+		if f.Plan != nil {
+			cp.mu.Lock()
+			cp.plans = append(cp.plans, *f.Plan)
+			cp.mu.Unlock()
+			cp.ack(ctx, conn, f.ID, protocol.Ack{OK: true, RunID: f.Plan.ID})
+		}
 
 	case "claim":
 		id := ""

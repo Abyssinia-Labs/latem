@@ -20,7 +20,8 @@ const BuildNumberVar = "LATEM_BUILD_NUMBER"
 
 // buildEnv assembles the run environment (RUNNER_SPEC §9, §15).
 //
-// Three layers, in this order, and the order is the contract:
+// Three layers, in this order, and the order is the contract (a job compiled
+// from a workflow has GitHub's variables between the first two, A50):
 //
 //  1. Resolved secrets, by declared name. This is the one place in the entire
 //     system where a secret becomes a Go string. §15 keeps values as []byte
@@ -41,11 +42,28 @@ const BuildNumberVar = "LATEM_BUILD_NUMBER"
 func (x *execution) buildEnv() map[string]string {
 	env := make(map[string]string, x.secretCount()+8)
 
-	if x.sec != nil {
+	// A workflow job reads its secrets through ${{ secrets.X }}, bound to the
+	// one step that names it (A50). Putting every one in every step's
+	// environment would hand a credential to steps — and third-party actions
+	// — that never asked for it, which GitHub does not do either.
+	if x.sec != nil && x.workflow == nil {
 		for _, name := range x.sec.Names() {
 			if v, ok := x.sec.Value(name); ok {
 				env[name] = string(v)
 			}
+		}
+	}
+
+	// A50: a job compiled from a workflow also gets GitHub's environment.
+	// Above the secrets, so a secret cannot redefine CI or GITHUB_SHA, and
+	// below LATEM_*, which stay the agent's own.
+	if x.workflow != nil {
+		for k, v := range x.githubEnv() {
+			env[k] = v
+		}
+		if slug, ok := x.githubRepository(); !ok {
+			x.note("GITHUB_REPOSITORY is the config key %q: set github = \"owner/name\" in [repos.%s] "+
+				"when the url does not name the repository on github.com", slug, x.req.Repo)
 		}
 	}
 

@@ -67,8 +67,12 @@ type runEnv struct {
 	envDir      string
 	envFile     string
 	outFile     string // $GITHUB_OUTPUT, a sibling of envFile
+	stateFile   string // $GITHUB_STATE (A51)
+	eventFile   string // $GITHUB_EVENT_PATH, or "" (A52)
 	pathFile    string // $GITHUB_PATH
 	summaryFile string // $GITHUB_STEP_SUMMARY
+	tempDir     string // $RUNNER_TEMP, inside envDir so Close empties it
+	toolCache   string // $RUNNER_TOOL_CACHE, the runner's, outliving the run
 	grace       time.Duration
 	drain       time.Duration
 
@@ -92,6 +96,16 @@ var _ executor.Env = (*runEnv)(nil)
 // which forced the orchestrator to import a concrete executor package to get it
 // right — defeating the interface (amendment A9).
 func (e *runEnv) EnvFile() string { return e.envFile }
+
+// ActionsDir is the host path itself: a step here runs on the host, so a
+// fetched action is already where the agent put it.
+func (e *runEnv) ActionsDir() string { return e.spec.ActionsDir }
+
+// TempDir is the host path itself, for the same reason as [runEnv.ActionsDir].
+func (e *runEnv) TempDir() string { return e.tempDir }
+
+// ToolCacheDir is the host path itself, likewise.
+func (e *runEnv) ToolCacheDir() string { return e.toolCache }
 
 // Workspace is the directory every step starts in. Not part of [executor.Env];
 // it exists for diagnostics and for tests.
@@ -177,8 +191,18 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env[EnvFileVar] = e.envFile
 	env[executor.GitHubEnvVar] = e.envFile
 	env[executor.OutputFileVar] = e.outFile
+	env[executor.StateFileVar] = e.stateFile
 	env[executor.PathFileVar] = e.pathFile
 	env[executor.SummaryFileVar] = e.summaryFile
+	env[executor.WorkspaceVar] = e.workspace
+	env[executor.RunnerTempVar] = e.tempDir
+	if e.eventFile != "" {
+		env[executor.EventPathVar] = e.eventFile
+	}
+	if e.toolCache != "" {
+		env[executor.ToolCacheVar] = e.toolCache
+		env[executor.AgentToolsDirVar] = e.toolCache
+	}
 	if len(e.pathAdds) > 0 {
 		// In front of whatever PATH the step would otherwise have had: one
 		// set explicitly, else the agent's own, which is what buildEnviron
@@ -221,6 +245,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	if outErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, outErr
 	}
+	state, stateErr := e.readState(stdout)
+	if stateErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, stateErr
+	}
 	if psErr := e.readPathAndSummary(stdout); psErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, psErr
 	}
@@ -234,7 +262,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		}
 		return none, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
 	}
-	return executor.Result{ExitCode: code, Outputs: outputs}, nil
+	return executor.Result{ExitCode: code, Outputs: outputs, State: state}, nil
 }
 
 // run starts one shell, streams it, and reaps it.
@@ -242,15 +270,21 @@ func (e *runEnv) run(
 	ctx context.Context, step executor.Step, env map[string]string, stdout, stderr io.Writer,
 ) (int, error) {
 	argv := StepArgv(e.shell, step.Run)
+	if gh := executor.GitHubArgv(step.Shell, step.Run); gh != nil {
+		// A50: a step compiled from a workflow runs under GitHub's shell, and
+		// GitHub's are not login shells — the step sees the agent's own
+		// environment, which is what a GitHub runner's steps see too.
+		argv = gh
+	}
 
 	// #nosec G204 -- this is the INV-3 surface and it is safe by construction.
-	// argv is a slice of exactly three elements built by [StepArgv]: argv[0] is
-	// the shell resolved from PATH at New and never from a broker, argv[1] is
-	// the literal "-lc", and argv[2] is step.Run passed to execve as one
-	// element. Nothing is concatenated, so no character in step.Run can be
-	// read as argv structure — the shell parses it as a script, which is the
-	// documented contract (§9), rather than the agent parsing it as a command
-	// line, which would be the injection. step.Run itself comes from the job
+	// argv is built by [StepArgv] or [executor.GitHubArgv]: argv[0] is a shell
+	// fixed by the agent and never from a broker, the elements between are
+	// literal flags, and the last is step.Run passed to execve as one element.
+	// Nothing is concatenated, so no character in step.Run can be read as argv
+	// structure — the shell parses it as a script, which is the documented
+	// contract (§9, A50), rather than the agent parsing it as a command line,
+	// which would be the injection. step.Run itself comes from the job
 	// registry at the resolved commit and never from a broker (INV-2).
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = e.workspace
@@ -278,7 +312,7 @@ func (e *runEnv) run(
 	defer group.release()
 
 	if err := cmd.Start(); err != nil {
-		return -1, fmt.Errorf("start %s: %w", e.shell, err)
+		return -1, fmt.Errorf("start %s: %w", argv[0], err)
 	}
 	// A write to a file created a moment ago, so a failure here means the
 	// filesystem is in trouble and the step is about to find that out for

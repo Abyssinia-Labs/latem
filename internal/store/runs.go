@@ -19,7 +19,7 @@ import (
 const runColumns = `id, repo, job, ref, ref_normalized, sha, runner, state,
 	exit_code, error_code, error_message, origin_kind, origin_actor,
 	cancel_reason, inputs_json, created_at, started_at, finished_at,
-	expires_at, approved_at, approved_sha, number`
+	expires_at, approved_at, approved_sha, number, workflow_json`
 
 // scanner is satisfied by both *sql.Row and *sql.Rows.
 type scanner interface {
@@ -47,13 +47,14 @@ func scanRun(s scanner) (Run, error) {
 		expiresAt    sql.NullInt64
 		approvedAt   sql.NullInt64
 		approvedSHA  sql.NullString
+		workflowJSON sql.NullString
 	)
 
 	err := s.Scan(
 		&r.ID, &r.Repo, &r.Job, &r.Ref, &refNorm, &sha, &runner, &r.State,
 		&exitCode, &errCode, &errMsg, &r.OriginKind, &originActor,
 		&cancelReason, &inputsJSON, &createdAt, &startedAt, &finishedAt,
-		&expiresAt, &approvedAt, &approvedSHA, &r.Number,
+		&expiresAt, &approvedAt, &approvedSHA, &r.Number, &workflowJSON,
 	)
 	if err != nil {
 		return Run{}, err
@@ -82,6 +83,12 @@ func scanRun(s scanner) (Run, error) {
 			return Run{}, fmt.Errorf("store: run %s has undecodable inputs_json: %w", r.ID, err)
 		}
 	}
+	if workflowJSON.Valid {
+		r.Workflow = &WorkflowRun{}
+		if err := json.Unmarshal([]byte(workflowJSON.String), r.Workflow); err != nil {
+			return Run{}, fmt.Errorf("store: run %s has undecodable workflow_json: %w", r.ID, err)
+		}
+	}
 	return r, nil
 }
 
@@ -101,6 +108,27 @@ func scanRuns(rows *sql.Rows) ([]Run, error) {
 		return nil, fmt.Errorf("store: reading runs: %w", err)
 	}
 	return out, nil
+}
+
+// redactWorkflow encodes a workflow run's fields for workflow_json, through
+// the redactor like everything else a broker supplied (INV-4). The event
+// payload and needs' outputs are other machines' data; a value this machine
+// holds as a secret is scrubbed from them before they reach disk, and an
+// encoding the scrub broke is refused rather than stored undecodable.
+func (d *DB) redactWorkflow(w *WorkflowRun) (sql.NullString, error) {
+	if w == nil {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("encoding workflow_json: %w", err)
+	}
+	out := d.red.Redact(string(b))
+	if !json.Valid([]byte(out)) {
+		return sql.NullString{}, errors.New("a secret this machine holds is in the workflow run's data, " +
+			"and scrubbing it left the data unreadable")
+	}
+	return sql.NullString{String: out, Valid: true}, nil
 }
 
 // redactInputs scrubs every input value and encodes the map.
@@ -164,6 +192,10 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 	if redactErr != nil {
 		return redactErr
 	}
+	workflow, err := d.redactWorkflow(r.Workflow)
+	if err != nil {
+		return fmt.Errorf("store: Create %s: %w", r.ID, err)
+	}
 
 	return d.tx(ctx, func(t *sql.Tx) error {
 		// The transaction is BEGIN IMMEDIATE, so this existence check cannot be
@@ -190,15 +222,15 @@ func (d *DB) Create(ctx context.Context, r Run) error {
 			  id, repo, job, ref, ref_normalized, sha, runner, state,
 			  exit_code, error_code, error_message, origin_kind, origin_actor,
 			  cancel_reason, inputs_json, created_at, started_at, finished_at,
-			  expires_at, approved_at, approved_sha, number
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			  expires_at, approved_at, approved_sha, number, workflow_json
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Repo, r.Job, r.Ref, nullString(r.RefNormalized), nullString(r.SHA),
 			nullString(r.Runner), string(r.State),
 			nullInt(r.ExitCode), nullString(string(r.ErrorCode)), nullString(d.red.Redact(r.ErrorMsg)),
 			r.OriginKind, nullString(r.OriginActor),
 			nullString(d.red.Redact(r.CancelReason)), inputs, toUnix(r.CreatedAt),
 			nullTime(r.StartedAt), nullTime(r.FinishedAt), nullTime(r.ExpiresAt),
-			nullTime(r.ApprovedAt), nullString(r.ApprovedSHA), number,
+			nullTime(r.ApprovedAt), nullString(r.ApprovedSHA), number, workflow,
 		)
 		if err != nil {
 			return fmt.Errorf("store: Create %s: %w", r.ID, err)

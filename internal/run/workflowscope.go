@@ -3,6 +3,7 @@ package run
 import (
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
@@ -13,19 +14,15 @@ import (
 // with a plausible value: `steps.*` and `job.status` do not exist yet, and
 // `secrets.*` must not be substituted at all (INV-4, §15).
 //
-// `vars` is present and empty on purpose. Repository variables are a hosted
-// concept with no local source, and an expression reading one gets the same
-// empty string it would get from an unset variable — which is the behaviour a
-// workflow author already expects, unlike an error naming a context they did
-// not know was unsupported.
+// `vars` starts empty and the compiler fills it from the repository's
+// config once it knows the job's environment (A50). A name nobody configured
+// reads as the empty string, as an unset variable does on GitHub.
 func (x *execution) workflowScope() expr.Scope {
-	refName := x.refNormalized
-	refType := ""
-	switch {
-	case strings.HasPrefix(refName, "refs/heads/"):
-		refName, refType = strings.TrimPrefix(refName, "refs/heads/"), "branch"
-	case strings.HasPrefix(refName, "refs/tags/"):
-		refName, refType = strings.TrimPrefix(refName, "refs/tags/"), "tag"
+	refName, refType := refParts(x.refNormalized)
+	slug, isGitHub := x.githubRepository()
+	owner := ""
+	if isGitHub {
+		owner, _, _ = strings.Cut(slug, "/")
 	}
 
 	inputs := map[string]any{}
@@ -38,30 +35,42 @@ func (x *execution) workflowScope() expr.Scope {
 		workspace = x.ws.Path
 	}
 
+	github := map[string]any{
+		// owner/name since A50, from config or the URL; the config
+		// key when neither names one.
+		"repository":       slug,
+		"repository_owner": owner,
+		"server_url":       githubServerURL,
+		"api_url":          githubAPIURL,
+		"graphql_url":      githubGraphQLURL,
+		"ref":              x.refNormalized,
+		"ref_name":         refName,
+		"ref_type":         refType,
+		"sha":              x.sha,
+		"job":              x.req.Job,
+		"run_id":           x.run.ID,
+		// run_number is the machine's own sequence, which is what
+		// A36 made the build number. A workflow that tags a build with
+		// github.run_number therefore names the run that produced it,
+		// the same as one using $LATEM_BUILD_NUMBER.
+		"run_number":  float64(x.run.Number),
+		"run_attempt": float64(1),
+		"event_name":  eventName(x.req.Origin.Kind),
+		"actor":       x.req.Origin.Actor,
+		"workspace":   workspace,
+	}
+	contexts := map[string]expr.Value{
+		"github": github,
+		"inputs": inputs,
+		"env":    map[string]any{},
+		"vars":   map[string]any{},
+	}
+	if x.isWorkflowRun() {
+		x.workflowRunContext(github)
+		contexts["needs"] = workflow.NeedsContext(x.req.Needs)
+	}
 	return expr.Scope{
-		Contexts: map[string]expr.Value{
-			"github": map[string]any{
-				"repository": x.req.Repo,
-				"ref":        x.refNormalized,
-				"ref_name":   refName,
-				"ref_type":   refType,
-				"sha":        x.sha,
-				"job":        x.req.Job,
-				"run_id":     x.run.ID,
-				// run_number is the machine's own sequence, which is what
-				// A36 made the build number. A workflow that tags a build with
-				// github.run_number therefore names the run that produced it,
-				// the same as one using $LATEM_BUILD_NUMBER.
-				"run_number":  float64(x.run.Number),
-				"run_attempt": float64(1),
-				"event_name":  eventName(x.req.Origin.Kind),
-				"actor":       x.req.Origin.Actor,
-				"workspace":   workspace,
-			},
-			"inputs": inputs,
-			"env":    map[string]any{},
-			"vars":   map[string]any{},
-		},
+		Contexts:     contexts,
 		Status:       expr.StatusSuccess,
 		WorkspaceDir: workspace,
 	}

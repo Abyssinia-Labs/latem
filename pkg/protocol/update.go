@@ -47,6 +47,12 @@ type Update struct {
 	// anyone asks about a surprising build.
 	RefNormalized string `json:"ref_normalized,omitempty"`
 	SHA           string `json:"sha,omitempty"`
+
+	// Outputs are a workflow job's outputs:, evaluated as it ended, on its
+	// terminal update only (A52). One that held a value the redactor knows is
+	// dropped and named in the run's log, as GitHub drops an output carrying
+	// a secret.
+	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
 // Ack is a transport's reply to an inbound [Command].

@@ -54,6 +54,7 @@ func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, prior
 		OriginActor: req.Origin.Actor,
 		Inputs:      req.Inputs,
 		CreatedAt:   now,
+		Workflow:    store.WorkflowRunOf(req),
 	}
 
 	if decision.OK() {
@@ -72,6 +73,8 @@ func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, prior
 		return store.Run{}, fmt.Errorf("run: admit %s: %w", req.ID, err)
 	}
 	if r.State == protocol.StateQueued {
+		// Held before the run is queued, so no runner claims it first (A52).
+		o.store.HoldToken(r.ID, req.Token)
 		if err := o.store.Enqueue(ctx, r.ID, priority); err != nil {
 			return store.Run{}, fmt.Errorf("run: admit %s: enqueue: %w", req.ID, err)
 		}
@@ -97,7 +100,7 @@ func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, prior
 // two code paths differing in where the job name came from is how INV-2 gets
 // eroded one convenience at a time.
 func requestOf(r store.Run) protocol.RunRequest {
-	return protocol.RunRequest{
+	req := protocol.RunRequest{
 		ID:     r.ID,
 		Repo:   r.Repo,
 		Job:    r.Job,
@@ -105,6 +108,14 @@ func requestOf(r store.Run) protocol.RunRequest {
 		Inputs: r.Inputs,
 		Origin: protocol.Origin{Kind: r.OriginKind, Actor: r.OriginActor},
 	}
+	// A workflow run's job (A52), from the row like everything else. Not the
+	// token, which no row holds.
+	if w := r.Workflow; w != nil {
+		ev := w.Event
+		req.Workflow, req.SHA, req.Event, req.Needs = w.Workflow, w.SHA, &ev, w.Needs
+		req.WorkflowRunID, req.RunNumber, req.RunAttempt = w.WorkflowRunID, w.RunNumber, w.RunAttempt
+	}
+	return req
 }
 
 func ptr[T any](v T) *T { return &v }

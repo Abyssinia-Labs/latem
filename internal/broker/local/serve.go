@@ -120,6 +120,12 @@ func (b *Broker) dispatch(ctx context.Context, conn net.Conn, cmd protocol.Comma
 		return b.dispatchRun(ctx, conn, *cmd.Run)
 	case protocol.CommandCancel:
 		return b.dispatchCancel(ctx, conn, cmd)
+	case protocol.CommandPlan:
+		// A plan answers a GitHub event, which reaches a machine only through
+		// a control plane; there is no reply on this socket that could carry
+		// one (A52).
+		b.respond(conn, errReply("the local socket does not plan events; plans come from a control plane"))
+		return false
 	default:
 		// Unreachable: the decoder closes the kind set (INV-2). It is here so
 		// that a third kind added to pkg/protocol without a handler is a

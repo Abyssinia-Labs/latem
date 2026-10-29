@@ -60,7 +60,7 @@ func TestNativeRegistryWins(t *testing.T) {
 		registry.Path:              nativeJobs,
 		".github/workflows/ci.yml": wfCI,
 	})
-	reg, src, err := Resolve(ws, "test", testScope())
+	reg, src, err := Resolve(t.Context(), ws, "test", testScope())
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestWorkflowJobResolvesAlongsideNative(t *testing.T) {
 		registry.Path:              nativeJobs,
 		".github/workflows/ci.yml": wfCI,
 	})
-	reg, src, err := Resolve(ws, "ios-release", testScope())
+	reg, src, err := Resolve(t.Context(), ws, "ios-release", testScope())
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestWorkflowJobResolvesAlongsideNative(t *testing.T) {
 
 func TestWorkflowOnlyRepository(t *testing.T) {
 	ws := workspace(t, map[string]string{".github/workflows/ci.yml": wfCI})
-	reg, src, err := Resolve(ws, "test", testScope())
+	reg, src, err := Resolve(t.Context(), ws, "test", testScope())
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestAmbiguousJobNameNamesBothFiles(t *testing.T) {
 		".github/workflows/a.yml": "jobs:\n  build:\n    runs-on: [macos]\n    steps:\n      - run: make a\n",
 		".github/workflows/b.yml": "jobs:\n  build:\n    runs-on: [macos]\n    steps:\n      - run: make b\n",
 	})
-	_, _, err := Resolve(ws, "build", testScope())
+	_, _, err := Resolve(t.Context(), ws, "build", testScope())
 	if err == nil {
 		t.Fatal("two workflows declaring one name must not resolve")
 	}
@@ -132,7 +132,7 @@ func TestNativeResolvesAnAmbiguousWorkflowName(t *testing.T) {
 		".github/workflows/a.yml": "jobs:\n  build:\n    runs-on: [macos]\n    steps:\n      - run: make a\n",
 		".github/workflows/b.yml": "jobs:\n  build:\n    runs-on: [macos]\n    steps:\n      - run: make b\n",
 	})
-	reg, src, err := Resolve(ws, "build", testScope())
+	reg, src, err := Resolve(t.Context(), ws, "build", testScope())
 	if err != nil {
 		t.Fatalf("the documented fix should resolve: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestUnknownJobListsWhatExists(t *testing.T) {
 		registry.Path:              nativeJobs,
 		".github/workflows/ci.yml": wfCI,
 	})
-	_, _, err := Resolve(ws, "nope", testScope())
+	_, _, err := Resolve(t.Context(), ws, "nope", testScope())
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -159,7 +159,7 @@ func TestUnknownJobListsWhatExists(t *testing.T) {
 
 func TestNoRegistryAtAll(t *testing.T) {
 	ws := workspace(t, map[string]string{"README.md": "hi"})
-	_, _, err := Resolve(ws, "test", testScope())
+	_, _, err := Resolve(t.Context(), ws, "test", testScope())
 	if got := codeOf(t, err); got != protocol.ErrNoRegistry {
 		t.Errorf("code = %s, want %s (%v)", got, protocol.ErrNoRegistry, err)
 	}
@@ -172,7 +172,7 @@ func TestMalformedNativeRegistryDoesNotFallThrough(t *testing.T) {
 		registry.Path:              "version: 1\njobs:\n  test:\n    runz_on: oops\n",
 		".github/workflows/ci.yml": wfCI,
 	})
-	_, _, err := Resolve(ws, "test", testScope())
+	_, _, err := Resolve(t.Context(), ws, "test", testScope())
 	if err == nil {
 		t.Fatal("a malformed native registry must be reported, not bypassed")
 	}
@@ -202,7 +202,7 @@ func TestWorkflowsDirectoryCannotEscapeTheWorkspace(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, _, err := Resolve(ws, "build", testScope())
+	_, _, err := Resolve(t.Context(), ws, "build", testScope())
 	if err == nil {
 		t.Fatal("a workflows directory linked out of the workspace must not be read")
 	}
@@ -215,7 +215,7 @@ func TestOversizedWorkflowIsRefused(t *testing.T) {
 	big := "jobs:\n  build:\n    runs-on: [macos]\n    steps:\n      - run: |\n" +
 		strings.Repeat("          echo padding padding padding padding\n", 40000)
 	ws := workspace(t, map[string]string{".github/workflows/big.yml": big})
-	_, _, err := Resolve(ws, "build", testScope())
+	_, _, err := Resolve(t.Context(), ws, "build", testScope())
 	if err == nil || !strings.Contains(err.Error(), "larger than") {
 		t.Errorf("an oversized workflow should be refused by size: %v", err)
 	}

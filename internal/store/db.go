@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	// The driver is cgo-free on purpose: the agent ships as a static
@@ -74,6 +75,9 @@ const maxOpenConns = 8
 type DB struct {
 	db  *sql.DB
 	red Redactor
+	// tokens holds workflow jobs' GitHub tokens, run id → token, in memory
+	// only (A52). See [DB.HoldToken].
+	tokens sync.Map
 }
 
 var _ Store = (*DB)(nil)
@@ -314,6 +318,7 @@ var terminalIndexOrder = mustCoverTerminalStates([]protocol.RunState{
 	protocol.StateRejected,
 	protocol.StateTimedOut,
 	protocol.StateInterrupted,
+	protocol.StateSkipped,
 })
 
 // mustCoverTerminalStates panics unless order is exactly protocol's terminal

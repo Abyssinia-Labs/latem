@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,26 @@ func (e *runEnv) ContainerID() string { return e.containerID }
 // get it right — defeating the interface (amendment A9).
 func (e *runEnv) EnvFile() string { return EnvFilePath }
 
+// ActionsDir is the container path the host's action cache is mounted at, or
+// "" when this run fetched no action and nothing was mounted.
+func (e *runEnv) ActionsDir() string {
+	if e.spec.ActionsDir == "" {
+		return ""
+	}
+	return ActionsPath
+}
+
+// TempDir is the container path exported as $RUNNER_TEMP (A50).
+func (e *runEnv) TempDir() string { return TempPath }
+
+// ToolCacheDir is where the tool cache volume is mounted, when there is one.
+func (e *runEnv) ToolCacheDir() string {
+	if e.spec.ToolCache == "" {
+		return ""
+	}
+	return ToolCachePath
+}
+
 // Exec runs one step.
 //
 // # This is finding F1
@@ -107,8 +128,18 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	env["LATEM_ENV"] = envFile
 	env[executor.GitHubEnvVar] = envFile
 	env[executor.OutputFileVar] = OutputFilePath
+	env[executor.StateFileVar] = StateFilePath
 	env[executor.PathFileVar] = PathFilePath
 	env[executor.SummaryFileVar] = SummaryFilePath
+	env[executor.WorkspaceVar] = WorkspacePath
+	env[executor.RunnerTempVar] = TempPath
+	if len(e.spec.Event) > 0 {
+		env[executor.EventPathVar] = EventFilePath
+	}
+	if e.spec.ToolCache != "" {
+		env[executor.ToolCacheVar] = ToolCachePath
+		env[executor.AgentToolsDirVar] = ToolCachePath
+	}
 	if len(e.pathAdds) > 0 {
 		// In front of whatever PATH the step would otherwise have had: one
 		// set explicitly, else the image's. Setting PATH in the exec's env
@@ -140,8 +171,8 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		code, err = e.exec(execCtx, container.ExecOptions{
 			User:         e.user,
 			WorkingDir:   WorkspacePath,
-			Env:          envSlice(env),
-			Cmd:          wrappedArgv(e.shell, step.Run),
+			Env:          stepEnv(env),
+			Cmd:          wrappedArgv(e.shell, step.Shell, step.Run),
 			AttachStdout: true,
 			AttachStderr: true,
 		}, stdout, stderr)
@@ -168,6 +199,10 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	if outErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, outErr
 	}
+	state, stateErr := e.readState(ctx, stdout)
+	if stateErr != nil && err == nil {
+		return executor.Result{ExitCode: code}, stateErr
+	}
 	if psErr := e.readPathAndSummary(ctx, stdout); psErr != nil && err == nil {
 		return executor.Result{ExitCode: code}, psErr
 	}
@@ -181,7 +216,7 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 		}
 		return none, wrapErr(protocol.ErrExecutor, err, "step %q", step.Name)
 	}
-	return executor.Result{ExitCode: code, Outputs: outputs}, nil
+	return executor.Result{ExitCode: code, Outputs: outputs, State: state}, nil
 }
 
 // StepArgv builds the argv a step is executed with.
@@ -315,6 +350,44 @@ func envSlice(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// shellName is a variable name a POSIX shell keeps when it starts. dash, the
+// /bin/sh of Ubuntu and Debian, and busybox's ash drop every other entry of
+// their environment, and a shell that drops one does not pass it on. So a name
+// such as INPUT_NO-CACHE — how a JavaScript action reads a hyphenated input —
+// never reached a step started under stepWrapper's /bin/sh: setup-bun read
+// `no-cache` as empty and threw. GitHub's runner execs node with no shell in
+// between, which is why actions are written to rely on it.
+var shellName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// carryPrefix names the variables that carry the others past the wrapper's
+// shell, numbered from 0, each `NAME=value`. Reserved: an entry already using
+// it is dropped, so the wrapper never reads a step's own variable as one.
+const carryPrefix = "LATEM_ENVX_"
+
+// stepEnv is env as a wrapped step's exec receives it: every name a shell
+// keeps as itself, and every other carried under carryPrefix for stepWrapper
+// to restore. A carried value is never in the exec's command, so it is not in
+// what the daemon records of it.
+func stepEnv(env map[string]string) []string {
+	kept := make(map[string]string, len(env))
+	var carried []string
+	for k, v := range env {
+		switch {
+		case strings.HasPrefix(k, carryPrefix):
+		case shellName.MatchString(k):
+			kept[k] = v
+		default:
+			carried = append(carried, k+"="+v)
+		}
+	}
+	sort.Strings(carried)
+	out := envSlice(kept)
+	for i, kv := range carried {
+		out = append(out, carryPrefix+strconv.Itoa(i)+"="+kv)
+	}
 	return out
 }
 
@@ -502,14 +575,33 @@ func (e *runEnv) runContainerStep(
 // holds it: if it ever stops being true, stopping a step would signal the
 // wrong processes.
 //
+// Before it does, it restores what [stepEnv] carried past it: each
+// LATEM_ENVX_<n> is unset and its `NAME=value` handed to env(1), which sets a
+// name no shell would and then execs the step, so the pid is still the step's.
+// Only `$i`, a counter, is ever spliced into what eval reads; the values are
+// expanded by it, never parsed. With nothing carried, it is the plain exec it
+// always was.
+//
 // #nosec G101 -- a shell script, not a credential: gosec reads "$$" as one.
-const stepWrapper = `echo "$$" > "$0"; exec "$@"`
+const stepWrapper = `echo "$$" > "$0"
+i=0
+while eval "[ -n \"\${LATEM_ENVX_$i+x}\" ]"; do
+	eval "set -- \"\$LATEM_ENVX_$i\" \"\$@\"; unset LATEM_ENVX_$i"
+	i=$((i+1))
+done
+[ "$i" -eq 0 ] && exec "$@"
+exec env -- "$@"`
 
-// wrappedArgv is [StepArgv] under [stepWrapper]. INV-3 is unchanged by it:
-// `run` is still one element of the slice, whole and untouched, and the
-// wrapper receives it as "$@" without ever reading it.
-func wrappedArgv(shell, run string) []string {
-	return append([]string{"/bin/sh", "-c", stepWrapper, StepPidFile}, StepArgv(shell, run)...)
+// wrappedArgv is [StepArgv], or GitHub's argv for a step compiled from a
+// workflow (A50), under [stepWrapper]. INV-3 is unchanged by it: `run` is
+// still one element of the slice, whole and untouched, and the wrapper
+// receives it as "$@" without ever reading it.
+func wrappedArgv(shell string, mode executor.Shell, run string) []string {
+	argv := StepArgv(shell, run)
+	if gh := executor.GitHubArgv(mode, run); gh != nil {
+		argv = gh
+	}
+	return append([]string{"/bin/sh", "-c", stepWrapper, StepPidFile}, argv...)
 }
 
 // stopScript stops the process group whose id is in the pid file: SIGTERM, up

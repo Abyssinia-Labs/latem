@@ -44,6 +44,10 @@ type execution struct {
 
 	ws       *source.Workspace
 	resolved *registry.Resolved
+	// workflow is where a job compiled from .github/workflows came from, and
+	// nil for a jobs.yaml job. It decides whether the run gets GitHub's
+	// environment as well as latem's (A50).
+	workflow *workflow.Source
 	// refNormalized and sha are what INV-5 decided at gates 7 and 9. They ride
 	// on the next transition rather than one of their own (amendment A21).
 	refNormalized string
@@ -51,10 +55,19 @@ type execution struct {
 	runner        *Runner
 	sec           *secrets.Set
 	env           executor.Env
+	// stepArtifacts are what upload-artifact steps collected as they ran
+	// (A49), reported with the run alongside §17's end-of-job collection.
+	stepArtifacts []protocol.ArtifactRef
 	// outputs is every completed step's $GITHUB_OUTPUT, by step id, for later
 	// steps' late bindings. Populated once that channel is wired (A42 phase
 	// 2); until then the compiler refuses steps.* and this stays empty.
 	outputs map[string]map[string]string
+	// results is every completed or skipped step's outcome and conclusion, by
+	// step id, for the steps context (A50).
+	results map[string]registry.StepResult
+	// actionState is what each use of a JavaScript action saved through
+	// $GITHUB_STATE, by use (A51).
+	actionState map[string]map[string]string
 
 	teardowns []teardownStep
 }
@@ -89,7 +102,10 @@ func (o *Orchestrator) Execute(ctx context.Context, r store.Run) (Result, error)
 	defer o.end(h)
 	defer o.reporter.forget(r.ID)
 
-	x := &execution{o: o, req: requestOf(r), run: r, h: h, started: o.now()}
+	req := requestOf(r)
+	// The job's GitHub token, from memory: it was never written down (A52).
+	req.Token = o.store.Token(r.ID)
+	x := &execution{o: o, req: req, run: r, h: h, started: o.now()}
 	return x.drive(runCtx), nil
 }
 
@@ -119,6 +135,11 @@ func (x *execution) drive(ctx context.Context) Result {
 	case !dec.OK():
 		return x.finish(ctx, fromDecision(dec))
 	}
+	// A workflow run's job whose if: was false is over before a runner is
+	// chosen: nothing of it runs (A52).
+	if job := reg.Jobs[x.req.Job]; job != nil && job.Skip {
+		return x.skip(ctx, job.SkipReason)
+	}
 
 	// Gates 12-15: job lookup, label match, typed inputs, declared secrets.
 	runner := x.o.selectRunner(reg, x.req.Job)
@@ -126,7 +147,11 @@ func (x *execution) drive(ctx context.Context) Result {
 	if runner != nil {
 		labels = runner.Labels
 	}
-	resolved, dec := reg.AdmitOn(x.req, registry.Runner{Labels: labels, Executor: executorName(runner)})
+	resolved, dec := reg.AdmitOn(x.req, registry.Runner{
+		Labels:   labels,
+		Executor: executorName(runner),
+		Isolates: executorIsolates(runner),
+	})
 	if !dec.OK() {
 		return x.finish(ctx, fromDecision(dec))
 	}
@@ -235,6 +260,13 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}
+	if x.isWorkflowRun() {
+		pinned, dec, err := x.pin(ctx, mirror, normalized, sha)
+		if err != nil || !dec.OK() {
+			return nil, dec, err
+		}
+		sha = pinned
+	}
 
 	// Record what INV-5 decided, in the columns §22 keeps for it (amendment
 	// A21). The pair is settled here, at gates 7 and 9, long after store.Create
@@ -283,7 +315,22 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// a *registry.Registry, so nothing downstream of this line knows or cares
 	// which one the job was written in — that is the point, and it is what
 	// keeps §5's invariants true in one place instead of two.
-	reg, src, err := workflow.Resolve(ws.Path, x.req.Job, x.workflowScope())
+	//
+	// A workflow run's job names its file, so it is compiled from that file
+	// and no other, and .latem/jobs.yaml is not consulted (A52).
+	opts := workflow.Options{
+		Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache(),
+		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
+	}
+	var (
+		reg *registry.Registry
+		src workflow.Source
+	)
+	if x.isWorkflowRun() {
+		reg, src, err = workflow.ResolveWorkflowJob(ctx, ws.Path, x.req.Workflow, x.req.Job, x.workflowScope(), opts)
+	} else {
+		reg, src, err = workflow.ResolveWith(ctx, ws.Path, x.req.Job, x.workflowScope(), opts)
+	}
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}
@@ -292,6 +339,12 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		// most readers of this repository would look in, and a workflow's own
 		// `on:` triggers are not what caused this run.
 		x.note("job %q from %s", x.req.Job, src.Path)
+		x.workflow = &src
+		for _, j := range reg.Jobs {
+			for _, n := range j.Notes {
+				x.note("%s", n)
+			}
+		}
 	}
 	return reg, registry.Decision{}, nil
 }
@@ -472,12 +525,21 @@ func (x *execution) terminate(ctx context.Context, out outcome) Result {
 }
 
 func (x *execution) terminateWith(ctx context.Context, out outcome, refs []protocol.ArtifactRef) Result {
+	// Artifacts uploaded by a step are reported whatever path reached here.
+	// A run that ends without §17's collection — cancelled early, say — still
+	// collected what its upload steps collected, and those files are on disk.
+	if len(x.stepArtifacts) > 0 {
+		refs = append(append([]protocol.ArtifactRef(nil), x.stepArtifacts...), refs...)
+	}
 	out.msg = x.redact(out.msg)
 	out.reason = x.redact(out.reason)
 
 	u := x.o.terminalUpdate(out, refs)
 	if x.runner != nil {
 		u.Runner = x.runner.Name
+	}
+	if x.isWorkflowRun() {
+		u.Outputs = x.jobOutputs()
 	}
 	if err := x.to(ctx, out.state, u); err != nil {
 		return x.raced(err)

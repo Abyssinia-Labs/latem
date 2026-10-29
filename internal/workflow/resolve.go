@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,10 @@ type Source struct {
 	Path string
 	// Native is true for .latem/jobs.yaml.
 	Native bool
+	// Workflow is the workflow's `name:`, or its path when it has none, which
+	// is what GitHub reports as github.workflow and $GITHUB_WORKFLOW (A50).
+	// Empty for a jobs.yaml job.
+	Workflow string
 }
 
 func (s Source) String() string { return s.Path }
@@ -58,7 +63,14 @@ func (s Source) String() string { return s.Path }
 // A malformed .latem/jobs.yaml is returned as an error rather than fallen
 // through: falling back would turn a syntax error into a silent change of which
 // file defines the build.
-func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Source, error) {
+func Resolve(ctx context.Context, workspace, jobName string, sc expr.Scope) (*registry.Registry, Source, error) {
+	return ResolveWith(ctx, workspace, jobName, sc, Options{})
+}
+
+// ResolveWith is [Resolve] against a machine's action policy.
+func ResolveWith(
+	ctx context.Context, workspace, jobName string, sc expr.Scope, opts Options,
+) (*registry.Registry, Source, error) {
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
 		return nil, Source{}, &registry.Error{
@@ -79,7 +91,7 @@ func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Sour
 		}
 	}
 
-	files, err := workflowFiles(root)
+	files, err := workflowFiles(root.FS())
 	if err != nil {
 		return nil, Source{}, err
 	}
@@ -91,7 +103,7 @@ func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Sour
 	var hits []hit
 	var allNames []string
 	for _, f := range files {
-		data, err := readCapped(root, f, MaxWorkflowBytes)
+		data, err := readCapped(root.FS(), f, MaxWorkflowBytes)
 		if err != nil {
 			return nil, Source{}, err
 		}
@@ -111,14 +123,12 @@ func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Sour
 	case len(hits) == 1:
 		// The same root the workflow was read through, so a local action is
 		// read at the same commit under the same symlink discipline.
-		job, err := CompileWith(hits[0].wf, jobName, sc, rootLoader{root: root})
+		opts.Actions = rootLoader{root: root}
+		job, err := CompileWith(ctx, hits[0].wf, jobName, sc, opts)
 		if err != nil {
 			return nil, Source{}, err
 		}
-		reg := &registry.Registry{
-			Version: registry.SchemaVersion,
-			Jobs:    map[string]*registry.Job{jobName: job},
-		}
+		reg := RegistryFor(jobName, job)
 		if err := reg.Validate(); err != nil {
 			return nil, Source{}, &registry.Error{
 				Code: protocol.ErrBadRegistry,
@@ -126,7 +136,11 @@ func Resolve(workspace, jobName string, sc expr.Scope) (*registry.Registry, Sour
 				Err:  err,
 			}
 		}
-		return reg, Source{Path: hits[0].file}, nil
+		name := hits[0].wf.Name
+		if name == "" {
+			name = hits[0].file
+		}
+		return reg, Source{Path: hits[0].file, Workflow: name}, nil
 
 	case len(hits) > 1:
 		var where []string
@@ -179,7 +193,7 @@ func available(native *registry.Registry, workflowNames []string) string {
 
 // readNative reads .latem/jobs.yaml, answering (nil, nil) when it is absent.
 func readNative(root *os.Root) (*registry.Registry, error) {
-	data, err := readCapped(root, registry.Path, MaxWorkflowBytes)
+	data, err := readCapped(root.FS(), registry.Path, MaxWorkflowBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -198,12 +212,13 @@ func readNative(root *os.Root) (*registry.Registry, error) {
 
 // workflowFiles lists .github/workflows/*.yml and *.yaml, sorted.
 //
-// Read through [os.Root.FS] rather than by joining paths onto the workspace,
+// Read through an [fs.FS] — a workspace's [os.Root.FS], or a commit in the
+// mirror when planning (A52) — rather than by joining paths onto a directory,
 // for the reason gate 11 gives: a workspace holds whatever a repository and a
 // build put there, and `.github/workflows` being a symlink to somewhere else on
 // the machine is a plain thing to commit.
-func workflowFiles(root *os.Root) ([]string, error) {
-	entries, err := fs.ReadDir(root.FS(), Dir)
+func workflowFiles(fsys fs.FS) ([]string, error) {
+	entries, err := fs.ReadDir(fsys, Dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -236,13 +251,13 @@ func workflowFiles(root *os.Root) ([]string, error) {
 	return out, nil
 }
 
-// readCapped reads a file through the root, refusing one byte past the cap so
+// readCapped reads a file through fsys, refusing one byte past the cap so
 // an oversized file is an error rather than a silent truncation that happens to
 // parse. The shape matches gate 11's, deliberately: two readers of
 // repository-supplied files that differ in their limits differ in what they
 // admit.
-func readCapped(root *os.Root, name string, max int) ([]byte, error) {
-	f, err := root.Open(path.Clean(name))
+func readCapped(fsys fs.FS, name string, max int) ([]byte, error) {
+	f, err := fsys.Open(path.Clean(name))
 	if err != nil {
 		return nil, err // fs.ErrNotExist is meaningful to the caller
 	}

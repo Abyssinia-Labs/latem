@@ -1,0 +1,172 @@
+package run
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
+)
+
+// isWorkflowRun reports whether this run is a workflow run's job (A52): it
+// names its workflow file, and carries the commit, the event and its needs.
+func (x *execution) isWorkflowRun() bool { return x.req.Workflow != "" }
+
+// pin is a workflow run's job's commit (A52). The job builds the commit its
+// event named, not whatever its ref says by the time a runner is free — and
+// that commit must be on the ref, so a control plane cannot borrow one ref's
+// policy for a commit from another (INV-5).
+//
+// A pull request's merge ref is the exception to "on the ref": GitHub
+// recomputes it whenever the base branch moves, so the merge commit an event
+// named stops being reachable from the ref without anything being wrong. It
+// still has to be in the mirror, which only fetched refs put there.
+func (x *execution) pin(ctx context.Context, mirror Mirror, normalized, tip string) (string, registry.Decision, error) {
+	want := x.req.SHA
+	if want == tip {
+		return want, registry.Decision{}, nil
+	}
+	refuse := func(why string) (string, registry.Decision, error) {
+		return "", registry.Decision{
+			State: protocol.StateRejected,
+			Code:  protocol.ErrInvalidRef,
+			Msg:   fmt.Sprintf("the event named %s, which %s", shortSHA(want), why),
+		}, nil
+	}
+	ok, err := mirror.HasCommit(ctx, want)
+	if err != nil {
+		return "", registry.Decision{}, err
+	}
+	if !ok {
+		return refuse("is not in this machine's mirror of " + x.req.Repo)
+	}
+	if strings.HasPrefix(normalized, "refs/pull/") {
+		return want, registry.Decision{}, nil
+	}
+	on, err := mirror.IsAncestor(ctx, want, tip)
+	if err != nil {
+		return "", registry.Decision{}, err
+	}
+	if !on {
+		return refuse(fmt.Sprintf("is not on %s (now %s)", normalized, shortSHA(tip)))
+	}
+	return want, registry.Decision{}, nil
+}
+
+// eventJSON is the event's payload for $GITHUB_EVENT_PATH: the webhook body
+// as it arrived, with a dispatch's inputs as GitHub puts them there — as
+// strings. Nil for a run that is not a workflow run's job.
+func (x *execution) eventJSON() []byte {
+	if !x.isWorkflowRun() || x.req.Event == nil {
+		return nil
+	}
+	payload := x.eventPayload()
+	if x.req.Event.Name == workflow.EventWorkflowDispatch && len(x.req.Inputs) > 0 {
+		inputs := make(map[string]any, len(x.req.Inputs))
+		for k, v := range x.req.Inputs {
+			inputs[k] = v
+		}
+		payload["inputs"] = inputs
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
+}
+
+// eventPayload is the event's payload decoded, for github.event. The
+// protocol only lets an object through, so a payload that does not decode is
+// an empty event rather than a failed run.
+func (x *execution) eventPayload() map[string]any {
+	out := map[string]any{}
+	if x.req.Event != nil && len(x.req.Event.Payload) > 0 {
+		if err := json.Unmarshal(x.req.Event.Payload, &out); err != nil {
+			x.note("the event's payload could not be read (%v); github.event is empty", err)
+			return map[string]any{}
+		}
+	}
+	return out
+}
+
+// workflowRunContext layers a workflow run's facts over github: the event,
+// the commit, the workflow run's own id and numbers (A52).
+func (x *execution) workflowRunContext(github map[string]any) {
+	ev := x.req.Event
+	if ev == nil {
+		return
+	}
+	github["event"] = x.eventPayload()
+	github["event_name"] = ev.Name
+	github["actor"] = ev.Actor
+	github["triggering_actor"] = ev.Actor
+	github["run_id"] = x.req.WorkflowRunID
+	github["run_number"] = float64(x.req.RunNumber)
+	github["run_attempt"] = float64(max(x.req.RunAttempt, 1))
+	github["base_ref"], github["head_ref"] = "", ""
+	if strings.HasPrefix(ev.Name, "pull_request") {
+		github["base_ref"], github["head_ref"] = ev.BaseRef, ev.HeadRef
+	}
+}
+
+// workflowRunEnv is GITHUB_* for a workflow run's job, over the variables
+// every workflow job gets (A52).
+func (x *execution) workflowRunEnv(env map[string]string) {
+	ev := x.req.Event
+	if ev == nil {
+		return
+	}
+	env["GITHUB_EVENT_NAME"] = ev.Name
+	env["GITHUB_ACTOR"] = ev.Actor
+	env["GITHUB_TRIGGERING_ACTOR"] = ev.Actor
+	env["GITHUB_RUN_ID"] = x.req.WorkflowRunID
+	env["GITHUB_RUN_NUMBER"] = strconv.FormatInt(x.req.RunNumber, 10)
+	env["GITHUB_RUN_ATTEMPT"] = strconv.FormatInt(max(x.req.RunAttempt, 1), 10)
+	if strings.HasPrefix(ev.Name, "pull_request") {
+		env["GITHUB_BASE_REF"] = ev.BaseRef
+		env["GITHUB_HEAD_REF"] = ev.HeadRef
+	}
+}
+
+// skip ends a workflow run's job whose if: was false (A52): straight from
+// preparing to skipped, which is neither success nor failure. Nothing ran,
+// so there is nothing to collect.
+func (x *execution) skip(ctx context.Context, cond string) Result {
+	msg := "the job's condition is false"
+	if cond != "" {
+		msg = fmt.Sprintf("if: %s is false", cond)
+	}
+	return x.terminate(ctx, outcome{state: protocol.StateSkipped, msg: msg})
+}
+
+// jobOutputs evaluates a workflow run's job's outputs: as it ends, against
+// every step that ran (A52). An output holding a value the redactor knows is
+// dropped and named, as GitHub drops one carrying a secret; one that cannot be
+// evaluated is named and left out, since the job's own result is already
+// decided.
+func (x *execution) jobOutputs() map[string]string {
+	if x.resolved == nil || x.resolved.Job == nil || len(x.resolved.Job.Outputs) == 0 {
+		return nil
+	}
+	sc := x.stepScope(registry.StatusSuccess)
+	out := map[string]string{}
+	for _, name := range slices.Sorted(maps.Keys(x.resolved.Job.Outputs)) {
+		v, err := x.resolved.Job.Outputs[name].Resolve(sc)
+		if err != nil {
+			x.note("output %s was not set: %s", name, x.redact(err.Error()))
+			continue
+		}
+		if x.redact(v) != v {
+			x.note("output %s was dropped: it holds a secret", name)
+			continue
+		}
+		out[name] = v
+	}
+	return out
+}

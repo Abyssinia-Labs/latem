@@ -66,6 +66,10 @@ var legalTransitions = map[protocol.RunState][]protocol.RunState{
 	},
 	protocol.StatePreparing: {
 		protocol.StateRunning,
+		// A workflow job whose if: is false as it starts (A52). The
+		// condition is read from the registry compiled during preparing,
+		// so this is the one place the answer is known.
+		protocol.StateSkipped,
 		protocol.StateQueued,
 		protocol.StateAwaitingApproval,
 		protocol.StateCollecting,
@@ -139,114 +143,172 @@ func (d *DB) Transition(ctx context.Context, runID string, to protocol.RunState,
 		return fmt.Errorf("store: Transition: %w", err)
 	}
 
-	return d.tx(ctx, func(t *sql.Tx) error {
-		var from protocol.RunState
-		err := t.QueryRowContext(ctx, `SELECT state FROM runs WHERE id = ?`, runID).Scan(&from)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: run %s", ErrNotFound, runID)
-		}
-		if err != nil {
-			return fmt.Errorf("store: Transition %s: %w", runID, err)
-		}
-
-		if !legal(from, to) {
-			return fmt.Errorf("%w: run %s: %s -> %s", ErrIllegalTransition, runID, from, to)
-		}
-
-		set := []string{"state = ?"}
-		args := []any{string(to)}
-
-		if u.ExitCode != nil {
-			set = append(set, "exit_code = ?")
-			args = append(args, *u.ExitCode)
-		}
-		if u.ErrorCode != "" {
-			set = append(set, "error_code = ?")
-			args = append(args, string(u.ErrorCode))
-		}
-		if u.ErrorMsg != "" {
-			// The field is documented as redacted before it reaches here.
-			// Redacting again is idempotent and costs one pass over a short
-			// string; trusting the caller costs INV-4 the one time they forget.
-			set = append(set, "error_message = ?")
-			args = append(args, d.red.Redact(u.ErrorMsg))
-		}
-		if u.StartedAt != nil {
-			set = append(set, "started_at = ?")
-			args = append(args, nullTime(u.StartedAt))
-		}
-		if u.FinishedAt != nil {
-			set = append(set, "finished_at = ?")
-			args = append(args, nullTime(u.FinishedAt))
-		}
-		// Amendment A8 added these three to [protocol.Update] precisely so the
-		// columns would be reachable through the Store interface. Applying
-		// them here is the other half of that change: without it the fields
-		// exist, callers set them, and Transition drops them silently — which
-		// is worse than not having added them, because the caller has no way
-		// to tell.
-		if u.Runner != "" {
-			set = append(set, "runner = ?")
-			args = append(args, u.Runner)
-		}
-		// Amendment A21. Both are decided at gates 7 and 9, long after Create,
-		// and §22 has columns for exactly this pair — but nothing could write
-		// them, so the audit trail INV-5 exists to leave was permanently NULL.
-		if u.RefNormalized != "" {
-			set = append(set, "ref_normalized = ?")
-			args = append(args, u.RefNormalized)
-		}
-		if u.SHA != "" {
-			set = append(set, "sha = ?")
-			args = append(args, u.SHA)
-		}
-		if u.CancelReason != "" {
-			// Display-only text from outside the trust boundary (§7.1), so it
-			// gets the same treatment as ErrorMsg.
-			set = append(set, "cancel_reason = ?")
-			args = append(args, d.red.Redact(u.CancelReason))
-		}
-
-		switch {
-		case !to.IsWaiting():
-			// Leaving a waiting state always clears the deadline, whatever the
-			// caller passed.
-			set = append(set, "expires_at = NULL")
-		case u.ExpiresAt != nil:
-			set = append(set, "expires_at = ?")
-			args = append(args, nullTime(u.ExpiresAt))
-		}
-
-		// Entering awaiting_approval always discards any approval on the row
-		// (amendment A27), and it is done here rather than left to the caller
-		// so that no path can forget. The case it exists for is the whole
-		// reason approval pins a commit: a run approved at commit A, whose ref
-		// then moved to B, is parked again by gate 8 — and if the old approval
-		// survived, the next attempt would find a stale approved_sha and the
-		// operator would never be asked about B. Clearing it in the same
-		// statement that records the new sha means the row can never say
-		// "approved" about a commit nobody was shown.
-		if to == protocol.StateAwaitingApproval {
-			set = append(set, "approved_at = NULL", "approved_sha = NULL")
-		}
-
-		args = append(args, runID)
-		// The assignments joined here are literals appended above, one per field
-		// the update actually carries; every value is bound.
-		res, err := t.ExecContext(ctx,
-			`UPDATE runs SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...) //nolint:gosec // no caller-supplied value is concatenated into this SQL
-		if err != nil {
-			return fmt.Errorf("store: Transition %s: %w", runID, err)
-		}
-		if err := affectedOne(res, runID, "Transition"); err != nil {
-			return err
-		}
-
-		if to != protocol.StateQueued {
-			if _, err := t.ExecContext(ctx, `DELETE FROM queue WHERE run_id = ?`, runID); err != nil {
-				return fmt.Errorf("store: Transition %s: dequeue: %w", runID, err)
-			}
-		}
-		return insertArtifacts(ctx, t, runID, u.Artifacts)
+	err := d.tx(ctx, func(t *sql.Tx) error {
+		_, err := d.apply(ctx, t, runID, to, u, "")
+		return err
 	})
+	if err == nil && to.IsTerminal() {
+		d.tokens.Delete(runID)
+	}
+	return err
+}
+
+// ReapplyIfCurrent re-applies an update the run is still in the state of, and
+// reports whether it did.
+//
+// It exists for the store half of a broker report (§7.2). A report describes a
+// transition the agent has already written, so applying it again is meant to be
+// an idempotent self-transition — and "meant to be" was the defect. A report is
+// delivered asynchronously, so by the time it lands the run may legitimately
+// have moved on: approved, re-queued and claimed again. Applying it then is not
+// idempotent, it is a rewind, and §11's graph cannot tell the two apart because
+// the edge a rewind travels is a real one. preparing → awaiting_approval is how
+// gate 8 parks a run; it is also how a late report of an old park un-approves a
+// run a human has already said yes to, discarding the approval on the way
+// (amendment A27's clearing rule, doing exactly what it should to the wrong
+// row).
+//
+// The guard is the update's own state. If the run is no longer there, the store
+// holds something newer and the report is a description of the past, so nothing
+// is written and the caller is told so.
+func (d *DB) ReapplyIfCurrent(ctx context.Context, runID string, u protocol.Update) (bool, error) {
+	to := u.State
+	if !to.Valid() {
+		return false, fmt.Errorf("store: ReapplyIfCurrent: unknown state %q", to)
+	}
+	if err := checkErrorCode(u.ErrorCode); err != nil {
+		return false, fmt.Errorf("store: ReapplyIfCurrent: %w", err)
+	}
+
+	var applied bool
+	err := d.tx(ctx, func(t *sql.Tx) error {
+		var err error
+		applied, err = d.apply(ctx, t, runID, to, u, to)
+		return err
+	})
+	return applied, err
+}
+
+// apply is the body both entry points share.
+//
+// guard, when non-empty, is a state the run must already be in for the update
+// to be written at all. It answers false and writes nothing when the run has
+// moved elsewhere, which is a report arriving late rather than an error.
+func (d *DB) apply(
+	ctx context.Context, t *sql.Tx, runID string, to protocol.RunState, u protocol.Update, guard protocol.RunState,
+) (bool, error) {
+	var from protocol.RunState
+	err := t.QueryRowContext(ctx, `SELECT state FROM runs WHERE id = ?`, runID).Scan(&from)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: Transition %s: %w", runID, err)
+	}
+
+	// The guard, before legality: a late report is not an illegal transition,
+	// it is a true statement about a state the run has already left.
+	if guard != "" && from != guard {
+		return false, nil
+	}
+
+	if !legal(from, to) {
+		return false, fmt.Errorf("%w: run %s: %s -> %s", ErrIllegalTransition, runID, from, to)
+	}
+
+	set := []string{"state = ?"}
+	args := []any{string(to)}
+
+	if u.ExitCode != nil {
+		set = append(set, "exit_code = ?")
+		args = append(args, *u.ExitCode)
+	}
+	if u.ErrorCode != "" {
+		set = append(set, "error_code = ?")
+		args = append(args, string(u.ErrorCode))
+	}
+	if u.ErrorMsg != "" {
+		// The field is documented as redacted before it reaches here.
+		// Redacting again is idempotent and costs one pass over a short
+		// string; trusting the caller costs INV-4 the one time they forget.
+		set = append(set, "error_message = ?")
+		args = append(args, d.red.Redact(u.ErrorMsg))
+	}
+	if u.StartedAt != nil {
+		set = append(set, "started_at = ?")
+		args = append(args, nullTime(u.StartedAt))
+	}
+	if u.FinishedAt != nil {
+		set = append(set, "finished_at = ?")
+		args = append(args, nullTime(u.FinishedAt))
+	}
+	// Amendment A8 added these three to [protocol.Update] precisely so the
+	// columns would be reachable through the Store interface. Applying
+	// them here is the other half of that change: without it the fields
+	// exist, callers set them, and Transition drops them silently — which
+	// is worse than not having added them, because the caller has no way
+	// to tell.
+	if u.Runner != "" {
+		set = append(set, "runner = ?")
+		args = append(args, u.Runner)
+	}
+	// Amendment A21. Both are decided at gates 7 and 9, long after Create,
+	// and §22 has columns for exactly this pair — but nothing could write
+	// them, so the audit trail INV-5 exists to leave was permanently NULL.
+	if u.RefNormalized != "" {
+		set = append(set, "ref_normalized = ?")
+		args = append(args, u.RefNormalized)
+	}
+	if u.SHA != "" {
+		set = append(set, "sha = ?")
+		args = append(args, u.SHA)
+	}
+	if u.CancelReason != "" {
+		// Display-only text from outside the trust boundary (§7.1), so it
+		// gets the same treatment as ErrorMsg.
+		set = append(set, "cancel_reason = ?")
+		args = append(args, d.red.Redact(u.CancelReason))
+	}
+
+	switch {
+	case !to.IsWaiting():
+		// Leaving a waiting state always clears the deadline, whatever the
+		// caller passed.
+		set = append(set, "expires_at = NULL")
+	case u.ExpiresAt != nil:
+		set = append(set, "expires_at = ?")
+		args = append(args, nullTime(u.ExpiresAt))
+	}
+
+	// Entering awaiting_approval always discards any approval on the row
+	// (amendment A27), and it is done here rather than left to the caller
+	// so that no path can forget. The case it exists for is the whole
+	// reason approval pins a commit: a run approved at commit A, whose ref
+	// then moved to B, is parked again by gate 8 — and if the old approval
+	// survived, the next attempt would find a stale approved_sha and the
+	// operator would never be asked about B. Clearing it in the same
+	// statement that records the new sha means the row can never say
+	// "approved" about a commit nobody was shown.
+	if to == protocol.StateAwaitingApproval {
+		set = append(set, "approved_at = NULL", "approved_sha = NULL")
+	}
+
+	args = append(args, runID)
+	// The assignments joined here are literals appended above, one per field
+	// the update actually carries; every value is bound.
+	res, err := t.ExecContext(ctx,
+		`UPDATE runs SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...) //nolint:gosec // no caller-supplied value is concatenated into this SQL
+	if err != nil {
+		return false, fmt.Errorf("store: Transition %s: %w", runID, err)
+	}
+	if err := affectedOne(res, runID, "Transition"); err != nil {
+		return false, err
+	}
+
+	if to != protocol.StateQueued {
+		if _, err := t.ExecContext(ctx, `DELETE FROM queue WHERE run_id = ?`, runID); err != nil {
+			return false, fmt.Errorf("store: Transition %s: dequeue: %w", runID, err)
+		}
+	}
+	return true, insertArtifacts(ctx, t, runID, u.Artifacts)
 }

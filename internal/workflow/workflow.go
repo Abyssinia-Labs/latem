@@ -120,6 +120,16 @@ type Step struct {
 	// container is set by the expander for a `uses: docker://…` step (A44).
 	// Unexported, so no file can write it.
 	container *containerSpec
+	// artifact is set by the expander for upload-artifact and
+	// download-artifact (A49). Unexported for the same reason.
+	artifact *registry.ArtifactStep
+	// fromAction marks a step inlined from a composite action. A job's
+	// `defaults.run` does not reach into an action's steps on GitHub, and does
+	// not here (A50).
+	fromAction bool
+	// actionUse ties a JavaScript action's pre, main and post steps together,
+	// for $GITHUB_STATE (A51).
+	actionUse string
 }
 
 // StringList accepts either a scalar or a sequence, which is how `runs-on` and

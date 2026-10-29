@@ -44,6 +44,7 @@ func validate(cfg *Config, md *toml.MetaData, opts Options) []error {
 	problems = append(problems, validateRepos(cfg)...)
 	problems = append(problems, validateRunners(cfg)...)
 	problems = append(problems, validateSecrets(cfg)...)
+	problems = append(problems, validateLabelAliases(cfg)...)
 	if !opts.skipFilesystem {
 		problems = append(problems, validateFilesystem(cfg)...)
 	}
@@ -303,6 +304,16 @@ func validateRepos(cfg *Config) []error {
 		}
 		if len(repo.AllowedRefs) == 0 && !repo.RequireApprovalOtherwise {
 			add("repos.%s: allowed_refs is empty and require_approval_otherwise is false, so no ref can ever run; list the refs you trust, or set require_approval_otherwise = true to gate them behind `latem approve`", name)
+		}
+		if repo.GitHub != "" && !githubSlugPattern.MatchString(repo.GitHub) {
+			add("repos.%s: github = %q must be owner/name, the repository as GitHub names it", name, repo.GitHub)
+		}
+		problems = append(problems, validateVars("repos."+name+".vars", repo.Vars)...)
+		for _, env := range sortedKeys(repo.Environments) {
+			if strings.TrimSpace(env) == "" {
+				add("repos.%s.environments: an environment needs a name", name)
+			}
+			problems = append(problems, validateVars("repos."+name+".environments."+env+".vars", repo.Environments[env].Vars)...)
 		}
 		problems = appendDuration(problems, "repos."+name+".approval_ttl", &repo.ApprovalTTL, DefaultApprovalTTL)
 	}
@@ -643,6 +654,52 @@ func validateLabels(what string, labels []string) []error {
 			problems = append(problems, fmt.Errorf("%s: label %q appears twice", what, l))
 		}
 		seen[l] = true
+	}
+	return problems
+}
+
+// varNamePattern is GitHub's rule for a variable's name.
+var varNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateVars checks a vars table (A50): GitHub's naming rule, and nothing
+// in GITHUB_, which GitHub reserves.
+func validateVars(what string, vars map[string]string) []error {
+	var problems []error
+	for _, k := range sortedKeys(vars) {
+		switch {
+		case !varNamePattern.MatchString(k):
+			problems = append(problems, fmt.Errorf("%s.%s: a variable name must match %s", what, k, varNamePattern))
+		case strings.HasPrefix(strings.ToUpper(k), "GITHUB_"):
+			problems = append(problems, fmt.Errorf("%s.%s: names starting GITHUB_ are GitHub's own", what, k))
+		}
+	}
+	return problems
+}
+
+// validateLabelAliases checks [Config.LabelAliases] (A50). An alias maps onto
+// labels, never onto another alias: one level is what the compiler applies,
+// and a chain would mean a label whose meaning depends on the order things
+// were read.
+func validateLabelAliases(cfg *Config) []error {
+	var problems []error
+	for _, alias := range sortedKeys(cfg.LabelAliases) {
+		what := fmt.Sprintf("label_aliases.%s", alias)
+		if !labelPattern.MatchString(alias) {
+			problems = append(problems, fmt.Errorf("%s: an alias must match %s, lowercase, as runs-on is compared lowercased", what, labelPattern))
+		}
+		if alias == "self-hosted" {
+			problems = append(problems, fmt.Errorf("%s: self-hosted is dropped from runs-on before aliases are applied, so this can never match", what))
+		}
+		labels := cfg.LabelAliases[alias]
+		if len(labels) == 0 {
+			problems = append(problems, fmt.Errorf("%s: maps onto no labels; a job naming it would match every runner", what))
+		}
+		problems = append(problems, validateLabels(what, labels)...)
+		for _, l := range labels {
+			if _, chained := cfg.LabelAliases[l]; chained && l != alias {
+				problems = append(problems, fmt.Errorf("%s: %q is itself an alias; name the labels it stands for", what, l))
+			}
+		}
 	}
 	return problems
 }

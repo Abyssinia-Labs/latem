@@ -1,13 +1,20 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
@@ -34,13 +41,33 @@ type containerSpec struct {
 // only steps of the kinds it already understands, and an inlined step is
 // exactly as safe as one the author wrote there by hand.
 type expander struct {
-	loader ActionLoader
-	where  string
+	loader  ActionLoader
+	fetcher RemoteFetcher
+	policy  actions.Policy
+	// usedRemote records that some step named a repository that is not this
+	// one, which is what makes the compiled job require an isolating
+	// executor.
+	usedRemote bool
+	// scope is the admission-time scope, for the one shim that has to
+	// evaluate something before any step runs: a cache's mount point.
+	scope expr.Scope
+	// caches are the declarations `uses: actions/cache` compiled into, in the
+	// order first seen and once each (A49).
+	caches    []registry.CacheDecl
+	cacheSeen map[string]bool
+	where     string
 	// outputs holds, for each composite `uses:` step that had an id, the
 	// program each declared output became. Ids are namespaced, so one map
 	// serves every depth.
 	outputs map[string]map[string]*expr.Program
 	synth   int
+	// notes are what expansion learned that the run log should say: the
+	// commit a tag resolved to, an input an action did not declare (A51).
+	notes []string
+	// pre and post are JavaScript actions' hook steps, in the order their
+	// actions appear: pre runs before the job's first step, post after its
+	// last, in reverse (A51).
+	pre, post []Step
 }
 
 func newExpander(loader ActionLoader, where string) *expander {
@@ -49,14 +76,14 @@ func newExpander(loader ActionLoader, where string) *expander {
 
 // expandSteps processes steps in order, because an action's outputs are only
 // visible to the steps after it.
-func (x *expander) expandSteps(steps []Step, stack []string) ([]Step, error) {
+func (x *expander) expandSteps(ctx context.Context, steps []Step, stack []string) ([]Step, error) {
 	var out []Step
 	for i, st := range steps {
 		st, err := x.rewriteStep(st, x.applyOutputs)
 		if err != nil {
 			return nil, fmt.Errorf("step %d: %w", i+1, err)
 		}
-		expanded, err := x.expand(st, stack)
+		expanded, err := x.expand(ctx, st, stack)
 		if err != nil {
 			return nil, fmt.Errorf("step %d: %w", i+1, err)
 		}
@@ -65,7 +92,7 @@ func (x *expander) expandSteps(steps []Step, stack []string) ([]Step, error) {
 	return out, nil
 }
 
-func (x *expander) expand(st Step, stack []string) ([]Step, error) {
+func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step, error) {
 	switch {
 	case st.Uses == "":
 		return []Step{st}, nil
@@ -97,6 +124,9 @@ func (x *expander) expand(st Step, stack []string) ([]Step, error) {
 		if err != nil {
 			return nil, err
 		}
+		if kind == actionNode {
+			return x.nodeSteps(st, action, nodeOrigin{})
+		}
 		if kind == actionDocker {
 			rewrite, err := x.actionRewrite(st, action, "")
 			if err != nil {
@@ -108,15 +138,160 @@ func (x *expander) expand(st Step, stack []string) ([]Step, error) {
 			}
 			return []Step{c}, nil
 		}
-		return x.inlineComposite(st, action, append(stack, action.Path))
+		return x.inlineComposite(ctx, st, action, append(stack, action.Path))
 	}
-	// A remote action. Left in place: unsupported() names it and the phase.
-	return []Step{st}, nil
+	// A checkout latem has already performed. Asked before the allowlist:
+	// nothing is fetched and nothing third-party runs, so there is no decision
+	// for an operator to make, and requiring it to be allowlisted would fail
+	// every workflow on a machine that opted into no actions at all.
+	if satisfied, err := checkoutShim(st); err != nil {
+		return nil, err
+	} else if satisfied {
+		return nil, nil
+	}
+
+	// The cache, as a mount (A49). Also before the allowlist, for the same
+	// reason as checkout.
+	if decls, outputs, ok, err := cacheShim(st, x.scope); err != nil {
+		return nil, err
+	} else if ok {
+		if x.cacheSeen == nil {
+			x.cacheSeen = map[string]bool{}
+		}
+		for _, d := range decls {
+			if !x.cacheSeen[d.Name] {
+				x.cacheSeen[d.Name] = true
+				x.caches = append(x.caches, d)
+			}
+		}
+		if st.ID != "" {
+			x.outputs[st.ID] = outputs
+		}
+		return nil, nil
+	}
+
+	// Artifacts, as a step the run loop performs itself (A49). The step
+	// survives, because its `if:` is what decides whether it happens.
+	if spec, outputs, ok, err := artifactShim(st, x.scope); err != nil {
+		return nil, err
+	} else if ok {
+		st.Uses, st.With, st.artifact = "", nil, spec
+		if st.Name == "" {
+			if spec.Download {
+				st.Name = "download artifact " + spec.Name
+			} else {
+				st.Name = "upload artifact " + spec.Name
+			}
+			st.Name = strings.TrimSpace(st.Name)
+		}
+		if st.ID != "" {
+			x.outputs[st.ID] = outputs
+		}
+		return []Step{st}, nil
+	}
+
+	// A remote action: another repository's code, which is the one kind of
+	// `uses:` this machine has an opinion about.
+	ref, err := actions.ParseRef(st.Uses)
+	if err != nil {
+		return nil, err
+	}
+	if err := x.policy.Permits(ref); err != nil {
+		return nil, err
+	}
+	if x.fetcher == nil {
+		return nil, fmt.Errorf(
+			"uses: %s is allowed here, but this caller has no action cache to fetch it into", ref)
+	}
+	got, err := x.fetcher.Fetch(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	x.usedRemote = true
+	if !ref.Pinned() {
+		// A tag can be moved by whoever owns it; the commit it named for this
+		// run is what anyone reading the log later needs (A51).
+		x.notes = append(x.notes, fmt.Sprintf("uses: %s resolved to %s", st.Uses, got.SHA))
+	}
+
+	action, err := dirLoader{dir: got.Dir, rel: got.Rel}.Load(st.Uses)
+	if err != nil {
+		return nil, err
+	}
+	kind, err := action.kind()
+	if err != nil {
+		return nil, err
+	}
+	if kind == actionNode {
+		return x.nodeSteps(st, action, originOf(ref))
+	}
+	if kind == actionDocker {
+		rewrite, err := x.actionRewrite(st, action, "")
+		if err != nil {
+			return nil, err
+		}
+		c, err := x.containerStep(st, strings.TrimPrefix(action.Runs.Image, dockerScheme), action, rewrite)
+		if err != nil {
+			return nil, err
+		}
+		return []Step{c}, nil
+	}
+	// A remote composite's own `uses: ./path` would be relative to *its*
+	// repository, not to the workspace, and resolving that needs a loader
+	// rooted at the fetched tree rather than at the checkout. Refused by name
+	// until it is, rather than silently reading a path out of the wrong repo.
+	for i, inner := range action.Runs.Steps {
+		if strings.HasPrefix(inner.Uses, "./") || strings.HasPrefix(inner.Uses, "../") {
+			return nil, fmt.Errorf(
+				"uses: %s step %d uses %s, a path inside its own repository, which is not implemented yet",
+				ref, i+1, inner.Uses)
+		}
+	}
+	return x.inlineComposite(ctx, st, action, append(stack, got.Rel))
+}
+
+// RemoteFetcher resolves and fetches an action from another repository.
+// *actions.Cache is the implementation; the interface is here so a compiler
+// test needs no network.
+type RemoteFetcher interface {
+	Fetch(ctx context.Context, r actions.Ref) (actions.Resolved, error)
+}
+
+// dirLoader reads a fetched action's metadata from an absolute directory.
+//
+// Unlike [rootLoader] it is not scoped to the workspace, because a fetched
+// action is not in the workspace. It does not need to be: the path comes from
+// the cache's own layout, every element of which this agent built from values
+// [actions.ParseRef] had already constrained.
+type dirLoader struct {
+	dir string
+	// rel is the action's path relative to the cache root, which is what
+	// `github.action_path` resolves against at run time.
+	rel string
+}
+
+func (l dirLoader) Load(uses string) (*Action, error) {
+	for _, name := range []string{"action.yml", "action.yaml"} {
+		data, err := os.ReadFile(filepath.Join(l.dir, name)) //#nosec G304 -- a path this agent built under its own cache root from a validated reference
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, badRegistry("reading %s of %s: %v", name, uses, err)
+		}
+		a, err := ParseAction(data, l.rel)
+		if err != nil {
+			return nil, err
+		}
+		a.Remote = true
+		return a, nil
+	}
+	return nil, badRegistry("uses: %s has no action.yml or action.yaml at the commit it resolved to", uses)
 }
 
 // inlineComposite returns the action's steps, rewritten to stand where the
 // `uses:` step stood.
-func (x *expander) inlineComposite(outer Step, action *Action, stack []string) ([]Step, error) {
+func (x *expander) inlineComposite(ctx context.Context, outer Step, action *Action, stack []string) ([]Step, error) {
 	ns := outer.ID
 	if ns == "" {
 		// Inner steps still refer to each other, so they still need a
@@ -150,6 +325,7 @@ func (x *expander) inlineComposite(outer Step, action *Action, stack []string) (
 			st.ID = ns + "/" + st.ID
 		}
 		st.Name = inlinedName(outer, st, i)
+		st.fromAction = true
 		st.Env = mergeEnv(outer.Env, st.Env)
 		if st.WorkingDirectory == "" {
 			st.WorkingDirectory = outer.WorkingDirectory
@@ -173,7 +349,7 @@ func (x *expander) inlineComposite(outer Step, action *Action, stack []string) (
 	}
 
 	// Nested actions, and the outputs of nested actions, in order.
-	expanded, err := x.expandSteps(inner, stack)
+	expanded, err := x.expandSteps(ctx, inner, stack)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action.Path, err)
 	}
@@ -222,7 +398,7 @@ func (x *expander) actionRewrite(outer Step, action *Action, ns string) (func(*e
 		case given:
 			src = v
 		case in.Default != nil:
-			src = *in.Default
+			src = string(*in.Default)
 		case in.Required:
 			return nil, fmt.Errorf("uses: %s requires the input %q", outer.Uses, name)
 		}
@@ -238,7 +414,20 @@ func (x *expander) actionRewrite(outer Step, action *Action, ns string) (func(*e
 		}
 		return nil, fmt.Errorf("%s declares no input %q", action.Path, name)
 	}
+	// A local action's path is relative to the workspace, which is where a
+	// step starts, so it is a literal. A fetched action's is relative to a
+	// cache whose location only the executor knows, so it is resolved at step
+	// time against `latem.action_dir` — which makes every expression carrying
+	// it late, through the classifier that already exists.
 	actionPath := expr.Literal(action.Path)
+	if action.Remote {
+		p, err := expr.Parse(fmt.Sprintf("format('{0}/{1}', latem.action_dir, '%s')",
+			strings.ReplaceAll(action.Path, "'", "''")))
+		if err != nil {
+			return nil, err
+		}
+		actionPath = p
+	}
 
 	return func(p *expr.Program) (*expr.Program, error) {
 		if ns != "" {
@@ -398,7 +587,7 @@ func (x *expander) containerStep(outer Step, image string, action *Action, rewri
 	if action != nil {
 		for name, in := range action.Inputs {
 			if in.Default != nil {
-				inputs[name] = *in.Default
+				inputs[name] = string(*in.Default)
 			}
 		}
 	}

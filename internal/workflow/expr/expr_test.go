@@ -3,6 +3,7 @@ package expr
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -337,5 +338,26 @@ func TestHashFilesStaysInTheWorkspace(t *testing.T) {
 	}
 	if v != "" {
 		t.Errorf("a symlink out of the workspace was followed: %#v", v)
+	}
+}
+
+func TestContextKeys(t *testing.T) {
+	p, err := Parse(`secrets.A != '' && secrets['B'] && format('{0}', secrets.a) && steps.x.outputs.y`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, computed := p.ContextKeys("secrets")
+	if strings.Join(keys, ",") != "A,B,a" || computed {
+		t.Errorf("ContextKeys(secrets) = %v, %v", keys, computed)
+	}
+	if ids := p.StepReferences(); strings.Join(ids, ",") != "x" {
+		t.Errorf("StepReferences = %v", ids)
+	}
+	p2, err := Parse(`secrets[format('KEY_{0}', env.STAGE)]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys, computed := p2.ContextKeys("secrets"); len(keys) != 0 || !computed {
+		t.Errorf("a computed key should be reported as computed: %v, %v", keys, computed)
 	}
 }

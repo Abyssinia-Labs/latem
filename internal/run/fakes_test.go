@@ -47,6 +47,9 @@ type fakeSource struct {
 	// what proves the checkout used the commit gate 8 admitted rather than
 	// resolving the name a second time.
 	checkedOut [][2]string
+	// commits are the commits the mirror holds besides the ref's tip, each
+	// mapped to whether it is on the ref (A52's pin).
+	commits map[string]bool
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -83,6 +86,19 @@ func (m *fakeMirror) HasRef(_ context.Context, fullyQualified string) (bool, err
 	m.src.mu.Lock()
 	defer m.src.mu.Unlock()
 	return m.src.refs[fullyQualified], nil
+}
+
+func (m *fakeMirror) HasCommit(_ context.Context, sha string) (bool, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	_, ok := m.src.commits[sha]
+	return ok || sha == m.src.sha, nil
+}
+
+func (m *fakeMirror) IsAncestor(_ context.Context, ancestor, descendant string) (bool, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	return ancestor == descendant || (descendant == m.src.sha && m.src.commits[ancestor]), nil
 }
 
 // Resolve is gate 9. It answers with whatever the ref points at *now*, which
@@ -147,16 +163,23 @@ type fakeEnv struct {
 	// outputs, when set, is what a step "wrote" to $GITHUB_OUTPUT. The fake
 	// has no file to read back, so a test that wants outputs states them.
 	outputs func(step executor.Step) map[string]string
+	// state, when set, is what a step "wrote" to $GITHUB_STATE (A51).
+	state      func(step executor.Step) map[string]string
+	actionsDir string
+	tempDir    string
 }
 
 func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
 	e.mu.Lock()
 	e.steps = append(e.steps, step)
-	fn, outs := e.exec, e.outputs
+	fn, outs, state := e.exec, e.outputs, e.state
 	e.mu.Unlock()
 	res := executor.Result{}
 	if outs != nil {
 		res.Outputs = outs(step)
+	}
+	if state != nil {
+		res.State = state(step)
 	}
 	if fn == nil {
 		return res, nil
@@ -172,6 +195,12 @@ func (e *fakeEnv) EnvFile() string {
 	}
 	return e.envFile
 }
+
+func (e *fakeEnv) ActionsDir() string { return e.actionsDir }
+
+func (e *fakeEnv) TempDir() string { return e.tempDir }
+
+func (e *fakeEnv) ToolCacheDir() string { return e.spec.ToolCache }
 
 func (e *fakeEnv) Close(context.Context) error {
 	e.mu.Lock()
@@ -203,6 +232,9 @@ type fakeExecutor struct {
 	prepareErr error
 	prepared   int
 	mu         sync.Mutex
+	// name is what Name reports, "fake" when empty; a test about behaviour
+	// that depends on the executor's kind sets it.
+	name string
 }
 
 func (f *fakeExecutor) Prepare(_ context.Context, spec executor.Spec) (executor.Env, error) {
@@ -219,7 +251,12 @@ func (f *fakeExecutor) Prepare(_ context.Context, spec executor.Spec) (executor.
 	return f.env, nil
 }
 
-func (f *fakeExecutor) Name() string { return "fake" }
+func (f *fakeExecutor) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	return "fake"
+}
 
 // Reap satisfies executor.Executor (amendment A23). The orchestrator does not
 // call it — startup reconciliation belongs to the agent (§6 step 5) — so this
@@ -300,6 +337,8 @@ func (b *fakeBroker) Logs(_ context.Context, runID string) (broker.LogSink, erro
 }
 
 func (b *fakeBroker) Heartbeat(context.Context, protocol.MachineHealth) error { return nil }
+
+func (b *fakeBroker) ReportPlan(context.Context, protocol.PlanResult) error { return nil }
 
 // Close satisfies broker.Broker (amendment A19).
 func (b *fakeBroker) Close() error { return nil }

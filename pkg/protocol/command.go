@@ -9,12 +9,13 @@ import (
 	"unicode/utf8"
 )
 
-// CommandKind names an inbound verb. The set is closed at two values.
+// CommandKind names an inbound verb. The set is closed at three values.
 //
 // Closing it is the mechanical half of INV-2: a control plane can ask the
-// agent to start work it already knows how to do, or to stop work it already
-// started, and there is no third thing it can say. Adding a kind requires a
-// written threat model and a change to RUNNER_SPEC §5 — it is not a feature.
+// agent to start work it already knows how to do, to stop work it already
+// started, or to say what an event would start (A52), and there is nothing
+// else it can say. Adding a kind requires a written threat model and a change
+// to RUNNER_SPEC §5 — it is not a feature.
 type CommandKind string
 
 const (
@@ -22,6 +23,9 @@ const (
 	CommandRun CommandKind = "run"
 	// CommandCancel asks the agent to stop a run it owns. See [CancelRequest].
 	CommandCancel CommandKind = "cancel"
+	// CommandPlan asks the agent which workflow runs an event starts. It
+	// reads files and runs nothing. See [PlanRequest].
+	CommandPlan CommandKind = "plan"
 )
 
 // MaxCancelReasonRunes bounds [CancelRequest.Reason]. The field is display
@@ -70,6 +74,7 @@ type Command struct {
 	Kind   CommandKind    `json:"kind"`
 	Run    *RunRequest    `json:"run,omitempty"`
 	Cancel *CancelRequest `json:"cancel,omitempty"`
+	Plan   *PlanRequest   `json:"plan,omitempty"`
 }
 
 // RunRequest is the complete set of data crossing the trust boundary inbound
@@ -87,6 +92,30 @@ type RunRequest struct {
 	Ref    string            `json:"ref"`              // validated per INV-3
 	Inputs map[string]string `json:"inputs,omitempty"` // declared inputs only
 	Origin Origin            `json:"origin"`           // audit only
+
+	// The fields below are a workflow run's job (A52), and are all set or all
+	// absent: Workflow names the file — the only path an inbound field may
+	// name, and only by pattern — and Job is a job's id in it.
+
+	Workflow string `json:"workflow,omitempty"`
+	// SHA is the commit to build. It must be reachable from Ref: the job
+	// builds what the event named, not whatever the branch says by the time
+	// the job starts.
+	SHA string `json:"sha,omitempty"`
+	// Event is what started the run, as data.
+	Event *Event `json:"event,omitempty"`
+	// Needs are the results and outputs of the jobs this one needs.
+	Needs map[string]NeedResult `json:"needs,omitempty"`
+	// WorkflowRunID, RunNumber and RunAttempt are the workflow run's, shared by
+	// its jobs: github.run_id, github.run_number, github.run_attempt.
+	WorkflowRunID string `json:"workflow_run_id,omitempty"`
+	RunNumber     int64  `json:"run_number,omitempty"`
+	RunAttempt    int64  `json:"run_attempt,omitempty"`
+	// Token is a GitHub installation token minted for this job alone, scoped
+	// by its permissions. The agent holds it in memory only — it is stripped
+	// before the request is made durable — and registers it with the
+	// redactor before the first step (A52, §12 as narrowed).
+	Token string `json:"token,omitempty"`
 }
 
 // CancelRequest carries an identifier and nothing executable.
@@ -121,6 +150,11 @@ func NewRunCommand(r RunRequest) Command {
 	return Command{Kind: CommandRun, Run: &r}
 }
 
+// NewPlanCommand builds a plan command.
+func NewPlanCommand(p PlanRequest) Command {
+	return Command{Kind: CommandPlan, Plan: &p}
+}
+
 // NewCancelCommand builds a cancel command with its reason already normalized.
 func NewCancelCommand(c CancelRequest) Command {
 	c.Normalize()
@@ -146,32 +180,63 @@ func (c *CancelRequest) Normalize() {
 // gate chain in RUNNER_SPEC §10. A Command that validates here is
 // well-formed, not safe.
 func (c Command) Validate() error {
+	// other names a payload that does not belong to the kind, so a refusal
+	// says which one.
+	other := func(kind CommandKind) string {
+		for _, p := range []struct {
+			kind CommandKind
+			set  bool
+		}{{CommandRun, c.Run != nil}, {CommandCancel, c.Cancel != nil}, {CommandPlan, c.Plan != nil}} {
+			if p.set && p.kind != kind {
+				return string(p.kind)
+			}
+		}
+		return ""
+	}
 	switch c.Kind {
 	case CommandRun:
 		if c.Run == nil {
 			return fmt.Errorf("protocol: command kind %q with no run payload", c.Kind)
 		}
-		if c.Cancel != nil {
-			return fmt.Errorf("protocol: command kind %q carries a cancel payload", c.Kind)
+		if o := other(c.Kind); o != "" {
+			return fmt.Errorf("protocol: command kind %q carries a %s payload", c.Kind, o)
 		}
-		return ValidateID(c.Run.ID)
+		if err := ValidateID(c.Run.ID); err != nil {
+			return err
+		}
+		return c.Run.validateWorkflowRun()
 
 	case CommandCancel:
 		if c.Cancel == nil {
 			return fmt.Errorf("protocol: command kind %q with no cancel payload", c.Kind)
 		}
-		if c.Run != nil {
-			return fmt.Errorf("protocol: command kind %q carries a run payload", c.Kind)
+		if o := other(c.Kind); o != "" {
+			return fmt.Errorf("protocol: command kind %q carries a %s payload", c.Kind, o)
 		}
 		return ValidateID(c.Cancel.ID)
+
+	case CommandPlan:
+		if c.Plan == nil {
+			return fmt.Errorf("protocol: command kind %q with no plan payload", c.Kind)
+		}
+		if o := other(c.Kind); o != "" {
+			return fmt.Errorf("protocol: command kind %q carries a %s payload", c.Kind, o)
+		}
+		if err := ValidateID(c.Plan.ID); err != nil {
+			return err
+		}
+		if c.Plan.Repo == "" {
+			return fmt.Errorf("protocol: plan %s names no repo", c.Plan.ID)
+		}
+		return c.Plan.Event.validate()
 
 	case "":
 		return fmt.Errorf("protocol: command has no kind")
 
 	default:
 		return fmt.Errorf(
-			"protocol: unknown command kind %q; the inbound set is closed to %q and %q (INV-2)",
-			c.Kind, CommandRun, CommandCancel)
+			"protocol: unknown command kind %q; the inbound set is closed to %q, %q and %q (INV-2)",
+			c.Kind, CommandRun, CommandCancel, CommandPlan)
 	}
 }
 

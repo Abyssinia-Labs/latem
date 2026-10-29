@@ -67,13 +67,15 @@ Alongside it, and doing more work than it does:
 GET /agent HTTP/1.1
 Upgrade: websocket
 Authorization: Bearer <machine-token>
-Latem-Protocol-Version: 1.0
+Latem-Protocol-Version: 2.0
 ```
 
 `Latem-Protocol-Version` is set by `Broker.authHeader` and by `remote.Verify`.
 It is **not** documented in RUNNER_SPEC §7.4, which mentions only the
 `Authorization` header. This server reads it for diagnostics and does not
-require it.
+require it. Since 2.0 it is also how a control plane knows which frames a
+machine can decode: `plan` commands and workflow-run fields go only to an agent
+that said `2.0` here (A52).
 
 **Status codes are load-bearing, and getting them wrong takes machines off the
 network:**
@@ -116,7 +118,7 @@ payload field is populated, and it is the one matching `kind`.
 
 | Field | JSON | Type | Direction | Required |
 |---|---|---|---|---|
-| Kind | `kind` | string, one of eight below | both | **yes** |
+| Kind | `kind` | string, one of nine below | both | **yes** |
 | ID | `id` | string | both | when a reply is wanted — see §2.1 |
 | Version | `protocol_version` | string | both | stamped on every frame by `encode`; see §2.2 |
 | Hello | `hello` | object | server → agent | with `kind: "hello"` |
@@ -127,6 +129,7 @@ payload field is populated, and it is the one matching `kind`.
 | Logs | `logs` | array | agent → server | with `kind: "logs"` |
 | Heartbeat | `heartbeat` | object | agent → server | with `kind: "heartbeat"` |
 | Claim | `claim` | object | agent → server | with `kind: "claim"` |
+| Plan | `plan` | object | agent → server | with `kind: "plan"` — 2.0, A52 |
 
 All payload fields are `omitempty`. Unset fields are **absent**, not `null` —
 with the exceptions in §5.
@@ -155,11 +158,20 @@ flight at once.
 | `update` | **yes** | `Report` blocks on the answer. |
 | `logs` | **yes** | The ack advances the sink's resume point. |
 | `ack` | **yes** | Echoes the `id` of the `command` being answered. |
+| `plan` | **yes** | `ReportPlan` blocks on the answer. Nothing replays it: the control plane, which is waiting for it, asks again. |
 
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"1.0"`.
+in both directions carries it**. The current value is `"2.0"`.
+
+**2.0 (amendment A52)** added the `plan` command and the `plan` frame that
+answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
+`heartbeat.repos` (§4.5) and the terminal state `skipped`. Every one of those is
+a field or a value a 1.0 decoder refuses, which is what §2.3 means by "there is no
+additive change": a 1.0 agent receiving a 2.0 `plan` command refuses it, loudly,
+and keeps its session. A control plane sends 2.0 frames only to an agent whose
+frames say `"2.0"`.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -192,7 +204,7 @@ refusal beats a quiet misinterpretation. Practically, for a control plane:
 
 ```
 server → agent:   hello   command   ack
-agent → server:   resume  update    logs   heartbeat   claim   ack
+agent → server:   resume  update    logs   heartbeat   claim   ack   plan
 ```
 
 `frame.validate()` on the agent accepts **only** `hello`, `command`, and `ack`
@@ -213,10 +225,10 @@ assigned to it. `latem register` writes it into `[machine] id`.
 ```json
 {
   "kind": "hello",
-  "protocol_version": "1.0",
+  "protocol_version": "2.0",
   "hello": {
     "machine_id": "mac-mini-01",
-    "protocol_version": "1.0",
+    "protocol_version": "2.0",
     "message": "connected as build-01"
   }
 }
@@ -243,7 +255,7 @@ report nothing.
 {
   "kind": "command",
   "id": "j57abc",
-  "protocol_version": "1.0",
+  "protocol_version": "2.0",
   "command": {
     "kind": "run",
     "run": {
@@ -262,11 +274,12 @@ report nothing.
 }
 ```
 
-**The inbound command set is closed at two kinds, `run` and `cancel`** (INV-2).
-A third is a RUNNER_SPEC §5 change requiring a written threat model, not a
-feature; the decoder rejects an unknown kind rather than zero-valuing it. Our
-negative control confirms: `{"kind":"deploy"}` is refused with *"the inbound set
-is closed to \"run\" and \"cancel\" (INV-2)"*.
+**The inbound command set is closed at three kinds, `run`, `cancel` and `plan`**
+(INV-2; `plan` is 2.0's, A52). A fourth is a RUNNER_SPEC §5 change requiring a
+written threat model, not a feature; the decoder rejects an unknown kind rather
+than zero-valuing it. Our negative control confirms: `{"kind":"deploy"}` is
+refused with *"the inbound set is closed to \"run\", \"cancel\" and \"plan\"
+(INV-2)"*.
 
 #### `run` — `protocol.RunRequest`
 
@@ -296,6 +309,51 @@ executor, cache configuration, timeout, or label override — the agent resolves
 all of that from a registry on its own disk at the resolved commit (INV-5).
 Adding a field is a security review. Our negative control confirms that a
 smuggled `script` or `image` is a hard decode failure at the agent.
+
+**A workflow run's job (2.0, A52)** adds the fields below, which are **all set or
+all absent** — a run carrying any of them without `workflow` is refused. `job` is
+then the job's id under `jobs:` in that file, which is what makes `web` in three
+files three different jobs.
+
+| Field | JSON | Type | Notes |
+|---|---|---|---|
+| Workflow | `workflow` | string | Must match `^\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9._-]*\.ya?ml$` — the only path an inbound field may name. |
+| SHA | `sha` | string | The commit to build, 40 or 64 hex. Must be reachable from `ref`: the job builds what the event named, not what the branch says by the time it starts. |
+| Event | `event` | object | `protocol.Event`, §3.2's `plan` below. Data: the payload reaches a step only as `$GITHUB_EVENT_PATH` or an expression bound to an env var (A42). |
+| Needs | `needs` | object, job id → `{result, outputs?}` | `result` is `success`, `failure`, `cancelled` or `skipped`. Outputs are strings. |
+| WorkflowRunID | `workflow_run_id` | string | The workflow run's id, shared by its jobs: `github.run_id`. Same pattern as `id`. |
+| RunNumber, RunAttempt | `run_number`, `run_attempt` | number | GitHub's per-workflow numbers. `$LATEM_BUILD_NUMBER` stays the machine's own (A36). |
+| Token | `token` | string | A GitHub installation token for this job alone, scoped by its `permissions`. One printable word, at most 1024 bytes. **Held in memory only**: stripped before the run is made durable, registered with the redactor before the first step, dropped when the run is terminal. An agent that restarts with the job queued builds it without one. |
+
+#### `plan` — `protocol.PlanRequest` (2.0, A52)
+
+```json
+{ "kind": "plan", "plan": { "id": "p7k9m2p4", "repo": "myapp", "event": {
+    "name": "push", "ref": "refs/heads/main",
+    "sha": "3bf12613f4a2a8f9d24a5e0c1b7d9e3a5c8f0b21",
+    "before": "1111111111111111111111111111111111111111",
+    "actor": "octocat", "payload": { "ref": "refs/heads/main", "head_commit": { "message": "fix" } } } } }
+```
+
+Which workflow runs does this event start at this commit? The control plane holds
+no workflow definitions and parses none (INV-5); the machine fetches, reads
+`.github/workflows` at `event.sha` from its own mirror, and answers with a `plan`
+frame (§4.8). Nothing runs.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | **yes** | Same validation as `run.id`. Echoed in the answer. |
+| `repo` | string | **yes** | A key into the agent's local config — the one the machine advertised beside the repository's `owner/name` (§4.5). |
+| `event.name` | string | **yes** | `push`, `pull_request`, `pull_request_target`, `release`, `repository_dispatch` or `workflow_dispatch`. Any other is answered with an error, by name; `schedule` is not planned yet. |
+| `event.action` | string | for pull requests, releases and repository dispatches | The activity type; a repository dispatch's `event_type`. |
+| `event.ref` | string | **yes** | `refs/heads/…` or `refs/tags/…` for a push or dispatch; `refs/pull/N/merge` for a pull request. |
+| `event.sha` | string | **yes** | 40 or 64 hex. A pull request's merge commit. |
+| `event.before` | string | no | A push's previous tip, for `paths` filters. Absent for a new branch, where the agent diffs against the commit's first parent. A pull request's diff is its merge commit against its first parent. |
+| `event.base_ref`, `event.head_ref` | string | for pull requests | Branch names. `branches` filters read `base_ref`. |
+| `event.workflow` | string | for `workflow_dispatch` only | Same pattern as `run.workflow`. |
+| `event.inputs` | object, string → string | `workflow_dispatch` only | Checked against the workflow's declarations; defaults are filled in. |
+| `event.actor` | string | no | `github.actor`. |
+| `event.payload` | object | no | The webhook body: `github.event`. A JSON object of at most 256 KiB. |
 
 #### `cancel` — `protocol.CancelRequest`
 
@@ -332,10 +390,15 @@ For a `cancel`, the answer is delivery: `ok: true` if it reached the command
 channel, `ok: false` with *"the agent is not reading commands; the cancel was not
 delivered"* if the buffer was full.
 
+A `plan` is answered the same way — delivery, not the plan. Fetching and reading
+a repository takes longer than an acknowledgement should, so the plan itself
+follows as a `plan` frame (§4.8). A plan is durable nowhere on the agent; if the
+answer does not come, ask again, here or of another machine with the repository.
+
 ### 3.3 `ack` (server → agent)
 
 ```json
-{ "kind": "ack", "id": "7", "protocol_version": "1.0", "ack": { "ok": true, "run_id": "r7k9…" } }
+{ "kind": "ack", "id": "7", "protocol_version": "2.0", "ack": { "ok": true, "run_id": "r7k9…" } }
 ```
 
 | Field | Type | Required | Notes |
@@ -376,7 +439,7 @@ empty `id` is discarded.
 ```json
 {
   "kind": "resume",
-  "protocol_version": "1.0",
+  "protocol_version": "2.0",
   "resume": {
     "machine_id": "mac-mini-01",
     "runs": [{ "run_id": "r-alpha", "state": "running", "last_acked_seq": 4200 }]
@@ -393,7 +456,7 @@ No `id`; **no ack is expected or wanted**.
 | `machine_id` | string | May be `""` on a machine that has never completed registration. |
 | `runs` | array (never `null`) | See §5. |
 | `runs[].run_id` | string | |
-| `runs[].state` | string | One of §11's twelve. |
+| `runs[].state` | string | One of §11's thirteen (2.0 added `skipped`). |
 | `runs[].last_acked_seq` | number (uint64) | **This transport's own** position, never the machine's. |
 
 The server owes two things in reply:
@@ -432,7 +495,7 @@ and reports that through its own replay.
 {
   "kind": "update",
   "id": "9",
-  "protocol_version": "1.0",
+  "protocol_version": "2.0",
   "update": { "run_id": "r-alpha", "update": { "state": "running", "started_at": "…" } }
 }
 ```
@@ -447,7 +510,7 @@ is the second recorded contract defect.
 
 | Field | JSON | Type | Notes |
 |---|---|---|---|
-| State | `state` | string | **Required.** One of §11's twelve. |
+| State | `state` | string | **Required.** One of §11's thirteen. `skipped` (2.0, A52) is terminal: a workflow job whose `if:` was false as it started — neither success nor failure. |
 | ExitCode | `exit_code` | number \| absent | Pointer on the Go side. A real run sends it only on failure; see §5. |
 | ErrorCode | `error_code` | string | One of §21's codes. |
 | ErrorMsg | `error_message` | string | Already redacted. |
@@ -459,6 +522,7 @@ is the second recorded contract defect.
 | CancelReason | `cancel_reason` | string | A8. Echo of `CancelRequest.Reason`, redacted and truncated. |
 | RefNormalized | `ref_normalized` | string | A21. The fully-qualified ref policy matched (INV-5). |
 | SHA | `sha` | string | A21. The commit it resolved to. |
+| Outputs | `outputs` | object, string → string | 2.0, A52. A workflow job's `outputs:`, evaluated as it ended, on its **terminal** update only. One holding a value the redactor knows is dropped and named in the run's log. |
 
 `ref_normalized` and `sha` together are the answer to the only question anyone
 asks about a surprising build: "requested as `main`, built `refs/heads/main` at
@@ -485,7 +549,7 @@ Two further properties this server implements and recommends:
 {
   "kind": "logs",
   "id": "15",
-  "protocol_version": "1.0",
+  "protocol_version": "2.0",
   "logs": [
     { "run_id": "r-alpha", "seq": 1, "stream": "agent", "at": "2026-08-08T09:15:00Z", "line": "[latem] preparing" }
   ]
@@ -543,14 +607,20 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 ```json
 {
   "kind": "heartbeat",
-  "protocol_version": "1.0",
+  "protocol_version": "2.0",
   "heartbeat": {
     "machine_id": "mac-mini-01", "agent_version": "0.4.1", "os": "darwin", "arch": "arm64",
     "runners": [{ "name": "ios", "executor": "tart", "labels": ["ios"], "concurrency": 1, "active": 1, "available": true }],
-    "disk_free_gb": 412.5, "draining": false
+    "disk_free_gb": 412.5, "draining": false,
+    "repos": [{ "key": "myapp", "github": "Abyssinia-Labs/myapp" }, { "key": "scratch" }]
   }
 }
 ```
+
+`repos` (2.0, A52) is how a GitHub event finds the machines that can plan and run
+it: an installation's repository `owner/name` matched against `repos[].github`,
+and `repos[].key` sent back as `plan.repo` and `run.repo`. A repository that is
+not on GitHub has a key and no `github`. Absent on a machine with no repositories.
 
 No `id`; no ack expected. Every 15 seconds (§20). **Three missed beats — 45
 seconds — is offline.**
@@ -576,7 +646,7 @@ returns.
 ### 4.6 `claim`
 
 ```json
-{ "kind": "claim", "id": "7", "protocol_version": "1.0", "claim": { "run_id": "r-alpha" } }
+{ "kind": "claim", "id": "7", "protocol_version": "2.0", "claim": { "run_id": "r-alpha" } }
 ```
 
 An identifier and nothing else: "the control plane already knows everything about
@@ -593,6 +663,46 @@ transactions, so the read and the write are one.
 
 The agent's answer to a `command`, echoing the envelope `id` the command carried.
 Same payload shape as §3.3.
+
+### 4.8 `plan` (2.0, A52)
+
+```json
+{ "kind": "plan", "id": "12", "protocol_version": "2.0", "plan": {
+    "id": "p7k9m2p4",
+    "workflows": [{
+      "file": ".github/workflows/checks.yml", "name": "Checks",
+      "concurrency": { "group": "checks-refs/heads/main", "cancel_in_progress": true },
+      "jobs": [
+        { "key": "lint", "name": "lint", "labels": ["linux"], "permissions": { "contents": "read" }, "timeout_minutes": 360 },
+        { "key": "web", "name": "Web build", "needs": ["lint"], "labels": ["linux"], "environment": "staging",
+          "permissions": {}, "if_checks_status": true, "timeout_minutes": 30 }
+      ] }] } }
+```
+
+The answer to a `plan` command, correlated by `plan.id`, and acked like an
+`update`. Structure and names, never steps.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | The plan command's id. |
+| `workflows` | array \| null | One entry per workflow the event triggers, in file order. **`[]` when the event triggers nothing; `null` when there is no plan** — read `error`. |
+| `error_code`, `error` | string | Why the request could not be planned at all: an unknown repository, a fetch that failed, a dispatch the workflow refuses (unknown input, missing required one, no `workflow_dispatch` trigger). |
+| `workflows[].file`, `.name` | string | The path, and `name:` or the path when there is none. |
+| `workflows[].run_name` | string | `run-name:` evaluated; absent when the workflow has none. |
+| `workflows[].concurrency` | `{group, cancel_in_progress?}` | Evaluated. **Enforced by the control plane**, which alone sees every run in a group. |
+| `workflows[].inputs` | object | A dispatch's inputs with defaults filled in; give every job of the run these. |
+| `workflows[].error` | string | Why this workflow could not be planned — it cannot be parsed, its `on:` or `needs:` is invalid, its `concurrency` reads something unknown when planning. **Report it as a failed run**, as GitHub reports an invalid workflow file. |
+| `jobs[]` | array | Ordered so each job comes after every job it needs. |
+| `jobs[].key`, `.name` | string | The id under `jobs:` (send it as `run.job`), and the display name a check run is named by. |
+| `jobs[].needs` | array | Keys of jobs in the same workflow. |
+| `jobs[].labels` | array | `runs-on` after the machine's aliases and GitHub's hosted labels. Dispatch to a runner whose labels cover these. |
+| `jobs[].environment` | string | The environment's name. |
+| `jobs[].permissions` | object | The token's scopes in the workflow's vocabulary (`pull-requests`, not `pull_requests`), `read` or `write`; a scope absent has none. Always present: the job's, else the workflow's, else GitHub's restricted default (`contents` and `packages` read). |
+| `jobs[].concurrency` | object | Job-level, evaluated, enforced like the workflow's. |
+| `jobs[].if_checks_status` | bool | The job's `if:` calls `success()`, `failure()`, `always()` or `cancelled()`. **Only then** dispatch it after a need did not succeed — the machine evaluates the condition. Otherwise skip it without asking: GitHub's implicit `success()`. |
+| `jobs[].continue_on_error` | bool | A failure of this job does not fail the workflow run. |
+| `jobs[].timeout_minutes` | number | 360 unless the job says. |
+| `jobs[].error` | string | This job cannot run — a matrix, a reusable workflow, a Windows label. It fails alone; jobs that need it are skipped as after any failure. |
 
 ---
 

@@ -250,6 +250,9 @@ type Resolved struct {
 	Shell            string
 	// RequiresExecutor is the executor gate 13 held the runner to, or "".
 	RequiresExecutor string
+	// RequiresIsolation records that gate 13 held the runner to confining the
+	// job's steps, so a log can say why it landed where it did.
+	RequiresIsolation bool
 }
 
 // ResolvedStep is a step with its environment already substituted.
@@ -262,11 +265,18 @@ type ResolvedStep struct {
 	ID   string
 	Name string
 	Run  string
-	Env  map[string]string
-	Late map[string]LateValue
-	If   Condition
+	// Shell, ContinueOnError and ActionUse are carried from [Step] unchanged
+	// (A50, A51).
+	Shell           string
+	ContinueOnError bool
+	ActionUse       string
+	Env             map[string]string
+	Late            map[string]LateValue
+	If              Condition
 	// Container is set for a container step, in which case Run is empty.
 	Container *ContainerStep
+	// Artifact is set for a step the run loop performs itself (A49).
+	Artifact *ArtifactStep
 	// Timeout of zero means "whatever remains of the job budget". Resolving
 	// that needs a clock and a start time, so it belongs to the orchestrator
 	// rather than here.
@@ -316,6 +326,18 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			req.Job, need, have)
 	}
 
+	// Gate 13, third part (A47) — isolation. A job carrying third-party code
+	// may only land on an executor that confines it. The operator's opt-out
+	// was applied at compile time, so a job that still asks for this has not
+	// been excused from it.
+	if job.RequiresIsolation && !runner.Isolates {
+		return nil, reject(protocol.ErrNoRunner,
+			"job %q runs a third-party action, which needs an executor that confines it to the "+
+				"workspace — this runner's %s executor runs steps as the agent's user. Use a docker "+
+				"runner, or set [actions] allow_unisolated on a machine where that is acceptable",
+			req.Job, orUnknown(runner.Executor))
+	}
+
 	// Gate 14 — typed input validation.
 	inputs, err := job.CoerceInputs(req.Inputs)
 	if err != nil {
@@ -342,30 +364,35 @@ func (r *Registry) AdmitOn(req protocol.RunRequest, runner Runner) (*Resolved, D
 			env[k] = substitute(v, inputs)
 		}
 		steps = append(steps, ResolvedStep{
-			ID:        s.ID,
-			Name:      s.Name,
-			Run:       s.Run,
-			Env:       env,
-			Late:      s.Late,
-			If:        s.If,
-			Container: s.Container,
-			Timeout:   s.Timeout.Duration(),
+			ID:              s.ID,
+			Name:            s.Name,
+			Run:             s.Run,
+			Shell:           s.Shell,
+			ContinueOnError: s.ContinueOnError,
+			ActionUse:       s.ActionUse,
+			Env:             env,
+			Late:            s.Late,
+			If:              s.If,
+			Container:       s.Container,
+			Artifact:        s.Artifact,
+			Timeout:         s.Timeout.Duration(),
 		})
 	}
 
 	return &Resolved{
-		JobName:          req.Job,
-		Job:              job,
-		Image:            job.Image,
-		Timeout:          r.JobTimeout(job),
-		Inputs:           inputs,
-		Steps:            steps,
-		Secrets:          job.Secrets,
-		Caches:           caches,
-		Artifacts:        job.Artifacts,
-		ConcurrencyGroup: job.ConcurrencyGroup,
-		Shell:            r.Defaults.Shell,
-		RequiresExecutor: job.RequiredExecutor(),
+		JobName:           req.Job,
+		Job:               job,
+		Image:             job.Image,
+		Timeout:           r.JobTimeout(job),
+		Inputs:            inputs,
+		Steps:             steps,
+		Secrets:           job.Secrets,
+		Caches:            caches,
+		Artifacts:         job.Artifacts,
+		ConcurrencyGroup:  job.ConcurrencyGroup,
+		Shell:             r.Defaults.Shell,
+		RequiresExecutor:  job.RequiredExecutor(),
+		RequiresIsolation: job.RequiresIsolation,
 	}, Decision{}
 }
 
@@ -381,4 +408,13 @@ func missingLabels(required, have []string) []string {
 		}
 	}
 	return missing
+}
+
+// orUnknown names an executor a caller did not supply. The gate fails closed
+// on it, so the message has to be usable when it happens.
+func orUnknown(name string) string {
+	if name == "" {
+		return "unknown"
+	}
+	return name
 }

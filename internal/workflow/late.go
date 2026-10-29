@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
@@ -50,18 +51,80 @@ func (l *lateExpr) Holds(sc registry.StepScope) (bool, error) {
 func (l *lateExpr) References() []string { return l.refs }
 func (l *lateExpr) Source() string       { return l.prog.Source() }
 
-// scope layers run-time facts over the admission scope.
+func (l *lateExpr) scope(sc registry.StepScope) expr.Scope { return lateScope(l.base, sc) }
+
+// lateTemplate is a late env value that mixes text with expressions:
+// `Bearer ${{ secrets.TOKEN }}`. The whole value is evaluated as the step is
+// about to run, against the same scope a [lateExpr] gets, and is still only
+// ever an environment value — never command text (A42, A50).
+type lateTemplate struct {
+	src   string
+	progs []*expr.Program
+	base  expr.Scope
+	refs  []string
+}
+
+func newLateTemplate(src string, spans []expr.Span, base expr.Scope) *lateTemplate {
+	t := &lateTemplate{src: src, base: base}
+	set := map[string]bool{}
+	for _, sp := range spans {
+		t.progs = append(t.progs, sp.Prog)
+		for _, id := range stepRefs(sp.Prog) {
+			set[id] = true
+		}
+	}
+	for id := range set {
+		t.refs = append(t.refs, id)
+	}
+	sort.Strings(t.refs)
+	return t
+}
+
+// Resolve renders the template against the admission scope plus what the run
+// loop knows.
+func (t *lateTemplate) Resolve(sc registry.StepScope) (string, error) {
+	out, err := expr.EvalString(t.src, lateScope(t.base, sc))
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", t.src, err)
+	}
+	return out, nil
+}
+
+func (t *lateTemplate) References() []string { return t.refs }
+func (t *lateTemplate) Source() string       { return t.src }
+
+// lateScope layers run-time facts over the admission scope.
 //
 // Status maps onto both the status functions and `job.status`, so that
 // `if: failure()` and `if: job.status == 'failure'` — which workflows use
 // interchangeably — agree with each other.
-func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
+//
+// secrets holds the values this run resolved for the names the job reads
+// (A50). A name that resolved nowhere is absent, so it reads as null and
+// renders as the empty string, which is GitHub's behaviour.
+func lateScope(base expr.Scope, sc registry.StepScope) expr.Scope {
 	out := expr.Scope{
-		Contexts:     make(map[string]expr.Value, len(l.base.Contexts)+3),
-		WorkspaceDir: l.base.WorkspaceDir,
+		Contexts:     make(map[string]expr.Value, len(base.Contexts)+4),
+		WorkspaceDir: base.WorkspaceDir,
 	}
-	for k, v := range l.base.Contexts {
+	for k, v := range base.Contexts {
 		out.Contexts[k] = v
+	}
+	secrets := make(map[string]any, len(sc.Secrets))
+	for k, v := range sc.Secrets {
+		secrets[k] = v
+	}
+	out.Contexts["secrets"] = secrets
+
+	// github.token is the job's token, which is the GITHUB_TOKEN secret (A52):
+	// the github context is copied, never edited, since one base scope serves
+	// every step.
+	if tok, ok := sc.Secrets[TokenSecret]; ok {
+		if gh, isMap := out.Contexts["github"].(map[string]any); isMap {
+			withToken := maps.Clone(gh)
+			withToken["token"] = tok
+			out.Contexts["github"] = withToken
+		}
 	}
 
 	switch sc.Status {
@@ -74,30 +137,39 @@ func (l *lateExpr) scope(sc registry.StepScope) expr.Scope {
 	}
 	out.Contexts["job"] = map[string]any{"status": statusName(sc.Status)}
 
-	steps := make(map[string]any, len(sc.Outputs))
+	// GitHub's steps context: every earlier step with an id, with its outputs,
+	// outcome and conclusion. The outcome is what happened and the conclusion
+	// what counts after continue-on-error (A50); a skipped step is present as
+	// skipped, with no outputs.
+	steps := make(map[string]any, len(sc.Results)+len(sc.Outputs))
+	entry := func(id string) map[string]any {
+		if e, ok := steps[id].(map[string]any); ok {
+			return e
+		}
+		e := map[string]any{"outputs": map[string]any{}, "outcome": "success", "conclusion": "success"}
+		steps[id] = e
+		return e
+	}
+	for id, r := range sc.Results {
+		e := entry(id)
+		e["outcome"], e["conclusion"] = r.Outcome, r.Conclusion
+	}
 	for id, outputs := range sc.Outputs {
 		o := make(map[string]any, len(outputs))
 		for k, v := range outputs {
 			o[k] = v
 		}
-		// GitHub's steps context carries outcome and conclusion alongside
-		// outputs. A step that has outputs in the map ran; it is recorded as
-		// having succeeded, because a failed step ends the run before any
-		// later step's scope is built, unless the later step's condition
-		// asked to run anyway — and in that case the failure is what
-		// job.status reports.
-		steps[id] = map[string]any{
-			"outputs":    o,
-			"outcome":    "success",
-			"conclusion": "success",
-		}
+		entry(id)["outputs"] = o
 	}
 	out.Contexts["steps"] = steps
 
+	out.Contexts["latem"] = map[string]any{"action_dir": sc.ActionsDir}
 	out.Contexts["runner"] = map[string]any{
-		"os":   runnerOS(sc.Runner.OS),
-		"arch": runnerArch(sc.Runner.Arch),
-		"name": sc.Runner.Name,
+		"os":         RunnerOS(sc.Runner.OS),
+		"arch":       RunnerArch(sc.Runner.Arch),
+		"name":       sc.Runner.Name,
+		"temp":       sc.TempDir,
+		"tool_cache": sc.ToolCache,
 	}
 	return out
 }
@@ -112,11 +184,13 @@ func statusName(s registry.StepStatus) string {
 	return "success"
 }
 
-// runnerOS and runnerArch render in GitHub's spelling, which is what a
+// RunnerOS and RunnerArch render in GitHub's spelling, which is what a
 // workflow compares against: `runner.os == 'macOS'`, `runner.arch == 'ARM64'`.
 // The comparison is case-insensitive in the expression language, so this is
-// for the value a step *reads*, not for the test to pass.
-func runnerOS(os string) string {
+// for the value a step *reads*, not for the test to pass. The run loop uses
+// them for $RUNNER_OS and $RUNNER_ARCH too (A50), so the variable and the
+// context cannot disagree.
+func RunnerOS(os string) string {
 	switch os {
 	case "macos", "darwin":
 		return "macOS"
@@ -126,7 +200,7 @@ func runnerOS(os string) string {
 	return os
 }
 
-func runnerArch(arch string) string {
+func RunnerArch(arch string) string {
 	switch arch {
 	case "arm64":
 		return "ARM64"

@@ -34,6 +34,8 @@ const (
 	kindLogs      frameKind = "logs"
 	kindHeartbeat frameKind = "heartbeat"
 	kindClaim     frameKind = "claim"
+	// kindPlan answers a plan command (A52).
+	kindPlan frameKind = "plan"
 
 	// Either direction: a reply, never a verb.
 	kindAck frameKind = "ack"
@@ -80,6 +82,7 @@ type frame struct {
 	Logs      []protocol.LogFrame     `json:"logs,omitempty"`
 	Heartbeat *protocol.MachineHealth `json:"heartbeat,omitempty"`
 	Claim     *claimRequest           `json:"claim,omitempty"`
+	Plan      *protocol.PlanResult    `json:"plan,omitempty"`
 }
 
 // helloFrame is the control plane's first message. It is how a machine learns

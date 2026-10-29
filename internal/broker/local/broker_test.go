@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,9 +49,19 @@ func TestClaim_UnknownRunIsNotFound(t *testing.T) {
 // Report is what marks a transition acknowledged. Without that, every run
 // stays in store.Unreported forever and the agent re-reports its whole history
 // on each reconnect.
+// persist writes local truth the way §11 requires before a report, which A46
+// made a precondition of [Broker.Report] rather than an expectation of it.
+func persist(t *testing.T, db *store.DB, id string, to protocol.RunState) {
+	t.Helper()
+	if err := db.Transition(t.Context(), id, to, protocol.Update{State: to}); err != nil {
+		t.Fatalf("Transition %s -> %s: %v", id, to, err)
+	}
+}
+
 func TestReport_PersistsAndMarksReported(t *testing.T) {
 	b, db := newBroker(t)
 	seedQueued(t, db, "r_report")
+	persist(t, db, "r_report", protocol.StateClaimed)
 
 	if err := b.Report(t.Context(), "r_report", protocol.Update{State: protocol.StateClaimed}); err != nil {
 		t.Fatalf("Report: %v", err)
@@ -110,6 +121,7 @@ func TestReport_IsIdempotent(t *testing.T) {
 func TestReport_AppliesTheA8Fields(t *testing.T) {
 	b, db := newBroker(t)
 	seedQueued(t, db, "r_a8")
+	persist(t, db, "r_a8", protocol.StateClaimed)
 
 	if err := b.Report(t.Context(), "r_a8", protocol.Update{
 		State:  protocol.StateClaimed,
@@ -118,6 +130,7 @@ func TestReport_AppliesTheA8Fields(t *testing.T) {
 		t.Fatalf("Report: %v", err)
 	}
 
+	persist(t, db, "r_a8", protocol.StateCancelled)
 	if err := b.Report(t.Context(), "r_a8", protocol.Update{
 		State:        protocol.StateCancelled,
 		CancelReason: "stopped from a phone",
@@ -157,6 +170,7 @@ func TestReport_SetsAndClearsTheDeadline(t *testing.T) {
 		t.Fatalf("expires_at = %v, want %v", run.ExpiresAt, deadline)
 	}
 
+	persist(t, db, "r_ttl", protocol.StateClaimed)
 	if err := b.Report(t.Context(), "r_ttl", protocol.Update{State: protocol.StateClaimed}); err != nil {
 		t.Fatalf("Report claimed: %v", err)
 	}
@@ -190,17 +204,71 @@ func TestReport_RefusesADeadlineOnANonWaitingState(t *testing.T) {
 	}
 }
 
-// An ordering bug should surface as a refused write, not as a run history that
-// says a run was queued after it finished.
-func TestReport_RefusesAnIllegalTransition(t *testing.T) {
+// A report describes a state the run was in. By the time it is delivered the
+// run may have left it, and then the report must write nothing — this is A46,
+// and the bug it was written for is the one below.
+func TestReport_OfAStateTheRunHasLeftIsANoOp(t *testing.T) {
 	b, db := newBroker(t)
 	seedQueued(t, db, "r_order")
+	persist(t, db, "r_order", protocol.StateClaimed)
 
-	err := b.Report(t.Context(), "r_order", protocol.Update{State: protocol.StateRunning})
-	if !errors.Is(err, store.ErrIllegalTransition) {
-		t.Fatalf("Report queued->running = %v, want ErrIllegalTransition", err)
+	// Delivered late: the run left queued some time ago.
+	if err := b.Report(t.Context(), "r_order", protocol.Update{
+		State: protocol.StateQueued, ErrorMsg: "stale",
+	}); err != nil {
+		t.Fatalf("a late report is not an error: %v", err)
 	}
-	_ = db
+	run, err := db.Get(t.Context(), "r_order")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if run.State != protocol.StateClaimed {
+		t.Errorf("state = %s; a report rewound the run", run.State)
+	}
+	if run.ErrorMsg == "stale" {
+		t.Error("a stale report wrote its fields anyway")
+	}
+}
+
+// The failure A46 was written for, at the layer it happened on.
+//
+// A run is parked at gate 8 and the park is reported. A human approves it,
+// which pins the commit and re-queues it (A27). Only then does the park's own
+// report arrive. Applying it would rewind the run to awaiting_approval and —
+// because entering that state clears the approval — throw away the human's
+// decision, so the run would sit parked waiting to be approved a second time.
+func TestReport_DoesNotUnapproveAnApprovedRun(t *testing.T) {
+	b, db := newBroker(t)
+	seedQueued(t, db, "r_appr")
+	persist(t, db, "r_appr", protocol.StateClaimed)
+	persist(t, db, "r_appr", protocol.StatePreparing)
+
+	sha := strings.Repeat("a", 40)
+	park := protocol.Update{State: protocol.StateAwaitingApproval, SHA: sha, ErrorMsg: "outside allowed_refs"}
+	if err := db.Transition(t.Context(), "r_appr", protocol.StateAwaitingApproval, park); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+
+	now := time.Now()
+	if _, err := db.Approve(t.Context(), "r_appr", now, now.Add(72*time.Hour)); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// The park's report, arriving after all of that.
+	if err := b.Report(t.Context(), "r_appr", park); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	run, err := db.Get(t.Context(), "r_appr")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if run.State != protocol.StateQueued {
+		t.Errorf("state = %s, want queued; the late park un-parked an approved run", run.State)
+	}
+	if run.ApprovedSHA != sha {
+		t.Errorf("approved_sha = %q, want %q; the human's approval was discarded", run.ApprovedSHA, sha)
+	}
 }
 
 func TestReport_Rejects(t *testing.T) {

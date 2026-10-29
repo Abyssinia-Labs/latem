@@ -19,6 +19,13 @@ const MaxFileBytes = 64 << 10
 // variable named PATH: the key is checked and the value is never interpreted.
 var keyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// nameKeyPattern is GitHub's rule for an output's or a saved state's name,
+// which is an identifier that may also hold hyphens — `cache-hit`,
+// `bun-version` (A51). Neither becomes an environment variable's name: an
+// output is read through the steps context, and state reaches a step as
+// STATE_<name>, which the action reads from its own process environment.
+var nameKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
+
 // Assignment is one key and its value.
 type Assignment struct {
 	Key   string
@@ -51,6 +58,17 @@ type Assignment struct {
 // still have to pass protected, so the worst case is an ordinary variable the
 // job could have set anyway, not a credential and not a LATEM_ name.
 func ParseKeyValueFile(data []byte, protected func(string) bool) ([]Assignment, []string) {
+	return parseKeyValues(data, protected, keyPattern)
+}
+
+// ParseOutputFile reads $GITHUB_OUTPUT and $GITHUB_STATE: the same format, with
+// GitHub's rule for their names, which allows hyphens (A51). Nothing is
+// protected; an output or a saved state shadows nothing the agent set.
+func ParseOutputFile(data []byte) ([]Assignment, []string) {
+	return parseKeyValues(data, nil, nameKeyPattern)
+}
+
+func parseKeyValues(data []byte, protected func(string) bool, keys *regexp.Regexp) ([]Assignment, []string) {
 	var warnings []string
 	body, truncated := capBytes(data)
 	if truncated {
@@ -77,10 +95,10 @@ func ParseKeyValueFile(data []byte, protected func(string) bool) ([]Assignment, 
 				// would silently set a variable to the rest of the step's
 				// bookkeeping.
 				warnings = append(warnings, fmt.Sprintf(
-					"%s: the heredoc was never closed, so nothing was set from it", describe(key)))
+					"%s: the heredoc was never closed, so nothing was set from it", describe(key, keys)))
 				continue
 			}
-			if w := admit(key, protected); w != "" {
+			if w := admit(key, protected, keys); w != "" {
 				warnings = append(warnings, w)
 				continue
 			}
@@ -98,7 +116,7 @@ func ParseKeyValueFile(data []byte, protected func(string) bool) ([]Assignment, 
 				"line %d is neither KEY=value nor KEY<<DELIMITER, and was ignored", i+1))
 			continue
 		}
-		if w := admit(key, protected); w != "" {
+		if w := admit(key, protected, keys); w != "" {
 			warnings = append(warnings, w)
 			continue
 		}
@@ -128,11 +146,11 @@ func ParsePathFile(data []byte) ([]string, []string) {
 }
 
 // admit returns a warning when a key may not be set, and "" when it may.
-func admit(key string, protected func(string) bool) string {
-	if !keyPattern.MatchString(key) {
-		// The key is quoted only when it is already known to be a well-formed
-		// identifier; here it is not, so it is described by shape.
-		return fmt.Sprintf("a key of %d bytes is not an identifier, and was ignored", len(key))
+func admit(key string, protected func(string) bool, keys *regexp.Regexp) string {
+	if !keys.MatchString(key) {
+		// The key is quoted only when it is already known to be well formed;
+		// here it is not, so it is described by shape.
+		return fmt.Sprintf("a key of %d bytes is not a valid name (%s), and was ignored", len(key), keys)
 	}
 	if protected != nil && protected(key) {
 		return fmt.Sprintf("%q is set by the agent or holds a declared secret, and was not overwritten", key)
@@ -141,11 +159,11 @@ func admit(key string, protected func(string) bool) string {
 }
 
 // describe names a key in a warning only when it is safe to echo.
-func describe(key string) string {
-	if keyPattern.MatchString(key) {
+func describe(key string, keys *regexp.Regexp) string {
+	if keys.MatchString(key) {
 		return fmt.Sprintf("%q", key)
 	}
-	return "a key that is not an identifier"
+	return "a key that is not a valid name"
 }
 
 // cutHeredoc recognises `KEY<<DELIMITER`.

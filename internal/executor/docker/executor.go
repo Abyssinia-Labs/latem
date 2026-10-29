@@ -331,7 +331,7 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 
 	// §9's between-step channel has to exist before the first step runs, or
 	// `>> "$LATEM_ENV"` fails on a job's very first use of it.
-	for _, f := range []string{OutputFilePath, PathFilePath, SummaryFilePath} {
+	for _, f := range []string{OutputFilePath, StateFilePath, PathFilePath, SummaryFilePath} {
 		if err := env.createEnvFile(ctx, f); err != nil {
 			_ = env.Close(ctx)
 			return nil, err
@@ -351,6 +351,17 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 	if err := env.createEnvFile(ctx, EnvFilePath); err != nil {
 		_ = env.Close(context.WithoutCancel(ctx))
 		return nil, err
+	}
+	// After the env file, whose archive created the directory this sits in.
+	if err := env.createDir(ctx, TempPath); err != nil {
+		_ = env.Close(context.WithoutCancel(ctx))
+		return nil, err
+	}
+	if len(spec.Event) > 0 {
+		if err := env.writeFile(ctx, EventFilePath, spec.Event); err != nil {
+			_ = env.Close(context.WithoutCancel(ctx))
+			return nil, err
+		}
 	}
 	return env, nil
 }
@@ -463,6 +474,29 @@ func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec) ([]moun
 		return nil, wrapErr(protocol.ErrExecutor, err, "run volume %q", runVolume)
 	}
 	mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: runVolume, Target: RunFilesDir})
+
+	// The action cache, read-only (A42 phase 5). Read-only because a fetched
+	// action is shared between runs and keyed on the commit it came from: a
+	// step that could write there would be editing what every later run
+	// believes that commit contains.
+	if spec.ActionsDir != "" {
+		mounts = append(mounts, mount.Mount{
+			Type: mount.TypeBind, Source: spec.ActionsDir, Target: ActionsPath, ReadOnly: true,
+		})
+	}
+
+	// The runner's tool cache (A51): a volume of its own, never locked, and —
+	// being a volume — handed to the step user by ensureCacheOwnership with
+	// the caches.
+	if spec.ToolCache != "" {
+		if _, err := e.api.VolumeCreate(ctx, volume.CreateOptions{
+			Name:   spec.ToolCache,
+			Labels: map[string]string{LabelManaged: "true"},
+		}); err != nil {
+			return nil, wrapErr(protocol.ErrCache, err, "tool cache volume %q", spec.ToolCache)
+		}
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: spec.ToolCache, Target: ToolCachePath})
+	}
 
 	for _, c := range spec.Caches {
 		// §14: CacheMount.Source is "the host volume name or directory". An

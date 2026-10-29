@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -131,8 +132,54 @@ func TestExec_EveryStepIsFullyConfigured(t *testing.T) {
 			t.Errorf("exec %d inherited an export from the previous step: %q", i, opts.Env)
 		}
 	}
-	if got := f.execOpts[1].Cmd; !reflect.DeepEqual(got, wrappedArgv("bash", steps[1].Run)) {
+	if got := f.execOpts[1].Cmd; !reflect.DeepEqual(got, wrappedArgv("bash", executor.ShellLatem, steps[1].Run)) {
 		t.Errorf("argv = %#v", got)
+	}
+}
+
+// A name no shell keeps — a JavaScript action's hyphenated input — is carried
+// past the wrapper's /bin/sh rather than handed to it, where dash and ash drop
+// it, and a step's own variable cannot pose as a carrier.
+func TestStepEnv_CarriesNamesAShellWouldDrop(t *testing.T) {
+	got := stepEnv(map[string]string{
+		"CI":                "true",
+		"INPUT_NO-CACHE":    "false",
+		"INPUT_BUN-VERSION": "1.3.3",
+		"9LIVES":            "x",
+		"LATEM_ENVX_0":      "PATH=/evil",
+	})
+	want := []string{
+		"CI=true",
+		"LATEM_ENVX_0=9LIVES=x",
+		"LATEM_ENVX_1=INPUT_BUN-VERSION=1.3.3",
+		"LATEM_ENVX_2=INPUT_NO-CACHE=false",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stepEnv = %q, want %q", got, want)
+	}
+	if !strings.Contains(stepWrapper, carryPrefix) {
+		t.Errorf("the wrapper does not read %s, the prefix stepEnv carries under", carryPrefix)
+	}
+}
+
+// The exec of a step gets its environment from stepEnv, so a hyphenated input
+// travels carried, and nowhere in the exec's command.
+func TestExec_CarriesHyphenatedNames(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir()})
+	step := executor.Step{Name: "bun", Run: "true", Env: map[string]string{"INPUT_NO-CACHE": "false"}}
+	if _, err := env.Exec(context.Background(), step, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	opts := f.execOpts[0]
+	if !slices.Contains(opts.Env, "LATEM_ENVX_0=INPUT_NO-CACHE=false") {
+		t.Errorf("env %q does not carry INPUT_NO-CACHE", opts.Env)
+	}
+	if slices.Contains(opts.Env, "INPUT_NO-CACHE=false") {
+		t.Errorf("env %q hands INPUT_NO-CACHE to the shell, which drops it", opts.Env)
+	}
+	if strings.Contains(strings.Join(opts.Cmd, " "), "false") {
+		t.Errorf("a carried value reached the exec's command: %q", opts.Cmd)
 	}
 }
 
@@ -154,6 +201,28 @@ func TestExec_StepEnvOverridesRunEnv(t *testing.T) {
 	}
 	if slices.Contains(f.execOpts[0].Env, "NODE_ENV=production") {
 		t.Errorf("both values are present: %q", f.execOpts[0].Env)
+	}
+}
+
+// A50: every step gets the workspace and the run's temporary directory as the
+// container sees them, and a job cannot point either somewhere else.
+func TestExec_WorkspaceAndRunnerTemp(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{
+		RunID:     "run-1",
+		Workspace: t.TempDir(),
+		Env:       map[string]string{"RUNNER_TEMP": "/elsewhere"},
+	})
+	if env.TempDir() != TempPath {
+		t.Errorf("TempDir() = %q, want %q", env.TempDir(), TempPath)
+	}
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "s", Run: "true"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	for _, kv := range []string{"GITHUB_WORKSPACE=" + WorkspacePath, "RUNNER_TEMP=" + TempPath} {
+		if !slices.Contains(f.execOpts[0].Env, kv) {
+			t.Errorf("%s missing from %q", kv, f.execOpts[0].Env)
+		}
 	}
 }
 
@@ -335,13 +404,24 @@ func TestExec_StepTimeoutFallsBackToKillingTheContainer(t *testing.T) {
 // of `run` is ever written into the script that records the pid.
 func TestWrappedArgv(t *testing.T) {
 	run := `echo "$(id)"; rm -rf / # '"`
-	got := wrappedArgv("bash", run)
+	got := wrappedArgv("bash", executor.ShellLatem, run)
 	want := []string{"/bin/sh", "-c", stepWrapper, StepPidFile, "bash", "-c", run}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v, want %#v", got, want)
 	}
 	if strings.Contains(stepWrapper, "rm") || strings.Contains(got[2], run) {
 		t.Error("the wrapper must never contain any part of the step")
+	}
+}
+
+// A step compiled from a workflow runs under GitHub's shell inside the same
+// wrapper, with `run` still the last element, whole (A50, INV-3).
+func TestWrappedArgv_GitHubShell(t *testing.T) {
+	run := `false; echo "$(id)"`
+	got := wrappedArgv("bash", executor.ShellGitHub, run)
+	want := []string{"/bin/sh", "-c", stepWrapper, StepPidFile, "bash", "-e", "-c", run}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
 	}
 }
 
@@ -449,5 +529,34 @@ func TestContainerID_IsExposedForReconciliation(t *testing.T) {
 	}
 	if ided.ContainerID() == "" {
 		t.Error("ContainerID is empty")
+	}
+}
+
+// A51: the tool cache is a volume of its own at GitHub's path, exported under
+// both names, and absent when the run has none.
+func TestPrepare_ToolCacheVolume(t *testing.T) {
+	f := &fakeAPI{envFileMissing: true}
+	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir(), ToolCache: "latem-toolcache-linux"})
+	if !slices.Contains(f.createdHosts[0].Mounts, mount.Mount{
+		Type: mount.TypeVolume, Source: "latem-toolcache-linux", Target: ToolCachePath,
+	}) {
+		t.Errorf("mounts = %v, want the tool cache volume", f.createdHosts[0].Mounts)
+	}
+	if env.ToolCacheDir() != ToolCachePath {
+		t.Errorf("ToolCacheDir() = %q", env.ToolCacheDir())
+	}
+	if _, err := env.Exec(context.Background(), executor.Step{Name: "s", Run: "true"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	for _, kv := range []string{"RUNNER_TOOL_CACHE=" + ToolCachePath, "AGENT_TOOLSDIRECTORY=" + ToolCachePath} {
+		if !slices.Contains(f.execOpts[0].Env, kv) {
+			t.Errorf("%s missing from %q", kv, f.execOpts[0].Env)
+		}
+	}
+
+	f2 := &fakeAPI{envFileMissing: true}
+	none := prepared(t, f2, executor.Spec{RunID: "run-2", Workspace: t.TempDir()})
+	if none.ToolCacheDir() != "" {
+		t.Error("a run with no tool cache should report none")
 	}
 }

@@ -62,6 +62,7 @@ func enqueueRun(ctx context.Context, st Store, req protocol.RunRequest, priority
 		OriginKind:  origin.Kind,
 		OriginActor: origin.Actor,
 		Inputs:      req.Inputs,
+		Workflow:    store.WorkflowRunOf(req),
 	}
 
 	switch err := st.Create(ctx, run); {
@@ -77,6 +78,10 @@ func enqueueRun(ctx context.Context, st Store, req protocol.RunRequest, priority
 	default:
 		return err
 	}
+
+	// The token is held before the run is queued, so no runner can claim it
+	// first and start without one. A replayed request may carry a fresh one.
+	st.HoldToken(req.ID, req.Token)
 
 	if err := st.Enqueue(ctx, req.ID, priority); err != nil {
 		return err

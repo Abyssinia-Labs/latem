@@ -46,6 +46,10 @@ type Paths struct {
 	SecretsEnv string
 	// TokenFile holds the machine token, mode 0600 (§7.4).
 	TokenFile string
+	// Actions holds one directory per fetched action, keyed by the commit it
+	// resolved to (A42 phase 5). Shared across runs like a cache, because
+	// that is what it is.
+	Actions string
 }
 
 // Base filenames under the config directory.
@@ -58,6 +62,7 @@ const (
 	mirrorsName    = "mirrors"
 	logsName       = "logs"
 	artifactsName  = "artifacts"
+	actionsName    = "actions"
 	secretsEnvName = "secrets.env"
 	tokenName      = "agent.key"
 )
@@ -109,6 +114,7 @@ func derivePaths(dir string) Paths {
 		Mirrors:    filepath.Join(dir, mirrorsName),
 		Logs:       filepath.Join(dir, logsName),
 		Artifacts:  filepath.Join(dir, artifactsName),
+		Actions:    filepath.Join(dir, actionsName),
 		SecretsEnv: filepath.Join(dir, secretsEnvName),
 		TokenFile:  filepath.Join(dir, tokenName),
 	}

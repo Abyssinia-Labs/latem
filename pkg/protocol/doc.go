@@ -10,13 +10,14 @@
 // Types here fall into two groups, and the distinction is the whole point of
 // the package:
 //
-//   - Inbound — [Command], and its two payloads [RunRequest] and
-//     [CancelRequest]. This is data the agent receives from outside its trust
-//     boundary. It is not trusted. Adding a field to either payload, or a
-//     third [CommandKind], is a security review and a change to RUNNER_SPEC
-//     §5 (INV-2), not a feature.
+//   - Inbound — [Command], and its three payloads [RunRequest],
+//     [CancelRequest] and [PlanRequest]. This is data the agent receives from
+//     outside its trust boundary. It is not trusted. Adding a field to any
+//     payload, or a fourth [CommandKind], is a security review and a change
+//     to RUNNER_SPEC §5 (INV-2), not a feature.
 //
-//   - Outbound — [Update], [LogFrame], [MachineHealth], [Resume]. The agent
+//   - Outbound — [Update], [LogFrame], [MachineHealth], [Resume],
+//     [PlanResult]. The agent
 //     produces these. [LogFrame] in particular has already passed the
 //     redactor by the time it exists (INV-4); a frame that has been
 //     constructed is safe to transmit.
@@ -43,4 +44,4 @@ package protocol
 // older agents as a decode failure rather than as silence, which is the
 // trade this package makes deliberately: at a trust boundary, a loud refusal
 // beats a quiet misinterpretation.
-const Version = "1.0"
+const Version = "2.0"

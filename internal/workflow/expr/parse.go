@@ -284,16 +284,29 @@ func sortedSet(m map[string]bool) []string {
 // does with it as well. The registry uses this to refuse a reference to a step
 // that is not an earlier one, before anything runs.
 func (p *Program) StepReferences() []string {
+	ids, _ := p.ContextKeys("steps")
+	return ids
+}
+
+// ContextKeys lists the literal keys an expression reads directly under one
+// context — `secrets.NAME` and `secrets['NAME']` for "secrets" — and reports
+// whether it also indexes that context with a key computed at run time, which
+// no list of names can describe.
+func (p *Program) ContextKeys(context string) (keys []string, computed bool) {
+	context = lowerASCII(context)
 	seen := map[string]bool{}
 	var walk func(*node)
 	walk = func(n *node) {
 		if n == nil {
 			return
 		}
-		if n.kind == nIndex && n.left != nil && n.left.kind == nContext &&
-			lowerASCII(n.left.name) == "steps" && n.right != nil && n.right.kind == nLiteral {
-			if id, ok := n.right.lit.(string); ok && id != "" {
-				seen[id] = true
+		if n.kind == nIndex && n.left != nil && n.left.kind == nContext && lowerASCII(n.left.name) == context {
+			if n.right != nil && n.right.kind == nLiteral {
+				if k, ok := n.right.lit.(string); ok && k != "" {
+					seen[k] = true
+				}
+			} else {
+				computed = true
 			}
 		}
 		walk(n.left)
@@ -303,5 +316,5 @@ func (p *Program) StepReferences() []string {
 		}
 	}
 	walk(p.root)
-	return sortedSet(seen)
+	return sortedSet(seen), computed
 }

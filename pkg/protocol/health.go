@@ -14,6 +14,17 @@ type MachineHealth struct {
 	// machine that stops beating and a machine that is draining need to look
 	// different to whoever is watching.
 	Draining bool `json:"draining"`
+	// Repos are the repositories this machine builds, which is how a GitHub
+	// event finds the machines that can plan and run it (A52).
+	Repos []RepoInfo `json:"repos,omitempty"`
+}
+
+// RepoInfo is one configured repository: the key a run or plan names it by,
+// and the owner/name GitHub knows it as (A50). GitHub is empty for a
+// repository that is not on GitHub.
+type RepoInfo struct {
+	Key    string `json:"key"`
+	GitHub string `json:"github,omitempty"`
 }
 
 // RunnerInfo describes one execution slot.

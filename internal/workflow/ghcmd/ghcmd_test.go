@@ -295,3 +295,21 @@ func TestPrependPath(t *testing.T) {
 		t.Errorf("an empty current PATH must not leave a trailing separator: %q", got)
 	}
 }
+
+// A51: an output's or a state's name may hold hyphens, as GitHub's do —
+// setup-bun writes bun-version and cache-hit — while an environment variable's
+// may not.
+func TestOutputNamesMayHoldHyphens(t *testing.T) {
+	data := []byte("cache-hit=true\nbun-version=1.3.3\n9bad=x\n")
+	got, warnings := ParseOutputFile(data)
+	if len(got) != 2 || got[0].Key != "cache-hit" || got[1].Value != "1.3.3" {
+		t.Errorf("outputs = %+v", got)
+	}
+	if len(warnings) != 1 {
+		t.Errorf("warnings = %q, want one for the malformed name", warnings)
+	}
+	env, _ := ParseKeyValueFile(data, nil)
+	if len(env) != 0 {
+		t.Errorf("an environment file must still refuse hyphens: %+v", env)
+	}
+}

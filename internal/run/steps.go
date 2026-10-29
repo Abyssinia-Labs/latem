@@ -46,12 +46,14 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 			}
 			if !holds {
 				x.note("step %d/%d: %s skipped (if: %s)", i+1, total, label, s.If.Source())
+				x.recordResult(s.ID, skipped)
 				continue
 			}
 		case first != nil:
 			// No condition, and something has already failed. The implicit
 			// condition is success(), which no longer holds.
 			x.note("step %d/%d: %s skipped (an earlier step failed)", i+1, total, label)
+			x.recordResult(s.ID, skipped)
 			continue
 		}
 
@@ -63,7 +65,18 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 		x.note("step %d/%d: %s", i+1, total, label)
 		start := x.o.now()
 
-		out, outputs := x.runStep(ctx, s, label, budget, late)
+		var (
+			out     outcome
+			outputs map[string]string
+		)
+		if s.Artifact != nil {
+			// Performed by the agent, not an executor: it is a copy between
+			// the workspace and this run's artifact store, both of which the
+			// agent reaches from the host whichever executor is running.
+			out = x.runArtifactStep(ctx, s, label)
+		} else {
+			out, outputs = x.runStep(ctx, s, label, budget, late)
+		}
 		if s.ID != "" && len(outputs) > 0 {
 			if x.outputs == nil {
 				x.outputs = map[string]map[string]string{}
@@ -73,6 +86,15 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 
 		x.note("step %d/%d: %s %s", i+1, total, label,
 			stepEnding(out, x.o.now().Sub(start).Round(time.Millisecond)))
+		forgiven := !out.ok() && s.ContinueOnError && !stopsTheRun(out)
+		x.recordResult(s.ID, resultOf(out, forgiven))
+		if forgiven {
+			// A50: the step failed and the job carries on as though it had
+			// not. Its outcome says failure for anything that asks; the job's
+			// status, and so every later success() and failure(), do not.
+			x.note("step %d/%d: %s failed; continuing (continue-on-error)", i+1, total, label)
+			continue
+		}
 		if !out.ok() {
 			if stopsTheRun(out) {
 				return x.settle(out, first)
@@ -172,11 +194,16 @@ func (x *execution) runStep(
 	for k, v := range late {
 		env[k] = v
 	}
+	// A51: what this use of the action saved in an earlier step.
+	for k, v := range x.actionState[s.ActionUse] {
+		env["STATE_"+k] = v
+	}
 	step := executor.Step{
 		Name:    label,
 		Run:     s.Run,
 		Env:     env,
 		Timeout: s.Timeout,
+		Shell:   executor.Shell(s.Shell),
 	}
 	if c := s.Container; c != nil {
 		step.Container = &executor.Container{Image: c.Image, Entrypoint: c.Entrypoint, Args: c.Args}
@@ -221,6 +248,7 @@ func (x *execution) runStep(
 		stdout.close()
 		stderr.close()
 	}
+	x.keepState(s.ActionUse, r.res.State)
 
 	if requested, reason, actor := x.h.cancelled(); requested {
 		return cancelOutcome(outcome{}, reason, actor), nil
@@ -262,4 +290,53 @@ func stepLabel(s registry.ResolvedStep, i int) string {
 		return s.Name
 	}
 	return fmt.Sprintf("step %d", i+1)
+}
+
+// skipped is the result of a step whose condition kept it from running.
+var skipped = registry.StepResult{Outcome: "skipped", Conclusion: "skipped"}
+
+// resultOf is GitHub's outcome and conclusion for a step that ran. forgiven is
+// continue-on-error turning a failure's conclusion into success (A50).
+func resultOf(out outcome, forgiven bool) registry.StepResult {
+	what := "success"
+	switch {
+	case out.state == protocol.StateCancelled:
+		what = "cancelled"
+	case !out.ok():
+		what = "failure"
+	}
+	if forgiven {
+		return registry.StepResult{Outcome: what, Conclusion: "success"}
+	}
+	return registry.StepResult{Outcome: what, Conclusion: what}
+}
+
+// recordResult keeps a step's result for later steps' steps context. A step
+// without an id cannot be referred to, so there is nothing to keep.
+func (x *execution) recordResult(id string, r registry.StepResult) {
+	if id == "" {
+		return
+	}
+	if x.results == nil {
+		x.results = map[string]registry.StepResult{}
+	}
+	x.results[id] = r
+}
+
+// keepState records what a step of one use of an action wrote to
+// $GITHUB_STATE, for that use's later steps (A51). A step that belongs to no
+// action use has nobody to hand it to.
+func (x *execution) keepState(use string, state map[string]string) {
+	if use == "" || len(state) == 0 {
+		return
+	}
+	if x.actionState == nil {
+		x.actionState = map[string]map[string]string{}
+	}
+	if x.actionState[use] == nil {
+		x.actionState[use] = map[string]string{}
+	}
+	for k, v := range state {
+		x.actionState[use][k] = v
+	}
 }

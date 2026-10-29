@@ -94,3 +94,76 @@ func TestAdmitOnHoldsTheRunnerToTheExecutor(t *testing.T) {
 		t.Errorf("an ordinary job must still admit through Admit: %+v", d)
 	}
 }
+
+// Gate 13's third part (A47). A job carrying third-party code may only land on
+// an executor that confines it — and the operator's opt-out was applied at
+// compile time, so a job that still asks for this has not been excused.
+func TestAdmitOnHoldsTheRunnerToIsolation(t *testing.T) {
+	r := &Registry{Version: SchemaVersion, Jobs: map[string]*Job{
+		"j": {RunsOn: []string{"linux"}, Steps: []Step{{Run: "make"}}, RequiresIsolation: true},
+	}}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req := protocol.RunRequest{Job: "j", Ref: "refs/heads/main"}
+
+	res, d := r.AdmitOn(req, Runner{Labels: []string{"linux"}, Executor: "docker", Isolates: true})
+	if !d.OK() {
+		t.Fatalf("an isolating runner should take it: %+v", d)
+	}
+	if !res.RequiresIsolation {
+		t.Error("the resolved job should record why it landed where it did")
+	}
+
+	_, d = r.AdmitOn(req, Runner{Labels: []string{"linux"}, Executor: "native"})
+	if d.Code != protocol.ErrNoRunner {
+		t.Fatalf("a native runner took a job carrying third-party code: %+v", d)
+	}
+	for _, want := range []string{"third-party", "native", "allow_unisolated"} {
+		if !strings.Contains(d.Msg, want) {
+			t.Errorf("the refusal should mention %q: %s", want, d.Msg)
+		}
+	}
+
+	// Fails closed on a caller that did not say what the executor is.
+	if _, d = r.Admit(req, []string{"linux"}); d.Code != protocol.ErrNoRunner {
+		t.Errorf("Admit without isolation info must refuse: %+v", d)
+	}
+	// And an ordinary job is unaffected.
+	plain := &Registry{Version: SchemaVersion, Jobs: map[string]*Job{
+		"j": {RunsOn: []string{"linux"}, Steps: []Step{{Run: "make"}}},
+	}}
+	if _, d = plain.Admit(req, []string{"linux"}); !d.OK() {
+		t.Errorf("an ordinary job must still admit: %+v", d)
+	}
+}
+
+func TestArtifactStepValidation(t *testing.T) {
+	ok := []Step{
+		{Artifact: &ArtifactStep{Name: "build output", Include: []string{"dist/**"}, IfNoFilesFound: "warn"}},
+		{Artifact: &ArtifactStep{Download: true, Name: "build output", Path: "restored"}},
+		{Artifact: &ArtifactStep{Download: true}},
+	}
+	for _, s := range ok {
+		if err := containerJob(s).Validate(); err != nil {
+			t.Errorf("%+v should validate: %v", *s.Artifact, err)
+		}
+	}
+
+	bad := map[string]Step{
+		"two kinds":        {Run: "make", Artifact: &ArtifactStep{Name: "a", Include: []string{"x"}, IfNoFilesFound: "warn"}},
+		"no name":          {Artifact: &ArtifactStep{Include: []string{"x"}, IfNoFilesFound: "warn"}},
+		"no paths":         {Artifact: &ArtifactStep{Name: "a", IfNoFilesFound: "warn"}},
+		"a traversal name": {Artifact: &ArtifactStep{Name: "../a", Include: []string{"x"}, IfNoFilesFound: "warn"}},
+		"absolute path":    {Artifact: &ArtifactStep{Name: "a", Include: []string{"/etc/passwd"}, IfNoFilesFound: "warn"}},
+		"climbing path":    {Artifact: &ArtifactStep{Name: "a", Include: []string{"../x"}, IfNoFilesFound: "warn"}},
+		"home path":        {Artifact: &ArtifactStep{Name: "a", Include: []string{"~/x"}, IfNoFilesFound: "warn"}},
+		"bad policy":       {Artifact: &ArtifactStep{Name: "a", Include: []string{"x"}, IfNoFilesFound: "shrug"}},
+		"download escape":  {Artifact: &ArtifactStep{Download: true, Path: "../out"}},
+	}
+	for name, s := range bad {
+		if err := containerJob(s).Validate(); err == nil {
+			t.Errorf("%s: should be refused", name)
+		}
+	}
+}

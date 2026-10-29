@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
 
@@ -54,7 +56,7 @@ func TestParseAndCompile(t *testing.T) {
 	if !w.TriggersAreNotHonoured() {
 		t.Error("an `on:` block should be reported as unhonoured")
 	}
-	job, err := Compile(w, "test", testScope())
+	job, err := Compile(t.Context(), w, "test", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -83,7 +85,7 @@ jobs:
     steps:
       - run: echo ${{ github.event.pull_request.title }}
 `)
-	job, err := Compile(w, "build", testScope())
+	job, err := Compile(t.Context(), w, "build", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -116,7 +118,7 @@ jobs:
     steps:
       - run: echo ${{ github.sha }}
 `)
-	job, err := Compile(w, "build", testScope())
+	job, err := Compile(t.Context(), w, "build", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -129,24 +131,38 @@ jobs:
 	}
 }
 
+// A remote action meets two gates, and they are separate because their fixes
+// are: the allowlist is a line in config.toml, and "not implemented yet" is a
+// workflow edit until phase 5 finishes.
 func TestUsesIsRefusedByName(t *testing.T) {
-	w := parse(t, `
+	src := `
 jobs:
   build:
     runs-on: [macos]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
       - run: make
-`)
-	_, err := Compile(w, "build", testScope())
+`
+	// The shipped default refuses everything, and says which file to edit.
+	_, err := Compile(t.Context(), parse(t, src), "build", testScope())
 	if err == nil {
-		t.Fatal("a uses: step must be refused in phase 1")
+		t.Fatal("the default policy admitted a remote action")
 	}
-	if !strings.Contains(err.Error(), "actions/checkout@v5") {
+	if !strings.Contains(err.Error(), "actions/setup-go") || !strings.Contains(err.Error(), "allowed") {
+		t.Errorf("the refusal should name the action and the allowlist: %v", err)
+	}
+
+	// Allowed, and still not implemented — a different sentence.
+	_, err = CompileWith(t.Context(), parse(t, src), "build", testScope(),
+		Options{Policy: actions.Policy{Allowed: []string{"actions/*"}}})
+	if err == nil {
+		t.Fatal("an allowed remote action compiled")
+	}
+	if !strings.Contains(err.Error(), "actions/setup-go@v6") {
 		t.Errorf("the error should name the action: %v", err)
 	}
-	if !strings.Contains(err.Error(), "phase 5") {
-		t.Errorf("the error should say when it will work: %v", err)
+	if !strings.Contains(err.Error(), "no action cache") {
+		t.Errorf("with no fetcher the error should say so: %v", err)
 	}
 }
 
@@ -164,7 +180,7 @@ jobs:
     steps:
       - run: make
 `)
-	_, err := Compile(w, "build", testScope())
+	_, err := Compile(t.Context(), w, "build", testScope())
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -188,7 +204,7 @@ jobs:
         run: make
       - run: echo ${{ steps.build.outputs.sha }}
 `)
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -212,7 +228,7 @@ jobs:
 	}
 
 	w2 := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: echo ${{ steps.later.outputs.x }}\n      - id: later\n        run: make\n")
-	job2, err := Compile(w2, "b", testScope())
+	job2, err := Compile(t.Context(), w2, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -235,7 +251,7 @@ jobs:
         if: github.event_name == 'schedule'
         run: make b
 `)
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -258,7 +274,7 @@ jobs:
       - if: ${{ always() }}
         run: ./report.sh
 `)
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -299,21 +315,21 @@ func TestStrictDecodingRejectsUnknownKeys(t *testing.T) {
 func TestRunsOnForms(t *testing.T) {
 	// A bare string is the common form.
 	w := parse(t, "jobs:\n  b:\n    runs-on: macos\n    steps:\n      - run: make\n")
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil || len(job.RunsOn) != 1 || job.RunsOn[0] != "macos" {
 		t.Errorf("scalar runs-on = %+v, %v", job, err)
 	}
 
 	// GitHub writes macOS; runner labels are lowercase.
 	w2 := parse(t, "jobs:\n  b:\n    runs-on: [self-hosted, macOS]\n    steps:\n      - run: make\n")
-	job2, err := Compile(w2, "b", testScope())
+	job2, err := Compile(t.Context(), w2, "b", testScope())
 	if err != nil || len(job2.RunsOn) != 1 || job2.RunsOn[0] != "macos" {
 		t.Errorf("mixed-case runs-on = %+v, %v", job2, err)
 	}
 
 	// self-hosted alone says nothing about which machine.
 	w3 := parse(t, "jobs:\n  b:\n    runs-on: [self-hosted]\n    steps:\n      - run: make\n")
-	if _, err := Compile(w3, "b", testScope()); err == nil {
+	if _, err := Compile(t.Context(), w3, "b", testScope()); err == nil {
 		t.Error("runs-on: [self-hosted] should be refused as carrying no label")
 	}
 }
@@ -327,7 +343,7 @@ jobs:
       - run: make
         working-directory: sub dir
 `)
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -336,9 +352,66 @@ jobs:
 	}
 }
 
+// A50: every compiled step carries GitHub's shell. No shell is GitHub's
+// default, `bash -e` — which is not the same as naming bash.
+func TestStepsCarryGitHubsShell(t *testing.T) {
+	w := parse(t, `
+jobs:
+  plain:
+    runs-on: [linux]
+    steps:
+      - run: make
+  defaulted:
+    runs-on: [linux]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: make
+      - run: make
+        shell: sh
+`)
+	job, err := Compile(t.Context(), w, "plain", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := job.Steps[0].Shell; got != string(executor.ShellGitHub) {
+		t.Errorf("no shell: got %q, want %q", got, executor.ShellGitHub)
+	}
+
+	job, err = Compile(t.Context(), w, "defaulted", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := job.Steps[0].Shell; got != string(executor.ShellGitHubBash) {
+		t.Errorf("job default bash: got %q", got)
+	}
+	if got := job.Steps[1].Shell; got != string(executor.ShellGitHubSh) {
+		t.Errorf("the step's own shell should win: got %q", got)
+	}
+
+	w = parse(t, `
+defaults:
+  run:
+    shell: sh
+jobs:
+  plain:
+    runs-on: [linux]
+    steps:
+      - run: make
+`)
+	job, err = Compile(t.Context(), w, "plain", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := job.Steps[0].Shell; got != string(executor.ShellGitHubSh) {
+		t.Errorf("workflow default sh: got %q", got)
+	}
+}
+
 func TestUnknownJobNamesTheOnesThatExist(t *testing.T) {
 	w := parse(t, simple)
-	_, err := Compile(w, "nope", testScope())
+	_, err := Compile(t.Context(), w, "nope", testScope())
 	if err == nil || !strings.Contains(err.Error(), "test") {
 		t.Errorf("the error should list the jobs that do exist: %v", err)
 	}
@@ -388,12 +461,22 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 			if len(w.JobNames()) == 0 {
 				t.Fatal("no jobs found")
 			}
+			// Allowed by policy, so what is left to refuse them is the
+			// implementation — which is the fact A42 measured these files for.
+			opts := Options{Policy: actions.Policy{Allowed: []string{"*/*"}}}
 			for _, name := range w.JobNames() {
-				_, err := Compile(w, name, testScope())
+				_, err := CompileWith(t.Context(), w, name, testScope(), opts)
 				if err == nil {
 					continue // a job with no uses: is allowed to compile
 				}
-				if !strings.Contains(err.Error(), "latem does not implement yet") {
+				// Two honest refusals remain with no cache wired: an action
+				// that would have to be fetched, and this repository's own
+				// release.yml asking checkout for a different ref — which is
+				// `latem run --ref` here, and the shim says so.
+				msg := err.Error()
+				if !strings.Contains(msg, "no action cache") &&
+					!strings.Contains(msg, "latem has already checked this repository out") &&
+					!strings.Contains(msg, "latem does not implement yet") {
 					t.Errorf("job %q refused for an unexpected reason: %v", name, err)
 				}
 			}
@@ -404,24 +487,52 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 // INV-4: a secret is declared and arrives by name. Substituting one would put
 // the value in the compiled registry, which is persisted and logged.
 func TestSecretsAreNeverSubstituted(t *testing.T) {
+	// Even with a value in the admission scope — which a run never puts there
+	// — a secret compiles to a late binding to its name (A50): the registry,
+	// which is persisted, never holds a value.
 	sc := testScope()
 	sc.Contexts["secrets"] = map[string]any{"NPM_TOKEN": "s3cret"}
 
-	for _, src := range []string{
-		"jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: npm publish --token ${{ secrets.NPM_TOKEN }}\n",
-		"jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - if: secrets.NPM_TOKEN != ''\n        run: make\n",
-	} {
-		w := parse(t, src)
-		_, err := Compile(w, "b", sc)
-		if err == nil {
-			t.Fatalf("a secrets expression must be refused:\n%s", src)
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - run: npm publish --token ${{ secrets.NPM_TOKEN }}
+      - if: secrets.DEPLOY_KEY != ''
+        run: make
+        env:
+          AUTH: Bearer ${{ secrets['API_TOKEN'] }}
+`)
+	job, err := Compile(t.Context(), w, "b", sc)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := strings.Join(job.Secrets, ","); got != "API_TOKEN,DEPLOY_KEY,NPM_TOKEN" {
+		t.Errorf("job secrets = %q, want every name the job reads", got)
+	}
+	publish := job.Steps[0]
+	if publish.Run != `npm publish --token "$GHA_EXPR_1"` {
+		t.Errorf("run = %q — a secret must reach the step as an environment variable", publish.Run)
+	}
+	if _, late := publish.Late["GHA_EXPR_1"]; !late {
+		t.Error("the secret should be bound late, by name")
+	}
+	for _, st := range job.Steps {
+		for k, v := range st.Env {
+			if strings.Contains(v, "s3cret") {
+				t.Errorf("a secret value reached the compiled registry in %s", k)
+			}
 		}
-		if strings.Contains(err.Error(), "s3cret") {
-			t.Fatalf("the refusal leaked the value: %v", err)
-		}
-		if !strings.Contains(err.Error(), "secrets:") {
-			t.Errorf("the error should point at the declaration: %v", err)
-		}
+	}
+	if job.Steps[1].If == nil {
+		t.Error("a condition reading a secret should be evaluated when the step runs")
+	}
+
+	// A name chosen at run time could be any secret on the machine.
+	w = parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - run: echo ${{ secrets[env.WHICH] }}\n")
+	if _, err := Compile(t.Context(), w, "b", sc); err == nil || !strings.Contains(err.Error(), "has to be named") {
+		t.Errorf("a computed secret name should be refused, got %v", err)
 	}
 }
 
@@ -436,7 +547,7 @@ jobs:
     steps:
       - run: echo status=${{ job.status }} on ${{ runner.os }}
 `)
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -469,9 +580,18 @@ jobs:
     steps:
       - run: make
 `)
-	_, err := Compile(w, "b", testScope())
-	if err == nil || !strings.Contains(err.Error(), "MIXED") {
-		t.Fatalf("a mixed late env value should be refused by name: %v", err)
+	// Text around a late expression is rendered whole when the step runs
+	// (A50); it is still only ever an environment value.
+	mixed, err := Compile(t.Context(), w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	v := mixed.Steps[0].Late["MIXED"]
+	if v == nil {
+		t.Fatalf("MIXED should be a late binding: %+v", mixed.Steps[0])
+	}
+	if got, err := v.Resolve(registry.StepScope{Status: registry.StatusFailure}); err != nil || got != "prefix-failure" {
+		t.Errorf("MIXED = %q, %v; want prefix-failure", got, err)
 	}
 
 	w2 := parse(t, `
@@ -483,7 +603,7 @@ jobs:
     steps:
       - run: make
 `)
-	job, err := Compile(w2, "b", testScope())
+	job, err := Compile(t.Context(), w2, "b", testScope())
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -497,7 +617,7 @@ jobs:
 
 func TestStepIDIsCarried(t *testing.T) {
 	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - id: build\n        run: make\n")
-	job, err := Compile(w, "b", testScope())
+	job, err := Compile(t.Context(), w, "b", testScope())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +630,7 @@ func TestStepIDIsCarried(t *testing.T) {
 // string, which is always truthy — a condition that silently always passes.
 func TestConditionMustBeASingleExpression(t *testing.T) {
 	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - if: run when ${{ always() }}\n        run: make\n")
-	if _, err := Compile(w, "b", testScope()); err == nil {
+	if _, err := Compile(t.Context(), w, "b", testScope()); err == nil {
 		t.Error("text around a condition's expression must be refused")
 	}
 }

@@ -269,8 +269,11 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		envDir:      dir,
 		envFile:     filepath.Join(dir, EnvFileName),
 		outFile:     filepath.Join(dir, OutputFileName),
+		stateFile:   filepath.Join(dir, StateFileName),
 		pathFile:    filepath.Join(dir, PathFileName),
 		summaryFile: filepath.Join(dir, SummaryFileName),
+		tempDir:     filepath.Join(dir, TempDirName),
+		toolCache:   spec.ToolCache,
 		grace:       e.grace,
 		drain:       e.drain,
 		carried:     map[string]string{},
@@ -278,6 +281,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 	}
 	for f, label := range map[string]string{
 		env.outFile: "$GITHUB_OUTPUT", env.pathFile: "$GITHUB_PATH", env.summaryFile: "$GITHUB_STEP_SUMMARY",
+		env.stateFile: "$GITHUB_STATE",
 	} {
 		if err := env.createEmpty(f, label); err != nil {
 			return nil, err
@@ -285,6 +289,28 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 	}
 	if err := env.createEnvFile(); err != nil {
 		return nil, err
+	}
+	// 0o700 like the files beside it: the directory is the run's, and a step
+	// is the only thing that should read what it put there.
+	if err := os.Mkdir(env.tempDir, 0o700); err != nil {
+		return nil, wrapErr(protocol.ErrExecutor, err, "create $RUNNER_TEMP %s", env.tempDir)
+	}
+	if len(spec.Event) > 0 {
+		// 0o600: the event is the run's, and a step running as this user is
+		// the only reader it has.
+		eventFile := filepath.Join(dir, EventFileName)
+		if err := os.WriteFile(eventFile, spec.Event, 0o600); err != nil {
+			return nil, wrapErr(protocol.ErrExecutor, err, "write $GITHUB_EVENT_PATH %s", eventFile)
+		}
+		env.eventFile = eventFile
+	}
+	if env.toolCache != "" {
+		if !filepath.IsAbs(env.toolCache) {
+			return nil, codeErr(protocol.ErrExecutor, "tool cache %q is not an absolute path", env.toolCache)
+		}
+		if err := os.MkdirAll(env.toolCache, 0o700); err != nil {
+			return nil, wrapErr(protocol.ErrExecutor, err, "create $RUNNER_TOOL_CACHE %s", env.toolCache)
+		}
 	}
 	return env, nil
 }

@@ -1,12 +1,17 @@
 package workflow
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -22,11 +27,24 @@ const hoistPrefix = "GHA_EXPR_"
 // lateContexts are answered by the run loop as the step is about to run, so
 // an expression reaching for one compiles to a [registry.LateValue] rather
 // than to a value. The command is unchanged either way — see hoist.
-var lateContexts = map[string]bool{"job": true, "runner": true, "steps": true}
+var lateContexts = map[string]bool{
+	"job": true, "runner": true, "steps": true,
+	// secrets are late for a reason that is not timing: the value must never
+	// be in the compiled registry, which is persisted. Compiled late, the
+	// registry holds the name, and the value is resolved on the machine and
+	// read as the step is about to run (A50).
+	"secrets": true,
+	// latem is this agent's own, and carries the one fact a compiled job
+	// cannot know: where a fetched action's files are reachable from inside
+	// the step. Only a chosen executor can answer that (A42 phase 5).
+	"latem": true,
+}
 
-// refusedContexts cannot be compiled at all, each for its own reason.
+// refusedContexts cannot be compiled at all, each for its own reason — unless
+// the scope answers them: a workflow run's job carries its needs' results and
+// outputs, so for it needs is known when the run is admitted (A52).
 var refusedContexts = map[string]string{
-	"needs": "latem runs one job per run, so there is nothing for needs to refer to (N2)",
+	"needs": "this run is not a workflow run's job, so there is nothing for needs to refer to (A52)",
 }
 
 // lateFuncs are the status functions. They answer against the job's status,
@@ -40,16 +58,13 @@ var refusedContexts = map[string]string{
 // which stops at the first failure like any other. A test holds this.
 var lateFuncs = map[string]bool{"success": true, "failure": true, "cancelled": true, "always": true}
 
-// secretsContext is refused separately from the run-time contexts, because the
-// reason is not timing.
-//
-// INV-4 and §15: a secret reaches a step as an environment variable of its own
-// name, because the job declared it in secrets: — it is never substituted. If
-// this compiled, the value would be evaluated at admission and written into the
-// registry's env map, which is persisted and logged; "secrets never leave the
-// machine" would still hold and "secrets are not in the registry" would not.
-// Answering null instead would be worse still: the step would run with an empty
-// credential and fail somewhere that does not mention secrets.
+// TokenSecret is the secret a workflow run's job token is read as —
+// secrets.GITHUB_TOKEN, and github.token, which is the same value (A52).
+const TokenSecret = "GITHUB_TOKEN" //nolint:gosec // a secret's name, not a secret
+
+// secretsContext is read by name only: `secrets.X` or `secrets['X']`. A name
+// computed at run time could be any secret on the machine, so it is refused
+// rather than resolved (A50).
 const secretsContext = "secrets"
 
 // labelPattern mirrors the native registry's, because the labels compiled here
@@ -66,14 +81,39 @@ var labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // the same executors and the same log pipeline as one written in
 // .latem/jobs.yaml, because a second execution path would be a second place for
 // the invariants in §5 to be true or not.
-func Compile(w *Workflow, jobName string, sc expr.Scope) (*registry.Job, error) {
-	return CompileWith(w, jobName, sc, nil)
+func Compile(ctx context.Context, w *Workflow, jobName string, sc expr.Scope) (*registry.Job, error) {
+	return CompileWith(ctx, w, jobName, sc, Options{})
 }
 
-// CompileWith is [Compile] with somewhere to read local actions from. A nil
-// loader compiles everything except `uses: ./path`, which it refuses by name —
-// there being no checkout to read the action out of.
-func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoader) (*registry.Job, error) {
+// Options is what compilation needs beyond the workflow itself.
+type Options struct {
+	// Actions reads a local action's metadata. Nil compiles everything except
+	// `uses: ./path`, which is refused by name — there being no checkout to
+	// read the action out of.
+	Actions ActionLoader
+	// Policy decides which remote actions this machine will run. Its zero
+	// value refuses all of them, which is the shipped default (A42 phase 5).
+	Policy actions.Policy
+	// Fetcher resolves and fetches an allowed remote action. Nil refuses one
+	// by name rather than reaching for a cache that is not there.
+	Fetcher RemoteFetcher
+	// LabelAliases is the machine's [label_aliases] (A50): a runs-on label
+	// found here is replaced by the labels it names, before GitHub's hosted
+	// labels are mapped. See [compileLabels].
+	LabelAliases map[string][]string
+	// Vars answers the vars context for a job in an environment (empty for
+	// none), from the repository's config (A50). Nil leaves vars empty.
+	Vars func(environment string) map[string]string
+	// WorkflowRun compiles a workflow run's job (A52): needs, a job's if:,
+	// outputs: and continue-on-error are then its own to honour, and the
+	// scope carries the needs context they read.
+	WorkflowRun bool
+}
+
+// CompileWith is [Compile] against a machine's actions and its policy.
+func CompileWith(
+	ctx context.Context, w *Workflow, jobName string, sc expr.Scope, opts Options,
+) (*registry.Job, error) {
 	declared, ok := w.Jobs[jobName]
 	if !ok {
 		return nil, &registry.Error{
@@ -82,20 +122,72 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoade
 		}
 	}
 
+	// A50: vars are the repository's, then the environment's over them —
+	// so the environment is answered first, against the repository's.
+	if opts.Vars != nil {
+		sc = withContext(sc, "vars", stringsToAny(opts.Vars("")))
+	}
+	if opts.WorkflowRun {
+		// A dispatch's inputs arrive as strings; the inputs context holds
+		// them as the workflow declares them, so `inputs.dry == true` is
+		// true for a boolean input set to "true", as on GitHub.
+		var err error
+		if sc, err = typedInputs(w, sc); err != nil {
+			return nil, badRegistry("%s: %v", w.Path, err)
+		}
+		// The job's if:, against its needs and the event, before anything
+		// else about the job is read: a skipped job's steps are not
+		// compiled, because none of them runs (A52).
+		run, err := jobCondition(declared.If, sc)
+		if err != nil {
+			return nil, badRegistry("%s: job %q: if: %v", w.Path, jobName, err)
+		}
+		if !run {
+			return &registry.Job{Description: declared.Name, Skip: true,
+				SkipReason: strings.TrimSpace(declared.If)}, nil
+		}
+	}
+	environment, err := environmentName(declared.Environment, sc)
+	if err != nil {
+		return nil, badRegistry("%s: job %q: environment: %v", w.Path, jobName, err)
+	}
+	if opts.Vars != nil && environment != "" {
+		sc = withContext(sc, "vars", stringsToAny(opts.Vars(environment)))
+	}
+
+	// A50: the env context holds the workflow's and the job's env:, which is
+	// what GitHub evaluates ${{ env.X }} against; a step's own is added per
+	// step. Before expansion, so an action's with: sees it too.
+	jobEnv := envContext(sc, nil, w.Env, declared.Env)
+	sc = withEnv(sc, jobEnv)
+
 	// A44: local and docker:// actions become steps before anything else
 	// looks at the job, so that the refusals, the hoisting and the late
 	// bindings below all see only kinds of step they already understand. The
 	// job is copied, not edited: a Workflow is parsed once and may be
 	// compiled for more than one run.
-	expanded, err := newExpander(actions, w.Path).expandSteps(declared.Steps, nil)
+	x := newExpander(opts.Actions, w.Path)
+	x.policy, x.fetcher, x.scope = opts.Policy, opts.Fetcher, sc
+	expanded, err := x.expandSteps(ctx, declared.Steps, nil)
 	if err != nil {
 		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)
+	}
+	// A51: JavaScript actions' pre steps first, their post steps last and in
+	// reverse, as GitHub orders them.
+	if len(x.pre) > 0 || len(x.post) > 0 {
+		all := make([]Step, 0, len(x.pre)+len(expanded)+len(x.post))
+		all = append(all, x.pre...)
+		all = append(all, expanded...)
+		for i := len(x.post) - 1; i >= 0; i-- {
+			all = append(all, x.post[i])
+		}
+		expanded = all
 	}
 	copied := *declared
 	copied.Steps = expanded
 	j := &copied
 
-	if err := j.unsupported(w.Path, jobName); err != nil {
+	if err := j.unsupported(w.Path, jobName, opts.WorkflowRun); err != nil {
 		return nil, err
 	}
 
@@ -103,7 +195,7 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoade
 	// applied per step below.
 	baseEnv := mergeEnv(w.Env, j.Env)
 
-	labels, err := compileLabels(j.RunsOn, w.Path, jobName)
+	labels, err := compileLabels(j.RunsOn, w.Path, jobName, opts.LabelAliases)
 	if err != nil {
 		return nil, err
 	}
@@ -111,19 +203,37 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoade
 	out := &registry.Job{
 		Description: j.Name,
 		RunsOn:      labels,
+		// A remote action is code the operator did not write, and by this
+		// point it has been inlined into ordinary steps — so unless the job
+		// says so here, nothing downstream can tell. The operator's opt-out
+		// was applied where the policy lives, in the expander, so a job that
+		// still carries this has not been excused from it (A47).
+		RequiresIsolation: x.usedRemote && !opts.Policy.AllowUnisolated,
+		CacheDecls:        x.caches,
 	}
+	for _, d := range x.caches {
+		out.Caches = append(out.Caches, d.Name)
+	}
+	// GitHub's default rather than §9's 30 minutes (A50): a workflow that
+	// relies on its jobs being allowed six hours never had to say so.
+	out.Timeout = protocol.Duration(DefaultJobTimeout)
 	if j.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*j.TimeoutMins) * float64(minute))
 	}
 
-	shell := defaultShell(w.Defaults, j.Defaults)
+	d := jobDefaults{
+		env:        baseEnv,
+		envContext: jobEnv,
+		shell:      defaultShell(w.Defaults, j.Defaults),
+		workingDir: defaultWorkingDirectory(w.Defaults, j.Defaults),
+	}
 
 	for i, st := range j.Steps {
 		where := fmt.Sprintf("%s: job %q step %d", w.Path, jobName, i+1)
 		if st.Name != "" {
 			where = fmt.Sprintf("%s: job %q step %q", w.Path, jobName, st.Name)
 		}
-		compiled, skip, err := compileStep(st, where, baseEnv, shell, sc)
+		compiled, skip, err := compileStep(st, where, d, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -136,17 +246,129 @@ func CompileWith(w *Workflow, jobName string, sc expr.Scope, actions ActionLoade
 	if len(out.Steps) == 0 {
 		return nil, badRegistry("%s: job %q has no steps to run", w.Path, jobName)
 	}
+	if opts.WorkflowRun {
+		if out.Outputs, err = compileOutputs(j.Outputs, sc); err != nil {
+			return nil, badRegistry("%s: job %q: outputs: %v", w.Path, jobName, err)
+		}
+		out.Inputs = dispatchDeclarations(w)
+	}
+	// A50: the names, never the values. The run resolves them on the
+	// machine, scoped by repository and environment, and registers every
+	// value with the redactor before the first step.
+	out.Secrets = secretNames(out.Steps)
+	out.Secrets = mergeNames(out.Secrets, outputSecrets(out.Outputs))
+	out.Environment = environment
+	out.Notes = append([]string(nil), x.notes...)
+	if !opts.WorkflowRun {
+		out.Notes = append(out.Notes, ignoredNotes(w, j)...)
+	}
 	return out, nil
 }
 
+// ignoredNotes says what the job's workflow asked for that latem parsed and
+// does not do yet, so a run does not appear to honour it (A50).
+func ignoredNotes(w *Workflow, j *Job) []string {
+	var notes []string
+	if len(w.Permissions) > 0 || len(j.Permissions) > 0 {
+		notes = append(notes, "permissions: is not enforced — there is no GITHUB_TOKEN for it to scope yet")
+	}
+	if len(w.Concurrency) > 0 || len(j.Concurrency) > 0 {
+		notes = append(notes, "concurrency: is not honoured — this run neither waits for nor cancels another "+
+			"(a jobs.yaml concurrency_group does serialise)")
+	}
+	return notes
+}
+
+// secretNames lists every secret a compiled job's late values and conditions
+// read, sorted.
+func secretNames(steps []registry.Step) []string {
+	set := map[string]bool{}
+	note := func(p *expr.Program) {
+		names, _ := p.ContextKeys(secretsContext)
+		for _, n := range names {
+			set[n] = true
+		}
+		if keys, _ := p.ContextKeys("github"); slices.Contains(keys, "token") {
+			set[TokenSecret] = true
+		}
+	}
+	visit := func(v any) {
+		switch l := v.(type) {
+		case *lateExpr:
+			note(l.prog)
+		case *lateTemplate:
+			for _, p := range l.progs {
+				note(p)
+			}
+		}
+	}
+	for _, st := range steps {
+		for _, v := range st.Late {
+			visit(v)
+		}
+		if st.If != nil {
+			visit(st.If)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// environmentName reads `environment:` — a name, or {name, url} — and answers
+// any expression in the name now (A50). Its url is GitHub's deployment UI and
+// has nothing to scope here.
+func environmentName(raw json.RawMessage, sc expr.Scope) (string, error) {
+	name, err := environmentField(raw)
+	if err != nil || name == "" {
+		return "", err
+	}
+	if !answerableNow(name, sc) {
+		return "", fmt.Errorf("%q is only known when the job runs, and an environment decides which secrets it gets before it starts", name)
+	}
+	out, err := expr.EvalString(name, sc)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// environmentField is the name an `environment:` gives, unevaluated.
+func environmentField(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var name string
+	if err := json.Unmarshal(raw, &name); err != nil {
+		var obj struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return "", fmt.Errorf("expected a name or {name, url}, got %s", string(raw))
+		}
+		name = obj.Name
+	}
+	return name, nil
+}
+
 const minute = 60 * 1_000_000_000 // protocol.Duration is nanoseconds
+
+// DefaultJobTimeout is GitHub's timeout-minutes default, 360 (A50).
+const DefaultJobTimeout = 360 * minute
 
 // unsupported refuses every construct this phase does not implement, by name.
 //
 // One error listing all of them, rather than the first: a workflow being
 // adopted usually trips several at once, and making the author discover them
 // one build at a time is the slow version of the same conversation.
-func (j *Job) unsupported(file, name string) error {
+func (j *Job) unsupported(file, name string, workflowRun bool) error {
 	var found []string
 	add := func(what, why string) { found = append(found, fmt.Sprintf("  %s — %s", what, why)) }
 
@@ -156,7 +378,7 @@ func (j *Job) unsupported(file, name string) error {
 	if len(j.Strategy) > 0 {
 		add("strategy:", "a matrix expands one job into several; latem runs the job you named")
 	}
-	if len(j.Needs) > 0 {
+	if len(j.Needs) > 0 && !workflowRun {
 		add("needs:", refusedContexts["needs"])
 	}
 	if len(j.Services) > 0 {
@@ -165,29 +387,30 @@ func (j *Job) unsupported(file, name string) error {
 	if len(j.Container) > 0 {
 		add("container:", "set the executor's image in config.toml instead")
 	}
-	if len(j.Outputs) > 0 {
-		add("outputs:", "job outputs are consumed by needs:, which latem has no equivalent for")
-	}
-	if len(j.ContinueOnError) > 0 {
-		add("continue-on-error:", "a step either fails the run or it does not")
-	}
-	if j.If != "" {
-		add("if: on a job", "a run targets one job; gate it with the hook's ref pattern instead")
+	// A workflow run's job honours these (A52): its if: was answered before
+	// this, its outputs are reported as it ends, and continue-on-error
+	// decides the workflow run's conclusion, which is the control plane's.
+	if !workflowRun {
+		if len(j.Outputs) > 0 {
+			add("outputs:", "job outputs are read by the jobs that need this one, and this run is not a workflow run's job (A52)")
+		}
+		if len(j.ContinueOnError) > 0 {
+			add("continue-on-error: on a job", "it decides a workflow run's result, and this run is not a workflow run's job (A52)")
+		}
+		if j.If != "" {
+			add("if: on a job", "it decides the job's place in a workflow run, and this run is not a workflow run's job (A52)")
+		}
 	}
 	for i, st := range j.Steps {
 		if st.Uses != "" {
-			// Local and docker:// actions were expanded before this ran, so
-			// what is left names a repository that is not this one.
-			found = append(found, fmt.Sprintf(
-				"  step %d uses: %s — a remote action is A42 phase 5. A local action (uses: ./path) or "+
-					"uses: docker://image runs today; so does the action's command as a run: step",
-				i+1, st.Uses))
+			// Unreachable since phase 5 step 2: the expander resolves every
+			// `uses:` or refuses it by name. Kept because a step that reaches
+			// execution with an unexpanded `uses:` would otherwise run as an
+			// empty command, which is the silent version of this.
+			found = append(found, fmt.Sprintf("  step %d uses: %s — unresolved", i+1, st.Uses))
 		}
-		if st.Run == "" && st.Uses == "" && st.container == nil {
+		if st.Run == "" && st.Uses == "" && st.container == nil && st.artifact == nil {
 			found = append(found, fmt.Sprintf("  step %d — has neither run: nor uses:", i+1))
-		}
-		if len(st.ContinueOnError) > 0 {
-			found = append(found, fmt.Sprintf("  step %d continue-on-error: — not implemented", i+1))
 		}
 	}
 	if len(found) == 0 {
@@ -205,11 +428,24 @@ func (j *Job) unsupported(file, name string) error {
 // that still does not fit the pattern is refused here rather than failing to
 // match anything later, which would present as "no runner" and send the
 // operator looking at their config.
-func compileLabels(runsOn StringList, file, job string) ([]string, error) {
+//
+// Since A50 a label is first looked up in the machine's aliases and then in
+// GitHub's hosted labels, and replaced by what it stands for: `ubuntu-latest`
+// is `linux` on a machine you own, and a vendor's label is whatever the
+// operator says it is. A Windows label is refused by name, because no latem
+// runner can be one (A47).
+func compileLabels(runsOn StringList, file, job string, aliases map[string][]string) ([]string, error) {
 	if len(runsOn) == 0 {
 		return nil, badRegistry("%s: job %q has no runs-on", file, job)
 	}
 	out := make([]string, 0, len(runsOn))
+	seen := map[string]bool{}
+	add := func(l string) {
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
 	for _, raw := range runsOn {
 		l := strings.ToLower(strings.TrimSpace(raw))
 		if expr.Has(l) {
@@ -223,10 +459,26 @@ func compileLabels(runsOn StringList, file, job string) ([]string, error) {
 		if l == "self-hosted" {
 			continue
 		}
+		if mapped, ok := aliases[l]; ok {
+			for _, m := range mapped {
+				add(m)
+			}
+			continue
+		}
+		if strings.HasPrefix(l, "windows") {
+			return nil, badRegistry(
+				"%s: job %q runs on %q, and no latem runner can be Windows (A47)", file, job, raw)
+		}
+		if mapped := hostedLabel(l); mapped != nil {
+			for _, m := range mapped {
+				add(m)
+			}
+			continue
+		}
 		if !labelPattern.MatchString(l) {
 			return nil, badRegistry("%s: job %q: runs-on label %q must match %s", file, job, raw, labelPattern)
 		}
-		out = append(out, l)
+		add(l)
 	}
 	if len(out) == 0 {
 		return nil, badRegistry(
@@ -234,6 +486,48 @@ func compileLabels(runsOn StringList, file, job string) ([]string, error) {
 				"name the labels that distinguish the machine you want", file, job)
 	}
 	return out, nil
+}
+
+var (
+	ubuntuLabel    = regexp.MustCompile(`^ubuntu-(latest|[0-9]+\.[0-9]+)$`)
+	ubuntuArmLabel = regexp.MustCompile(`^ubuntu-(latest|[0-9]+\.[0-9]+)-arm$`)
+	macosLabel     = regexp.MustCompile(`^macos-(latest|[0-9]+)(-x?large)?$`)
+)
+
+// hostedLabel maps one of GitHub's hosted-runner labels onto the labels a
+// machine you own carries for the same platform, or nil when l is not one
+// (A50). The version in the label is not kept: a machine is whatever release
+// it runs, and that is the operator's to say, through an alias, if a job has
+// to care.
+func hostedLabel(l string) []string {
+	switch {
+	case ubuntuLabel.MatchString(l):
+		return []string{"linux"}
+	case ubuntuArmLabel.MatchString(l):
+		return []string{"linux", "arm64"}
+	case macosLabel.MatchString(l):
+		return []string{"macos"}
+	}
+	return nil
+}
+
+// jobDefaults is what every step of a job starts from.
+type jobDefaults struct {
+	env        map[string]string // the workflow's env: under the job's
+	envContext map[string]any    // the same, answered, for ${{ env.X }}
+	shell      string
+	workingDir string
+}
+
+func defaultWorkingDirectory(wf, job *Defaults) string {
+	dir := ""
+	if wf != nil && wf.Run != nil && wf.Run.WorkingDirectory != "" {
+		dir = wf.Run.WorkingDirectory
+	}
+	if job != nil && job.Run != nil && job.Run.WorkingDirectory != "" {
+		dir = job.Run.WorkingDirectory
+	}
+	return dir
 }
 
 func defaultShell(wf, job *Defaults) string {
@@ -265,14 +559,23 @@ func mergeEnv(base, over map[string]string) map[string]string {
 // the step from the compiled job — there is nothing to gain from carrying a
 // step that will not run. A condition that needs the run loop becomes the
 // step's If, evaluated then.
-func compileStep(st Step, where string, baseEnv map[string]string, shell string, sc expr.Scope) (registry.Step, bool, error) {
+func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.Step, bool, error) {
+	baseEnv, shell := d.env, d.shell
+	// The step's own env: joins the env context for its own expressions (A50).
+	sc = withEnv(sc, envContext(sc, d.envContext, st.Env))
+
+	continueOnError, err := compileContinueOnError(st.ContinueOnError, sc)
+	if err != nil {
+		return registry.Step{}, false, badRegistry("%s: continue-on-error: %v", where, err)
+	}
+
 	var cond registry.Condition
 	if st.If != "" {
 		prog, err := conditionProgram(st.If)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
 		}
-		w, err := classify(prog)
+		w, err := classify(prog, sc)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: if: %v", where, err)
 		}
@@ -288,6 +591,16 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 				return registry.Step{}, true, nil
 			}
 		}
+	}
+
+	// A step the run loop performs itself has no process, so it has no shell,
+	// environment or working directory — only its condition and its budget.
+	if st.artifact != nil {
+		out := registry.Step{ID: st.ID, Name: st.Name, If: cond, Artifact: st.artifact, ContinueOnError: continueOnError}
+		if st.TimeoutMins != nil {
+			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
+		}
+		return out, false, nil
 	}
 
 	if st.Shell != "" {
@@ -339,7 +652,7 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 				return registry.Step{}, false, badRegistry("%s: env.%s: %v", where, k, err)
 			}
 		}
-		out := registry.Step{ID: st.ID, Name: st.Name, Env: env, If: cond, Container: c}
+		out := registry.Step{ID: st.ID, Name: st.Name, Env: env, If: cond, Container: c, ContinueOnError: continueOnError}
 		if st.TimeoutMins != nil {
 			out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 		}
@@ -370,8 +683,14 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		late[k] = v
 	}
 
-	if st.WorkingDirectory != "" {
-		dir, err := expr.EvalString(st.WorkingDirectory, sc)
+	// A job's defaults.run.working-directory, unless the step names its own
+	// or came from an action, which GitHub's defaults do not reach (A50).
+	workingDir := st.WorkingDirectory
+	if workingDir == "" && !st.fromAction {
+		workingDir = d.workingDir
+	}
+	if workingDir != "" {
+		dir, err := expr.EvalString(workingDir, sc)
 		if err != nil {
 			return registry.Step{}, false, badRegistry("%s: working-directory: %v", where, err)
 		}
@@ -387,7 +706,10 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 		}
 	}
 
-	out := registry.Step{ID: st.ID, Name: st.Name, Run: run, Env: env, If: cond}
+	out := registry.Step{
+		ID: st.ID, Name: st.Name, Run: run, Shell: string(githubShell(shell)), Env: env, If: cond,
+		ContinueOnError: continueOnError, ActionUse: st.actionUse,
+	}
 	if st.TimeoutMins != nil {
 		out.Timeout = protocol.Duration(float64(*st.TimeoutMins) * float64(minute))
 	}
@@ -400,11 +722,9 @@ func compileStep(st Step, where string, baseEnv map[string]string, shell string,
 	return out, false, nil
 }
 
-// envValue decides whether an env: value is late. It is late when it is
-// exactly one late expression. A value that mixes text with a late expression
-// is refused: a late binding is one program, and the honest answer is to ask
-// for the expression in a variable of its own rather than to silently split
-// the value in two.
+// envValue decides whether an env: value is late: it is when any expression in
+// it is. One expression is a [lateExpr]; text around it makes a
+// [lateTemplate], rendered whole when the step runs (A50).
 func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, error) {
 	if !expr.Has(v) {
 		return nil, nil
@@ -415,7 +735,7 @@ func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, err
 	}
 	anyLate := false
 	for _, sp := range spans {
-		w, err := classify(sp.Prog)
+		w, err := classify(sp.Prog, sc)
 		if err != nil {
 			return nil, badRegistry("%s: env.%s: %v", where, k, err)
 		}
@@ -427,9 +747,10 @@ func envValue(k, v string, sc expr.Scope, where string) (registry.LateValue, err
 		return nil, nil
 	}
 	if len(spans) != 1 || spans[0].Start != 0 || spans[0].End != len(v) {
-		return nil, badRegistry(
-			"%s: env.%s mixes text with an expression that is only known when the step runs; "+
-				"put that expression in a variable of its own and reference it", where, k)
+		// Text around a late expression — `Bearer ${{ secrets.TOKEN }}` — is
+		// rendered whole as the step is about to run (A50). It is still an
+		// environment value, so nothing about A42's rule changes.
+		return newLateTemplate(v, spans, sc), nil
 	}
 	return newLate(spans[0].Prog, sc), nil
 }
@@ -476,7 +797,7 @@ func hoist(run string, existing map[string]string, sc expr.Scope, where string) 
 	var b strings.Builder
 	last, n := 0, 0
 	for _, sp := range spans {
-		w, err := classify(sp.Prog)
+		w, err := classify(sp.Prog, sc)
 		if err != nil {
 			return "", nil, nil, badRegistry("%s: run: %v", where, err)
 		}
@@ -528,14 +849,22 @@ const (
 //
 // secrets is checked first and separately: it is neither now nor late, and the
 // reason is not timing (INV-4, §15).
-func classify(p *expr.Program) (when, error) {
+func classify(p *expr.Program, sc expr.Scope) (when, error) {
 	contexts, funcs := p.References()
 	result := whenNow
+	// github.token is a secret by another name (A52): never compiled into the
+	// registry, answered as the step runs from the job's token.
+	if keys, _ := p.ContextKeys("github"); slices.Contains(keys, "token") {
+		result = whenLate
+	}
 	for _, c := range contexts {
 		if c == secretsContext {
-			return whenNow, errSecretsInExpression
+			if _, computed := p.ContextKeys(secretsContext); computed {
+				return whenNow, fmt.Errorf("${{ %s }}: a secret has to be named, as secrets.NAME — "+
+					"one chosen at run time could be any secret on the machine", strings.TrimSpace(p.Source()))
+			}
 		}
-		if why, refused := refusedContexts[c]; refused {
+		if why, refused := refusedContexts[c]; refused && sc.Contexts[c] == nil {
 			return whenNow, fmt.Errorf("${{ %s }}: the %s context cannot be used here — %s",
 				strings.TrimSpace(p.Source()), c, why)
 		}
@@ -570,12 +899,6 @@ func conditionProgram(cond string) (*expr.Program, error) {
 	return spans[0].Prog, nil
 }
 
-// errSecretsInExpression is a sentinel so the two callers report it identically.
-var errSecretsInExpression = fmt.Errorf(
-	"${{ secrets.* }} is not substituted. Declare the secret in the job's secrets: list and " +
-		"read it from the environment by its own name — substituting it would write the value " +
-		"into the compiled registry, which is persisted (INV-4, RUNNER_SPEC §15)")
-
 // envValueIsLiteral rejects a compiled value that would be read as this
 // system's own interpolation syntax when the registry validates it.
 //
@@ -589,6 +912,20 @@ func envValueIsLiteral(v string) error {
 				"by the registry validator; this is a limitation, not something the workflow did wrong", v)
 	}
 	return nil
+}
+
+// githubShell maps a workflow's shell onto the executor's name for GitHub's
+// contract (A50). shell has already passed [isSupportedShell]; empty is
+// GitHub's default for a step that names none, `bash -e`, which is not the
+// same as `shell: bash`.
+func githubShell(shell string) executor.Shell {
+	switch strings.ToLower(strings.TrimSpace(shell)) {
+	case "bash":
+		return executor.ShellGitHubBash
+	case "sh":
+		return executor.ShellGitHubSh
+	}
+	return executor.ShellGitHub
 }
 
 func isSupportedShell(s string) bool {
@@ -621,7 +958,7 @@ func compileContainer(c *containerSpec, sc expr.Scope, where string) (*registry.
 			return "", badRegistry("%s: %s: %v", where, field, err)
 		}
 		for _, sp := range spans {
-			w, err := classify(sp.Prog)
+			w, err := classify(sp.Prog, sc)
 			if err != nil {
 				return "", badRegistry("%s: %s: %v", where, field, err)
 			}
@@ -654,4 +991,16 @@ func compileContainer(c *containerSpec, sc expr.Scope, where string) (*registry.
 		out.Args = append(out.Args, v)
 	}
 	return out, nil
+}
+
+// RegistryFor wraps one compiled job in a registry, lifting the caches it
+// declared to where a registry declares them. It is the one place that happens,
+// so the resolver and anything else building a registry from a compiled job
+// cannot disagree about it.
+func RegistryFor(jobName string, job *registry.Job) *registry.Registry {
+	return &registry.Registry{
+		Version: registry.SchemaVersion,
+		Caches:  append([]registry.CacheDecl(nil), job.CacheDecls...),
+		Jobs:    map[string]*registry.Job{jobName: job},
+	}
 }

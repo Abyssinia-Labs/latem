@@ -388,3 +388,54 @@ func TestSetRunnerExpiryAndCancelReason(t *testing.T) {
 		t.Error("SetRunner accepted an empty runner")
 	}
 }
+
+// A workflow run's job keeps its workflow fields across a restart, and never
+// its token (A52).
+func TestCreate_WorkflowRunAndToken(t *testing.T) {
+	d := newTestDB(t)
+	ctx := t.Context()
+	req := protocol.RunRequest{
+		ID: "r-wf", Repo: "app", Job: "web", Ref: "refs/heads/main",
+		Workflow: ".github/workflows/checks.yml", SHA: strings.Repeat("a", 40),
+		Event: &protocol.Event{Name: "push", Ref: "refs/heads/main", SHA: strings.Repeat("a", 40),
+			Payload: []byte(`{"head_commit":{"message":"hi"}}`)},
+		Needs:         map[string]protocol.NeedResult{"lint": {Result: "success", Outputs: map[string]string{"v": "1"}}},
+		WorkflowRunID: "wr1", RunNumber: 7, RunAttempt: 1,
+		Token: "ghs_secret",
+	}
+	run := Run{ID: req.ID, Repo: req.Repo, Job: req.Job, Ref: req.Ref, State: protocol.StateQueued,
+		OriginKind: "webhook", Workflow: WorkflowRunOf(req)}
+	if err := d.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	d.HoldToken(req.ID, req.Token)
+
+	got, err := d.Get(ctx, req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := got.Workflow
+	if w == nil || w.Workflow != req.Workflow || w.SHA != req.SHA || w.Event.Name != "push" ||
+		string(w.Event.Payload) != `{"head_commit":{"message":"hi"}}` ||
+		w.Needs["lint"].Outputs["v"] != "1" || w.WorkflowRunID != "wr1" || w.RunNumber != 7 {
+		t.Fatalf("workflow run did not survive: %+v", w)
+	}
+	var raw string
+	if err := d.db.QueryRowContext(ctx, `SELECT workflow_json FROM runs WHERE id = ?`, req.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "ghs_secret") {
+		t.Fatal("the token reached the database")
+	}
+	if d.Token(req.ID) != "ghs_secret" {
+		t.Fatal("the token is not held in memory")
+	}
+	for _, to := range []protocol.RunState{protocol.StateClaimed, protocol.StatePreparing, protocol.StateSkipped} {
+		if err := d.Transition(ctx, req.ID, to, protocol.Update{State: to}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d.Token(req.ID) != "" {
+		t.Error("the token outlived the run")
+	}
+}

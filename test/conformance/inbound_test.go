@@ -193,7 +193,7 @@ func TestConformance_ServerCorpusCoversTheDocumentedCases(t *testing.T) {
 				"plane may send", k)
 		}
 	}
-	for _, k := range []string{"resume", "update", "logs", "heartbeat", "claim"} {
+	for _, k := range []string{"resume", "update", "logs", "heartbeat", "claim", "plan"} {
 		if !kinds[k] {
 			t.Errorf("the corpus never tries to send %q back at the agent; PROTOCOL §2.4 says "+
 				"that must be refused by name", k)
@@ -276,6 +276,8 @@ func commandID(cmd protocol.Command) string {
 		return cmd.Run.ID
 	case cmd.Cancel != nil:
 		return cmd.Cancel.ID
+	case cmd.Plan != nil:
+		return cmd.Plan.ID
 	default:
 		return ""
 	}

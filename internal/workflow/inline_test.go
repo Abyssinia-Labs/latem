@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 )
 
 // mapLoader serves actions from memory, keyed by directory.
@@ -22,14 +23,18 @@ func (m mapLoader) Load(dir string) (*Action, error) {
 	return ParseAction([]byte(body), clean)
 }
 
-func compileWith(t *testing.T, wf string, actions mapLoader) (*registry.Job, error) {
+// compileWith compiles against a set of local actions, with every remote
+// action allowed — the policy has tests of its own, and these are about
+// inlining.
+func compileWith(t *testing.T, wf string, acts mapLoader) (*registry.Job, error) {
 	t.Helper()
-	if actions == nil {
-		// An untyped nil: a nil mapLoader in the interface would be a loader
-		// that exists and knows no actions, which is a different test.
-		return CompileWith(parse(t, wf), "b", testScope(), nil)
+	opts := Options{Policy: actions.Policy{Allowed: []string{"*/*"}}}
+	if acts != nil {
+		// An untyped nil would be a loader that exists and knows no actions,
+		// which is a different test.
+		opts.Actions = acts
 	}
-	return CompileWith(parse(t, wf), "b", testScope(), actions)
+	return CompileWith(t.Context(), parse(t, wf), "b", testScope(), opts)
 }
 
 func mustValidate(t *testing.T, job *registry.Job) {
@@ -203,7 +208,9 @@ func TestCompositeRefusals(t *testing.T) {
 			"runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ${{ inputs.ghost }}\n", `declares no input "ghost"`},
 		"a run step without a shell": {"", "line",
 			"runs:\n  using: composite\n  steps:\n    - run: echo hi\n", "must name its shell"},
-		"a javascript action": {"", "line", "runs:\n  using: node20\n  main: index.js\n", "phase 5"},
+		"a javascript action with no main": {"", "line", "runs:\n  using: node20\n", "needs runs.main"},
+		"a javascript action outside itself": {"", "line",
+			"runs:\n  using: node20\n  main: ../../steal.js\n", "must be a path inside the action"},
 		"an action that uses itself": {"", "line",
 			"runs:\n  using: composite\n  steps:\n    - uses: ./a\n", "uses itself"},
 		"a dockerfile image": {"", "line", "runs:\n  using: docker\n  image: Dockerfile\n", "would have to be built"},
@@ -222,10 +229,18 @@ func TestCompositeRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "no checkout") {
 		t.Errorf("a local action with no loader: %v", err)
 	}
-	// A remote action is still phase 5, and says what does run today.
-	_, err := compileWith(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/checkout@v5\n", nil)
-	if err == nil || !strings.Contains(err.Error(), "phase 5") || !strings.Contains(err.Error(), "docker://") {
+	// A remote action that policy allows still needs somewhere to fetch into.
+	_, err := compileWith(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/setup-go@v6\n", nil)
+	if err == nil || !strings.Contains(err.Error(), "no action cache") {
 		t.Errorf("remote action refusal: %v", err)
+	}
+
+	// And one policy refuses is refused for that reason instead, which is a
+	// different fix in a different file.
+	_, err = CompileWith(t.Context(), parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: evil/thing@v1\n"),
+		"b", testScope(), Options{Policy: actions.DefaultPolicy()})
+	if err == nil || !strings.Contains(err.Error(), "allowed") {
+		t.Errorf("a refused action should name the allowlist: %v", err)
 	}
 }
 
@@ -371,7 +386,7 @@ func TestResolveReadsLocalActionsFromTheCheckout(t *testing.T) {
 		".github/workflows/ci.yml":         "on: [push]\njobs:\n  test:\n    runs-on: [macos]\n    steps:\n      - uses: ./.github/actions/greet\n        with: {who: disk}\n",
 		".github/actions/greet/action.yml": greet,
 	})
-	reg, src, err := Resolve(ws, "test", testScope())
+	reg, src, err := Resolve(t.Context(), ws, "test", testScope())
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -389,10 +404,101 @@ func TestResolveReadsLocalActionsFromTheCheckout(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(ws2, "evil")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, _, err := Resolve(ws2, "test", testScope()); err == nil {
+	if _, _, err := Resolve(t.Context(), ws2, "test", testScope()); err == nil {
 		t.Error("an action directory linked out of the workspace must not be read")
 	}
 	if _, err := (rootLoader{}).Load("./../x"); err == nil {
 		t.Error("a path that climbs out of the repository is refused before any read")
+	}
+}
+
+// A51: a local JavaScript action is repository code: its directory is a path
+// in the workspace, known now, and it asks for no isolation.
+func TestLocalJavaScriptAction(t *testing.T) {
+	job, err := compileWith(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - uses: ./.github/actions/hello
+        id: hi
+        with:
+          who: world
+`, mapLoader{".github/actions/hello": "inputs:\n  who:\n    required: true\nruns:\n  using: node24\n  main: index.js\n"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	mustValidate(t, job)
+	st := job.Steps[0]
+	if st.Env["GHA_ACTION_DIR"] != ".github/actions/hello" || st.Env["INPUT_WHO"] != "world" {
+		t.Errorf("env = %v", st.Env)
+	}
+	if _, set := st.Env["GITHUB_ACTION_REPOSITORY"]; set {
+		t.Error("a local action has no action repository")
+	}
+	if job.RequiresIsolation {
+		t.Error("a local action is the repository's own code")
+	}
+
+	_, err = compileWith(t, "jobs:\n  b:\n    runs-on: [linux]\n    steps:\n      - uses: ./.github/actions/hello\n",
+		mapLoader{".github/actions/hello": "inputs:\n  who:\n    required: true\nruns:\n  using: node24\n  main: index.js\n"})
+	if err == nil || !strings.Contains(err.Error(), `requires the input "who"`) {
+		t.Errorf("a missing required input should be refused, got %v", err)
+	}
+}
+
+// A51: pre runs before the job's first step under pre-if, post after its last
+// in reverse under post-if and only if main ran, and all three steps of one
+// use share the use that carries $GITHUB_STATE between them.
+func TestJavaScriptActionPreAndPost(t *testing.T) {
+	hooks := "runs:\n  using: node20\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: success()\n"
+	job, err := compileWith(t, `
+jobs:
+  b:
+    runs-on: [linux]
+    steps:
+      - run: first
+      - uses: ./a
+        id: one
+      - uses: ./b
+      - run: last
+`, mapLoader{"a": hooks, "b": "runs:\n  using: node20\n  main: main.js\n  post: post.js\n"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	mustValidate(t, job)
+	var order []string
+	for _, st := range job.Steps {
+		order = append(order, st.Name+"="+st.Env["GHA_ACTION_ENTRY"])
+	}
+	want := []string{
+		"Pre Run ./a=pre.js", "=", "Run ./a=main.js", "Run ./b=main.js", "=",
+		"Post Run ./b=post.js", "Post Run ./a=post.js",
+	}
+	if strings.Join(order, " | ") != strings.Join(want, " | ") {
+		t.Errorf("order:\n got %v\nwant %v", order, want)
+	}
+	pre, mainA, mainB, postB, postA := job.Steps[0], job.Steps[2], job.Steps[3], job.Steps[5], job.Steps[6]
+	if pre.ActionUse == "" || pre.ActionUse != mainA.ActionUse || mainA.ActionUse != postA.ActionUse {
+		t.Errorf("one use's steps should share it: %q %q %q", pre.ActionUse, mainA.ActionUse, postA.ActionUse)
+	}
+	if mainB.ActionUse == mainA.ActionUse || mainB.ActionUse != postB.ActionUse {
+		t.Error("each use of an action has its own")
+	}
+	if mainA.ID != "one" || mainB.ID == "" {
+		t.Errorf("main keeps the uses: step's id, or gets one for post to name: %q, %q", mainA.ID, mainB.ID)
+	}
+	for _, c := range []struct {
+		st   registry.Step
+		want string
+	}{
+		{pre, "always()"},
+		{postA, "success()"},
+		{postA, "steps.one.outcome != 'skipped'"},
+		{postB, "always()"},
+	} {
+		if c.st.If == nil || !strings.Contains(c.st.If.Source(), c.want) {
+			t.Errorf("%s: condition should contain %q", c.st.Name, c.want)
+		}
 	}
 }

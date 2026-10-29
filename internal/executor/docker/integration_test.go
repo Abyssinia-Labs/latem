@@ -142,6 +142,45 @@ func TestIntegration_RunsSteps(t *testing.T) {
 	}
 }
 
+// A JavaScript action reads a hyphenated input as INPUT_NO-CACHE. The step runs
+// under the wrapper's /bin/sh, and dash — Debian's and Ubuntu's /bin/sh — drops
+// such a name as it starts: setup-bun then read its `no-cache` as empty and
+// threw. busybox's ash happens to keep it, so alpine alone would not have
+// caught this; both are run. On debian the step itself runs under bash, as a
+// workflow step does by default, so the only dash in the way is the wrapper's.
+// Carried past it, the name arrives, and the carriers do not.
+func TestIntegration_HyphenatedNamesReachTheStep(t *testing.T) {
+	for _, c := range []struct{ image, shell string }{
+		{"debian:stable-slim", "bash"},
+		{testImage, testShell},
+	} {
+		t.Run(c.image, func(t *testing.T) {
+			e := newIntegrationExecutor(t, func(o *Options) { o.DefaultImage, o.Shell = c.image, c.shell })
+			env, _ := prepareRun(t, e, "int-hyphen", nil)
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			var log bytes.Buffer
+			res, err := env.Exec(ctx, executor.Step{
+				Name: "inputs",
+				Run:  `env | grep -E '^(INPUT_|LATEM_ENVX_|PLAIN=)' | sort`,
+				Env: map[string]string{
+					"INPUT_NO-CACHE":    "false",
+					"INPUT_BUN-VERSION": "1.3.3 with spaces; and $(no) expansion",
+					"PLAIN":             "kept",
+				},
+			}, &log, &log)
+			if err != nil || res.ExitCode != 0 {
+				t.Fatalf("Exec: %v, exit %d\n%s", err, res.ExitCode, log.String())
+			}
+			want := "INPUT_BUN-VERSION=1.3.3 with spaces; and $(no) expansion\nINPUT_NO-CACHE=false\nPLAIN=kept\n"
+			if log.String() != want {
+				t.Errorf("the step saw\n%s\nwant\n%s", log.String(), want)
+			}
+		})
+	}
+}
+
 // This is finding F1, against a real container.
 //
 // Draft 01 of RUNNER_SPEC said `cd` and `export` persist across steps because
