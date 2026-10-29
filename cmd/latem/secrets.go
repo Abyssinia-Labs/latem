@@ -488,6 +488,26 @@ func secretInventory(ctx context.Context, cfg *config.Config, stores secretStore
 	return inv, nil
 }
 
+// has reports whether name resolves anywhere for a job of repo in env, the
+// way the run looks it up (internal/run's resolveWorkflowSecrets): repo and
+// environment, then repo, then the machine.
+func (inv inventory) has(name, repo, env string) bool {
+	scopes := [][]string{{repo}, nil}
+	if repo == "" {
+		// A checkout this machine has no [repos.*] entry for: only the
+		// machine-wide name could answer.
+		scopes = [][]string{nil}
+	} else if env != "" {
+		scopes = append([][]string{{repo, env}}, scopes...)
+	}
+	for _, sc := range scopes {
+		if len(inv.byName[secrets.ScopedName(name, sc...)]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // inventoryEntry is one stored name, decoded into its scope.
 type inventoryEntry struct {
 	scope  secretScope

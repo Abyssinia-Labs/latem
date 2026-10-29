@@ -48,6 +48,9 @@ func init() {
 	newSecretStores = func(config.Paths) (secretStores, error) {
 		panic("a test reached the real secret stores; use fakeStores")
 	}
+	originURL = func(context.Context, string) string {
+		panic("a test reached a real git remote get-url; use fakeOrigin")
+	}
 }
 
 // configDirWith is a 0700 config directory holding body as config.toml, or

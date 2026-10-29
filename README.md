@@ -695,6 +695,35 @@ than failing every run at fetch. `latem repo list` shows what is allowed and
 `latem repo remove <name>` takes one out. All three edit `config.toml` as
 text and leave the rest of the file, comments included, as you wrote it.
 
+**Then ask what this machine can run.** `latem workflows check` reads a
+checkout's `.github/workflows` and plans it as the control plane would — a
+push to the default branch, a pull request into it, and a dispatch of each
+file that has one — through the agent's own planner and compiler, offline:
+
+```console
+$ latem workflows check ~/src/latem-cloud
+checking /Users/me/src/latem-cloud (repos.latem-cloud, Abyssinia-Labs/latem-cloud)
+
+.github/workflows/checks.yml  "Checks"
+  planned for: push to main, pull_request
+  [FAIL] checks
+         - uses oven-sh/setup-bun@v2: oven-sh/setup-bun is not in [actions] allowed
+             fix: [actions] allowed += "oven-sh/setup-bun"
+         - runs-on "blacksmith-4vcpu-ubuntu-2404": no runner here carries it
+             fix: [label_aliases] "blacksmith-4vcpu-ubuntu-2404" = ["linux"]
+
+0 of 1 jobs can run on this machine
+```
+
+For each job it names what stands in the way and the fix: a `runs-on` label
+no runner carries, a remote action outside `[actions] allowed` or not pinned to
+a commit, secrets with no value in any scope the run would look in (names
+only), vars that would read as empty, and what latem refuses outright — a
+matrix, a reusable workflow, `services:`, `container:`. `--fix` writes the
+`[label_aliases]` and `[actions]` entries it suggests and reloads the agent;
+pinning an action and storing a secret stay yours. It exits 1 while any job
+cannot run, so it also works as a gate.
+
 **Edit `config.toml` by hand for anything else**, then tell the running
 agent, or the edit does nothing:
 
@@ -782,6 +811,7 @@ latem register --url U --token T
 latem repo add <owner/name> | list | remove <name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]
+latem workflows check [path] [--fix]  which workflow jobs this machine can run, and the fix for the rest
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | restart | reload | status

@@ -1290,6 +1290,7 @@ latem service reload                 Apply config.toml to the running agent (SIG
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
+latem workflows check [path] [--fix]   Plan and compile a checkout's workflows offline (A54)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem version
@@ -2533,3 +2534,25 @@ and `[secrets.commands]` from config — and decodes each back into its scope. `
 
 **`latem vars set|list|rm --repo R [--env E] NAME [VALUE]`** edits `[repos.R.vars]` or
 `[repos.R.environments.E.vars]` as text, creating the table beside its repository, and reloads.
+
+**`latem workflows check [path]`** runs `workflow.PlanEvent` over `os.DirFS`-style access to a
+local checkout — through an `os.Root`, as the agent reads a workspace — for a push to the
+default branch (the repo's first plain `allowed_refs` entry, or `--branch`), a pull request into
+it, and a `workflow_dispatch` of every file declaring one, with each required input that has no
+default given its first option, `false`, `0` or a placeholder. A paths filter is matched against
+every file in the checkout. Each planned job is then compiled with `CompileWith` as a workflow
+run's job, its `if:` blanked — the question is whether this machine could run it, not whether
+this event would — with every need succeeded and the machine's `[label_aliases]` and vars. Remote
+actions are compiled against a permissive policy and an offline fetcher that records each
+reference and answers with a placeholder JavaScript action; the machine's own `[actions]` policy
+is applied to that record afterwards, so one refused action neither stops the compile nor hides
+the next. Nothing is fetched and nothing runs. Per job it reports: the runner gate 13 would pick
+(labels, a docker runner for container steps, an isolating runner for remote actions unless
+`allow_unisolated`); a `runs-on` label no runner carries, with a `[label_aliases]` line mapping it
+to `linux` or `macos` when its name says which; an action outside the allowlist or not pinned;
+secrets the compiled job declares (less `GITHUB_TOKEN`, which the control plane mints) that no
+store holds under any scope the run looks in, from names alone; and the compiler's own refusals.
+Vars referenced in the file with no value are a warning, as they read as empty. `--fix` writes
+the alias and allowlist entries, through the same text edit and load gate as the other commands,
+and reloads; it never changes `require_pinned` or stores a secret. The checkout is matched to a
+`[repos.*]` entry by its `origin` remote or `--repo`.
