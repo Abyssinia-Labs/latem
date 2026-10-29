@@ -1279,6 +1279,7 @@ The original argument survives for what it did cover: the runner still invokes `
 ## 19. Local trigger and CLI
 
 ```
+latem setup [--url U] [--no-register] [--no-service]   init, register, service install, doctor; idempotent (A54)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
@@ -2566,3 +2567,15 @@ follows is unchanged and is the point: the claimed token goes through `remote.Ve
 `remote.WriteToken` and `writeRegistration`, so a token that came from a browser is held to the
 same rule as one pasted in — proven, then written, and nothing written on any failure. No token
 is ever printed, and the device code is not either.
+
+**`latem setup`** is the guided path for a fresh machine, and each step skips what is already
+done, so running it again is safe. (1) With no `config.toml` it writes `init`'s template with no
+repositories: a native `macos` runner on darwin, plus a `linux` docker runner when a Docker
+daemon answers a ping — on Linux, always — whose `default_image` is `--image` or the template's
+placeholder until the published `latem-ubuntu` digest replaces it. A config that exists is left
+alone; one that does not load stops setup, because the agent would not start on it. (2) Unless
+the machine already has `[broker.remote]` and a readable token, or `--no-register`, it runs
+`latem register`'s device flow. (3) It installs the user service (§23), or restarts it when steps 1
+or 2 changed anything or it is installed and not running. Registration comes before the service
+rather than after because `[broker.remote]` is restart-only: the other order starts the agent
+twice. (4) It runs doctor, and exits with doctor's verdict. `install.sh` now ends by naming it.

@@ -96,6 +96,9 @@ type registerFlags struct {
 	name      string
 	labels    []string
 	noBrowser bool
+	// inSetup leaves the service to `latem setup`, which starts or restarts
+	// it next, instead of telling the operator to.
+	inSetup bool
 }
 
 // runRegister proves the control plane before it changes anything.
@@ -214,7 +217,9 @@ func runRegister(cmd *cobra.Command, f registerFlags) error {
 		printf(out, "  machine id  (the control plane did not assign one)\n")
 	}
 	printf(out, "  url         %s\n", f.url)
-	printf(out, "\nrestart the agent to connect:\n  latem service restart\nor, if it is not installed as a service:\n  latem agent\n")
+	if !f.inSetup {
+		printf(out, "\nrestart the agent to connect:\n  latem service restart\nor, if it is not installed as a service:\n  latem agent\n")
+	}
 	return nil
 }
 

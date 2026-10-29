@@ -88,9 +88,11 @@ Exit codes:
   3  no agent is listening (E_AGENT_DOWN); see ` + "`latem agent`" + `
 
 Start here:
-  latem doctor            check this machine and name the fix for anything wrong
-  latem service install   run the agent at boot
-  latem run <repo> <job>  trigger a build locally`
+  latem setup                  config, registration, service and doctor, in one
+  latem repo add <owner/name>  allow a repository
+  latem workflows check [dir]  which of its workflow jobs this machine can run
+  latem doctor                 check this machine and name the fix for anything wrong
+  latem run <repo> <job>       trigger a build locally`
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
@@ -124,6 +126,7 @@ func newRootCommand() *cobra.Command {
 	})
 
 	root.AddCommand(
+		newSetupCommand(),
 		newInitCommand(),
 		newAgentCommand(),
 		newRunCommand(),

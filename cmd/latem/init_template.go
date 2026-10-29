@@ -46,6 +46,14 @@ name = %q
 		fmt.Fprintf(&b, "\n[repos.%s]\nurl          = %q\nallowed_refs = [%s]\n",
 			r.Name, r.URL, quoteList(p.Refs))
 	}
+	if len(p.Repos) == 0 {
+		// `latem setup` writes this file before there is a repo to name. An
+		// empty allowlist loads, and rejects every run until one is added.
+		b.WriteString(`#
+# None yet: "latem repo add <owner/name>" adds one, checks this machine can
+# fetch it, and tells the running agent.
+`)
+	}
 	b.WriteString(`
 # require_approval_otherwise = true
 #   A ref outside allowed_refs is parked instead of rejected, and waits for a
@@ -79,28 +87,12 @@ concurrency = 1
   [runner.native]
   min_free_gb = 60
 `, p.GOARCH)
+		if p.Docker {
+			b.WriteString("\n")
+			writeDockerRunner(&b, p, "Docker Desktop's Linux VM")
+		}
 	default:
-		fmt.Fprintf(&b, `# --- runner: this machine's execution slot --------------------------------
-#
-# docker is the Linux executor (§13.1). The image is yours, but three things
-# are required of it and "latem doctor" checks them by running it once: a
-# non-root user "runner" with uid 1000 and a writable $HOME, plus bash, git and
-# ca-certificates.
-
-[[runner]]
-name        = "linux"
-executor    = "docker"
-labels      = ["linux", %q, "docker"]
-concurrency = 2
-
-  [runner.docker]
-  default_image = "ghcr.io/me/ci-base:latest"
-  min_free_gb   = 40
-  # A workflow step may be a container: uses: docker://image. A tag is a
-  # mutable reference, so the digest it resolved to is always written to the
-  # run log. Set this to refuse anything not named by digest instead.
-  # require_pinned_images = true
-`, p.GOARCH)
+		writeDockerRunner(&b, p, "")
 	}
 
 	b.WriteString(`
@@ -138,6 +130,44 @@ concurrency = 2
 #   runs (§16). Put values in ` + configSecretsName() + ` at mode 0600.
 `)
 	return b.String()
+}
+
+// defaultDockerImage is the image a docker runner gets when nobody names one.
+// A placeholder that says so: the image is the operator's (§13.1).
+const defaultDockerImage = "ghcr.io/me/ci-base:latest"
+
+// writeDockerRunner is the linux docker runner: the only runner on Linux, and
+// on a Mac the second one, beside native, when a Docker daemon answers.
+func writeDockerRunner(b *strings.Builder, p initParams, where string) {
+	image := p.Image
+	if image == "" {
+		image = defaultDockerImage
+	}
+	intro := "docker is the Linux executor (§13.1)."
+	if where != "" {
+		intro = "docker runs Linux jobs here, in " + where + " (§13.1)."
+	}
+	fmt.Fprintf(b, `# --- runner: this machine's execution slot --------------------------------
+#
+# %s The image is yours, but three things
+# are required of it and "latem doctor" checks them by running it once: a
+# non-root user "runner" with uid 1000 and a writable $HOME, plus bash, git and
+# ca-certificates.
+
+[[runner]]
+name        = "linux"
+executor    = "docker"
+labels      = ["linux", %q, "docker"]
+concurrency = 2
+
+  [runner.docker]
+  default_image = %q
+  min_free_gb   = 40
+  # A workflow step may be a container: uses: docker://image. A tag is a
+  # mutable reference, so the digest it resolved to is always written to the
+  # run log. Set this to refuse anything not named by digest instead.
+  # require_pinned_images = true
+`, intro, p.GOARCH, image)
 }
 
 func configSecretsName() string { return "secrets.env" }

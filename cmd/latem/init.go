@@ -133,6 +133,11 @@ type initParams struct {
 	Machine, GOOS, GOARCH string
 	Repos                 []repoSpec
 	Refs                  []string
+	// Docker adds a linux docker runner on macOS, beside the native one.
+	// Linux always has one; it is the only executor there.
+	Docker bool
+	// Image is the docker runner's default_image; empty is the placeholder.
+	Image string
 }
 
 // parseRepoFlags splits --repo name=url. The name is what `latem run` takes and

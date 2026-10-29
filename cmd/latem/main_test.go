@@ -80,6 +80,8 @@ func TestEverySpecCommandExists(t *testing.T) {
 	}
 	for _, want := range []string{
 		"agent", "run", "list", "logs", "cancel", "approve", "register", "doctor", "cache", "version",
+		// A54.
+		"setup", "repo", "secrets", "vars", "workflows",
 	} {
 		if !have[want] {
 			t.Errorf("§19 command %q is missing", want)

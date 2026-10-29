@@ -55,6 +55,9 @@ func init() {
 	// here, instead of introducing itself to the production control plane.
 	registerURL = "ws://127.0.0.1:1/agent"
 	openBrowser = func(string) error { panic("a test tried to open a browser") }
+	newSetupDeps = func() setupDeps {
+		panic("a test reached setup's real service manager, Docker or doctor; use fakeSetup")
+	}
 }
 
 // configDirWith is a 0700 config directory holding body as config.toml, or

@@ -191,7 +191,12 @@ Never as root. The script detects your OS and architecture, verifies the
 download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
 
 ```console
-$ latem register
+$ latem setup
+1/4 config
+  wrote /Users/me/.latem/config.toml
+  runners: macos (native), linux (docker)
+
+2/4 register
 to register this machine, open
 
   https://app.latem.dev/connect?code=WDJB-MJHT
@@ -203,14 +208,41 @@ waiting for approval — the code expires in 10m0s …
   approved
 verifying wss://gw.latem.dev/agent …
   connection verified
+
+3/4 service
+  …
+4/4 doctor
+  …
 ```
 
-With no token, `latem register` asks the control plane for a code and opens
-the page to approve it on; you approve it signed in, seeing the machine's
-name, OS and labels, and the machine collects its own token. Over ssh the link
-is printed instead — open it anywhere you are signed in. `--url` points at a
-control plane other than the hosted one, and `--token-file` still takes a
-token you already have.
+`latem setup` does the four things a fresh machine needs, and skips each one
+that is already done, so it is safe to run again:
+
+1. **config** — writes `~/.latem/config.toml` when there is none: a native
+   `macos` runner on a Mac, and a `linux` docker runner wherever a Docker
+   daemon answers (always, on Linux; `--image` sets its image). No
+   repositories yet — `latem repo add` is for those.
+2. **register** — approves the machine in the browser. With no token,
+   `latem register` asks the control plane for a code and opens the page to
+   approve it on; you approve it signed in, seeing the machine's name, OS and
+   labels, and the machine collects its own token. Over ssh the link is
+   printed instead — open it anywhere you are signed in. `--url` points at a
+   control plane other than the hosted one; `--no-register` keeps the
+   machine local, which is a fully supported way to run it.
+3. **service** — installs the agent as a user service and starts it, or
+   restarts it when the config or the registration just changed.
+4. **doctor** — checks the result and names the fix for anything wrong.
+
+Then allow a repository, see what of it this machine can run, and give it
+what its workflows read:
+
+```console
+$ latem repo add me/myapp
+$ latem workflows check ~/src/myapp
+$ latem secrets set --repo myapp DEPLOY_TOKEN
+```
+
+`latem register --token-file F` still takes a token you already have.
 
 **Verify what you installed**, or have the script do it for you — it does both
 checks below before it writes anything. By hand, for a release downloaded
@@ -822,6 +854,7 @@ there is no subcommand to fetch them yet.
 ## Commands
 
 ```
+latem setup [--url U] [--no-register]  config, registration, service and doctor, idempotently
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
