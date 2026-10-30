@@ -2755,3 +2755,35 @@ requirements, counts the kinds at the end — "kinds of build: 7 Linux, 2 iOS �
 reach admission (INV-5 is unchanged). A control plane may be told a job's kind and requirement
 keys and versions — a closed vocabulary, never steps or evidence — and that is a later protocol
 change.
+
+**What the machine has.** `system.Toolchains` probes it as a step would find it: every
+`Xcode*.app` under `/Applications` and `~/Applications` with the version its `Info.plist` names (read
+with `plutil`, not by running each Xcode), the iOS simulator runtimes, the JDKs (`java_home -V`,
+Homebrew's `openjdk@N`, `/usr/lib/jvm`), the Android SDK where a build would find it and its
+platforms and emulator, the tools a job's needs ask about on the PATH a step gets — the
+service's, not a shell's, plus the per-user directories bun, cargo and pipx install into — and
+whether `sudo -n true` succeeds. It reports and judges nothing.
+
+**Gaps.** `needs.Gaps` compares one job's needs with that, for the executor of the runner that
+would take it. A native runner's needs are the host's. A docker runner's are its image's, which
+this does not open, except what no image can give: a Docker daemon (the docker runner gives a
+step none) and `services:`/`container:` (A44 refuses them). A tart runner's are in its VM and
+not known here. Something an action provides (`setup-node`), or that runs through `bundle exec`,
+`bunx` or `npx`, asks the machine for nothing. Each gap names the fix: a command (`brew install
+xcodegen`, `xcodebuild -downloadPlatform iOS`, `sdkmanager "platforms;android-36"`) or a step for
+a person (install Xcode 27 beside the one there; a step selects it with `DEVELOPER_DIR`).
+
+**`latem doctor`** gains a section, "What jobs need". It reads each configured repository from the
+agent's mirror — never fetching: the agent owns its mirrors — plans and classifies its workflows
+as `workflows check` does, and for every job a runner here would take, reports the gaps, with
+their fixes; a repository with no mirror yet is skipped until the agent has one. These are
+warnings: doctor's exit code is a CI gate, and a reading of a workflow is not yet trusted to fail
+one. The toolchain checks that existed before (`ruby.*`, `java.version`, `android.sdk`,
+`xcode.simruntime`) are now decided by need: skipped when every repository was read and no job
+here needs them, and naming the jobs that do when they run. Until every repository has been
+read, all of them run, as before.
+
+**A run's note.** The agent probes its toolchains once, in the background, when it starts. A run
+whose job needs what its runner lacks says so in its log before the first step — "this job needs
+Xcode 27; this runner has Xcode 26.0.1" — and runs exactly as it would have. A run before the probe
+lands, or on an agent given none, writes no note.
