@@ -42,6 +42,9 @@ func (mi *Mirror) Repo() Repo { return mi.repo }
 // [Mirror.Checkout] runs outside this lock, so a repo with four queued runs
 // pays for one fetch and then clones four workspaces in parallel.
 func (m *Manager) Fetch(ctx context.Context, repo Repo) (*Mirror, error) {
+	if m.readOnly {
+		return nil, errReader
+	}
 	if err := repo.validate(); err != nil {
 		return nil, err
 	}

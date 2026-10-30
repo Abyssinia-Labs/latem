@@ -70,6 +70,9 @@ func (mi *Mirror) Acquire(ctx context.Context, runID, normalizedRef string) (*Wo
 // .gitmodules with a relative URL ("../shared.git") resolves against origin,
 // so running it before the rewrite would resolve against the mirror path.
 func (mi *Mirror) Checkout(ctx context.Context, runID, normalizedRef, sha string) (*Workspace, error) {
+	if mi.mgr.readOnly {
+		return nil, errReader
+	}
 	m := mi.mgr
 
 	if err := registry.ValidateRef(normalizedRef); err != nil {
