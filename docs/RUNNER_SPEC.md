@@ -550,6 +550,11 @@ concurrency = 1                     # enforced; §13.3
 
   [runner.native]
   min_free_gb = 60
+  # Where a toolchain lives that the service's environment does not reach
+  # (A60): a keg-only Homebrew install is on no PATH launchd gives the agent.
+  # Beneath the job's env, which wins; never a secret.
+  # path_prepend = ["/opt/homebrew/opt/openjdk@17/bin"]
+  # env          = { JAVA_HOME = "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" }
 
 # The isolation upgrade (§13.2). Uncomment — and delete the native block above,
 # since both carry the same labels — when this machine builds a ref anyone
@@ -1039,6 +1044,7 @@ Being the default raises the stakes on everything below rather than lowering the
 - Requires **auto-login enabled**, and auto-login is defeated by FileVault. See §23 — this interacts badly enough with "survives reboots" that it is a `latem doctor` check, not a footnote.
 - Every step runs `bash -lc` as a **new process**, so the login environment (Homebrew paths, rbenv, nvm) is present and, per §9, nothing else carries between steps.
 - **`LANG=en_US.UTF-8` is set in the step's environment** (§9, amendment A33), below the run environment so a job can override it. The hole this leaves is worth stating: `-lc` is a *login* shell, and a profile runs after execve, so an `export LC_ALL=C` in `~/.bash_profile` still wins. `latem doctor` therefore probes the locale by running this same shell the same way rather than by reading the executor's code — the only answer that accounts for the profile is the one the shell gives.
+- **The runner's `[runner.native]` `env` and `path_prepend`** (amendment A60) lie beneath the run environment, with `LANG`: `env` is set unless the job or step sets the name, and `path_prepend` goes in front of the PATH the step inherits from the agent — a job that sets PATH replaces both, and `$GITHUB_PATH` additions go in front of them. They say where a toolchain lives that launchd's PATH does not reach, which on a Mac is every keg-only Homebrew install.
 - Workspace is the run's clone directly; no copy. Because §12 produces a self-contained repository, the workspace looks identical here and inside a container.
 - Disk floor defaults to 60 GB.
 
@@ -2787,3 +2793,39 @@ read, all of them run, as before.
 whose job needs what its runner lacks says so in its log before the first step — "this job needs
 Xcode 27; this runner has Xcode 26.0.1" — and runs exactly as it would have. A run before the probe
 lands, or on an agent given none, writes no note.
+
+### Amendment from installing what a machine is missing
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A60 | §8, §13.3, §19, A57, A59 | **`latem setup` gains a toolchains step: what the jobs this machine takes need that it lacks — or, with no repository, what it says it will build — and, on a terminal, each install a command can do, offered one at a time and run as an argv. A native runner gains `[runner.native] env` and `path_prepend`, which setup writes for a keg-only install** | A59 made doctor say what is missing and how to get it, and left every install to the operator, one copied command at a time. And what doctor said to install, a step could not always find: `brew install openjdk@17` is keg-only, so the JDK lands on no PATH launchd gives the agent, and a build finds it only through `JAVA_HOME` |
+
+**What it offers.** Every gap A59 names, for each job a runner here takes, read from the agent's
+mirror or else a temporary clone (A57); and each docker runner's image, when Docker does not have
+it yet, so a first job does not wait on the pull. A gap's fix is now an argv —
+`["brew", "install", "xcodegen"]`, never a line for a shell — and doctor prints it as a line to
+type. A fix whose program is not installed (no Homebrew) is said and not offered; a tool whose
+only installer is a pipe into a shell (`curl … | bash`) is a step for a person.
+
+**How it runs one.** Asked, `[y/N]`, one at a time, and only on a terminal: off one, setup prints
+the fixes and installs nothing. Each runs with stdin closed and in a session of its own, so
+nothing it starts can open the terminal to ask for a password — `sudo` fails instead of
+prompting. latem never runs `sudo`, accepts a licence (`xcodebuild -license`, `sdkmanager
+--licenses`) or installs Xcode: those are said, for a person. Homebrew runs with
+`HOMEBREW_NO_AUTO_UPDATE` and `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`, so installing one tool
+cannot upgrade the JDK or Ruby a working build relies on. After an install the machine is probed
+again, so a gap the install closed is not offered twice.
+
+**Runner env.** A native runner's `env` is set for every step beneath the job's own env — a job
+or step that sets a name wins — and its `path_prepend` goes in front of the PATH a step inherits
+from the agent. Names a run sets for itself (`GITHUB_*`, `RUNNER_*`, `LATEM_*`) are refused, as is
+a directory that is not absolute or holds a `:`. It is for where a toolchain lives, never for a
+secret, which §15 keeps out of config. After a keg-only install, setup writes what a step needs:
+`openjdk@N`'s `bin` on `path_prepend` and its home as `JAVA_HOME`; Ruby's `bin`;
+`android-commandlinetools`' root as `ANDROID_HOME`. A name the runner's env already sets is left
+as it is, and said. Doctor's probe and the agent's (A59) look on the same PATH a step gets, the
+runner's `path_prepend` included.
+
+**With no repository.** Setup asks what the machine will build — iOS apps, macOS apps, Android
+apps, Linux builds — and checks what each needs of the runner here that would take it: Xcode and a
+simulator runtime for iOS, Xcode for a macOS app, JDK 17 and an Android SDK for Android.

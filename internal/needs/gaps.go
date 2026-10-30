@@ -2,7 +2,9 @@ package needs
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
@@ -15,9 +17,35 @@ type Gap struct {
 	Missing string
 	// Have is what the machine has instead, when it has something.
 	Have string
-	// Fix are commands that would close it; Manual, steps for a person.
-	Fix    []string
+	// Fix are commands that would close it, each an argv: `latem setup` runs
+	// one as it is, once asked, and never through a shell (INV-3). Manual
+	// are steps for a person.
+	Fix    [][]string
 	Manual []string
+}
+
+// Fixes renders Fix as command lines a person could type.
+func (g Gap) Fixes() []string {
+	out := make([]string, len(g.Fix))
+	for i, argv := range g.Fix {
+		out[i] = CommandLine(argv)
+	}
+	return out
+}
+
+var plainWord = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
+
+// CommandLine renders argv as one line to type, quoting what a shell would
+// otherwise read: sdkmanager "platforms;android-36".
+func CommandLine(argv []string) string {
+	words := make([]string, len(argv))
+	for i, a := range argv {
+		words[i] = a
+		if !plainWord.MatchString(a) {
+			words[i] = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`").Replace(a) + `"`
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // Executors, as a runner's config names them.
@@ -28,20 +56,27 @@ const (
 )
 
 // toolFixes is what installs a tool on a Mac, and on Linux, when there is one
-// command for it.
-var toolFixes = map[string]struct{ tool, mac, linux string }{
-	XcodeGen:  {"xcodegen", "brew install xcodegen", ""},
-	CocoaPods: {"pod", "brew install cocoapods", ""},
-	Fastlane:  {"fastlane", "brew install fastlane", ""},
-	Bundler:   {"bundle", "gem install bundler", "gem install bundler"},
-	Ruby:      {"ruby", "brew install ruby", ""},
-	Brew:      {"brew", "", ""},
-	Python:    {"python3", "brew install python", ""},
-	Node:      {"node", "brew install node", ""},
-	Bun:       {"bun", "brew install oven-sh/bun/bun", "curl -fsSL https://bun.sh/install | bash"},
-	Go:        {"go", "brew install go", ""},
-	Rust:      {"cargo", "brew install rust", ""},
+// command for it: an argv, or — where the only way is a pipe into a shell —
+// a line for a person.
+var toolFixes = map[string]struct {
+	tool       string
+	mac, linux []string
+	byHand     string
+}{
+	XcodeGen:  {tool: "xcodegen", mac: brew("xcodegen")},
+	CocoaPods: {tool: "pod", mac: brew("cocoapods")},
+	Fastlane:  {tool: "fastlane", mac: brew("fastlane")},
+	Bundler:   {tool: "bundle", mac: []string{"gem", "install", "bundler"}, linux: []string{"gem", "install", "bundler"}},
+	Ruby:      {tool: "ruby", mac: brew("ruby")},
+	Brew:      {tool: "brew", byHand: "install Homebrew, from https://brew.sh"},
+	Python:    {tool: "python3", mac: brew("python")},
+	Node:      {tool: "node", mac: brew("node")},
+	Bun:       {tool: "bun", mac: brew("oven-sh/bun/bun"), byHand: "curl -fsSL https://bun.sh/install | bash"},
+	Go:        {tool: "go", mac: brew("go")},
+	Rust:      {tool: "cargo", mac: brew("rust")},
 }
+
+func brew(args ...string) []string { return append([]string{"brew", "install"}, args...) }
 
 // Gaps compares what a job needs with what the machine has, for a job that
 // would run on a runner of executor. Only a native runner's needs are the
@@ -50,7 +85,7 @@ var toolFixes = map[string]struct{ tool, mac, linux string }{
 // runner's live in its VM, and are not known here.
 func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 	var gaps []Gap
-	add := func(q Requirement, missing, have string, fix []string, manual ...string) {
+	add := func(q Requirement, missing, have string, fix [][]string, manual ...string) {
 		gaps = append(gaps, Gap{Requirement: q, Missing: missing, Have: have, Fix: fix, Manual: manual})
 	}
 	for _, q := range r.Requires {
@@ -79,7 +114,7 @@ func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 			}
 		case IOSSimulator:
 			if len(t.Xcodes) > 0 && !t.HasIOSRuntime() {
-				add(q, "an iOS simulator runtime", "", []string{"xcodebuild -downloadPlatform iOS"})
+				add(q, "an iOS simulator runtime", "", [][]string{{"xcodebuild", "-downloadPlatform", "iOS"}})
 			}
 		case JDK:
 			want, _ := strconv.Atoi(q.Version)
@@ -92,20 +127,22 @@ func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 				if v == "" {
 					v = "17"
 				}
-				add(q, "JDK "+v, have, []string{"brew install openjdk@" + v})
+				add(q, "JDK "+v, have, [][]string{brew("openjdk@" + v)})
 			}
 		case AndroidSDK:
 			switch {
 			case t.AndroidSDK == "":
-				add(q, "an Android SDK", "", []string{"brew install --cask android-commandlinetools"},
+				add(q, "an Android SDK", "", [][]string{brew("--cask", "android-commandlinetools")},
 					"or install the SDK with Android Studio, and set ANDROID_HOME for the agent")
 			case q.Version != "" && !hasInt(t.AndroidPlatforms, q.Version):
 				add(q, "Android platform "+q.Version, fmt.Sprintf("platforms %v", t.AndroidPlatforms),
-					[]string{fmt.Sprintf(`sdkmanager "platforms;android-%s"`, q.Version)})
+					[][]string{{"sdkmanager", "platforms;android-" + q.Version}},
+					"accept the SDK's licences first, by hand: sdkmanager --licenses")
 			}
 		case AndroidEmulator:
 			if !t.AndroidEmulator {
-				add(q, "the Android emulator", "", []string{"sdkmanager emulator"})
+				add(q, "the Android emulator", "", [][]string{{"sdkmanager", "emulator"}},
+					"accept the SDK's licences first, by hand: sdkmanager --licenses")
 			}
 		case DockerDaemon:
 			if !t.Tools["docker"] {
@@ -125,11 +162,14 @@ func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 			if r.Platform == "Linux" {
 				fix = f.linux
 			}
-			var fixes []string
-			if fix != "" {
-				fixes = []string{fix}
+			switch {
+			case fix != nil:
+				add(q, f.tool, "", [][]string{fix})
+			case f.byHand != "":
+				add(q, f.tool, "", nil, f.byHand)
+			default:
+				add(q, f.tool, "", nil)
 			}
-			add(q, f.tool, "", fixes)
 		}
 	}
 	return gaps

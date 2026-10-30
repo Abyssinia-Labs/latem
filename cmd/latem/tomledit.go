@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -298,34 +299,81 @@ func insertAfter(body string, prefix []string, text string) string {
 func setTableKey(body string, path, parent []string, key, literal string) (string, error) {
 	lines := splitLines(body)
 	for _, b := range tomlBlocks(lines) {
-		if !samePath(b.path, path) || b.array {
-			continue
+		if samePath(b.path, path) && !b.array {
+			return setBlockKey(lines, b, key, literal)
 		}
-		indent := b.indent
-		for i := b.start + 1; i < b.end; i++ {
-			k := tomlKeyOf(lines[i])
-			if k == "" {
-				continue
-			}
-			indent = lines[i][:len(lines[i])-len(strings.TrimLeft(lines[i], " \t"))]
-			if k != key {
-				continue
-			}
-			if !singleLineValue(lines[i]) {
-				return "", fmt.Errorf("%s.%s spans more than one line in config.toml; edit it by hand",
-					strings.Join(path, "."), key)
-			}
-			lines[i] = indent + tomlKey(key) + " = " + literal + "\n"
-			return strings.Join(lines, ""), nil
-		}
-		line := indent + tomlKey(key) + " = " + literal + "\n"
-		out := append(append(append([]string{}, lines[:b.end]...), line), lines[b.end:]...)
-		if b.end > 0 && !strings.HasSuffix(lines[b.end-1], "\n") {
-			out[b.end-1] += "\n"
-		}
-		return strings.Join(out, ""), nil
 	}
 	return insertAfter(body, parent, tomlHeader(path...)+"\n"+tomlKey(key)+" = "+literal+"\n"), nil
+}
+
+// setBlockKey sets key = literal in the table b, replacing the key's line or
+// adding one after the table's last, at its indent.
+func setBlockKey(lines []string, b tomlBlock, key, literal string) (string, error) {
+	indent := b.indent
+	for i := b.start + 1; i < b.end; i++ {
+		k := tomlKeyOf(lines[i])
+		if k == "" {
+			continue
+		}
+		indent = lines[i][:len(lines[i])-len(strings.TrimLeft(lines[i], " \t"))]
+		if k != key {
+			continue
+		}
+		if !singleLineValue(lines[i]) {
+			return "", fmt.Errorf("%s.%s spans more than one line in config.toml; edit it by hand",
+				strings.Join(b.path, "."), key)
+		}
+		lines[i] = indent + tomlKey(key) + " = " + literal + "\n"
+		return strings.Join(lines, ""), nil
+	}
+	line := indent + tomlKey(key) + " = " + literal + "\n"
+	out := append(append(append([]string{}, lines[:b.end]...), line), lines[b.end:]...)
+	if b.end > 0 && !strings.HasSuffix(lines[b.end-1], "\n") {
+		out[b.end-1] += "\n"
+	}
+	return strings.Join(out, ""), nil
+}
+
+// setRunnerKey sets key = literal in the table [runner.<sub>] of the
+// [[runner]] named name, creating that table after the runner's own last
+// one when it does not exist. The runner is found by position: the loaded
+// config keeps the file's order of [[runner]] tables, and a name is a value
+// this does not parse.
+func setRunnerKey(body string, cfg *config.Config, name string, sub []string, key, literal string) (string, error) {
+	n := slices.IndexFunc(cfg.Runners, func(r *config.Runner) bool { return r.Name == name })
+	if n < 0 {
+		return "", fmt.Errorf("config.toml has no runner %q", name)
+	}
+	lines := splitLines(body)
+	blocks := tomlBlocks(lines)
+	runner, path := []string{"runner"}, append([]string{"runner"}, sub...)
+	seen := -1
+	for i, b := range blocks {
+		if !b.array || !samePath(b.path, runner) {
+			continue
+		}
+		if seen++; seen != n {
+			continue
+		}
+		last := b
+		for _, c := range blocks[i+1:] {
+			if c.array || !hasPrefix(c.path, runner) {
+				break
+			}
+			if samePath(c.path, path) {
+				return setBlockKey(lines, c, key, literal)
+			}
+			last = c
+		}
+		indent := b.indent + "  "
+		text := indent + tomlHeader(path...) + "\n" + indent + tomlKey(key) + " = " + literal + "\n"
+		out := strings.TrimRight(strings.Join(lines[:last.end], ""), "\n") + "\n\n" + text
+		if rest := strings.TrimLeft(strings.Join(lines[last.end:], ""), "\n"); rest != "" {
+			out += "\n" + rest
+		}
+		return out, nil
+	}
+	return "", fmt.Errorf("config.toml has %d [[runner]] tables; runner %q is number %d", seen+1, name, n+1)
 }
 
 // removeTableKey deletes key from the table at path, and the table with it

@@ -43,13 +43,14 @@ type setupRecorder struct {
 	registers int
 	doctors   int
 	docker    bool
+	machine   *fakeMachine
 }
 
 // fakeSetup routes setup's outward steps to fakes: registration still runs
 // the real device flow, against whatever --url the test passes.
 func fakeSetup(t *testing.T, docker bool) *setupRecorder {
 	t.Helper()
-	rec := &setupRecorder{svc: &fakeService{}, docker: docker}
+	rec := &setupRecorder{svc: &fakeService{}, docker: docker, machine: newFakeMachine()}
 	prev := newSetupDeps
 	newSetupDeps = func() setupDeps {
 		return setupDeps{
@@ -64,9 +65,13 @@ func fakeSetup(t *testing.T, docker bool) *setupRecorder {
 				printf(cmd.OutOrStdout(), "  (doctor ran)\n")
 				return nil
 			},
+			toolchains: rec.machine.deps(),
 		}
 	}
 	t.Cleanup(func() { newSetupDeps = prev })
+	// The toolchains step reads every configured repository; a test that
+	// cares what is in one says so with its own fakeRepoFiles.
+	fakeRepoFiles(t, fstest.MapFS{})
 	return rec
 }
 
@@ -106,7 +111,7 @@ func TestSetup_AFreshMachineEndToEnd(t *testing.T) {
 		t.Errorf("register %d, install %d, restart %d, doctor %d; want 1 1 0 1",
 			rec.registers, rec.svc.installs, rec.svc.restart, rec.doctors)
 	}
-	for _, want := range []string{"1/5 config", "wrote", "3/5 register", "approved", "4/5 service", "5/5 doctor",
+	for _, want := range []string{"1/6 config", "wrote", "3/6 toolchains", "4/6 register", "approved", "5/6 service", "6/6 doctor",
 		"(doctor ran)", "latem repo add <owner/name>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
@@ -265,12 +270,12 @@ func TestSetup_AsksForARepositoryAndOffersWhatItsWorkflowsNeed(t *testing.T) {
 	if !slices.Contains(cfg.Actions.Allowed, "oven-sh/setup-bun") {
 		t.Errorf("actions.allowed = %v", cfg.Actions.Allowed)
 	}
-	if !slices.Equal(*asked, []treeSource{fromMirrorThenRemote}) {
+	if len(*asked) == 0 || slices.ContainsFunc(*asked, func(s treeSource) bool { return s != fromMirrorThenRemote }) {
 		t.Errorf("read from %v; a fresh machine has no mirror, so the remote", *asked)
 	}
-	for _, want := range []string{"2/5 repositories", "should build (owner/name)", "nope", "added repos.app",
+	for _, want := range []string{"2/6 repositories", "should build (owner/name)", "nope", "added repos.app",
 		"jobs in app can run on this machine", "its workflows need", "add them? [Y/n]", "added 2 entries",
-		"another (owner/name)", "3/5 register"} {
+		"another (owner/name)", "4/6 register"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}

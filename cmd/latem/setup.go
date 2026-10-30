@@ -33,8 +33,9 @@ func newSetupCommand() *cobra.Command {
 	var f setupFlags
 	cmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Make this machine a latem runner: config, registration, service, doctor",
-		Long: `Make this machine a latem runner: config, registration, service, doctor.
+		Short: "Make this machine a latem runner: config, repositories, toolchains, registration, service, doctor",
+		Long: `Make this machine a latem runner: config, repositories, toolchains,
+registration, service, doctor.
 
 One command for a fresh machine, and safe to run again on one that is half
 done — each step looks at what is there and does only what is missing:
@@ -46,12 +47,17 @@ done — each step looks at what is there and does only what is missing:
                    with none configured, asks which — and checks each one's
                    workflows, read without a checkout, offering the label
                    aliases and allowed actions they need (A57).
-  3. register      approves this machine in the browser (` + "`latem register`" + `),
+  3. toolchains    says what the jobs this machine takes need that it lacks —
+                   with no repository, asks what it will build — and, on a
+                   terminal, offers each install a command can do, one at a
+                   time (A60). It never runs sudo: what needs a password, a
+                   licence or the App Store is said, for you to do.
+  4. register      approves this machine in the browser (` + "`latem register`" + `),
                    unless it is already registered or --no-register keeps it
                    local.
-  4. service       installs the agent as a user service and starts it, or
-                   restarts it when steps 1 or 3 changed what it runs.
-  5. doctor        checks the result and names the fix for anything wrong.
+  5. service       installs the agent as a user service and starts it, or
+                   restarts it when an earlier step changed what it runs.
+  6. doctor        checks the result and names the fix for anything wrong.
 
 Registering before the service starts, rather than after, is deliberate: the
 control plane connection is read only when the agent starts, so the other
@@ -103,6 +109,7 @@ type setupDeps struct {
 	service       setupService
 	register      func(cmd *cobra.Command, f registerFlags) error
 	doctor        func(cmd *cobra.Command) error
+	toolchains    toolchainDeps
 }
 
 type setupService interface {
@@ -117,6 +124,7 @@ var newSetupDeps = func() setupDeps {
 		service:       systemService{sys: system.New(system.Options{})},
 		register:      runRegister,
 		doctor:        runDoctorFor,
+		toolchains:    realToolchainDeps(),
 	}
 }
 
@@ -127,9 +135,12 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	step := func(title string) { printf(out, "\n%s\n", st.heading(title)) }
 	paths := config.DerivePaths(configDir())
 	changed := false
+	// One reader of stdin for every question, so that a question does not
+	// lose what was typed ahead for the next.
+	p := newPrompter(cmd)
 
 	// 1 — config.
-	step("1/5 config")
+	step("1/6 config")
 	if _, err := os.Stat(paths.File); os.IsNotExist(err) {
 		docker := runtime.GOOS != "darwin"
 		if runtime.GOOS == "darwin" && !f.noDocker {
@@ -163,16 +174,24 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	}
 
 	// 2 — repositories.
-	step("2/5 repositories")
-	if err := setupRepositories(cmd, f, cfg); err != nil {
+	step("2/6 repositories")
+	if err := setupRepositories(cmd, p, f, cfg); err != nil {
 		return err
 	}
+
+	// 3 — toolchains.
+	step("3/6 toolchains")
+	wrote, err := setupToolchains(cmd, p, deps.toolchains)
+	if err != nil {
+		return err
+	}
+	changed = changed || wrote
 	if cfg, err = loadConfig(); err != nil {
 		return err
 	}
 
-	// 3 — register.
-	step("3/5 register")
+	// 4 — register.
+	step("4/6 register")
 	switch {
 	case f.noRegister:
 		printf(out, "  skipped (--no-register): this machine builds what `latem run` asks, and nothing else\n")
@@ -185,8 +204,8 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 		changed = true
 	}
 
-	// 4 — service.
-	step("4/5 service")
+	// 5 — service.
+	step("5/6 service")
 	switch {
 	case f.noService:
 		printf(out, "  skipped (--no-service); run the agent yourself with `latem agent`\n")
@@ -211,8 +230,8 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 		}
 	}
 
-	// 5 — doctor.
-	step("5/5 doctor")
+	// 6 — doctor.
+	step("6/6 doctor")
 	doctorErr := deps.doctor(cmd)
 
 	printf(out, "\n%s\n", st.heading("next"))
@@ -227,7 +246,7 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 // setupRepositories adds the repositories this machine builds: those --repo
 // names, or — on a terminal, with none configured — those it is asked for.
 // Each one's workflows are read without a checkout and checked (A57).
-func setupRepositories(cmd *cobra.Command, f setupFlags, cfg *config.Config) error {
+func setupRepositories(cmd *cobra.Command, p *prompter, f setupFlags, cfg *config.Config) error {
 	out := cmd.OutOrStdout()
 	asking := len(f.repos) == 0 && len(cfg.Repos) == 0 && interactive(cmd)
 	if len(f.repos) == 0 && !asking {
@@ -239,7 +258,6 @@ func setupRepositories(cmd *cobra.Command, f setupFlags, cfg *config.Config) err
 		return nil
 	}
 
-	p := newPrompter(cmd)
 	for i := 0; ; i++ {
 		var slug string
 		if asking {
@@ -325,6 +343,7 @@ func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 	}
 	printf(out, "\n  %d of %d jobs in %s can run on this machine\n", rep.jobs()-rep.failed(), rep.jobs(), key)
 	shown := 0
+refused:
 	for _, wr := range rep.workflows {
 		for _, j := range wr.jobs {
 			if j.level() != levelFail || len(j.findings) == 0 {
@@ -332,7 +351,7 @@ func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 			}
 			if shown == 6 {
 				printf(out, "    …\n")
-				break
+				break refused
 			}
 			first := strings.SplitN(j.findings[0].text, "\n", 2)[0]
 			printf(out, "    %s: %s — %s\n", path.Base(wr.file), j.key, first)

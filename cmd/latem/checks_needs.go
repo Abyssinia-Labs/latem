@@ -136,7 +136,7 @@ func (d *doctor) needsCheck(id, title, key string, rep checkReport, tcFor func(*
 				if !slices.Contains(lines, line) {
 					lines = append(lines, line)
 				}
-				for _, f := range g.Fix {
+				for _, f := range g.Fixes() {
 					if !slices.Contains(fixes, f) {
 						fixes = append(fixes, f)
 					}
