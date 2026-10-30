@@ -2526,7 +2526,14 @@ scope, so the command cannot file a value under a name no run reads. The value c
 or from a prompt with echo off, and the command takes no argument that could carry it. On macOS it
 goes to the Keychain through `security -i`, which reads `add-generic-password -U -s latem -a <name>
 -X <hex>` from stdin: the value is never in a process's argv, and hex carries a PEM's newlines
-without quoting. Elsewhere, and with `--store file`, it is a line of `secrets.env` in the double
+without quoting. `security -i` runs at most 4095 bytes of a line and the rest as a command of its
+own — a truncated value written over the good one, and the remainder echoed as an unknown command
+— so a value whose line would pass 4000 bytes (about 1,950 bytes of value) is refused with
+`--store file` named, and a run of hex in anything security prints is elided before it is shown.
+The prompt reads with canonical mode off as well as echo, because the terminal's line discipline
+holds 1,024 bytes of a line on macOS and drops the rest. Two `[repos.*]` keys that fold to the same
+scoped prefix — `my-app` and `my_app` are both `my_app__` — would each read the other's secrets, so
+the config that has both does not load. Elsewhere, and with `--store file`, it is a line of `secrets.env` in the double
 quoting the file provider reads back exactly, every other line kept, written through a 0600
 temporary and a rename; a file that does not parse is refused rather than rewritten. `list` reads
 names only — the Keychain's from `security dump-keychain` without `-d`, the file's from its keys,
