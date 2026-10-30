@@ -157,6 +157,19 @@ type PlannedJob struct {
 	// Error is why this job cannot run. It fails alone, and the jobs that
 	// need it are skipped as after any failure.
 	Error string `json:"error,omitempty"`
+	// Requires is what the job needs of a machine that nothing in it
+	// provides (A61, 2.2), sent only to a control plane that says 2.2. It
+	// explains; nothing routes on it.
+	Requires []Requirement `json:"requires,omitempty"`
+}
+
+// Requirement is one thing a job needs of a machine (A61): a key from
+// internal/needs' closed vocabulary — "xcode", "ios-simulator", "jdk" — and
+// the version the job names, if it names one. Never evidence, a path or a
+// step.
+type Requirement struct {
+	Key     string `json:"key"`
+	Version string `json:"version,omitempty"`
 }
 
 // Strategy is a matrix leg's place among its siblings, and how the control

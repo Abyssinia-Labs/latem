@@ -17,6 +17,23 @@ type MachineHealth struct {
 	// Repos are the repositories this machine builds, which is how a GitHub
 	// event finds the machines that can plan and run it (A52).
 	Repos []RepoInfo `json:"repos,omitempty"`
+	// Toolchains is what the machine has for builds (A61, 2.2), sent only to
+	// a control plane that says 2.2. It explains; nothing routes on it.
+	Toolchains *Toolchains `json:"toolchains,omitempty"`
+}
+
+// Toolchains is what a machine has for builds, as a step on its native
+// runners would find it (A61): versions and names, never a path.
+type Toolchains struct {
+	Xcode            []string `json:"xcode,omitempty"` // "26.0.1"
+	IOSSimulator     bool     `json:"ios_simulator,omitempty"`
+	JDK              []int    `json:"jdk,omitempty"` // majors
+	AndroidSDK       bool     `json:"android_sdk,omitempty"`
+	AndroidPlatforms []int    `json:"android_platforms,omitempty"`
+	AndroidEmulator  bool     `json:"android_emulator,omitempty"`
+	// Tools are the probed commands a step's PATH finds: "xcodegen", "docker".
+	Tools            []string `json:"tools,omitempty"`
+	PasswordlessSudo bool     `json:"passwordless_sudo,omitempty"`
 }
 
 // RepoInfo is one configured repository: the key a run or plan names it by,

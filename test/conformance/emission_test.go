@@ -39,6 +39,9 @@ func TestConformance_AgentEmissions(t *testing.T) {
 	dir := shortTemp(t)
 	db := openStore(t, dir)
 	rec := newRecorder(t, "tok-conformance")
+	// A61: a control plane that says 2.2 is sent a plan's requires and a
+	// heartbeat's toolchains.
+	rec.hello = []byte(`{"kind":"hello","hello":{"protocol_version":"` + protocol.Version + `"}}`)
 
 	ctx := context.Background()
 
@@ -78,6 +81,13 @@ func TestConformance_AgentEmissions(t *testing.T) {
 
 	// --- resume (§4.1) ------------------------------------------------------
 	rec.waitForKind(t, "resume", 20*time.Second)
+	deadline := time.Now().Add(20 * time.Second)
+	for !b.SpeaksRequires() {
+		if time.Now().After(deadline) {
+			t.Fatal("the broker never read the hello")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// --- heartbeat (§4.5) ---------------------------------------------------
 	if err := b.Heartbeat(ctx, protocol.MachineHealth{
@@ -93,6 +103,12 @@ func TestConformance_AgentEmissions(t *testing.T) {
 		// A52: how an installation's repository finds its machines. A
 		// repository not on GitHub has a key and no slug.
 		Repos: []protocol.RepoInfo{{Key: "myapp", GitHub: "Abyssinia-Labs/myapp"}, {Key: "scratch"}},
+		// A61: versions and names, never a path.
+		Toolchains: &protocol.Toolchains{
+			Xcode: []string{"26.0.1", "27.0"}, IOSSimulator: true, JDK: []int{17, 21},
+			AndroidSDK: true, AndroidPlatforms: []int{35, 36}, AndroidEmulator: true,
+			Tools: []string{"bun", "docker", "xcodegen"},
+		},
 	}); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -153,6 +169,8 @@ func TestConformance_AgentEmissions(t *testing.T) {
 			Jobs: []protocol.PlannedJob{{
 				Key: "lint", Name: "lint", Labels: []string{"linux"},
 				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+				// A61: what it needs that nothing in it provides.
+				Requires: []protocol.Requirement{{Key: "xcode", Version: "27"}, {Key: "ios-simulator"}},
 			}, {
 				Key: "web", Name: "Web build", Needs: []string{"lint"}, Labels: []string{"linux"},
 				Environment: "staging", Permissions: map[string]string{},

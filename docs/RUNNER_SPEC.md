@@ -2829,3 +2829,32 @@ runner's `path_prepend` included.
 **With no repository.** Setup asks what the machine will build — iOS apps, macOS apps, Android
 apps, Linux builds — and checks what each needs of the runner here that would take it: Xcode and a
 simulator runtime for iOS, Xcode for a macOS app, JDK 17 and an Android SDK for Android.
+
+### Amendment from telling the control plane what jobs need
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A61 | §5 INV-5, §7, §20, A52, A59, A60 | **Protocol 2.2. A planned job carries `requires` — what it needs of a machine that nothing in it provides, as closed keys and versions — and a heartbeat carries `toolchains` — what the machine has, as versions and names. Both are sent only to a control plane whose hello says 2.2, and both only explain** | A59 put what a job needs in a run's log and doctor's report, on the machine. The person looking at a queued or failing job is looking at the control plane's page, which knew neither what the job needed nor what the machine had, and said "waiting for an online machine with R and a runner labelled L" whatever the cause |
+
+**What is sent.** `requires` is each requirement of the job that no action provides, as A59
+reads it — the scripts its steps run included, through the mirror's tree at the planned commit —
+with a version only when it is digits and dots: `[{"key":"xcode","version":"27"},
+{"key":"ios-simulator"}]`. At most 32. Never the evidence, a path or a step: the control plane
+gets a closed vocabulary, which is what INV-5's "the job definition comes from the pinned commit"
+leaves it able to hold. `toolchains` is the agent's probe (A59, with A60's `path_prepend`):
+Xcode versions, an iOS simulator runtime, JDK majors, the Android SDK and its platforms and
+emulator, the probed commands a step's PATH finds, and passwordless sudo. Never a path.
+
+**To whom.** The agent records the protocol version of the control plane's last hello. It
+computes `requires` only for a control plane that said 2.2 or later, and the remote broker strips
+both fields from what it sends to one that did not, as a second guard: a 2.1 control plane
+decodes a plan strictly and would refuse the whole of it over one job's field. So the control
+plane is upgraded first, as for 2.1, and an agent on 2.2 talks to a 2.1 control plane exactly as
+a 2.1 agent does.
+
+**What it is for.** The control plane shows what a job needs, and — once the job is on a machine
+whose runners covering it are native — what that machine likely lacks: "likely to fail on mac
+mini, which lacks Xcode 27". For a docker runner it says only what no image gives: a Docker
+daemon, `services:`, `container:`. It never routes a job, never holds one back, and admission
+never reads either field: INV-5 is unchanged, and the machine decides what it runs from its
+own config and the pinned commit, as before.

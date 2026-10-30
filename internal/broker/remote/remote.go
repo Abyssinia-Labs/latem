@@ -80,6 +80,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -247,6 +250,9 @@ type Broker struct {
 	pending map[string][]protocol.Update
 	health  protocol.MachineHealth
 	hasHB   bool
+	// peerVersion is the protocol version the control plane's last hello
+	// said, or "" before one: what decides whether 2.2's fields are sent.
+	peerVersion string
 }
 
 var _ broker.Broker = (*Broker)(nil)
@@ -525,6 +531,7 @@ func (b *Broker) ReportPlan(ctx context.Context, p protocol.PlanResult) error {
 	if err := protocol.ValidateID(p.ID); err != nil {
 		return fmt.Errorf("remote: ReportPlan: %w", err)
 	}
+	p = b.planForPeer(p)
 	ack, err := b.request(ctx, frame{Kind: kindPlan, Plan: &p})
 	switch {
 	case err != nil:
@@ -604,6 +611,7 @@ func (b *Broker) Heartbeat(ctx context.Context, h protocol.MachineHealth) error 
 	b.hasHB = true
 	b.mu.Unlock()
 
+	h = b.healthForPeer(h)
 	err := b.send(ctx, frame{Kind: kindHeartbeat, Heartbeat: &h})
 	if errors.Is(err, ErrDisconnected) || errors.Is(err, ErrRevoked) {
 		return nil
@@ -685,4 +693,55 @@ func (b *Broker) authHeader() (http.Header, error) {
 	h.Set("Authorization", "Bearer "+token)
 	h.Set("Latem-Protocol-Version", protocol.Version)
 	return h, nil
+}
+
+// SpeaksRequires reports whether the control plane's last hello said 2.2 or
+// later, so that a plan's requires and a heartbeat's toolchains reach it
+// (A61). An older one decodes a plan strictly and would refuse the whole of
+// it over a field it does not know.
+func (b *Broker) SpeaksRequires() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return versionAtLeast(b.peerVersion, 2, 2)
+}
+
+// planForPeer is p without 2.2's fields, for a control plane that has not
+// said 2.2. A copy: the caller's slices are not written.
+func (b *Broker) planForPeer(p protocol.PlanResult) protocol.PlanResult {
+	if b.SpeaksRequires() {
+		return p
+	}
+	workflows := slices.Clone(p.Workflows)
+	for i := range workflows {
+		jobs := slices.Clone(workflows[i].Jobs)
+		for j := range jobs {
+			jobs[j].Requires = nil
+		}
+		workflows[i].Jobs = jobs
+	}
+	p.Workflows = workflows
+	return p
+}
+
+// healthForPeer is h without 2.2's toolchains, for a control plane that has
+// not said 2.2.
+func (b *Broker) healthForPeer(h protocol.MachineHealth) protocol.MachineHealth {
+	if !b.SpeaksRequires() {
+		h.Toolchains = nil
+	}
+	return h
+}
+
+// versionAtLeast compares a "major.minor" protocol version.
+func versionAtLeast(v string, major, minor int) bool {
+	majText, minText, ok := strings.Cut(v, ".")
+	if !ok {
+		return false
+	}
+	m, err1 := strconv.Atoi(majText)
+	n, err2 := strconv.Atoi(minText)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return m > major || (m == major && n >= minor)
 }

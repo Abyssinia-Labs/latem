@@ -661,6 +661,11 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	for _, r := range a.runners {
 		h.Runners = append(h.Runners, r.info())
 	}
+	// A61: what it has for builds, once the background probe has landed.
+	// The remote broker sends it only to a control plane that says 2.2.
+	if tc := a.toolchains.Load(); tc != nil {
+		h.Toolchains = toolchainsAdvert(*tc)
+	}
 	// A52: the repositories this machine builds, by key and by owner/name,
 	// which is how an event on GitHub finds the machines that can plan it.
 	repos := a.current().Repos

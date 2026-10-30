@@ -30,7 +30,7 @@ func (a *Agent) plan(ctx context.Context, t transport, req protocol.PlanRequest)
 	}
 	defer func() { <-a.planSlots }()
 
-	res := a.makePlan(ctx, req)
+	res := a.makePlan(ctx, req, speaksRequires(t))
 	if res.Error != "" {
 		a.log.Warn("plan refused", "plan_id", req.ID, "repo", req.Repo, "code", res.ErrorCode, "err", res.Error)
 	} else {
@@ -43,8 +43,9 @@ func (a *Agent) plan(ctx context.Context, t transport, req protocol.PlanRequest)
 }
 
 // makePlan reads the event's commit from this machine's own mirror and plans
-// it (INV-5). Nothing here runs anything from the repository.
-func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest) protocol.PlanResult {
+// it (INV-5). Nothing here runs anything from the repository. With requires,
+// each job also says what it needs of a machine (A61).
+func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, requires bool) protocol.PlanResult {
 	res := protocol.PlanResult{ID: req.ID}
 	fail := func(code protocol.ErrorCode, err error) protocol.PlanResult {
 		res.ErrorCode = code
@@ -94,6 +95,9 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest) protocol
 	})
 	if err != nil {
 		return fail(codeOr(registry.CodeOf(err), protocol.ErrBadRegistry), err)
+	}
+	if requires {
+		addRequires(ctx, mirror, ev.SHA, workflows)
 	}
 	for i := range workflows {
 		workflows[i].Error = a.redactLine(workflows[i].Error)

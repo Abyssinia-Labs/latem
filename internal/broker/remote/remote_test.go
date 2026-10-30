@@ -398,6 +398,48 @@ func TestHello_RecordsTheMachineIDTheControlPlaneAssigns(t *testing.T) {
 	h.CP.Await(t, "the machine id", func() bool { return h.MachineID() == "mch_01HXYZ" })
 }
 
+// TestRequires_OnlyToAControlPlaneThatSays22. A 2.1 control plane decodes a
+// plan strictly, so a job's requires would cost it the whole plan; a 2.2 one
+// gets them, and a heartbeat's toolchains (A61).
+func TestRequires_OnlyToAControlPlaneThatSays22(t *testing.T) {
+	plan := protocol.PlanResult{ID: "p-1", Workflows: []protocol.PlannedWorkflow{{
+		File: ".github/workflows/apple.yml", Name: "apple",
+		Jobs: []protocol.PlannedJob{{Key: "apple", Name: "apple", TimeoutMinutes: 360,
+			Requires: []protocol.Requirement{{Key: "xcode", Version: "27"}}}},
+	}}}
+	health := protocol.MachineHealth{MachineID: "m", Toolchains: &protocol.Toolchains{Xcode: []string{"26.0.1"}}}
+
+	for _, c := range []struct {
+		version string
+		want    bool
+	}{{"2.1", false}, {"", false}, {"2.2", true}, {"2.10", true}, {"3.0", true}} {
+		h := newHarness(t, nil)
+		h.CP.SetHello(&helloFrame{Version: c.version})
+		h.CP.Partition()
+		h.CP.Await(t, "the partition", func() bool { return !h.Connected() })
+		h.CP.Heal()
+		h.AwaitConnected(t)
+		h.CP.Await(t, "the hello", func() bool { return h.SpeaksRequires() == c.want || c.version == "" })
+
+		if err := h.ReportPlan(t.Context(), plan); err != nil {
+			t.Fatalf("%q: ReportPlan: %v", c.version, err)
+		}
+		if err := h.Heartbeat(t.Context(), health); err != nil {
+			t.Fatalf("%q: Heartbeat: %v", c.version, err)
+		}
+		h.CP.Await(t, "the beat", func() bool { return len(h.CP.Heartbeats()) > 0 })
+		plans, beats := h.CP.Plans(), h.CP.Heartbeats()
+		gotReq := plans[len(plans)-1].Workflows[0].Jobs[0].Requires != nil
+		gotTC := beats[len(beats)-1].Toolchains != nil
+		if gotReq != c.want || gotTC != c.want {
+			t.Errorf("hello %q: requires sent %v, toolchains sent %v; want %v", c.version, gotReq, gotTC, c.want)
+		}
+	}
+	if plan.Workflows[0].Jobs[0].Requires == nil {
+		t.Error("stripping for an old control plane wrote the caller's plan")
+	}
+}
+
 // TestReport_RefusalIsNotReplayed.
 //
 // A refusal is the control plane's answer, not a delivery failure. Replaying

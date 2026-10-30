@@ -24,7 +24,7 @@ jobs:
   web:
     needs: lint
     runs-on: ubuntu-latest
-    steps: [{run: make build}]
+    steps: [{run: bun run build}]
 `
 
 const planDeploy = `
@@ -99,6 +99,11 @@ func TestAgent_PlansAnEventFromItsMirror(t *testing.T) {
 	if len(w.Jobs) != 2 || w.Jobs[1].Key != "web" || !slices.Equal(w.Jobs[1].Needs, []string{"lint"}) ||
 		!slices.Equal(w.Jobs[1].Labels, []string{"linux"}) {
 		t.Errorf("jobs %+v", w.Jobs)
+	}
+	// A61: the control plane said 2.2, so each job says what it needs that
+	// nothing in it provides.
+	if w.Jobs[0].Requires != nil || !slices.Equal(w.Jobs[1].Requires, []protocol.Requirement{{Key: "bun"}}) {
+		t.Errorf("requires: lint %+v, web %+v; want none, and bun", w.Jobs[0].Requires, w.Jobs[1].Requires)
 	}
 	if p2 := plans["p2"]; p2.ErrorCode != protocol.ErrUnknownRepo || p2.Workflows != nil {
 		t.Errorf("p2: %+v, want an unknown repository", p2)
