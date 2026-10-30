@@ -163,8 +163,8 @@ func (d *doctor) needsCheck(id, title, key string, rep checkReport, tcFor func(*
 			if j.needs == nil {
 				continue
 			}
-			runner, ok := d.cfg.Runner(j.runner)
-			if j.runner == "" || !ok {
+			runner, ok := d.cfg.Runner(j.carrier)
+			if j.carrier == "" || !ok {
 				elsewhere++
 				continue
 			}

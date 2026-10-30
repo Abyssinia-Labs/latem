@@ -1339,6 +1339,22 @@ func repoFailureAdvice(url, out string) (notes, fixes []string) {
 		}
 		fixes = []string{seeFullError}
 
+	case strings.Contains(out, "could not read Username"),
+		strings.Contains(out, "could not read Password"):
+		notes = []string{
+			"An https URL needs a credential, and git found none it could give without asking: " +
+				"this account has no login for the host that a service can use. Prompting is off " +
+				"because the agent has no terminal to prompt on.",
+		}
+		if strings.HasPrefix(url, "https://github.com/") {
+			fixes = []string{
+				"gh auth login --hostname github.com --git-protocol https   # stores a login git's helper reads",
+				"gh auth setup-git   # if git does not ask gh yet",
+			}
+		} else {
+			fixes = []string{seeFullError}
+		}
+
 	case strings.Contains(out, "Authentication failed"):
 		notes = []string{
 			"An https URL was refused. The credential comes from a helper rather than from " +

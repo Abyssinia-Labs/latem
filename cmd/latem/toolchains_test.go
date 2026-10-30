@@ -27,6 +27,8 @@ type fakeMachine struct {
 	gives    map[string][2]string
 	installs []string
 	probes   []string
+	// brewOwner, when set, is the other user whose Homebrew this is.
+	brewOwner string
 }
 
 func newFakeMachine() *fakeMachine {
@@ -46,7 +48,8 @@ func (m *fakeMachine) deps() toolchainDeps {
 		},
 		image: func(_ context.Context, ref string) bool { return !m.absent[ref] },
 		install: func(_ context.Context, argv []string, w io.Writer) error {
-			line := needs.CommandLine(argv)
+			// argv[0] is the program as lookPath found it.
+			line := needs.CommandLine(append([]string{filepath.Base(argv[0])}, argv[1:]...))
 			m.installs = append(m.installs, line)
 			got, ok := m.gives[line]
 			if !ok {
@@ -57,6 +60,9 @@ func (m *fakeMachine) deps() toolchainDeps {
 			return nil
 		},
 		lookPath: func(name string) (string, error) { return "/opt/homebrew/bin/" + name, nil },
+		brewOwner: func(string) (string, bool) {
+			return m.brewOwner, m.brewOwner == ""
+		},
 	}
 }
 
@@ -174,6 +180,93 @@ func TestSetupToolchains_AsksWhatItWillBuild(t *testing.T) {
 	}
 	if len(rec.machine.installs) != 0 {
 		t.Errorf("installed %q after a no", rec.machine.installs)
+	}
+}
+
+// A job the native runner refuses only for its remote actions still goes
+// there once allow_unisolated is set, so what it needs is still said — a
+// fresh account's take-one apple job was left out, and the step said nothing.
+func TestSetupToolchains_AJobRefusedForItsActionsStillCounts(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{".github/workflows/apple.yml": {Data: []byte(`on: push
+jobs:
+  apple:
+    runs-on: macos-latest
+    steps:
+      - uses: oven-sh/setup-bun@0123456789abcdef0123456789abcdef01234567
+      - run: xcodegen generate
+`)}})
+	rec.machine.dirs["xcodegen"] = "/nowhere"
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	for _, want := range []string{"xcodegen — for app apple.yml apple", "fix: brew install xcodegen"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// A repository none of whose jobs a runner here takes is said, not passed
+// over in silence.
+func TestSetupToolchains_NoJobComesHere(t *testing.T) {
+	dir, _ := setupMachine(t, fstest.MapFS{".github/workflows/win.yml": {Data: []byte(
+		"on: push\njobs:\n  win:\n    runs-on: windows-latest\n    steps:\n      - run: echo hi\n")}})
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "no job in app goes to a runner here") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// A Homebrew another user installed — the usual case for an account made
+// for the agent — is not offered as an install this account can do.
+func TestSetupToolchains_AnotherUsersHomebrew(t *testing.T) {
+	dir, rec := setupMachine(t, macRepo)
+	fakeInteractive(t)
+	m := rec.machine
+	m.brewOwner = "michael"
+	m.dirs["xcodegen"], m.dirs["ruby"] = "/nowhere", "/nowhere"
+	m.gives["brew install xcodegen"] = [2]string{"xcodegen", "/usr/local/bin"}
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	if len(m.installs) != 0 {
+		t.Errorf("installed %q into another user's Homebrew", m.installs)
+	}
+	if strings.Contains(out, "run `brew install") {
+		t.Errorf("offered an install this account cannot do:\n%s", out)
+	}
+	if !strings.Contains(out, "brew install xcodegen — Homebrew here belongs to michael") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// A program on the agent's PATH and not this shell's is found: an account
+// made for the agent may never have put Homebrew on its own.
+func TestLookPathOr(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "brew-for-test"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "not-executable"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	if got, err := lookPathOr("brew-for-test", "/nonexistent:"+dir); err != nil || got != filepath.Join(dir, "brew-for-test") {
+		t.Errorf("lookPathOr = %q, %v", got, err)
+	}
+	if _, err := lookPathOr("not-executable", dir); err == nil {
+		t.Error("found a file that cannot run")
+	}
+	if _, err := lookPathOr("nowhere-at-all", dir); err == nil {
+		t.Error("found what is not there")
 	}
 }
 

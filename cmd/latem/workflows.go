@@ -353,7 +353,12 @@ type jobReport struct {
 	needs     *needs.Report
 	key, name string
 	runner    string // the runner that takes it, when one does
-	findings  []finding
+	// carrier is the runner whose labels it carries: runner, or the native
+	// one that refuses its remote actions until [actions] allow_unisolated
+	// says otherwise — still where it goes once that is settled, so what it
+	// needs is that runner's to have.
+	carrier  string
+	findings []finding
 }
 
 func (j jobReport) level() level {
@@ -551,6 +556,7 @@ func checkRegistry(cfg *config.Config, t checkTarget, inv inventory, fsys fs.FS,
 			jr.findings = append(jr.findings, finding{level: levelFail, text: text, fixes: fixes})
 		}
 		jr.runner = checkRegistryRunner(cfg, job, fail)
+		jr.carrier = jr.runner
 		checkSecrets(t, inv, job, &jr)
 		wr.jobs = append(wr.jobs, jr)
 	}
@@ -808,7 +814,7 @@ func checkJob(
 		return jr
 	}
 
-	jr.runner = checkRunner(cfg, job, rep, fail)
+	jr.runner, jr.carrier = checkRunner(cfg, job, rep, fail)
 	checkSecrets(t, inv, job, &jr)
 	return jr
 }
@@ -946,7 +952,10 @@ func checkActions(cfg *config.Config, refs []actions.Ref, rep *checkReport, fail
 
 // checkRunner is gate 13 for a compiled job: the first runner carrying its
 // labels, and able to run its kind of steps (internal/run's selectRunner).
-func checkRunner(cfg *config.Config, job *registry.Job, rep *checkReport, fail func(string, ...string)) string {
+// It also returns where the job goes once [actions] allow_unisolated lets
+// it: the runner that takes it, or the native one refusing it only for its
+// remote actions.
+func checkRunner(cfg *config.Config, job *registry.Job, rep *checkReport, fail func(string, ...string)) (takes, carries string) {
 	needDocker := job.RequiredExecutor() == registry.ExecutorDocker
 	var labelsOnly *config.Runner
 	for _, r := range cfg.Runners {
@@ -955,7 +964,7 @@ func checkRunner(cfg *config.Config, job *registry.Job, rep *checkReport, fail f
 		}
 		isolates := r.Executor == config.ExecutorDocker || r.Executor == config.ExecutorTart
 		if (!needDocker || r.Executor == config.ExecutorDocker) && (!job.RequiresIsolation || isolates) {
-			return r.Name
+			return r.Name, r.Name
 		}
 		if labelsOnly == nil {
 			labelsOnly = r
@@ -966,14 +975,17 @@ func checkRunner(cfg *config.Config, job *registry.Job, rep *checkReport, fail f
 		if !suggestAliases(cfg, job.RunsOn, rep, fail) {
 			fail(fmt.Sprintf("no runner here carries all of %s", strings.Join(job.RunsOn, ", ")))
 		}
+		return "", ""
 	case needDocker && labelsOnly.Executor != config.ExecutorDocker:
+		// No setting makes a native runner run a container.
 		fail(fmt.Sprintf("a docker:// step or a Docker action needs a docker runner, and %q is %s", labelsOnly.Name, labelsOnly.Executor))
+		return "", ""
 	default:
 		fail(fmt.Sprintf("it uses remote actions, which run only on an isolating runner, and %q is %s",
 			labelsOnly.Name, labelsOnly.Executor),
 			"[actions] allow_unisolated = true   # runs them as you, with everything you can reach (A47)")
 	}
-	return ""
+	return "", labelsOnly.Name
 }
 
 // suggestAliases names the labels a compiled job asks for that no runner
