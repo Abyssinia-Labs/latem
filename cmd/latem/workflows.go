@@ -259,6 +259,26 @@ func checkAndReport(cmd *cobra.Command, cfg *config.Config, target checkTarget, 
 	return nil
 }
 
+// repoCheckTarget is a configured repository as a check target, read without
+// a checkout: its slug and the branch pushes are checked against.
+func repoCheckTarget(cfg *config.Config, key string) checkTarget {
+	r := cfg.Repos[key]
+	t := checkTarget{repoKey: key, repo: r, branch: "main"}
+	if r == nil {
+		return t
+	}
+	if slug, ok := r.GitHubRepository(); ok {
+		t.slug = slug
+	}
+	for _, ref := range r.AllowedRefs {
+		if !strings.ContainsAny(ref, "*?[") && !strings.HasPrefix(ref, "refs/") {
+			t.branch = ref
+			break
+		}
+	}
+	return t
+}
+
 // resolveCheckTarget finds the [repos.*] entry a checkout is, by --repo or by
 // its origin remote.
 func resolveCheckTarget(ctx context.Context, cfg *config.Config, dir string, f workflowsCheckFlags) (checkTarget, error) {

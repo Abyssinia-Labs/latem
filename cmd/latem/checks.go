@@ -111,6 +111,15 @@ type doctor struct {
 	// asserts on what the host happens to have is a test that reports on the
 	// host.
 	kegRubies []string
+	// toolchains probes what the machine has for builds (A59); nil probes
+	// the real one with the service's PATH.
+	toolchains func(context.Context) system.Toolchains
+	// readRepo reads a configured repository; doctor reads the agent's
+	// mirror and nothing else.
+	readRepo func(context.Context, *config.Config, string, treeSource) (*repoFiles, error)
+	// needs is what the configured repositories' jobs need, once
+	// checkNeeds has read them.
+	needs needsSummary
 }
 
 func newDoctor() *doctor {
@@ -136,6 +145,7 @@ func newDoctor() *doctor {
 		newAppStore: func() *appstore.Client { return &appstore.Client{} },
 		kvm:         system.CheckKVM,
 		sameFS:      source.CheckSameFilesystem,
+		readRepo:    readRepo,
 	}
 }
 
@@ -148,13 +158,18 @@ func newDoctor() *doctor {
 func (d *doctor) run(ctx context.Context) report {
 	d.cfg, d.cfgErr = d.loadCfg()
 
+	// Read before anything is reported: what the repositories need decides
+	// which toolchain checks apply (A59).
+	needsChecks := d.checkNeeds(ctx)
+
 	var rep report
 	rep.section("Tooling", d.checkTooling(ctx)...)
-	rep.section("Mobile toolchain", d.checkMobileToolchain(ctx)...)
+	rep.section("Mobile toolchain", d.gateByNeeds(d.checkMobileToolchain(ctx))...)
 	rep.section("Configuration", d.checkConfiguration(ctx)...)
 	rep.section("Disk", d.checkDisk(ctx)...)
 	rep.section("Executors", d.checkExecutors(ctx)...)
 	rep.section("Repositories", d.checkRepos(ctx)...)
+	rep.section("What jobs need", needsChecks...)
 	rep.section("Actions", d.checkActions()...)
 	if d.includeSecrets {
 		rep.section("Secrets", d.checkSecrets(ctx)...)
@@ -1395,8 +1410,10 @@ const jdkForAndroid = 17
 //
 // Every check here exists because it cost real time on 2026-08-11
 // during the manual baseline. They are warnings rather than failures: a macOS
-// runner might build Go, and doctor cannot know what jobs a repo declares —
-// jobs.yaml lives in the repo at the resolved commit (§9), not on this machine.
+// runner might build Go. Since A59 doctor reads what the repositories' jobs
+// need from the agent's mirrors (checkNeeds), and [doctor.gateByNeeds] skips
+// a check here no job needs and names the jobs that need the rest; until
+// every repository has been fetched, all of them run, as before.
 //
 // The shape they share is the interesting part. In each case a working tool IS
 // installed and the one on PATH is the wrong one, so every naive check

@@ -71,6 +71,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -160,6 +161,11 @@ type Options struct {
 
 	// Now is the clock. Nil uses time.Now.
 	Now func() time.Time
+
+	// Toolchains is what this machine has installed for builds, as the
+	// agent last probed it, or nil before it has (A59). A run notes in its
+	// log what its job needs that the machine lacks. Nil writes no note.
+	Toolchains func() *system.Toolchains
 }
 
 // Runner is one execution slot: an executor plus the configuration that
@@ -225,6 +231,7 @@ type Orchestrator struct {
 	cancelGrace     time.Duration
 	teardownTimeout time.Duration
 	now             func() time.Time
+	toolchains      func() *system.Toolchains
 
 	reporter *reporter
 	groups   *groups
@@ -274,6 +281,7 @@ func New(opts Options) (*Orchestrator, error) {
 		cancelGrace:     orDefault(opts.CancelGrace, DefaultCancelGrace),
 		teardownTimeout: orDefault(opts.TeardownTimeout, DefaultTeardownTimeout),
 		now:             opts.Now,
+		toolchains:      opts.Toolchains,
 		groups:          newGroups(),
 		live:            map[string]*handle{},
 	}

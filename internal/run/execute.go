@@ -162,6 +162,7 @@ func (x *execution) drive(ctx context.Context) Result {
 	x.resolved, x.runner = resolved, runner
 	x.note("job %q on runner %q at %s (budget %s, %d step(s))",
 		resolved.JobName, runner.Name, shortSHA(x.ws.SHA), resolved.Timeout, len(resolved.Steps))
+	x.noteNeeds(reg, runner)
 
 	// The job wall clock is §9's, "enforced by the agent, not the executor",
 	// and it covers the whole job — which includes the rest of preparing. §11

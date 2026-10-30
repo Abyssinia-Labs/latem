@@ -188,6 +188,10 @@ type Options struct {
 	HTTP *http.Client
 	// Timeout bounds one probe. Zero uses [DefaultTimeout].
 	Timeout time.Duration
+	// Root is put in front of the absolute system paths a toolchain probe
+	// reads — /Applications, /usr/lib/jvm — so a test reads a fixture
+	// rather than the machine running it. Empty is the real filesystem.
+	Root string
 }
 
 // System probes one machine.
@@ -205,6 +209,7 @@ type System struct {
 	getuid       func() int
 	httpClient   *http.Client
 	timeout      time.Duration
+	root         string
 }
 
 // New builds a System from opts, filling in the real machine for anything the
@@ -221,6 +226,7 @@ func New(opts Options) *System {
 		getuid:     opts.Getuid,
 		httpClient: opts.HTTP,
 		timeout:    opts.Timeout,
+		root:       opts.Root,
 	}
 	if s.goos == "" {
 		s.goos = runtime.GOOS
