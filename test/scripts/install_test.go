@@ -119,6 +119,9 @@ func tarGzOf(t *testing.T, name string, body []byte) []byte {
 // combined output.
 func runInstaller(t *testing.T, r *fakeRelease, installDir string) (string, error) {
 	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("install.sh refuses root before it downloads anything, by design; this needs a non-root user")
+	}
 	if _, err := exec.LookPath("curl"); err != nil {
 		if _, err := exec.LookPath("wget"); err != nil {
 			t.Skip("neither curl nor wget is installed; install.sh needs one")
@@ -319,6 +322,9 @@ func signChecksums(t *testing.T, r *fakeRelease, secret, trusted string) {
 
 func runInstallerScript(t *testing.T, script string, r *fakeRelease, installDir string) (string, error) {
 	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("install.sh refuses root before it downloads anything, by design; this needs a non-root user")
+	}
 	cmd := exec.Command("/bin/sh", script) //nolint:gosec // a copy of this repository's own script
 	cmd.Env = append(os.Environ(),
 		"LATEM_VERSION="+r.version,

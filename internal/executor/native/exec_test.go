@@ -741,7 +741,13 @@ echo "## Built 3 targets" >> "$GITHUB_STEP_SUMMARY"
 	agentPath := strings.Split(os.Getenv("PATH"), ":")
 	tail := agentPath[len(agentPath)-1]
 	add, agent := strings.Index(out, "/opt/latem-test-bin:"), strings.LastIndex(out, tail)
-	if tail == "" || add < 0 || agent < 0 || add > agent {
+	switch {
+	case !loginShellKeepsPath(t):
+		// Debian's /etc/profile replaces root's PATH outright rather than
+		// prepending to it, so on that machine nothing handed to a login
+		// shell survives, from the agent or from $GITHUB_PATH.
+		t.Log("this machine's login profile replaces PATH; the ordering is not checked here")
+	case tail == "" || add < 0 || agent < 0 || add > agent:
 		t.Errorf("$GITHUB_PATH addition should precede the agent's PATH (add at %d, agent tail %q at %d): %q", add, tail, agent, out)
 	}
 
@@ -857,4 +863,15 @@ func TestExec_ToolCacheOutlivesTheRun(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tools, "node", "22.0.0.complete")); err != nil {
 		t.Errorf("the tool cache should outlive the run: %v", err)
 	}
+}
+
+// loginShellKeepsPath reports whether a login shell on this machine keeps a
+// PATH entry it was handed. A profile that prepends (Homebrew's shellenv,
+// conda's init) keeps it; Debian's /etc/profile, for root, does not.
+func loginShellKeepsPath(t *testing.T) bool {
+	t.Helper()
+	cmd := exec.Command(DefaultShell, "-lc", `echo "$PATH"`) //nolint:gosec // a fixed probe
+	cmd.Env = append(os.Environ(), "PATH=/opt/latem-probe:"+os.Getenv("PATH"))
+	out, err := cmd.Output()
+	return err == nil && strings.Contains(string(out), "/opt/latem-probe")
 }
