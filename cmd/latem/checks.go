@@ -120,6 +120,9 @@ type doctor struct {
 	// needs is what the configured repositories' jobs need, once
 	// checkNeeds has read them.
 	needs needsSummary
+	// probed is each PATH a native runner's steps get, and what a probe on
+	// it found: one probe per PATH for the whole of a doctor run.
+	probed map[string]system.Toolchains
 }
 
 func newDoctor() *doctor {
@@ -167,7 +170,7 @@ func (d *doctor) run(ctx context.Context) report {
 	rep.section("Mobile toolchain", d.gateByNeeds(d.checkMobileToolchain(ctx))...)
 	rep.section("Configuration", d.checkConfiguration(ctx)...)
 	rep.section("Disk", d.checkDisk(ctx)...)
-	rep.section("Executors", d.checkExecutors(ctx)...)
+	rep.section("Executors", append(d.checkExecutors(ctx), d.checkRunnerLabels(ctx)...)...)
 	rep.section("Repositories", d.checkRepos(ctx)...)
 	rep.section("What jobs need", needsChecks...)
 	rep.section("Actions", d.checkActions()...)
