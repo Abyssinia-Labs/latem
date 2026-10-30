@@ -52,25 +52,7 @@ func (d *doctor) checkNeeds(ctx context.Context) []check {
 	if len(d.cfg.Repos) == 0 {
 		return []check{skip(id, title, "no repositories yet")}
 	}
-	probe := d.toolchains
-	if probe == nil {
-		probe = d.sys.Toolchains
-	}
-	// Probed once per PATH a native runner's steps get (A60), when a job
-	// needs it: a docker or tart runner's toolchain is not the host's.
-	probed := map[string]system.Toolchains{}
-	tcFor := func(r *config.Runner) system.Toolchains {
-		if r.Executor != config.ExecutorNative {
-			return system.Toolchains{Tools: map[string]bool{}}
-		}
-		p := ghcmd.PrependPath(r.NativePathPrepend(), servicePath(d.sys))
-		tc, ok := probed[p]
-		if !ok {
-			tc = probe(ctx, p)
-			probed[p] = tc
-		}
-		return tc
-	}
+	tcFor := func(r *config.Runner) system.Toolchains { return d.toolchainsFor(ctx, r) }
 	empty, err := os.MkdirTemp("", "latem-doctor-workspace-")
 	if err != nil {
 		return []check{fail(id, title, err.Error())}
@@ -97,6 +79,74 @@ func (d *doctor) checkNeeds(ctx context.Context) []check {
 			continue
 		}
 		out = append(out, d.needsCheck(cid, ctitle, key, rep, tcFor))
+	}
+	return out
+}
+
+// toolchainsFor is what a step on runner r finds, probed once per PATH a
+// native runner's steps get (A60), and only when asked: a docker or tart
+// runner's toolchain is not the host's, and reads as nothing here.
+func (d *doctor) toolchainsFor(ctx context.Context, r *config.Runner) system.Toolchains {
+	if r.Executor != config.ExecutorNative {
+		return system.Toolchains{Tools: map[string]bool{}}
+	}
+	probe := d.toolchains
+	if probe == nil {
+		probe = d.sys.Toolchains
+	}
+	if d.probed == nil {
+		d.probed = map[string]system.Toolchains{}
+	}
+	p := ghcmd.PrependPath(r.NativePathPrepend(), servicePath(d.sys))
+	tc, ok := d.probed[p]
+	if !ok {
+		tc = probe(ctx, p)
+		d.probed[p] = tc
+	}
+	return tc
+}
+
+// labelPromises are labels that say a runner can do what only a toolchain
+// makes true. A job asking for one is routed here by it, and fails at its
+// first build step when the machine cannot — and `latem init` writes xcode
+// on every Mac, whether or not it has one.
+var labelPromises = []struct {
+	label, what string
+	has         func(system.Toolchains) bool
+}{
+	{"xcode", "no Xcode", func(t system.Toolchains) bool { return len(t.Xcodes) > 0 }},
+	{"ios", "no iOS simulator runtime", func(t system.Toolchains) bool { return len(t.Xcodes) > 0 && t.HasIOSRuntime() }},
+	{"android", "no Android SDK", func(t system.Toolchains) bool { return t.AndroidSDK != "" }},
+}
+
+// checkRunnerLabels warns of a native runner whose labels promise a
+// toolchain its steps would not find.
+func (d *doctor) checkRunnerLabels(ctx context.Context) []check {
+	if d.cfg == nil {
+		return nil
+	}
+	var out []check
+	for _, r := range d.cfg.Runners {
+		if r.Executor != config.ExecutorNative {
+			continue
+		}
+		var broken []string
+		for _, p := range labelPromises {
+			if !slices.ContainsFunc(r.Labels, func(l string) bool { return strings.EqualFold(l, p.label) }) {
+				continue
+			}
+			if !p.has(d.toolchainsFor(ctx, r)) {
+				broken = append(broken, fmt.Sprintf("%s, and its steps find %s", p.label, p.what))
+			}
+		}
+		id, title := "labels."+r.Name, "labels / "+r.Name
+		if len(broken) == 0 {
+			continue
+		}
+		out = append(out, warn(id, title, "runner "+r.Name+" is labelled "+strings.Join(broken, "; ")).
+			withNotes("A job that asks for the label is sent here, and fails at its first build step.").
+			withManual("install what the label promises (`latem setup` offers what a command can), "+
+				"or take the label off the runner in config.toml"))
 	}
 	return out
 }

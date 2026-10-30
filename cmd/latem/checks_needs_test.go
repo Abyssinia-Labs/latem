@@ -122,3 +122,26 @@ func TestDoctorNeeds_ProbesTheRunnersPath(t *testing.T) {
 		t.Errorf("probed with %q, want one probe of the mac runner's PATH", paths)
 	}
 }
+
+// A runner labelled xcode or ios on a Mac whose steps find no Xcode is where
+// a job asking for the label goes, and fails (`latem init` writes xcode on
+// every Mac). A machine that has them says nothing.
+func TestDoctorRunnerLabels_SaysWhatALabelPromisesAndTheMachineLacks(t *testing.T) {
+	d := needsDoctor(t, appleRepo, system.Toolchains{Tools: map[string]bool{}})
+	d.cfg.Runners[1].Labels = []string{"macos", "arm64", "xcode", "ios"}
+	got := d.checkRunnerLabels(t.Context())
+	if len(got) != 1 || got[0].ID != "labels.mac" || got[0].Level != levelWarn ||
+		!strings.Contains(got[0].Detail, "xcode, and its steps find no Xcode; ios, and its steps find no iOS simulator runtime") {
+		t.Fatalf("checks = %+v", got)
+	}
+
+	d = needsDoctor(t, appleRepo, system.Toolchains{
+		Xcodes:      []system.XcodeInstall{{Version: system.Version{Major: 27, Text: "27.0"}}},
+		SimRuntimes: []system.SimRuntime{{Platform: "iOS", Available: true}},
+		Tools:       map[string]bool{},
+	})
+	d.cfg.Runners[1].Labels = []string{"macos", "xcode", "ios"}
+	if got := d.checkRunnerLabels(t.Context()); len(got) != 0 {
+		t.Errorf("a Mac with Xcode and a runtime: %+v", got)
+	}
+}

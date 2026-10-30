@@ -2789,6 +2789,11 @@ one. The toolchain checks that existed before (`ruby.*`, `java.version`, `androi
 here needs them, and naming the jobs that do when they run. Until every repository has been
 read, all of them run, as before.
 
+**Labels that promise a toolchain.** A native runner labelled `xcode`, `ios` or `android` is
+where a job asking for that label goes, and `latem init` writes `xcode` on every Mac. Doctor
+warns, under Executors, when a step on that runner would find no Xcode, no iOS simulator
+runtime, or no Android SDK: the job would fail at its first build step.
+
 **A run's note.** The agent probes its toolchains once, in the background, when it starts. A run
 whose job needs what its runner lacks says so in its log before the first step — "this job needs
 Xcode 27; this runner has Xcode 26.0.1" — and runs exactly as it would have. A run before the probe
