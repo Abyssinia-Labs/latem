@@ -273,10 +273,13 @@ cat <<EOF
 
 ${BOLD}Installed.${RESET} Next:
 
-  1. Write ~/.latem/config.toml           see RUNNER_SPEC §8, or the README
-  2. latem doctor                         until it is green
-  3. latem service install                run the agent at boot
-  4. latem run <repo> <job>               trigger a build
+  latem setup                          config, registration (approved in your
+                                       browser), the service, and doctor
+  latem repo add <owner/name>          allow a repository
+  latem workflows check <checkout>     what this machine can run of it
+  latem secrets set NAME               a value its workflows read
+
+Building locally only, with no control plane: latem setup --no-register
 
 Docs: https://github.com/$REPO
 EOF

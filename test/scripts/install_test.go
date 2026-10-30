@@ -173,6 +173,11 @@ func TestInstallScript_InstallsAVerifiedRelease(t *testing.T) {
 	if !strings.Contains(out, "doctor ran") {
 		t.Errorf("install.sh did not run doctor:\n%s", out)
 	}
+	// A54: the next step it names is the one command that does the rest, not
+	// a config file to write by hand.
+	if !strings.Contains(out, "latem setup") || strings.Contains(out, "Write ~/.latem/config.toml") {
+		t.Errorf("install.sh's closing text does not point at `latem setup`:\n%s", out)
+	}
 	// And nothing was left behind by the rename-into-place.
 	if _, err := os.Stat(filepath.Join(dir, ".latem.new")); err == nil {
 		t.Error("the staging file survived the install")

@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -283,9 +284,21 @@ func validateRepos(cfg *Config) []error {
 		problems = append(problems, fmt.Errorf(format, args...))
 	}
 
-	if len(cfg.Repos) == 0 {
-		add("no [repos.*] entries; a repo absent from this table cannot be built (§8), so this agent would reject every run — add at least one")
-		return problems
+	// No repos at all is legal (A54): it is the state `latem setup` leaves a
+	// machine in, registered and serving and waiting for `latem repo add`,
+	// which a reload then applies. The agent rejects every run until then,
+	// and `latem doctor` says so; refusing to load would instead stop the
+	// agent from starting until a repo was written by hand.
+	// A repository's secrets are looked up under its key folded to
+	// [A-Za-z0-9_] (A50), so two keys that fold alike — my-app and my_app —
+	// would each be served the other's secrets.
+	scopedAs := map[string]string{}
+	for _, name := range sortedKeys(cfg.Repos) {
+		prefix := secrets.ScopedName("", name)
+		if other, ok := scopedAs[prefix]; ok {
+			add("repos.%s and repos.%s would share secrets: both look them up as %sNAME; rename one", other, name, prefix)
+		}
+		scopedAs[prefix] = name
 	}
 
 	for _, name := range sortedKeys(cfg.Repos) {

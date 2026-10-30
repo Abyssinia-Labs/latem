@@ -85,10 +85,25 @@ func (r *Reloader) Reload() (*Config, []string, error) {
 //   - agent.metrics_addr and broker.local.socket — already bound. Rebinding a
 //     listener under live connections is not a config change, it is a restart
 //     with extra steps.
+//   - [broker.remote] — the transport is dialled with its url and token file
+//     at startup and keeps both for its life. Rotating the token's *contents*
+//     needs nothing: it is re-read on every dial. Pointing it at a different
+//     file, or a different control plane, does (A54).
+//   - agent.queue_ttl, agent.remote_logs, agent.shutdown_grace and
+//     agent.auto_update — each is handed to a broker, the drain timer or the
+//     update loop as it starts (A54).
+//   - [secrets] — the resolution chain is built once, with its commands
+//     parsed, and every run resolves through that chain (A54).
 //
-// Everything else reloads: the repo allowlist (the common case — adding a repo
-// should not need downtime), the remote broker, retention and TTLs, and the
-// secrets chain.
+// Everything else reloads: the repo allowlist and each repo's refs, vars and
+// environments (the common case — adding a repo should not need downtime),
+// [label_aliases], [actions], and log retention.
+//
+// The second half of that list was longer before A54, and wrong: it named the
+// remote broker, the TTLs and the secrets chain, none of which any reload ever
+// reached. A reload that reports a change as applied when nothing consumes it
+// is the case [Reloader.Reload] warns about — the operator walks away believing
+// the change took.
 func RequiresRestart(old, next *Config) []string {
 	var out []string
 	note := func(format string, args ...any) {
@@ -109,6 +124,34 @@ func RequiresRestart(old, next *Config) []string {
 	}
 	if old.Paths.Socket != next.Paths.Socket {
 		note("broker.local.socket changed from %s to %s", old.Paths.Socket, next.Paths.Socket)
+	}
+	if old.Broker.Remote.Enabled != next.Broker.Remote.Enabled {
+		note("broker.remote.enabled changed from %v to %v", old.Broker.Remote.Enabled, next.Broker.Remote.Enabled)
+	}
+	if old.Broker.Remote.URL != next.Broker.Remote.URL {
+		note("broker.remote.url changed from %q to %q", old.Broker.Remote.URL, next.Broker.Remote.URL)
+	}
+	if old.Paths.TokenFile != next.Paths.TokenFile {
+		note("broker.remote.token_file changed from %s to %s", old.Paths.TokenFile, next.Paths.TokenFile)
+	}
+	if old.Agent.QueueTTL != next.Agent.QueueTTL {
+		note("agent.queue_ttl changed from %s to %s", old.Agent.QueueTTL.Duration(), next.Agent.QueueTTL.Duration())
+	}
+	if old.Agent.RemoteLogs != next.Agent.RemoteLogs {
+		note("agent.remote_logs changed from %q to %q", old.Agent.RemoteLogs, next.Agent.RemoteLogs)
+	}
+	if old.Agent.ShutdownGrace != next.Agent.ShutdownGrace {
+		note("agent.shutdown_grace changed from %s to %s",
+			old.Agent.ShutdownGrace.Duration(), next.Agent.ShutdownGrace.Duration())
+	}
+	if old.Agent.AutoUpdate != next.Agent.AutoUpdate {
+		note("agent.auto_update changed from %v to %v", old.Agent.AutoUpdate, next.Agent.AutoUpdate)
+	}
+	if !reflect.DeepEqual(old.Secrets, next.Secrets) {
+		// Named, not diffed: [secrets.commands] values are command lines, and
+		// a command line is where an operator who should not have pasted a
+		// token inline would have pasted it.
+		note("[secrets] changed")
 	}
 	out = append(out, runnerChanges(old.Runners, next.Runners)...)
 	return out
@@ -170,18 +213,22 @@ func merge(old, next *Config) *Config {
 
 	merged.SchemaVersion = old.SchemaVersion
 	merged.Machine.ID = old.Machine.ID
-	merged.Agent.WorkDir = old.Agent.WorkDir
-	merged.Agent.MetricsAddr = old.Agent.MetricsAddr
-	merged.Broker.Local = old.Broker.Local
+	merged.Broker = old.Broker
 	merged.Runners = old.Runners
+	merged.Secrets = old.Secrets
+
+	// [agent] is restart-only but for log retention, which the daily
+	// maintenance pass reads afresh each time it runs.
+	retention := merged.Agent.LogRetention
+	merged.Agent = old.Agent
+	merged.Agent.LogRetention = retention
 
 	// Paths derive from the config directory, which cannot change under a
-	// reload, and from work_dir and the socket, which are restart-only. The
-	// token file is the exception: rotating a machine token is a routine
-	// operation and the remote broker re-reads it on reconnect.
-	tokenFile := merged.Paths.TokenFile
+	// reload, and from work_dir, the socket and the token file, which are
+	// restart-only. Rotating the token itself is routine and needs none of
+	// this: the remote broker re-reads the file it was started with on every
+	// dial.
 	merged.Paths = old.Paths
-	merged.Paths.TokenFile = tokenFile
 
 	merged.source = old.source
 	return &merged

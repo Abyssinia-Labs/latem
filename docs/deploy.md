@@ -163,6 +163,13 @@ token carries every repo you can see.
 
 ## 5. Configure the agent
 
+**`latem setup` does sections 5 and 9 in one command** — it writes the config,
+registers the machine with a control plane by approving it in the browser
+(`--no-register` skips that), installs the service, and runs doctor — and
+`latem repo add` then allows each repository. The rest of this runbook is the
+same machine by hand, which is still the way to understand what those
+commands did:
+
 ```bash
 latem init --repo myapp=git@github.com:me/myapp.git
 ```

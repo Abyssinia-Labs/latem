@@ -30,16 +30,24 @@ func TestReload_AppliesTheReloadableSubset(t *testing.T) {
 schema_version = 1
 
 [agent]
-queue_ttl   = "12h"
-remote_logs = "on_failure"
+log_retention = "72h"
 
 [repos.app]
 url          = "git@github.com:me/app.git"
 allowed_refs = ["main"]
 
+[repos.app.vars]
+REGION = "eu"
+
 [repos.added]
 url          = "git@github.com:me/added.git"
 allowed_refs = ["main", "release/*"]
+
+[label_aliases]
+"blacksmith-4vcpu-ubuntu-2404" = ["linux"]
+
+[actions]
+allowed = ["actions/*"]
 
 [[runner]]
 name     = "linux"
@@ -54,14 +62,20 @@ labels   = ["linux", "docker"]
 	if len(deferred) != 0 {
 		t.Errorf("nothing needed a restart, but got %v", deferred)
 	}
-	if got := next.Agent.QueueTTL.Duration(); got != 12*time.Hour {
-		t.Errorf("queue_ttl = %s, want 12h", got)
-	}
-	if next.Agent.RemoteLogs != RemoteLogsOnFailure {
-		t.Errorf("remote_logs = %q", next.Agent.RemoteLogs)
+	if got := next.Agent.LogRetention.Duration(); got != 72*time.Hour {
+		t.Errorf("log_retention = %s, want 72h", got)
 	}
 	if _, ok := next.Repos["added"]; !ok {
 		t.Error("a repo added on SIGHUP did not appear — adding a repo is the reason SIGHUP exists")
+	}
+	if got := next.Repos["app"].Vars["REGION"]; got != "eu" {
+		t.Errorf("repos.app.vars.REGION = %q, want eu", got)
+	}
+	if got := next.LabelAliases["blacksmith-4vcpu-ubuntu-2404"]; len(got) != 1 || got[0] != "linux" {
+		t.Errorf("label_aliases did not reload: %v", next.LabelAliases)
+	}
+	if len(next.Actions.Allowed) != 1 || next.Actions.Allowed[0] != "actions/*" {
+		t.Errorf("[actions] did not reload: %+v", next.Actions)
 	}
 	if r.Config() != next {
 		t.Error("Config() does not return the reloaded config")
@@ -209,6 +223,9 @@ socket  = "other.sock"
 enabled    = true
 url        = "wss://api.example.com/agent"
 token_file = "rotated.key"
+
+[secrets.commands]
+MATCH_PASSWORD = "op read op://ci/match/password"
 `)
 	f.writeFile(t, "rotated.key", 0o600)
 
@@ -230,18 +247,56 @@ token_file = "rotated.key"
 		t.Errorf("the local broker changed under a reload: %+v", next.Broker.Local)
 	}
 
-	// The token file is the exception: rotating a machine token is routine.
-	if want := filepath.Join(f.Dir, "rotated.key"); next.Paths.TokenFile != want {
-		t.Errorf("token_file = %s, want %s — rotating a token should not need a restart", next.Paths.TokenFile, want)
+	// A54: the remote broker is dialled once with its url and token file, so
+	// the live config must go on naming the ones it is actually using.
+	if next.Paths.TokenFile != cfg.Paths.TokenFile {
+		t.Errorf("token_file moved under a reload to %s; the broker still reads %s",
+			next.Paths.TokenFile, cfg.Paths.TokenFile)
 	}
-	if !next.Broker.Remote.Enabled || next.Broker.Remote.URL == "" {
-		t.Error("the remote broker did not reload")
+	if next.Broker.Remote.Enabled || next.Broker.Remote.URL != "" {
+		t.Errorf("the remote broker changed under a reload: %+v", next.Broker.Remote)
+	}
+	if len(next.Secrets.Commands) != 0 {
+		t.Errorf("[secrets] changed under a reload: %v", next.Secrets.Commands)
 	}
 
 	joined := strings.Join(deferred, "; ")
-	for _, want := range []string{"machine.id", "agent.work_dir", "agent.metrics_addr", "broker.local.enabled", "broker.local.socket"} {
+	for _, want := range []string{"machine.id", "agent.work_dir", "agent.metrics_addr", "broker.local.enabled",
+		"broker.local.socket", "broker.remote.enabled", "broker.remote.url", "broker.remote.token_file", "[secrets]"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("a change needing a restart was applied silently: %s not in %v", want, deferred)
+		}
+	}
+}
+
+// A54: the [agent] knobs a broker, the drain timer or the update loop took at
+// startup are reported, not applied.
+func TestReload_AgentKnobsConsumedAtStartupAreDeferred(t *testing.T) {
+	f := newFixture(t, minimalValid)
+	cfg, err := Load(f.Opts)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	r := NewReloader(cfg)
+
+	f.rewrite(t, minimalValid+`
+[agent]
+queue_ttl      = "12h"
+remote_logs    = "on_failure"
+shutdown_grace = "1m"
+`)
+	next, deferred, err := r.Reload()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if next.Agent.QueueTTL != cfg.Agent.QueueTTL || next.Agent.RemoteLogs != cfg.Agent.RemoteLogs ||
+		next.Agent.ShutdownGrace != cfg.Agent.ShutdownGrace {
+		t.Errorf("[agent] changed under a reload: %+v", next.Agent)
+	}
+	joined := strings.Join(deferred, "; ")
+	for _, want := range []string{"agent.queue_ttl", "agent.remote_logs", "agent.shutdown_grace"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("%s was neither applied nor reported: %v", want, deferred)
 		}
 	}
 }

@@ -65,6 +65,17 @@ type ExecRunner struct {
 // APP_STORE_CONNECT_KEY_P8, and the cheapest way to guarantee it never leaks
 // one secret into the process that fetches another is to not pass it.
 func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, error) {
+	return r.run(ctx, argv, nil)
+}
+
+// RunInput is [ExecRunner.Run] with stdin. It exists for writing a secret:
+// `security -i` reads the command that carries the value from stdin, which is
+// the one way to hand it a value that never appears in a process listing.
+func (r ExecRunner) RunInput(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	return r.run(ctx, argv, stdin)
+}
+
+func (r ExecRunner) run(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
 	if len(argv) == 0 {
 		return nil, nil, errors.New("secrets: cannot run an empty argv")
 	}
@@ -92,6 +103,9 @@ func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, err
 	// prompt therefore reads EOF and fails, rather than blocking until the
 	// timeout with no indication of what it wanted.
 	cmd.Stdin = nil
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	cmd.Env = withoutAgentSecrets(r.environ())
 
 	runErr := cmd.Run()

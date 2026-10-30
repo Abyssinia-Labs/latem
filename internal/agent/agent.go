@@ -251,6 +251,16 @@ type Agent struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
+	// live is the config a reload last applied, nil until one has (A54).
+	// [Agent.current] reads it; cfg stays the config the agent started with,
+	// which is the right answer for everything restart-only.
+	live atomic.Pointer[config.Config]
+	// reloadMu serialises reloads and guards the three fields after it.
+	reloadMu  sync.Mutex
+	reloader  *config.Reloader
+	reloads   int
+	startedAt time.Time
+
 	mu sync.Mutex
 	// activeRepos maps a live run id to its repo key, so the cache pruner can
 	// answer "is a live run reading this mirror" without a database round trip
@@ -353,6 +363,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.spawn(&wg, func() { a.updateLoop(workCtx) })
 
 	pool := a.startPool(workCtx)
+	a.startReloads()
+	defer a.removeReloadStatus()
 	a.markReady()
 	a.log.Info("agent ready",
 		"machine", a.cfg.Machine.Name,
@@ -624,9 +636,10 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	}
 	// A52: the repositories this machine builds, by key and by owner/name,
 	// which is how an event on GitHub finds the machines that can plan it.
-	for _, key := range slices.Sorted(maps.Keys(a.cfg.Repos)) {
+	repos := a.current().Repos
+	for _, key := range slices.Sorted(maps.Keys(repos)) {
 		info := protocol.RepoInfo{Key: key}
-		if slug, ok := a.cfg.Repos[key].GitHubRepository(); ok {
+		if slug, ok := repos[key].GitHubRepository(); ok {
 			info.GitHub = slug
 		}
 		h.Repos = append(h.Repos, info)

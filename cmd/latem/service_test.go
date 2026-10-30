@@ -130,7 +130,7 @@ func TestServiceCommandsExist(t *testing.T) {
 			for _, sub := range c.Commands() {
 				have[sub.Name()] = true
 			}
-			for _, want := range []string{"install", "uninstall", "status"} {
+			for _, want := range []string{"install", "uninstall", "restart", "reload", "status"} {
 				if !have[want] {
 					t.Errorf("service %s is missing", want)
 				}

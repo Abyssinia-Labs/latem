@@ -348,8 +348,6 @@ func TestRegister_ReadsTheTokenFromStdinAndFromAFile(t *testing.T) {
 // before the wiring existed, so they are pinned here.
 func TestRegister_UsageErrorsExitTwo(t *testing.T) {
 	tests := map[string][]string{
-		"no url":                {"--token", "x"},
-		"no token":              {"--url", "wss://x/agent"},
 		"both token forms":      {"--url", "wss://x/agent", "--token", "x", "--token-file", "y"},
 		"a positional argument": {"--url", "wss://x/agent", "--token", "x", "stray"},
 	}

@@ -472,7 +472,7 @@ WebSocket to the control plane. `Authorization: Bearer <machine-token>`.
 
 ## 8. Configuration
 
-`~/.latem/config.toml`, mode `0600`. Reloaded on `SIGHUP`; changes to `[[runner]]` require a restart.
+`~/.latem/config.toml`, mode `0600`. Reloaded on `SIGHUP` — `latem service reload` sends it and prints the answer — which applies `[repos.*]` with their refs, vars and environments, `[label_aliases]`, `[actions]` and `log_retention`; changes to `[[runner]]`, `[machine] id`, `[broker.*]`, `[secrets]` and the other `[agent]` keys require a restart, and the agent names each one it read and did not apply (amendment A54).
 
 ```toml
 schema_version = 1
@@ -1094,7 +1094,7 @@ Resolution chain, first hit wins. Only names declared in the job's `secrets:` bl
 
 1. `LATEM_SECRET_<NAME>` in the agent's own environment
 2. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
-3. macOS Keychain — `security find-generic-password -s latem -a <NAME> -w`
+3. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
 4. `pass` / `gopass`, if configured
 5. A shell command per secret, defined in config
 
@@ -1117,6 +1117,7 @@ Rules:
 - Never written to sqlite, never included in `Update.ErrorMsg`, never sent to a broker (INV-4).
 - A declared secret that resolves empty is `E_MISSING_SECRET` at admission, not a runtime surprise 40 minutes in.
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
+- `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value.
 
 ---
 
@@ -1278,13 +1279,19 @@ The original argument survives for what it did cover: the runner still invokes `
 ## 19. Local trigger and CLI
 
 ```
+latem setup [--url U] [--no-register] [--no-service]   init, register, service install, doctor; idempotent (A54)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
 latem cancel <run-id>
 latem approve <run-id>               Local-only; pins the run's commit (INV-5)
-latem register --url U --token T     Write config + machine token, verify connectivity
+latem register [--url U] [--token-file F]   Write config + machine token, verify connectivity; no token: approve in the browser (A54)
+latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
+latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
+latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
+latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
+latem workflows check [path] [--fix]   Plan and compile a checkout's workflows offline (A54)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem version
@@ -2469,3 +2476,118 @@ additive, and §2.3's strictness makes every additive change a refusal at the ot
 agent refuses a run carrying `matrix`, and a control plane that does not know the plan's new
 fields refuses the plan. So the control plane is upgraded first, and sends a leg only to a
 machine whose frames say 2.1 or later.
+
+### Amendment from making a machine easy to adopt
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A54 | §8, §15, §19, §23 | **Onboarding is commands, not hand-written TOML. `latem service reload` and a wired SIGHUP make a config edit take effect without a restart, and the list of what reloads is narrowed to what the agent actually re-reads** | Bringing the first real machine onto Path B took a hand-written `config.toml` (repo URLs, `refs/pull/*/merge`, `[label_aliases]` for Blacksmith labels, an `[actions]` allowlist), a machine token pasted into `register`, and a restart after every edit, because SIGHUP was documented and nothing handled it. Go's default action for an unhandled SIGHUP is to exit, so the documented way to reload was a way to stop the machine |
+
+**Reload.** `latem agent` handles SIGHUP. The agent re-reads `config.toml` through
+`config.Reloader`; a file that does not load is refused and the agent keeps the config it had,
+because an operator mid-edit is not a reason to kill builds in flight. What a reload applies is
+what the agent reads afresh: the repo allowlist with each repo's refs, vars and environments,
+`[label_aliases]`, `[actions]`, and `log_retention`. It reaches the next admission, the next
+plan, and the next heartbeat's advertised repositories; a run already admitted keeps what it was
+admitted under. Everything consumed once at startup is restart-only and reported as such:
+`[[runner]]`, `[machine] id`, `agent.work_dir`, `metrics_addr`, `[broker.local]`, and — new in
+this amendment, because no reload ever reached them and §8 said they reloaded — `[broker.remote]`,
+`[secrets]`, `queue_ttl`, `remote_logs`, `shutdown_grace` and `auto_update`. Rotating the machine
+token's contents still needs nothing: the remote broker re-reads its file on every dial.
+
+`latem service reload` checks the file first and sends nothing if it does not load. It signals
+only the process holding the config directory's flock — the kernel's word that it is the agent,
+which a pid file alone cannot give — and only when that process has written
+`~/.latem/agent.reload` naming itself. The agent writes that file when it has started and after
+every reload, with the reload count, the error if it refused one, and the changes it deferred;
+the command waits for the count to move and prints the outcome. An agent built before this
+amendment writes no such file, and is not signalled: SIGHUP would stop it.
+
+**No repos is a legal config.** It is the state `latem setup` leaves a machine in — registered,
+serving, and rejecting every run — until `latem repo add` gives it one; the loader used to
+refuse it, which meant the agent could not start until a repo was written by hand. `latem
+doctor` warns about it and names the fix.
+
+**`latem repo add <owner/name>`** writes `[repos.<key>]` — the key is the repository's name,
+lowercased into §8's key characters, or `--key` — with `url = "https://github.com/<owner>/<name>.git"`
+and `allowed_refs` set to the repository's default branch (as `git ls-remote --symref` names it)
+and `refs/pull/*/merge`. It first runs that `ls-remote` in the agent's git environment: prompting
+off, the git state variables dropped as `internal/source` drops them, and no `SSH_AUTH_SOCK`,
+since a service does not inherit one. A repository that answers only with the operator's ssh
+agent is refused with that diagnosis, as `doctor`'s repo check gives it; `--no-verify` skips the
+probe. `repo remove` deletes the table and its `vars` and `environments` subtables. Both edit the
+file as text — the table found by its header, everything else byte for byte — and refuse an edit
+whose result would not load when the original did, then ask the running agent to reload.
+
+**`latem secrets set|list|rm [--repo R] [--env E] NAME`** stores a value under
+`secrets.ScopedName(NAME, R[, E])` — exactly the name a workflow job's lookup tries first for that
+scope, so the command cannot file a value under a name no run reads. The value comes from stdin
+(a one-line value loses the one trailing newline `echo` adds; a multi-line value is kept as it is)
+or from a prompt with echo off, and the command takes no argument that could carry it. On macOS it
+goes to the Keychain through `security -i`, which reads `add-generic-password -U -s latem -a <name>
+-X <hex>` from stdin: the value is never in a process's argv, and hex carries a PEM's newlines
+without quoting. `security -i` runs at most 4095 bytes of a line and the rest as a command of its
+own — a truncated value written over the good one, and the remainder echoed as an unknown command
+— so a value whose line would pass 4000 bytes (about 1,950 bytes of value) is refused with
+`--store file` named, and a run of hex in anything security prints is elided before it is shown.
+The prompt reads with canonical mode off as well as echo, because the terminal's line discipline
+holds 1,024 bytes of a line on macOS and drops the rest. Two `[repos.*]` keys that fold to the same
+scoped prefix — `my-app` and `my_app` are both `my_app__` — would each read the other's secrets, so
+the config that has both does not load. Elsewhere, and with `--store file`, it is a line of `secrets.env` in the double
+quoting the file provider reads back exactly, every other line kept, written through a 0600
+temporary and a rename; a file that does not parse is refused rather than rewritten. `list` reads
+names only — the Keychain's from `security dump-keychain` without `-d`, the file's from its keys,
+and `[secrets.commands]` from config — and decodes each back into its scope. `set` warns when
+`secrets.env` holds the same name, because the file is read before the Keychain.
+
+**`latem vars set|list|rm --repo R [--env E] NAME [VALUE]`** edits `[repos.R.vars]` or
+`[repos.R.environments.E.vars]` as text, creating the table beside its repository, and reloads.
+
+**`latem workflows check [path]`** runs `workflow.PlanEvent` over `os.DirFS`-style access to a
+local checkout — through an `os.Root`, as the agent reads a workspace — for a push to the
+default branch (the repo's first plain `allowed_refs` entry, or `--branch`), a pull request into
+it, and a `workflow_dispatch` of every file declaring one, with each required input that has no
+default given its first option, `false`, `0` or a placeholder. A paths filter is matched against
+every file in the checkout. Each planned job is then compiled with `CompileWith` as a workflow
+run's job, its `if:` blanked — the question is whether this machine could run it, not whether
+this event would — with every need succeeded and the machine's `[label_aliases]` and vars. Remote
+actions are compiled against a permissive policy and an offline fetcher that records each
+reference and answers with a placeholder JavaScript action; the machine's own `[actions]` policy
+is applied to that record afterwards, so one refused action neither stops the compile nor hides
+the next. Nothing is fetched and nothing runs. Per job it reports: the runner gate 13 would pick
+(labels, a docker runner for container steps, an isolating runner for remote actions unless
+`allow_unisolated`); a `runs-on` label no runner carries, with a `[label_aliases]` line mapping it
+to `linux` or `macos` when its name says which; an action outside the allowlist or not pinned;
+secrets the compiled job declares (less `GITHUB_TOKEN`, which the control plane mints) that no
+store holds under any scope the run looks in, from names alone; and the compiler's own refusals.
+A matrix job (A55) is compiled once per leg the plan made, with that leg as `Options.Matrix` —
+exactly the `run.matrix` a run of it would carry — and reported per leg, because `runs-on` may
+read the matrix. Alias suggestions therefore come from the compiled labels: one the compiler
+produced itself (`linux`, `macos`, `arm64`, or an existing alias's target) is a platform this
+machine lacks; any other is a vendor's label as written, and an alias is the fix.
+Vars referenced in the file with no value are a warning, as they read as empty. `--fix` writes
+the alias and allowlist entries, through the same text edit and load gate as the other commands,
+and reloads; it never changes `require_pinned` or stores a secret. The checkout is matched to a
+`[repos.*]` entry by its `origin` remote or `--repo`.
+
+**`latem register` with no token** runs RFC 8628's device flow against the control plane behind
+`--url`, which now defaults to the hosted one, `wss://gw.latem.dev/agent`: `POST <base>/claim` with
+the machine's name, OS, architecture, labels and version, then `POST <base>/claim/token` every
+`interval` seconds — slower by 5 s after each `slow_down` — until the person who opened the
+printed link approves it, declines it, or it expires. The contract is PROTOCOL.md §1's. What
+follows is unchanged and is the point: the claimed token goes through `remote.Verify` before
+`remote.WriteToken` and `writeRegistration`, so a token that came from a browser is held to the
+same rule as one pasted in — proven, then written, and nothing written on any failure. No token
+is ever printed, and the device code is not either.
+
+**`latem setup`** is the guided path for a fresh machine, and each step skips what is already
+done, so running it again is safe. (1) With no `config.toml` it writes `init`'s template with no
+repositories: a native `macos` runner on darwin, plus a `linux` docker runner when a Docker
+daemon answers a ping — on Linux, always — whose `default_image` is `--image` or the template's
+placeholder until the published `latem-ubuntu` digest replaces it. A config that exists is left
+alone; one that does not load stops setup, because the agent would not start on it. (2) Unless
+the machine already has `[broker.remote]` and a readable token, or `--no-register`, it runs
+`latem register`'s device flow. (3) It installs the user service (§23), or restarts it when steps 1
+or 2 changed anything or it is installed and not running. Registration comes before the service
+rather than after because `[broker.remote]` is restart-only: the other order starts the agent
+twice. (4) It runs doctor, and exits with doctor's verdict. `install.sh` now ends by naming it.

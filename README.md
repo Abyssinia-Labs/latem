@@ -188,7 +188,61 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 ```
 
 Never as root. The script detects your OS and architecture, verifies the
-download, installs to `~/.local/bin`, and runs `latem doctor`.
+download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
+
+```console
+$ latem setup
+1/4 config
+  wrote /Users/me/.latem/config.toml
+  runners: macos (native), linux (docker)
+
+2/4 register
+to register this machine, open
+
+  https://app.latem.dev/connect?code=WDJB-MJHT
+
+and approve the code  WDJB-MJHT
+(opened in your browser)
+
+waiting for approval — the code expires in 10m0s …
+  approved
+verifying wss://gw.latem.dev/agent …
+  connection verified
+
+3/4 service
+  …
+4/4 doctor
+  …
+```
+
+`latem setup` does the four things a fresh machine needs, and skips each one
+that is already done, so it is safe to run again:
+
+1. **config** — writes `~/.latem/config.toml` when there is none: a native
+   `macos` runner on a Mac, and a `linux` docker runner wherever a Docker
+   daemon answers (always, on Linux; `--image` sets its image). No
+   repositories yet — `latem repo add` is for those.
+2. **register** — approves the machine in the browser. With no token,
+   `latem register` asks the control plane for a code and opens the page to
+   approve it on; you approve it signed in, seeing the machine's name, OS and
+   labels, and the machine collects its own token. Over ssh the link is
+   printed instead — open it anywhere you are signed in. `--url` points at a
+   control plane other than the hosted one; `--no-register` keeps the
+   machine local, which is a fully supported way to run it.
+3. **service** — installs the agent as a user service and starts it, or
+   restarts it when the config or the registration just changed.
+4. **doctor** — checks the result and names the fix for anything wrong.
+
+Then allow a repository, see what of it this machine can run, and give it
+what its workflows read:
+
+```console
+$ latem repo add me/myapp
+$ latem workflows check ~/src/myapp
+$ latem secrets set --repo myapp DEPLOY_TOKEN
+```
+
+`latem register --token-file F` still takes a token you already have.
 
 **Verify what you installed**, or have the script do it for you — it does both
 checks below before it writes anything. By hand, for a release downloaded
@@ -530,31 +584,53 @@ commands; it never runs them.
 
 ### Where secret values live
 
-A job's `secrets: [NAME, …]` names what to resolve. The values are on the
-machine, never in the repository, and are looked up in a fixed order — the first
-that answers wins:
-
-| | Source | How to set it |
-|---|---|---|
-| 1 | Environment | `LATEM_SECRET_<NAME>` in the agent's environment — the override, useful for `LATEM_SECRET_X=… latem run` to answer "is it the secret or is it the build?" |
-| 2 | File | a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
-| 3 | Keychain | `security add-generic-password -s latem -a <NAME> -w …` |
-| 4 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
-
-**`secrets.env` is line-based and cannot hold a multi-line value.** This matters
-because the secret INV-4 is built around — `APP_STORE_CONNECT_KEY_P8`, a PEM
-block — is multi-line by definition. A quoted block spanning lines is a parse
-error, and the obvious workaround of collapsing it with `\n` escapes is worse
-than an error: the escapes are **not** expanded, so the value resolves, `doctor`
-reports it `[ ok ]`, and the build gets one line containing literal backslash-n.
-That is not a usable key, and nothing says so until `fastlane` fails.
-
-**Put multi-line secrets in the Keychain**, which holds them intact:
+A job's `secrets: [NAME, …]` — or a workflow's `${{ secrets.NAME }}` — names
+what to resolve. The values are on the machine, never in the repository.
+**`latem secrets set` is the way in:**
 
 ```console
-$ security add-generic-password -s latem -a APP_STORE_CONNECT_KEY_P8 \
-      -w "$(cat AuthKey_ABC123.p8)"
+$ latem secrets set --repo latem-cloud --env production CONVEX_DEPLOY_KEY
+value for CONVEX_DEPLOY_KEY (repo latem-cloud, environment production, not echoed):
+stored CONVEX_DEPLOY_KEY for repo latem-cloud, environment production, in the Keychain as latem_cloud__production__CONVEX_DEPLOY_KEY
+$ pbpaste | latem secrets set CLOUDFLARE_API_TOKEN
+$ latem secrets set --repo myapp APP_STORE_CONNECT_KEY_P8 < AuthKey_ABC123.p8
+$ latem secrets list
+SCOPE                     NAME                      STORE
+*                         CLOUDFLARE_API_TOKEN      keychain
+latem-cloud / production  CONVEX_DEPLOY_KEY         keychain
+myapp                     APP_STORE_CONNECT_KEY_P8  keychain
 ```
+
+The value comes from stdin or a prompt that does not echo, never from an
+argument — an argument is in your shell history and in every user's process
+listing. Piped in, a one-line value loses the newline `echo` and `pbpaste`
+add, and a multi-line one (a PEM) is kept byte for byte. On a Mac it goes in
+the Keychain under the service `latem`; elsewhere in `~/.latem/secrets.env`
+at mode `0600`; `--store` picks. `latem secrets list` prints names and scopes,
+never values, and `latem secrets rm` removes one. Every run reads the stores
+afresh, so nothing needs a reload.
+
+**`--repo` and `--env` say which jobs a value is for.** A workflow job of repo
+`R` in environment `E` looks a name up as `R__E__NAME`, then `R__NAME`, then
+`NAME` — most specific first (A50) — and `set` files the value under exactly
+the name that lookup builds. A value with neither flag is for every job on
+the machine.
+
+Behind the command, the lookup order is fixed, and the first that answers
+wins:
+
+| | Source | Set by |
+|---|---|---|
+| 1 | Environment | `LATEM_SECRET_<NAME>` in the agent's environment — the override, useful for `LATEM_SECRET_X=… latem run` to answer "is it the secret or is it the build?" |
+| 2 | File | `latem secrets set --store file`, or a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
+| 3 | Keychain | `latem secrets set` on a Mac |
+| 4 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
+
+**By hand, `secrets.env` holds a multi-line value only in double quotes with
+`\n` escapes** — `KEY="-----BEGIN…\n…\n-----END…\n"` — and a quoted block
+spanning real lines is a parse error. `latem secrets set --store file` writes
+that quoting for you. Never put a value in a `security add-generic-password -w`
+argument: `latem secrets set` hands it to `security` over stdin instead.
 
 **Or name a command**, which works equally well and is where a secret lives when
 it comes from a password manager rather than this machine:
@@ -650,23 +726,76 @@ ref outside `allowed_refs` is rejected rather than parked:
 latem: r_… rejected (E_INVALID_REF): ref "refs/heads/feature/x" is outside allowed_refs for "myapp" and approval is disabled
 ```
 
-**To add a second repository, edit `config.toml` by hand** and add another
-`[repos.<name>]` block. `latem init` refuses to run against an existing config,
-and its `--force` flag *overwrites* the file rather than merging into it — it
-would drop the repos already there. `latem doctor` validates what you added.
-
-**Then restart the agent**, or the edit does nothing:
+**To add a repository, use `latem repo add`:**
 
 ```console
-$ latem service restart
+$ latem repo add me/myapp
+checking https://github.com/me/myapp.git the way the agent will fetch it …
+added repos.myapp to /Users/me/.latem/config.toml
+  url           https://github.com/me/myapp.git
+  allowed refs  main, refs/pull/*/merge
+
+the agent (pid 4182) reloaded config.toml
 ```
 
-The agent reads `config.toml` once, when it starts, because a bad config has to
-be fatal at load rather than forty minutes into somebody's build. Until it
-restarts it is running what it loaded, so a repo you have just added — and that
-`doctor` has just called `[ ok ]`, because `doctor` reads the file — is still
-`E_UNKNOWN_REPO` to a run. `doctor` warns when the file is newer than the
-agent.
+It writes `[repos.<name>]` with the https URL and the refs a build may use
+without approval — the repository's default branch, and `refs/pull/*/merge`,
+which is what a pull request's checks are built from (`--allowed-refs`
+replaces both, `--require-approval` parks anything else). It checks the
+repository first with `git ls-remote` the way the agent runs git: no terminal
+to prompt on, and none of your shell's ssh agent, which a service does not
+inherit — so a repository only your terminal can read is refused here rather
+than failing every run at fetch. `latem repo list` shows what is allowed and
+`latem repo remove <name>` takes one out. All three edit `config.toml` as
+text and leave the rest of the file, comments included, as you wrote it.
+
+**Then ask what this machine can run.** `latem workflows check` reads a
+checkout's `.github/workflows` and plans it as the control plane would — a
+push to the default branch, a pull request into it, and a dispatch of each
+file that has one — through the agent's own planner and compiler, offline:
+
+```console
+$ latem workflows check ~/src/latem-cloud
+checking /Users/me/src/latem-cloud (repos.latem-cloud, Abyssinia-Labs/latem-cloud)
+
+.github/workflows/checks.yml  "Checks"
+  planned for: push to main, pull_request
+  [FAIL] checks
+         - uses oven-sh/setup-bun@v2: oven-sh/setup-bun is not in [actions] allowed
+             fix: [actions] allowed += "oven-sh/setup-bun"
+         - runs-on "blacksmith-4vcpu-ubuntu-2404": no runner here carries it
+             fix: [label_aliases] "blacksmith-4vcpu-ubuntu-2404" = ["linux"]
+
+0 of 1 jobs can run on this machine
+```
+
+For each job it names what stands in the way and the fix: a `runs-on` label
+no runner carries, a remote action outside `[actions] allowed` or not pinned to
+a commit, secrets with no value in any scope the run would look in (names
+only), vars that would read as empty, and what latem refuses outright — a
+reusable workflow, `services:`, `container:`. A matrix job is checked leg by
+leg, each with its own `runs-on`. `--fix` writes the
+`[label_aliases]` and `[actions]` entries it suggests and reloads the agent;
+pinning an action and storing a secret stay yours. It exits 1 while any job
+cannot run, so it also works as a gate.
+
+**Edit `config.toml` by hand for anything else**, then tell the running
+agent, or the edit does nothing:
+
+```console
+$ latem service reload
+the agent (pid 4182) reloaded config.toml
+```
+
+The agent validates `config.toml` when it starts, because a bad config has to
+be fatal at load rather than forty minutes into somebody's build, and until it
+re-reads the file it is running what it loaded — so a repo you have just added
+is still `E_UNKNOWN_REPO` to a run. `service reload` checks the file first,
+sends nothing if it does not load, and prints what the agent applied: repos
+(with their refs, vars and environments), `[label_aliases]`, `[actions]` and
+`log_retention`. Anything else it read — a `[[runner]]` above all — is listed
+as needing `latem service restart`. A file that fails to load is refused and
+the agent keeps the config it had.
 
 Every rule is validated at load and fatal there: a runner that starts on a
 broken config does not fail at startup, it fails forty minutes into somebody's
@@ -726,6 +855,7 @@ there is no subcommand to fetch them yet.
 ## Commands
 
 ```
+latem setup [--url U] [--no-register]  config, registration, service and doctor, idempotently
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
@@ -733,10 +863,14 @@ latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f]
 latem cancel <run-id> [--reason R]
 latem approve <run-id>               Local only; pins that run's commit (INV-5)
-latem register --url U --token T
+latem register [--url U] [--token-file F]   no token: approve this machine in the browser
+latem repo add <owner/name> | list | remove <name>
+latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
+latem vars set | list | rm --repo R [--env E] NAME [VALUE]
+latem workflows check [path] [--fix]  which workflow jobs this machine can run, and the fix for the rest
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
-latem service install [--print] | uninstall | restart | status
+latem service install [--print] | uninstall | restart | reload | status
 latem version
 ```
 

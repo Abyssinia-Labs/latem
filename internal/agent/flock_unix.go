@@ -28,6 +28,16 @@ func lockExclusive(f *os.File) error {
 	return err
 }
 
+// lockShared takes a non-blocking shared flock, which fails exactly when an
+// agent holds the exclusive one. It is how [Holder] asks without waiting.
+func lockShared(f *os.File) error {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EAGAIN) {
+		return errWouldBlock
+	}
+	return err
+}
+
 func unlock(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

@@ -54,7 +54,8 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest) protocol
 
 	// INV-3: the repo is matched exactly against config and never used to
 	// build a path; the key that match produced is what goes further.
-	repoCfg, ok := a.cfg.Repos[req.Repo]
+	cfg := a.current()
+	repoCfg, ok := cfg.Repos[req.Repo]
 	if !ok {
 		return fail(protocol.ErrUnknownRepo, fmt.Errorf("no repo %q in this machine's config", req.Repo))
 	}
@@ -78,7 +79,7 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest) protocol
 	ev := req.Event
 	workflows, err := workflow.PlanEvent(fsys, ev, workflow.PlanOptions{
 		Repository:   slug,
-		LabelAliases: a.cfg.LabelAliases,
+		LabelAliases: cfg.LabelAliases,
 		Vars:         repoCfg.VarsFor(""),
 		Changed: func() ([]string, error) {
 			// A push compares with what the branch was; anything else — a

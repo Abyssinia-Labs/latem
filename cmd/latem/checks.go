@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/appstore"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
@@ -392,14 +393,41 @@ func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
 	if !ok {
 		return skip(id, title, "could not determine when the agent started")
 	}
-	if info.ModTime().After(started) {
+
+	// A54: an agent that reloads says when it last read the file, and that is
+	// the time an edit has to be compared with. Its status names its pid, so a
+	// file left by an earlier process cannot vouch for this one.
+	fix, read := "latem service restart", started
+	if rs, err := agent.ReadReloadStatus(config.DerivePaths(d.dir).ReloadStatus); err == nil && rs.PID == st.PID {
+		fix = "latem service reload"
+		if rs.Error != "" {
+			return warn(id, title,
+				"the agent refused the last reload and is running the configuration it had: "+rs.Error,
+				"fix config.toml, then: latem service reload")
+		}
+		if len(rs.Deferred) > 0 {
+			return warn(id, title,
+				"the agent reloaded config.toml and did not apply: "+strings.Join(rs.Deferred, "; "),
+				"latem service restart")
+		}
+		// Only a reload's time is a read of the file. The first status is
+		// written when the agent is ready, after a startup that can take
+		// minutes, and an edit made during it is in no config the agent has.
+		if rs.Reloads > 0 && rs.At.After(read) {
+			read = rs.At
+		}
+	}
+	if info.ModTime().After(read) {
 		return warn(id, title,
-			fmt.Sprintf("config.toml was modified %s after the agent started; the agent is running the configuration it loaded at %s",
-				info.ModTime().Sub(started).Round(time.Second), started.Format("15:04:05")),
-			"latem service restart").
+			fmt.Sprintf("config.toml was modified %s after the agent last read it; the agent is running the configuration it loaded at %s",
+				info.ModTime().Sub(read).Round(time.Second), read.Format("15:04:05")),
+			fix).
 			withNotes("Everything this command reports about the configuration is read from the " +
-				"file, not from the agent. Until it restarts, a repo added here is still " +
+				"file, not from the agent. Until it re-reads it, a repo added here is still " +
 				"E_UNKNOWN_REPO to a run.")
+	}
+	if read.After(started) {
+		return pass(id, title, "the agent re-read config.toml after its last change")
 	}
 	return pass(id, title, "the agent started after the last change to config.toml")
 }
@@ -740,7 +768,8 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 		return []check{skip("repo.reach", "repositories", "config did not load")}
 	}
 	if len(d.cfg.Repos) == 0 {
-		return []check{warn("repo.reach", "repositories", "no [repos.*] entries; this agent would reject every run")}
+		return []check{warn("repo.reach", "repositories", "no [repos.*] entries; this agent would reject every run",
+			"latem repo add <owner/name>")}
 	}
 
 	out := make([]check, 0, len(d.cfg.Repos))

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -8,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -23,15 +26,23 @@ func newRegisterCommand() *cobra.Command {
 		tokenFile string
 		name      string
 		labels    []string
+		noBrowser bool
 	)
 	cmd := &cobra.Command{
-		Use:   "register --url <wss://…> --token <token>",
+		Use:   "register [--url <wss://…>] [--token-file <path>]",
 		Short: "Register this machine with a control plane",
 		Long: `Register this machine with a control plane.
 
-Writes [broker.remote] into config.toml, stores the machine token in
-~/.latem/agent.key at mode 0600, verifies connectivity, and records the
-machine id the control plane assigns.
+With no token, registration is approved in the browser (A54): the control
+plane hands this machine a short code, the link to approve it on opens in
+your browser, and once you approve — signed in, seeing this machine's name,
+OS and labels — the machine collects its token. Nothing is copied by hand.
+Over ssh the link is printed instead; open it anywhere you are signed in.
+--url defaults to the hosted control plane, ` + defaultAgentURL + `.
+
+Then, as with a token you supply: writes [broker.remote] into config.toml,
+stores the machine token in ~/.latem/agent.key at mode 0600, verifies
+connectivity, and records the machine id the control plane assigns.
 
 The token goes in its own file and never inline in config.toml, because
 config.toml is the file that gets pasted into an issue when something breaks
@@ -51,12 +62,7 @@ Exit codes:
   2  usage`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			switch {
-			case url == "":
-				return usageErrorf("--url is required")
-			case token == "" && tokenFile == "":
-				return usageErrorf("one of --token or --token-file is required")
-			case token != "" && tokenFile != "":
+			if token != "" && tokenFile != "" {
 				return usageErrorf("--token and --token-file are mutually exclusive")
 			}
 			normalized, err := normalizeAgentURL(url)
@@ -69,14 +75,16 @@ Exit codes:
 				tokenFile: tokenFile,
 				name:      name,
 				labels:    labels,
+				noBrowser: noBrowser,
 			})
 		},
 	}
-	cmd.Flags().StringVar(&url, "url", "", "control plane agent endpoint, e.g. wss://api.example.com/agent")
+	cmd.Flags().StringVar(&url, "url", registerURL, "control plane agent endpoint")
 	cmd.Flags().StringVar(&token, "token", "", "machine token (visible in shell history; prefer --token-file)")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the machine token from this file, or - for stdin")
 	cmd.Flags().StringVar(&name, "name", "", "display name for this machine (default: the hostname)")
 	cmd.Flags().StringArrayVar(&labels, "label", nil, "machine label; repeatable")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the approval link without opening a browser")
 	return cmd
 }
 
@@ -86,6 +94,10 @@ type registerFlags struct {
 	tokenFile string
 	name      string
 	labels    []string
+	noBrowser bool
+	// inSetup leaves the service to `latem setup`, which starts or restarts
+	// it next, instead of telling the operator to.
+	inSetup bool
 }
 
 // runRegister proves the control plane before it changes anything.
@@ -100,12 +112,6 @@ type registerFlags struct {
 // Nothing in this function prints the token, and nothing puts it in an error.
 func runRegister(cmd *cobra.Command, f registerFlags) error {
 	out := cmd.OutOrStdout()
-
-	tok, err := readRegistrationToken(cmd.InOrStdin(), f)
-	if err != nil {
-		return err
-	}
-
 	dir := configDir()
 	paths := config.DerivePaths(dir)
 
@@ -114,11 +120,42 @@ func runRegister(cmd *cobra.Command, f registerFlags) error {
 	// arriving as a stranger and being issued a second identity for the same
 	// hardware.
 	existingID, existingName := "", ""
+	var runnerLabels []string
 	if cfg, lerr := loadConfig(); lerr == nil {
 		existingID, existingName = cfg.Machine.ID, cfg.Machine.Name
+		for _, r := range cfg.Runners {
+			for _, l := range r.Labels {
+				if !slices.Contains(runnerLabels, l) {
+					runnerLabels = append(runnerLabels, l)
+				}
+			}
+		}
 	}
 	if f.name == "" && existingName == "" {
 		f.name = defaultMachineName()
+	}
+
+	var tok, claimedID string
+	if f.token == "" && f.tokenFile == "" {
+		// What the approver sees: this machine's name and the labels its
+		// runners answer to, unless --label says otherwise.
+		labels := f.labels
+		if len(labels) == 0 {
+			labels = runnerLabels
+		}
+		claimed, err := claimMachineToken(cmd, f, cmp.Or(f.name, existingName), labels)
+		if err != nil {
+			return err
+		}
+		tok, claimedID = claimed.Token, claimed.MachineID
+		if claimedID != "" {
+			existingID = claimedID
+		}
+	} else {
+		var err error
+		if tok, err = readRegistrationToken(cmd.InOrStdin(), f); err != nil {
+			return err
+		}
 	}
 
 	printf(out, "verifying %s …\n", f.url)
@@ -132,6 +169,11 @@ func runRegister(cmd *cobra.Command, f registerFlags) error {
 			return fmt.Errorf("%w\n\nnothing was written. check the token, or ask for a new one", err)
 		}
 		return fmt.Errorf("%w\n\nnothing was written. check the url and that this machine can reach it", err)
+	}
+	if reg.MachineID == "" {
+		// A claim names the machine before the hello does; a control plane
+		// that assigned the id there is still assigning this one.
+		reg.MachineID = claimedID
 	}
 	printf(out, "  connection verified\n")
 	if reg.Message != "" {
@@ -174,8 +216,52 @@ func runRegister(cmd *cobra.Command, f registerFlags) error {
 		printf(out, "  machine id  (the control plane did not assign one)\n")
 	}
 	printf(out, "  url         %s\n", f.url)
-	printf(out, "\nrestart the agent to connect:\n  latem service restart\nor, if it is not installed as a service:\n  latem agent\n")
+	if !f.inSetup {
+		printf(out, "\nrestart the agent to connect:\n  latem service restart\nor, if it is not installed as a service:\n  latem agent\n")
+	}
 	return nil
+}
+
+// claimMachineToken runs the device flow against the control plane behind
+// f.url: ask for a code, show it and its link, open the link when a person is
+// at this terminal, and wait for the approval.
+func claimMachineToken(cmd *cobra.Command, f registerFlags, name string, labels []string) (claimToken, error) {
+	out := cmd.OutOrStdout()
+	base, err := claimBase(f.url)
+	if err != nil {
+		return claimToken{}, usageErrorf("--url: %v", err)
+	}
+	c := newClaimClient(base)
+	st, err := c.start(cmd.Context(), newClaimRequest(name, labels, version))
+	if err != nil {
+		return claimToken{}, fmt.Errorf("%w\n\nnothing was written. check the url and that this machine can reach it", err)
+	}
+
+	link := approvalLink(st)
+	shown := cmp.Or(link, displayText(st.VerificationURI))
+	printf(out, "to register this machine, open\n\n  %s\n\nand approve the code  %s\n", shown, displayText(st.UserCode))
+	if t, ok := out.(*os.File); ok && isTerminal(t) && !f.noBrowser && link != "" {
+		if openBrowser(link) == nil {
+			printf(out, "(opened in your browser)\n")
+		}
+	}
+	expiry := time.Duration(st.ExpiresIn) * time.Second
+	if expiry <= 0 {
+		expiry = defaultClaimExpiry
+	}
+	printf(out, "\nwaiting for approval — the code expires in %s …\n", expiry.Round(time.Minute))
+
+	tok, err := c.wait(cmd.Context(), st)
+	switch {
+	case errors.Is(err, errClaimDenied):
+		return claimToken{}, fmt.Errorf("%w. nothing was written", err)
+	case errors.Is(err, errClaimExpired):
+		return claimToken{}, fmt.Errorf("%w. nothing was written; run `latem register` again for a new one", err)
+	case err != nil:
+		return claimToken{}, fmt.Errorf("%w\n\nnothing was written", err)
+	}
+	printf(out, "  approved\n")
+	return tok, nil
 }
 
 // readRegistrationToken resolves --token, --token-file, or stdin.
@@ -285,8 +371,8 @@ type registration struct {
 // unloadable". Those differ in exactly the case that matters most, which is the
 // first one anybody meets: a machine with no config.toml at all. What register
 // can write there is necessarily incomplete, because §8 requires a [[runner]]
-// block and a [repos.*] entry and this command has no way to know what this
-// machine can build. Refusing to write anything would leave a new user with a
+// block and this command has no way to know what this machine can build
+// (`latem setup` runs `init` first for exactly this reason). Refusing to write anything would leave a new user with a
 // verified token, a proven URL, and nothing on disk to show for it.
 //
 // So the gate is conditional on the original: if it loaded, the result must
