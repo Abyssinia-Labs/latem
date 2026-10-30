@@ -43,7 +43,7 @@ func TestReload_AddsARepoWithoutARestart(t *testing.T) {
 	ta := newTestAgent(t, cfg, nil)
 	ta.run(t)
 
-	if res := ta.makePlan(context.Background(), protocol.PlanRequest{ID: "p1", Repo: "added"}); res.ErrorCode != protocol.ErrUnknownRepo {
+	if res := ta.makePlan(context.Background(), protocol.PlanRequest{ID: "p1", Repo: "added"}, false); res.ErrorCode != protocol.ErrUnknownRepo {
 		t.Fatalf("before the reload, planning an unconfigured repo answered %q, want %s", res.ErrorCode, protocol.ErrUnknownRepo)
 	}
 
@@ -73,7 +73,7 @@ allowed_refs = ["main", "refs/pull/*/merge"]
 	}
 	// The plan now reaches the fetch, which fails on the mirror path this
 	// test made sure does not exist — anything but "unknown repo".
-	if res := ta.makePlan(context.Background(), protocol.PlanRequest{ID: "p2", Repo: "added"}); res.ErrorCode == protocol.ErrUnknownRepo {
+	if res := ta.makePlan(context.Background(), protocol.PlanRequest{ID: "p2", Repo: "added"}, false); res.ErrorCode == protocol.ErrUnknownRepo {
 		t.Errorf("after the reload, planning the added repo still answered %s: %s", res.ErrorCode, res.Error)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,7 @@ type controlPlane struct {
 	resumes    []protocol.Resume
 	updates    []recordedUpdate
 	heartbeats []protocol.MachineHealth
+	plans      []protocol.PlanResult
 	claims     []string
 	// commandAcks are the agent's answers to commands this control plane sent.
 	commandAcks []protocol.Ack
@@ -229,6 +231,13 @@ func (cp *controlPlane) handle(conn *websocket.Conn, data []byte) {
 		}
 		_ = high
 		cp.push(conn, frame{Kind: kindAck, ID: f.ID, Ack: &ack})
+
+	case kindPlan:
+		cp.mu.Lock()
+		cp.plans = append(cp.plans, *f.Plan)
+		cp.mu.Unlock()
+		cp.notify()
+		cp.push(conn, frame{Kind: kindAck, ID: f.ID, Ack: &protocol.Ack{OK: true}})
 
 	case kindAck:
 		// The agent's answer to a command this control plane sent.
@@ -818,4 +827,11 @@ func errorContains(t *testing.T, err error, want string) {
 	if !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q does not mention %q", err, want)
 	}
+}
+
+// Plans are the plan answers the agent sent, in order.
+func (cp *controlPlane) Plans() []protocol.PlanResult {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return slices.Clone(cp.plans)
 }

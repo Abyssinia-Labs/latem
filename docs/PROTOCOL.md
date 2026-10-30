@@ -67,7 +67,7 @@ Alongside it, and doing more work than it does:
 GET /agent HTTP/1.1
 Upgrade: websocket
 Authorization: Bearer <machine-token>
-Latem-Protocol-Version: 2.1
+Latem-Protocol-Version: 2.2
 ```
 
 `Latem-Protocol-Version` is set by `Broker.authHeader` and by `remote.Verify`.
@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.1"`.
+in both directions carries it**. The current value is `"2.2"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -239,6 +239,14 @@ control plane sends a leg only to an agent whose frames say 2.1 or later; and a
 control plane that does not know the plan's new fields refuses a plan that has
 them, so the control plane is upgraded before the agents. A plan with no matrix
 job carries neither field, and is the same at 2.0 and 2.1.
+
+**2.2 (amendment A61)** added a planned job's `requires` (§4.8) and a
+heartbeat's `toolchains` (§4.5): what a job needs of a machine, and what the
+machine has. Both explain, and neither routes a job. The rule runs the other
+way here: the agent sends either only to a control plane whose `hello` said
+2.2 or later, because a 2.1 control plane decodes a plan strictly and would
+refuse all of it over one job's `requires`. A control plane answers a 2.2
+agent's hello with 2.2.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -292,10 +300,10 @@ assigned to it. `latem register` writes it into `[machine] id`.
 ```json
 {
   "kind": "hello",
-  "protocol_version": "2.1",
+  "protocol_version": "2.2",
   "hello": {
     "machine_id": "mac-mini-01",
-    "protocol_version": "2.1",
+    "protocol_version": "2.2",
     "message": "connected as build-01"
   }
 }
@@ -322,7 +330,7 @@ report nothing.
 {
   "kind": "command",
   "id": "j57abc",
-  "protocol_version": "2.1",
+  "protocol_version": "2.2",
   "command": {
     "kind": "run",
     "run": {
@@ -466,7 +474,7 @@ answer does not come, ask again, here or of another machine with the repository.
 ### 3.3 `ack` (server → agent)
 
 ```json
-{ "kind": "ack", "id": "7", "protocol_version": "2.1", "ack": { "ok": true, "run_id": "r7k9…" } }
+{ "kind": "ack", "id": "7", "protocol_version": "2.2", "ack": { "ok": true, "run_id": "r7k9…" } }
 ```
 
 | Field | Type | Required | Notes |
@@ -507,7 +515,7 @@ empty `id` is discarded.
 ```json
 {
   "kind": "resume",
-  "protocol_version": "2.1",
+  "protocol_version": "2.2",
   "resume": {
     "machine_id": "mac-mini-01",
     "runs": [{ "run_id": "r-alpha", "state": "running", "last_acked_seq": 4200 }]
@@ -563,7 +571,7 @@ and reports that through its own replay.
 {
   "kind": "update",
   "id": "9",
-  "protocol_version": "2.1",
+  "protocol_version": "2.2",
   "update": { "run_id": "r-alpha", "update": { "state": "running", "started_at": "…" } }
 }
 ```
@@ -617,7 +625,7 @@ Two further properties this server implements and recommends:
 {
   "kind": "logs",
   "id": "15",
-  "protocol_version": "2.1",
+  "protocol_version": "2.2",
   "logs": [
     { "run_id": "r-alpha", "seq": 1, "stream": "agent", "at": "2026-08-08T09:15:00Z", "line": "[latem] preparing" }
   ]
@@ -675,7 +683,7 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 ```json
 {
   "kind": "heartbeat",
-  "protocol_version": "2.1",
+  "protocol_version": "2.2",
   "heartbeat": {
     "machine_id": "mac-mini-01", "agent_version": "0.4.1", "os": "darwin", "arch": "arm64",
     "runners": [{ "name": "ios", "executor": "tart", "labels": ["ios"], "concurrency": 1, "active": 1, "available": true }],
@@ -689,6 +697,13 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 it: an installation's repository `owner/name` matched against `repos[].github`,
 and `repos[].key` sent back as `plan.repo` and `run.repo`. A repository that is
 not on GitHub has a key and no `github`. Absent on a machine with no repositories.
+
+`toolchains` (2.2, A61) is what the machine has for builds, as a step on its
+native runners would find it: `xcode` (versions, `"26.0.1"`), `ios_simulator`,
+`jdk` (majors), `android_sdk`, `android_platforms`, `android_emulator`, `tools`
+(the probed commands a step's PATH finds: `xcodegen`, `docker`) and
+`passwordless_sudo`. Versions and names, never a path. Sent only to a control
+plane that said 2.2, and absent until the agent's probe has run.
 
 No `id`; no ack expected. Every 15 seconds (§20). **Three missed beats — 45
 seconds — is offline.**
@@ -714,7 +729,7 @@ returns.
 ### 4.6 `claim`
 
 ```json
-{ "kind": "claim", "id": "7", "protocol_version": "2.1", "claim": { "run_id": "r-alpha" } }
+{ "kind": "claim", "id": "7", "protocol_version": "2.2", "claim": { "run_id": "r-alpha" } }
 ```
 
 An identifier and nothing else: "the control plane already knows everything about
@@ -735,7 +750,7 @@ Same payload shape as §3.3.
 ### 4.8 `plan` (2.0, A52)
 
 ```json
-{ "kind": "plan", "id": "12", "protocol_version": "2.1", "plan": {
+{ "kind": "plan", "id": "12", "protocol_version": "2.2", "plan": {
     "id": "p7k9m2p4",
     "workflows": [{
       "file": ".github/workflows/checks.yml", "name": "Checks",
@@ -773,6 +788,7 @@ The answer to a `plan` command, correlated by `plan.id`, and acked like an
 | `jobs[].matrix` | object | 2.1, A55. Set on each **leg** of a matrix job: its values. A matrix job is planned as one entry per leg, all with the job's `key`, each with its own `name` (GitHub's: `check (linux, 22)`), `labels`, `environment` and `concurrency`. **Send it back as `run.matrix`.** |
 | `jobs[].strategy` | `{job_index, job_total, fail_fast, max_parallel?}` | 2.1, A55. Set on each leg. Legs are jobs to schedule, with three rules the control plane enforces: **a job that needs `key` waits for every leg**, and reads `needs.<key>.result` as `failure` if a leg failed, else `cancelled` if one was, else `skipped` if all were, else `success`, and `needs.<key>.outputs` as the legs' outputs merged in the order they ended; **`fail_fast`** cancels a failed leg's queued and running siblings, unless that leg is `continue_on_error`; **`max_parallel`**, when set, caps how many legs run at once. |
 | `jobs[].error` | string | This job cannot run — a matrix computed from another job's outputs, a reusable workflow, a Windows label. It fails alone; jobs that need it are skipped as after any failure. |
+| `jobs[].requires` | `[{key, version?}]` | 2.2, A61. What the job needs of a machine that nothing in it provides, read from the commit: `xcode` at `27`, `ios-simulator`, `jdk` at `17`, `docker-daemon`. Keys from a closed vocabulary that may grow (a control plane keeps a key it has no words for), versions only digits and dots, at most 32. **Never route on it**: it is for saying a job is likely to fail on the machine it went to. Sent only to a control plane that said 2.2. |
 
 ---
 

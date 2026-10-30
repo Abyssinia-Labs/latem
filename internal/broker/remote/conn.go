@@ -206,6 +206,7 @@ func (b *Broker) onConnect(ctx context.Context) error {
 		// Publishing the last known health immediately means a machine that was
 		// away for ten minutes is current the moment it returns, rather than
 		// looking idle until the next fifteen-second beat.
+		h = b.healthForPeer(h)
 		if err := b.send(ctx, frame{Kind: kindHeartbeat, Heartbeat: &h}); err != nil {
 			return err
 		}
@@ -397,6 +398,9 @@ func (b *Broker) handleHello(h helloFrame) {
 		b.log.Warn("the control plane speaks a different protocol version",
 			"theirs", h.Version, "ours", protocol.Version)
 	}
+	b.mu.Lock()
+	b.peerVersion = h.Version
+	b.mu.Unlock()
 	if h.MachineID == "" {
 		return
 	}
