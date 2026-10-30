@@ -15,6 +15,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/appstore"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
@@ -123,6 +124,9 @@ type doctor struct {
 	// probed is each PATH a native runner's steps get, and what a probe on
 	// it found: one probe per PATH for the whole of a doctor run.
 	probed map[string]system.Toolchains
+	// machine measures this machine for capacity's recommendation (A63);
+	// nil measures the real one.
+	machine func(context.Context) capacity.Machine
 }
 
 func newDoctor() *doctor {
@@ -171,6 +175,7 @@ func (d *doctor) run(ctx context.Context) report {
 	rep.section("Configuration", d.checkConfiguration(ctx)...)
 	rep.section("Disk", d.checkDisk(ctx)...)
 	rep.section("Executors", append(d.checkExecutors(ctx), d.checkRunnerLabels(ctx)...)...)
+	rep.section("Capacity", d.checkCapacity(ctx)...)
 	rep.section("Repositories", d.checkRepos(ctx)...)
 	rep.section("What jobs need", needsChecks...)
 	rep.section("Actions", d.checkActions()...)

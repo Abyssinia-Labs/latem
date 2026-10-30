@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
@@ -1239,4 +1240,34 @@ func checkByID(checks []check, id string) *check {
 		}
 	}
 	return nil
+}
+
+// A runner set to take more jobs at once than the machine has room for is a
+// warning naming the number; one at or under it passes, and says the room.
+func TestDoctor_Capacity(t *testing.T) {
+	dir := privateDir(t)
+	cfg := testConfig(dir)
+	cfg.Runners = []*config.Runner{
+		{Name: "macos", Executor: config.ExecutorNative, Concurrency: 1},
+		{Name: "linux", Executor: config.ExecutorDocker, Concurrency: 3},
+	}
+	d := newTestDoctor("darwin", dir, healthyRunner("darwin"), cfg, nil)
+	d.machine = func(context.Context) capacity.Machine {
+		return capacity.Machine{CPUs: 8, MemoryGB: 8, Docker: &capacity.Docker{CPUs: 6, MemoryGB: 3.8}}
+	}
+
+	checks := d.checkCapacity(t.Context())
+	native, linux := checkByID(checks, "capacity.macos"), checkByID(checks, "capacity.linux")
+	if native == nil || native.Level != levelPass {
+		t.Errorf("native = %+v, want a pass", native)
+	}
+	if linux == nil || linux.Level != levelWarn || !strings.Contains(linux.Detail, "concurrency 3; this machine has room for 1") ||
+		!strings.Contains(strings.Join(linux.Fix, " "), "concurrency = 1") {
+		t.Errorf("linux = %+v, want a warning with the number and the fix", linux)
+	}
+
+	d.machine = func(context.Context) capacity.Machine { return capacity.Machine{} }
+	if got := checkByID(d.checkCapacity(t.Context()), "capacity"); got == nil || got.Level != levelSkip {
+		t.Errorf("an unmeasured machine = %+v, want a skip", got)
+	}
 }

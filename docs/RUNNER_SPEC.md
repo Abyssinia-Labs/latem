@@ -2903,3 +2903,39 @@ the Mac mini and the MacBook with no agent until each was loaded by hand. `servi
 waits, up to two minutes, for `launchctl print` to stop finding the old job before it loads the new
 one. An agent finishing a run takes longer than that, and the install then says so rather than
 loading over it.
+
+### Amendment from sizing runners to the machine
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A63 | §8, §13, §20, A59, A61 | **latem measures the machine and recommends each runner's `concurrency`. Setup writes the recommendation for the docker runner it adds, doctor warns about a runner set above it, and the heartbeat carries it (protocol 2.3) for the control plane to show. A machine has at most one native runner. An install that runs lifecycle scripts needs Node** | Setup wrote `concurrency = 2` for every docker runner, whatever the machine. On an 8 GB Mac mini, Docker Desktop's VM holds one CI-sized job. Nothing said so until jobs failed under load in ways that read as flaky tests. A second native `[[runner]]` block ran two builds on one host, which §13.3's concurrency of 1 exists to stop. take-one's `bun install` ran a workspace's `wxt prepare` on a Mac whose only Node was too old for it, and no needs said Node |
+
+**The recommendation.** A job is sized at 2 CPUs and 4 GB, what GitHub's own Linux runners give a
+job at the low end and what the fleet's bun, Go and Convex builds peak at.
+- **Native:** 1, always (§13.3).
+- **Docker:** the smaller of CPUs ÷ 2 and GB ÷ 4, never below 1. It is counted from what the
+  daemon says it has (Docker Desktop's VM on a Mac), or else the host. Docker runners on one
+  machine share it.
+- **Tart:** as many macOS VMs as fit after the host keeps 8 GB, at 8 GB each, at least 1 and at
+  most Apple's 2. Below 16 GB, the one VM is said to swap.
+
+Each recommendation carries a sentence naming the numbers it came from, so a person can check it.
+It never changes a config. A runner set above it runs what it is given, and doctor warns,
+because the failures it invites never name the machine.
+
+**Where it shows.**
+- `latem setup` writes the docker runner's `concurrency` from it, and says so.
+- `latem doctor` has a Capacity section: a pass at or under the recommendation, saying the room;
+  a warning above it, with the line to change.
+- The agent measures the machine beside its toolchains (A59), at start and every fifteen
+  minutes, and sends `capacity` in its heartbeat to a control plane that said 2.3 (PROTOCOL.md
+  §4.5).
+
+**One native runner.** The config check refuses a second `executor = "native"` block. Native jobs
+share the host, so a machine has one native runner, and it takes one job at a time.
+
+**Installs.** `bun install`, `npm install`, `npm ci`, `pnpm install` and `yarn install` run each
+package's `preinstall`, `install`, `postinstall` and `prepare` scripts, the root's and its
+workspaces'. The CLIs those scripts name start with `#!/usr/bin/env node`. A job whose install
+finds any such script needs Node, inferred, with the package and the script as its evidence.
+

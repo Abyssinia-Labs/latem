@@ -146,6 +146,10 @@ func writeDockerRunner(b *strings.Builder, p initParams, where string) {
 	if image == "" {
 		image = defaultDockerImage
 	}
+	slots := p.DockerConcurrency
+	if slots == 0 {
+		slots = 2
+	}
 	intro := "docker is the Linux executor (§13.1)."
 	if where != "" {
 		intro = "docker runs Linux jobs here, in " + where + " (§13.1)."
@@ -162,7 +166,7 @@ func writeDockerRunner(b *strings.Builder, p initParams, where string) {
 name        = "linux"
 executor    = "docker"
 labels      = ["linux", %q, "docker"]
-concurrency = 2
+concurrency = %d
 
   [runner.docker]
   default_image = %q
@@ -171,7 +175,7 @@ concurrency = 2
   # mutable reference, so the digest it resolved to is always written to the
   # run log. Set this to refuse anything not named by digest instead.
   # require_pinned_images = true
-`, intro, p.GOARCH, image)
+`, intro, p.GOARCH, slots, image)
 }
 
 func configSecretsName() string { return "secrets.env" }

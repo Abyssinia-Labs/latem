@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
@@ -76,5 +77,29 @@ func TestToolchains_ProbedAgainWhenAsked(t *testing.T) {
 	})
 	if n := p.probes.Load(); n != 2 {
 		t.Errorf("%d probes, want 2: the hour-long tick should not have fired", n)
+	}
+}
+
+// The heartbeat carries the machine's size and each runner's recommended
+// concurrency (A63), measured on the same beat as the toolchains.
+func TestCapacity_InTheHeartbeat(t *testing.T) {
+	var measured atomic.Int32
+	ta := newTestAgent(t, newConfigDir(t, configOptions{}), func(o *Options) {
+		o.MeasureMachine = func(context.Context) capacity.Machine {
+			measured.Add(1)
+			return capacity.Machine{CPUs: 8, MemoryGB: 8}
+		}
+		o.ToolchainsInterval = time.Hour
+	})
+	ta.run(t)
+	waitFor(t, "the first measure", 10*time.Second, func() bool {
+		return ta.health(context.Background()).Capacity != nil
+	})
+	c := ta.health(context.Background()).Capacity
+	if c.CPUs != 8 || c.MemoryGB != 8 || len(c.Runners) != 1 || c.Runners[0].Name != "test" || c.Runners[0].Recommended != 1 {
+		t.Errorf("capacity = %+v", c)
+	}
+	if measured.Load() != 1 {
+		t.Errorf("measured %d times, want once before the hour-long tick", measured.Load())
 	}
 }

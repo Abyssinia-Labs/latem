@@ -589,6 +589,10 @@ func (r *reader) packageScript(tool string, args []string, wd string, depth int)
 		return
 	}
 	name := args[0]
+	if slices.Contains([]string{"install", "i", "ci", "add"}, name) {
+		r.installScripts(wd)
+		return
+	}
 	if name == "run" || name == "run-script" {
 		if len(args) < 2 {
 			return
@@ -611,6 +615,67 @@ func (r *reader) packageScript(tool string, args []string, wd string, depth int)
 	if body, ok := pkg.Scripts[name]; ok && r.files < maxScriptFiles {
 		r.files++
 		r.script(body, file, "scripts."+name, wd, depth+1)
+	}
+}
+
+// lifecycleScripts are the scripts a package manager runs during an install.
+var lifecycleScripts = []string{"preinstall", "install", "postinstall", "prepare"}
+
+// installScripts is what an install runs besides fetching: each package's
+// lifecycle scripts, the root's and its workspaces'. They run whatever CLI
+// they name from node_modules/.bin, and those start with `#!/usr/bin/env
+// node`: `bun install` in take-one ran the extension's `wxt prepare` on a
+// Mac whose only Node was too old for it, and no needs said Node at all.
+func (r *reader) installScripts(wd string) {
+	root := path.Clean(path.Join(wd, "package.json"))
+	data, err := readCapped(r.fsys, root)
+	if err != nil {
+		return
+	}
+	var pkg struct {
+		Scripts    map[string]string `json:"scripts"`
+		Workspaces json.RawMessage   `json:"workspaces"`
+	}
+	if json.Unmarshal(data, &pkg) != nil {
+		return
+	}
+	files := []string{root}
+	var globs []string
+	if json.Unmarshal(pkg.Workspaces, &globs) != nil {
+		var nested struct {
+			Packages []string `json:"packages"`
+		}
+		_ = json.Unmarshal(pkg.Workspaces, &nested)
+		globs = nested.Packages
+	}
+	for _, g := range globs {
+		matches, err := fs.Glob(r.fsys, path.Clean(path.Join(wd, g, "package.json")))
+		if err == nil {
+			files = append(files, matches...)
+		}
+	}
+	for _, file := range files {
+		if r.files >= maxScriptFiles {
+			return
+		}
+		r.files++
+		data, err := readCapped(r.fsys, file)
+		if err != nil {
+			continue
+		}
+		var p struct {
+			Scripts map[string]string `json:"scripts"`
+		}
+		if json.Unmarshal(data, &p) != nil {
+			continue
+		}
+		for _, name := range lifecycleScripts {
+			if body, ok := p.Scripts[name]; ok {
+				r.c.add(Requirement{Key: Node, Strength: Inferred,
+					Evidence: Evidence{File: file, Where: "scripts." + name, Snippet: body}})
+				return
+			}
+		}
 	}
 }
 

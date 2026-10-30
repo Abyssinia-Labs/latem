@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
@@ -248,6 +249,11 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		// so "a 40 GB floor passes" held on a laptop and failed on every
 		// runner. A test that wants a full disk says so.
 		freeGB: func(context.Context) (float64, error) { return testFreeGB, nil },
+		// A machine with room for every runner a test config declares; one
+		// measured from the real host would report on the host.
+		machine: func(context.Context) capacity.Machine {
+			return capacity.Machine{CPUs: 16, MemoryGB: 64, Docker: &capacity.Docker{CPUs: 16, MemoryGB: 32}}
+		},
 		// Offline by default. checkSelfUpdate only probes when auto_update is
 		// on, which no test config sets — but a future one that did and forgot
 		// this seam would reach api.github.com from the unit suite, which is

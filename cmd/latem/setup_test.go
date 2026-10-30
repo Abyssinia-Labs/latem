@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
@@ -66,6 +67,9 @@ func fakeSetup(t *testing.T, docker bool) *setupRecorder {
 				return nil
 			},
 			toolchains: rec.machine.deps(),
+			measure: func(context.Context) capacity.Machine {
+				return capacity.Machine{CPUs: 8, MemoryGB: 16, Docker: &capacity.Docker{CPUs: 8, MemoryGB: 8}}
+			},
 		}
 	}
 	t.Cleanup(func() { newSetupDeps = prev })
@@ -90,6 +94,11 @@ func TestSetup_AFreshMachineEndToEnd(t *testing.T) {
 	var names []string
 	for _, r := range cfg.Runners {
 		names = append(names, r.Name+"/"+string(r.Executor))
+	}
+	// Sized from the machine (A63): fakeSetup's Docker has 8 CPUs and 8 GB,
+	// room for two jobs of 2 CPUs and 4 GB.
+	if r, ok := cfg.Runner("linux"); !ok || r.Concurrency != 2 || !strings.Contains(out, "linux runner: concurrency 2 — Docker has 8 CPUs and 8 GB") {
+		t.Errorf("the docker runner was not sized from the machine:\n%s", out)
 	}
 	want := "linux/docker"
 	if runtime.GOOS == "darwin" {

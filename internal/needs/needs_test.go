@@ -310,3 +310,38 @@ jobs:
 		t.Errorf("kind %s, want xcode", r.Kind)
 	}
 }
+
+// An install runs each package's lifecycle scripts, and the CLIs they name
+// run on Node: take-one's `bun install` ran the extension's `wxt prepare` on
+// a Mac whose only Node was too old for it, and nothing said Node.
+func TestJob_AnInstallWhoseWorkspaceRunsAPostinstall(t *testing.T) {
+	workflow := `
+on: pull_request
+jobs:
+  apple:
+    runs-on: macos-26
+    steps:
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+`
+	with := fstest.MapFS{
+		".github/workflows/checks.yml":    {Data: []byte(workflow)},
+		"package.json":                    {Data: []byte(`{"workspaces":["packages/*"]}`)},
+		"packages/web/package.json":       {Data: []byte(`{"scripts":{"build":"vite build"}}`)},
+		"packages/extension/package.json": {Data: []byte(`{"scripts":{"postinstall":"wxt prepare"}}`)},
+	}
+	r := jobOf(t, with, ".github/workflows/checks.yml", "apple", mac)
+	q, ok := r.Get(Node)
+	if !ok || q.Strength != Inferred || q.Evidence.File != "packages/extension/package.json" || q.Evidence.Where != "scripts.postinstall" {
+		t.Errorf("node = %+v (found %v), want it inferred from the extension's postinstall", q, ok)
+	}
+
+	without := fstest.MapFS{
+		".github/workflows/checks.yml": {Data: []byte(workflow)},
+		"package.json":                 {Data: []byte(`{"workspaces":{"packages":["packages/*"]}}`)},
+		"packages/web/package.json":    {Data: []byte(`{"scripts":{"build":"vite build"}}`)},
+	}
+	if _, ok := jobOf(t, without, ".github/workflows/checks.yml", "apple", mac).Get(Node); ok {
+		t.Error("an install with no lifecycle scripts was said to need Node")
+	}
+}

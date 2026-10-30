@@ -440,6 +440,41 @@ func TestRequires_OnlyToAControlPlaneThatSays22(t *testing.T) {
 	}
 }
 
+// A heartbeat's capacity (A63) goes only to a control plane that says 2.3:
+// a 2.2 one decodes heartbeats strictly, and would refuse the field.
+func TestCapacity_OnlyToAControlPlaneThatSays23(t *testing.T) {
+	health := protocol.MachineHealth{MachineID: "m", Toolchains: &protocol.Toolchains{Xcode: []string{"27.2"}},
+		Capacity: &protocol.Capacity{CPUs: 8, MemoryGB: 8, Runners: []protocol.RunnerCapacity{{Name: "linux", Recommended: 1, Why: "w"}}}}
+
+	for _, c := range []struct {
+		version   string
+		toolchain bool
+		capacity  bool
+	}{{"2.1", false, false}, {"2.2", true, false}, {"2.3", true, true}, {"2.10", true, true}} {
+		h := newHarness(t, nil)
+		h.CP.SetHello(&helloFrame{Version: c.version})
+		h.CP.Partition()
+		h.CP.Await(t, "the partition", func() bool { return !h.Connected() })
+		h.CP.Heal()
+		h.AwaitConnected(t)
+		h.CP.Await(t, "the hello", func() bool { return h.SpeaksRequires() == c.toolchain })
+
+		if err := h.Heartbeat(t.Context(), health); err != nil {
+			t.Fatalf("%q: Heartbeat: %v", c.version, err)
+		}
+		h.CP.Await(t, "the beat", func() bool { return len(h.CP.Heartbeats()) > 0 })
+		beats := h.CP.Heartbeats()
+		last := beats[len(beats)-1]
+		if (last.Toolchains != nil) != c.toolchain || (last.Capacity != nil) != c.capacity {
+			t.Errorf("hello %q: toolchains sent %v, capacity sent %v; want %v, %v",
+				c.version, last.Toolchains != nil, last.Capacity != nil, c.toolchain, c.capacity)
+		}
+	}
+	if health.Capacity == nil {
+		t.Error("stripping for an old control plane wrote the caller's heartbeat")
+	}
+}
+
 // TestReport_RefusalIsNotReplayed.
 //
 // A refusal is the control plane's answer, not a delivery failure. Replaying
@@ -530,8 +565,13 @@ func TestStoreInterface_IsSatisfiedByTheRealDatabase(t *testing.T) {
 func TestReport_DeliveredTransitionsLeaveTheReplaySet(t *testing.T) {
 	const runID = "r_delivered"
 
-	h := newHarness(t, nil)
-	seedRun(t, h.DB, runID, protocol.StateRunning)
+	// The run exists before the broker does. Seeded after newHarness, it
+	// raced the connection the harness starts: a replay that read the store
+	// first never saw the run, and the wait below timed out on a loaded
+	// Blacksmith runner. A sleep before seeding made it fail every time.
+	db := newStore(t)
+	seedRun(t, db, runID, protocol.StateRunning)
+	h := newHarness(t, func(o *harnessOptions) { o.db = db })
 	h.AwaitConnected(t)
 	h.AwaitResumes(t, 1)
 

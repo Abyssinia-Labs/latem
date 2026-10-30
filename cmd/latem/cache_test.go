@@ -46,10 +46,17 @@ metrics_addr = ""
 url          = "https://git.example.invalid/app.git"
 allowed_refs = ["main"]
 `)
-	for _, r := range runners {
+	// The first runner is native and the rest tart: a machine has one native
+	// runner (A63), and both keep their caches in host directories (§14.2).
+	for i, r := range runners {
 		b.WriteString("\n[[runner]]\nname        = \"" + r + "\"\n")
-		b.WriteString("executor    = \"native\"\nlabels      = [\"" + r + "\"]\nconcurrency = 1\n")
-		b.WriteString("\n  [runner.native]\n  min_free_gb = 0.001\n")
+		if i == 0 {
+			b.WriteString("executor    = \"native\"\nlabels      = [\"" + r + "\"]\nconcurrency = 1\n")
+			b.WriteString("\n  [runner.native]\n  min_free_gb = 0.001\n")
+			continue
+		}
+		b.WriteString("executor    = \"tart\"\nlabels      = [\"" + r + "\"]\nconcurrency = 1\n")
+		b.WriteString("\n  [runner.tart]\n  base_image  = \"ghcr.io/example/xcode:27\"\n  min_free_gb = 0.001\n")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)

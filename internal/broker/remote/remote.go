@@ -723,11 +723,24 @@ func (b *Broker) planForPeer(p protocol.PlanResult) protocol.PlanResult {
 	return p
 }
 
+// speaksCapacity reports whether the control plane said 2.3, so takes a
+// heartbeat's capacity (A63).
+func (b *Broker) speaksCapacity() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return versionAtLeast(b.peerVersion, 2, 3)
+}
+
 // healthForPeer is h without 2.2's toolchains, for a control plane that has
 // not said 2.2.
 func (b *Broker) healthForPeer(h protocol.MachineHealth) protocol.MachineHealth {
 	if !b.SpeaksRequires() {
 		h.Toolchains = nil
+	}
+	// 2.3's capacity, likewise: a 2.2 control plane decodes heartbeats as
+	// strictly as plans.
+	if !b.speaksCapacity() {
+		h.Capacity = nil
 	}
 	return h
 }

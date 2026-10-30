@@ -138,6 +138,9 @@ type initParams struct {
 	Docker bool
 	// Image is the docker runner's default_image; empty is latem-ubuntu.
 	Image string
+	// DockerConcurrency is the docker runner's concurrency, capacity's
+	// recommendation when setup measured the machine (A63); 0 is 2.
+	DockerConcurrency int
 }
 
 // parseRepoFlags splits --repo name=url. The name is what `latem run` takes and

@@ -113,3 +113,33 @@ func TestToolchains_JavaHomesOldNamesAndThePlugin(t *testing.T) {
 		t.Errorf("jdks = %v, want [8 11]", got)
 	}
 }
+
+// What capacity is worked out from, read the way each OS says it.
+func TestResources(t *testing.T) {
+	mac := New(Options{GOOS: "darwin", Root: t.TempDir(), Home: t.TempDir(), Getenv: func(string) string { return "" },
+		Run: newFakeRunner(map[string]fakeCmd{
+			"sysctl -n hw.ncpu":    {out: "8\n"},
+			"sysctl -n hw.memsize": {out: "8589934592\n"},
+		}).run})
+	if cpus, mem := mac.Resources(t.Context()); cpus != 8 || mem != 8589934592 {
+		t.Errorf("mac = %d CPUs, %d bytes", cpus, mem)
+	}
+
+	root := t.TempDir()
+	mkTree(t, root, "proc/")
+	if err := os.WriteFile(filepath.Join(root, "proc/meminfo"), []byte("MemTotal:       16314424 kB\nMemFree:  1 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linux := New(Options{GOOS: "linux", Root: root, Home: t.TempDir(), Getenv: func(string) string { return "" },
+		Run: newFakeRunner(map[string]fakeCmd{"getconf _NPROCESSORS_ONLN": {out: "4\n"}}).run})
+	if cpus, mem := linux.Resources(t.Context()); cpus != 4 || mem != 16314424*1024 {
+		t.Errorf("linux = %d CPUs, %d bytes", cpus, mem)
+	}
+
+	// Nothing answers: zeros, never a guess from the machine running the test.
+	none := New(Options{GOOS: "darwin", Root: t.TempDir(), Home: t.TempDir(), Getenv: func(string) string { return "" },
+		Run: newFakeRunner(nil).run})
+	if cpus, mem := none.Resources(t.Context()); cpus != 0 || mem != 0 {
+		t.Errorf("unanswered = %d, %d", cpus, mem)
+	}
+}
