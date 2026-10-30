@@ -1279,7 +1279,7 @@ The original argument survives for what it did cover: the runner still invokes `
 ## 19. Local trigger and CLI
 
 ```
-latem setup [--url U] [--no-register] [--no-service]   init, register, service install, doctor; idempotent (A54)
+latem setup [--url U] [--repo owner/name …] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
@@ -1291,7 +1291,7 @@ latem service reload                 Apply config.toml to the running agent (SIG
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
-latem workflows check [path] [--fix]   Plan and compile a checkout's workflows offline (A54)
+latem workflows check [path] [--repo R] [--offline] [--json] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout (A54, A57)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem update [--check]               Install the latest release; the agent moves onto it when idle (A56)
@@ -2647,6 +2647,48 @@ request a day per user is far inside api.github.com's 60 an hour per address.
 and than the tag's prereleases, and older than anything newer than the tag. Two builds past the
 same tag compare as the same, so neither is offered the other. Release tags never have this
 shape.
+
+### Amendment from reading a repository without a checkout
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A57 | §12, §19, A52, A54 | **A command reads a repository's files without a checkout: the agent's mirror, read and never written, or a temporary blobless clone of the default branch. `latem workflows check --repo R` with no path checks a repository that way, `.latem/jobs.yaml` included, and `latem setup` gains a repositories step that adds one, checks it, and offers what its workflows need** | Onboarding asked for a checkout before it could say anything about a repository — `latem workflows check <checkout>` — on a build machine, which is the one place a checkout is not lying around. And everything the guided-setup work wants to know next (what kinds of builds a machine will run, what it is missing for them) starts from reading the repositories' workflows on the machine, from the command line, beside a running agent |
+
+**Reading.** `source.NewReader` is a manager that only reads: it makes no directory, checks no
+filesystem, and refuses `Fetch` and `Checkout`. `Manager.Open` finds the agent's mirror of a
+repository without fetching, or says there is none yet (the agent makes one on its first plan
+or run). `NewSnapshot` makes a bare, one-commit, blobless clone (`--depth=1 --filter=blob:none
+--single-branch`) in a directory the caller owns and removes. `Mirror.Tree` reads a commit's
+regular files as an `fs.FS`: the listing at once — without `ls-tree -l`, because in a blobless
+clone a blob's size is a fetch — and each file when it is opened, under a cap. A symlink or a
+submodule is not there at all, as A52's `ReadDir` leaves them out.
+
+**A command never writes a mirror.** Fetches into one bare repository race, and the lock that
+serialises them (§12) lives inside the agent's process, so a command typed beside a running agent
+reads, by object id, from objects that are immutable, and fetches nothing into it. A repository
+the agent has no mirror of is read from its own remote instead, into a directory of the command's.
+
+**`workflows check --repo R` with no path** reads R's default branch from its remote, through the
+blobless clone — only the files the check reads are downloaded — or with `--offline` from the
+agent's mirror. `hashFiles` in a repository read this way resolves against an empty directory:
+a check needs the job to compile, not the hash. `.latem/jobs.yaml`, when the repository has one,
+is checked beside the workflows; its `runs_on` labels are matched as written, since
+`[label_aliases]` maps a workflow's `runs-on` and not these. `--json` prints the report for a
+script, with the same exit code.
+
+**`latem setup`'s repositories step**, second of five. It adds the repositories `--repo` names, or —
+on a terminal, with none configured — asks which, one at a time. Each is added as `latem repo add`
+adds it, then read without a checkout (the mirror if there is one, else the remote) and checked:
+how many jobs this machine can run, why not the rest, and the `[label_aliases]` and `[actions]
+allowed` entries that would let more run. On a terminal it asks before writing them; with `--repo`
+it says how to (`latem workflows check --repo R --fix`). A repository that cannot be read is
+reported and does not stop setup. Off a terminal with no `--repo`, the step asks nothing.
+
+**Found while building it.** The cap on git's output that A52's `ReadDir` and A53's checkout pack
+rely on (`cappedBuffer`) was never consulted: it embedded `bytes.Buffer`, whose promoted `ReadFrom`
+`io.Copy` prefers to `Write`, so a blob or a pack of any size was read whole. `ReadDir` hid it by
+checking sizes from `ls-tree -l` first; A53's 256 MB limit on a checkout's pack did not hold. The
+buffer is now a field, and a test copies past the cap.
 
 ### Amendment from running latem's own CI on latem
 

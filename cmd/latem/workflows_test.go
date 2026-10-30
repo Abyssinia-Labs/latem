@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 )
 
@@ -307,5 +310,90 @@ func TestReadTriggers(t *testing.T) {
 	_, decl := readTriggers([]byte(`{"workflow_dispatch":{"inputs":{"t":{"required":true,"type":"choice","options":["a","b"]}}}}`))
 	if in := decl["t"]; !in.Required || in.Type != "choice" || !slices.Equal(in.Options, []string{"a", "b"}) {
 		t.Errorf("dispatch inputs = %+v", decl)
+	}
+}
+
+// fakeRepoFiles answers readRepo with files and records where it was asked
+// to read from.
+func fakeRepoFiles(t *testing.T, files fstest.MapFS) *[]treeSource {
+	t.Helper()
+	prev := readRepo
+	var asked []treeSource
+	readRepo = func(_ context.Context, _ *config.Config, key string, from treeSource) (*repoFiles, error) {
+		asked = append(asked, from)
+		return &repoFiles{fsys: files, sha: strings.Repeat("ab", 20), where: "the files of " + key, close: func() {}}, nil
+	}
+	t.Cleanup(func() { readRepo = prev })
+	return &asked
+}
+
+// With --repo and no path there is no checkout: the repository is read
+// without one (A57), from GitHub unless --offline says the agent's mirror,
+// and its .latem/jobs.yaml is checked beside its workflows.
+func TestWorkflowsCheck_ARepositoryWithoutACheckout(t *testing.T) {
+	dir := configDirWith(t, baseConfig+"\n[label_aliases]\n\"blacksmith-4vcpu-ubuntu-2404\" = [\"linux\"]\n")
+	fakeStores(t, true)
+	asked := fakeRepoFiles(t, fstest.MapFS{
+		".github/workflows/ci.yml": {Data: []byte("on: push\njobs:\n  build:\n    runs-on: blacksmith-4vcpu-ubuntu-2404\n" +
+			"    steps:\n      - uses: ./.github/actions/setup\n      - run: make\n")},
+		".github/actions/setup/action.yml": {Data: []byte("name: setup\nruns:\n  using: composite\n  steps:\n" +
+			"    - run: echo set up\n      shell: bash\n")},
+		".latem/jobs.yaml": {Data: []byte("version: 1\njobs:\n  ios-smoke:\n    runs_on: [macos, xcode]\n" +
+			"    steps:\n      - run: xcodebuild -version\n")},
+	})
+
+	out, err := latemIn(t, dir, "", "workflows", "check", "--repo", "app", "--no-color")
+	if exitCode(err) != ExitFailure {
+		t.Fatalf("exit %d (%v): the jobs.yaml job has no macos runner here\n%s", exitCode(err), err, out)
+	}
+	for _, want := range []string{
+		"checking the files of app at abababababab (repos.app, me/app)",
+		"[ ok ] build", "runs on linux",
+		".latem/jobs.yaml", "[FAIL] ios-smoke", "no runner here carries all of macos, xcode",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+
+	out, _ = latemIn(t, dir, "", "workflows", "check", "--repo", "app", "--offline", "--json")
+	var rep struct {
+		Source    string `json:"source"`
+		Commit    string `json:"commit"`
+		Jobs      int    `json:"jobs"`
+		Failed    int    `json:"failed"`
+		Workflows []struct {
+			File string `json:"file"`
+			Jobs []struct {
+				Key, Level, Runner string
+			} `json:"jobs"`
+		} `json:"workflows"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("--json printed something that is not JSON: %v\n%s", err, out)
+	}
+	if rep.Source != "the files of app" || rep.Jobs != 2 || rep.Failed != 1 || len(rep.Workflows) != 2 ||
+		rep.Workflows[1].File != ".latem/jobs.yaml" {
+		t.Errorf("report = %+v", rep)
+	}
+	if !slices.Equal(*asked, []treeSource{fromRemote, fromMirror}) {
+		t.Errorf("read from %v, want GitHub, then with --offline the mirror", *asked)
+	}
+}
+
+func TestWorkflowsCheck_OfflineNeedsARepositoryAndNoPath(t *testing.T) {
+	dir := configDirWith(t, baseConfig)
+	fakeStores(t, false)
+	if _, err := latemIn(t, dir, "", "workflows", "check", t.TempDir(), "--offline"); exitCode(err) != ExitUsage {
+		t.Errorf("--offline with a path: exit %d (%v), want usage", exitCode(err), err)
+	}
+}
+
+// The real reader, against a config whose agent has made no mirror yet.
+func TestReadRepo_OfflineWithNoMirrorSaysSo(t *testing.T) {
+	cfg := testConfig(t.TempDir())
+	_, err := realReadRepo(context.Background(), cfg, "app", fromMirror)
+	if err == nil || !strings.Contains(err.Error(), "has no mirror of app yet") {
+		t.Errorf("err = %v", err)
 	}
 }

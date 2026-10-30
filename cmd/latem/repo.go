@@ -92,6 +92,7 @@ type repoAddFlags struct {
 	refs      []string
 	approval  bool
 	noVerify  bool
+	inSetup   bool // setup says what comes next itself
 }
 
 func runRepoAdd(cmd *cobra.Command, f repoAddFlags) error {
@@ -145,8 +146,10 @@ func runRepoAdd(cmd *cobra.Command, f repoAddFlags) error {
 	}
 	printf(out, "\n")
 	announceConfigChange(out, paths)
-	printf(out, "\nnext:\n  latem workflows check <a checkout of %s>   what this machine can run, and what it needs\n"+
-		"  latem secrets set --repo %s <NAME>          a secret its workflows read\n", f.slug, f.key)
+	if !f.inSetup {
+		printf(out, "\nnext:\n  latem workflows check --repo %s   what this machine can run of it, and what it needs\n"+
+			"  latem secrets set --repo %s <NAME>   a secret its workflows read\n", f.key, f.key)
+	}
 	return nil
 }
 

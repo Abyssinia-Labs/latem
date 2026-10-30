@@ -192,11 +192,26 @@ download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
 
 ```console
 $ latem setup
-1/4 config
+1/5 config
   wrote /Users/me/.latem/config.toml
   runners: macos (native), linux (docker)
 
-2/4 register
+2/5 repositories
+  a repository this machine should build (owner/name), or Enter to skip: me/myapp
+checking https://github.com/me/myapp.git the way the agent will fetch it …
+added repos.myapp to /Users/me/.latem/config.toml
+
+  6 of 9 jobs in myapp can run on this machine
+    checks.yml: e2e — uses oven-sh/setup-bun@v2: oven-sh/setup-bun is not in [actions] allowed
+    …
+  its workflows need, in config.toml:
+    [label_aliases] "blacksmith-4vcpu-ubuntu-2404" = ["linux"]
+    [actions] allowed += "oven-sh/setup-bun"
+  add them? [Y/n] y
+  added 2 entries
+  another (owner/name), or Enter to go on:
+
+3/5 register
 to register this machine, open
 
   https://app.latem.dev/connect?code=WDJB-MJHT
@@ -209,36 +224,40 @@ waiting for approval — the code expires in 10m0s …
 verifying wss://gw.latem.dev/agent …
   connection verified
 
-3/4 service
+4/5 service
   …
-4/4 doctor
+5/5 doctor
   …
 ```
 
-`latem setup` does the four things a fresh machine needs, and skips each one
+`latem setup` does the five things a fresh machine needs, and skips each one
 that is already done, so it is safe to run again:
 
 1. **config** — writes `~/.latem/config.toml` when there is none: a native
    `macos` runner on a Mac, and a `linux` docker runner wherever a Docker
-   daemon answers (always, on Linux; `--image` sets its image). No
-   repositories yet — `latem repo add` is for those.
-2. **register** — approves the machine in the browser. With no token,
+   daemon answers (always, on Linux; `--image` sets its image).
+2. **repositories** — adds the repositories `--repo owner/name` names, or on
+   a terminal with none configured asks which, and checks each one's
+   workflows without a checkout: how many jobs this machine can run, why not
+   the rest, and the `[label_aliases]` and `[actions]` entries that would let
+   more run, which it adds when you say yes.
+3. **register** — approves the machine in the browser. With no token,
    `latem register` asks the control plane for a code and opens the page to
    approve it on; you approve it signed in, seeing the machine's name, OS and
    labels, and the machine collects its own token. Over ssh the link is
    printed instead — open it anywhere you are signed in. `--url` points at a
    control plane other than the hosted one; `--no-register` keeps the
    machine local, which is a fully supported way to run it.
-3. **service** — installs the agent as a user service and starts it, or
+4. **service** — installs the agent as a user service and starts it, or
    restarts it when the config or the registration just changed.
-4. **doctor** — checks the result and names the fix for anything wrong.
+5. **doctor** — checks the result and names the fix for anything wrong.
 
-Then allow a repository, see what of it this machine can run, and give it
-what its workflows read:
+Then allow more repositories, see what of each this machine can run — read
+from GitHub, no checkout needed — and give them what their workflows read:
 
 ```console
 $ latem repo add me/myapp
-$ latem workflows check ~/src/myapp
+$ latem workflows check --repo myapp
 $ latem secrets set --repo myapp DEPLOY_TOKEN
 ```
 
@@ -859,7 +878,7 @@ there is no subcommand to fetch them yet.
 ## Commands
 
 ```
-latem setup [--url U] [--no-register]  config, registration, service and doctor, idempotently
+latem setup [--url U] [--repo owner/name] [--no-register]  config, repositories, registration, service and doctor, idempotently
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
@@ -871,7 +890,7 @@ latem register [--url U] [--token-file F]   no token: approve this machine in th
 latem repo add <owner/name> | list | remove <name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]
-latem workflows check [path] [--fix]  which workflow jobs this machine can run, and the fix for the rest
+latem workflows check [path | --repo R] [--offline] [--json] [--fix]  which workflow jobs this machine can run, and the fix for the rest
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | restart | reload | status

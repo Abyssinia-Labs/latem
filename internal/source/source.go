@@ -174,6 +174,10 @@ type Manager struct {
 	mu     sync.Mutex
 	repoMu map[string]*sync.Mutex
 
+	// readOnly marks a manager from [NewReader]: it reads mirrors the agent
+	// made and writes nothing (A57).
+	readOnly bool
+
 	// beforeClone is a test seam, nil in production. It runs immediately
 	// before `git clone --local`, which is where a test can observe whether
 	// clones out of one mirror overlap or queue.

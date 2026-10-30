@@ -43,6 +43,8 @@ func newWorkflowsCommand() *cobra.Command {
 type workflowsCheckFlags struct {
 	repo, branch string
 	fix          bool
+	offline      bool // with --repo and no path: the agent's mirror only
+	json         bool
 }
 
 func newWorkflowsCheckCommand() *cobra.Command {
@@ -81,12 +83,29 @@ storing a secret stay yours to do.
 The checkout is matched to a [repos.*] entry by its origin remote, or by
 --repo, for its vars and secrets.
 
+With --repo and no path there is no checkout to give: the repository's
+default branch is read without one (A57) — from GitHub, through a temporary
+clone that downloads only the files the check reads, or with --offline from
+the agent's own mirror of it, which this command reads and never writes. To
+check a checkout as a [repos.*] entry instead, give its path as well.
+
+.latem/jobs.yaml is checked too, when the repository has one: its jobs win
+over a workflow job of the same name.
+
+--json prints the report as JSON, for a script; the exit code is the same.
+
 Exit codes:
   0  every job these events plan can run here
   1  at least one cannot, or the checkout could not be read
   2  usage`,
 		Args: rangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 && f.repo != "" {
+				return runWorkflowsCheckRepo(cmd, f)
+			}
+			if f.offline {
+				return usageErrorf("--offline reads a repository without a checkout: give --repo and no path")
+			}
 			dir := "."
 			if len(args) == 1 {
 				dir = args[0]
@@ -94,7 +113,9 @@ Exit codes:
 			return runWorkflowsCheck(cmd, dir, f)
 		},
 	}
-	cmd.Flags().StringVar(&f.repo, "repo", "", "the [repos.*] entry this checkout is (default: matched by its origin remote)")
+	cmd.Flags().StringVar(&f.repo, "repo", "", "the [repos.*] entry to check; with no path, read without a checkout (A57)")
+	cmd.Flags().BoolVar(&f.offline, "offline", false, "with --repo and no path: read the agent's mirror, not GitHub")
+	cmd.Flags().BoolVar(&f.json, "json", false, "print the report as JSON")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "the branch pushes and pull requests are checked against (default: the repo's)")
 	cmd.Flags().BoolVar(&f.fix, "fix", false, "add the suggested [label_aliases] and [actions] entries to config.toml")
 	return cmd
@@ -107,11 +128,20 @@ type checkTarget struct {
 	repoKey string       // the [repos.*] key, or ""
 	repo    *config.Repo // nil when the checkout is not in the config
 	branch  string
+
+	// fsys is the repository read without a checkout (A57), and where and
+	// commit say from what. Nil for a checkout, which is read from dir.
+	fsys   fs.FS
+	where  string
+	commit string
+	// workspace roots hashFiles: the checkout, or for a repository read
+	// without one an empty directory, so a pattern matches nothing rather
+	// than refusing the job.
+	workspace string
 }
 
 func runWorkflowsCheck(cmd *cobra.Command, dir string, f workflowsCheckFlags) error {
 	ctx := cmd.Context()
-	out := cmd.OutOrStdout()
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -127,6 +157,47 @@ func runWorkflowsCheck(cmd *cobra.Command, dir string, f workflowsCheckFlags) er
 	if err != nil {
 		return err
 	}
+	target.workspace = abs
+	return checkAndReport(cmd, cfg, target, f)
+}
+
+// runWorkflowsCheckRepo checks a configured repository's default branch,
+// read without a checkout (A57).
+func runWorkflowsCheckRepo(cmd *cobra.Command, f workflowsCheckFlags) error {
+	ctx := cmd.Context()
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	target, err := resolveCheckTarget(ctx, cfg, "", f)
+	if err != nil {
+		return err
+	}
+	if target.repo == nil {
+		return fmt.Errorf("there is no [repos.%s] in %s; `latem repo add` allows a repository", f.repo, cfg.Paths.File)
+	}
+	from := fromRemote
+	if f.offline {
+		from = fromMirror
+	}
+	files, err := readRepo(ctx, cfg, target.repoKey, from)
+	if err != nil {
+		return err
+	}
+	defer files.close()
+	empty, err := os.MkdirTemp("", "latem-check-workspace-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(empty) }()
+	target.fsys, target.where, target.commit, target.workspace = files.fsys, files.where, files.sha, empty
+	return checkAndReport(cmd, cfg, target, f)
+}
+
+// checkAndReport analyses a target, applies --fix, and prints the report.
+func checkAndReport(cmd *cobra.Command, cfg *config.Config, target checkTarget, f workflowsCheckFlags) error {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
 	stores, err := newSecretStores(cfg.Paths)
 	if err != nil {
 		return err
@@ -152,15 +223,23 @@ func runWorkflowsCheck(cmd *cobra.Command, dir string, f workflowsCheckFlags) er
 		defer announceConfigChange(out, paths)
 	}
 
-	printCheckReport(out, target, rep)
-	if len(fixed) > 0 {
+	switch {
+	case f.json:
+		if err := printCheckJSON(out, target, rep, fixed); err != nil {
+			return err
+		}
+	case len(fixed) > 0:
+		printCheckReport(out, target, rep)
 		printf(out, "\nfixed in %s:\n", cfg.Paths.File)
 		for _, l := range fixed {
 			printf(out, "  %s\n", l)
 		}
 		printf(out, "\n")
-	} else if rep.hasFixes() {
-		printf(out, "\n`latem workflows check --fix` adds the [label_aliases] and [actions] entries above.\n")
+	default:
+		printCheckReport(out, target, rep)
+		if rep.hasFixes() {
+			printf(out, "\n`latem workflows check --fix` adds the [label_aliases] and [actions] entries above.\n")
+		}
 	}
 	if rep.failed() > 0 || rep.broken() > 0 {
 		return &ExitError{Code: ExitFailure, Err: fmt.Errorf("%d of %d jobs cannot run on this machine as it is, "+
@@ -309,14 +388,21 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 	if err != nil {
 		return rep, err
 	}
-	root, err := os.OpenRoot(t.dir)
-	if err != nil {
-		return rep, err
+	fsys := t.fsys
+	if fsys == nil {
+		root, err := os.OpenRoot(t.dir)
+		if err != nil {
+			return rep, err
+		}
+		defer func() { _ = root.Close() }()
+		fsys = root.FS()
 	}
-	defer func() { _ = root.Close() }()
-	fsys := root.FS()
 
 	files, err := workflowFilesIn(fsys)
+	if errors.Is(err, fs.ErrNotExist) && t.fsys != nil {
+		// A repository read without a checkout may have only jobs.yaml.
+		err = nil
+	}
 	if err != nil {
 		return rep, err
 	}
@@ -400,14 +486,53 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 		}
 		envs := map[string]bool{}
 		for _, pj := range pf.pw.Jobs {
-			jr := checkJob(ctx, cfg, t, inv, fetcher, root, pw, pf, pj, &rep)
+			jr := checkJob(ctx, cfg, t, inv, fetcher, fsys, pw, pf, pj, &rep)
 			wr.jobs = append(wr.jobs, jr)
 			envs[pj.Environment] = true
 		}
 		wr.findings = append(wr.findings, checkVars(t, pw, envs)...)
 		rep.workflows = append(rep.workflows, wr)
 	}
+	if data, err := fs.ReadFile(fsys, registry.Path); err == nil {
+		rep.workflows = append(rep.workflows, checkRegistry(cfg, t, inv, data, &rep))
+	}
 	return rep, nil
+}
+
+// checkRegistry checks .latem/jobs.yaml's jobs: whether a runner here takes
+// each, and the secrets it declares. Its labels are matched as written —
+// [label_aliases] maps a workflow's runs-on, not these.
+func checkRegistry(cfg *config.Config, t checkTarget, inv inventory, data []byte, rep *checkReport) workflowReport {
+	wr := workflowReport{file: registry.Path, name: registry.Path, events: []string{"any ref this machine allows"}}
+	reg, err := registry.Parse(data)
+	if err != nil {
+		wr.err = err.Error()
+		return wr
+	}
+	for _, key := range slices.Sorted(maps.Keys(reg.Jobs)) {
+		job := reg.Jobs[key]
+		jr := jobReport{key: key, name: key}
+		fail := func(text string, fixes ...string) {
+			jr.findings = append(jr.findings, finding{level: levelFail, text: text, fixes: fixes})
+		}
+		jr.runner = checkRegistryRunner(cfg, job, fail)
+		checkSecrets(t, inv, job, &jr)
+		wr.jobs = append(wr.jobs, jr)
+	}
+	return wr
+}
+
+// checkRegistryRunner is checkRunner without the alias suggestions, which a
+// jobs.yaml runs_on does not go through.
+func checkRegistryRunner(cfg *config.Config, job *registry.Job, fail func(string, ...string)) string {
+	needDocker := job.RequiredExecutor() == registry.ExecutorDocker
+	for _, r := range cfg.Runners {
+		if hasAllLabels(r.Labels, job.RunsOn) && (!needDocker || r.Executor == config.ExecutorDocker) {
+			return r.Name
+		}
+	}
+	fail(fmt.Sprintf("no runner here carries all of %s", strings.Join(job.RunsOn, ", ")))
+	return ""
 }
 
 // plannedFile is one workflow as the events planned it.
@@ -593,7 +718,7 @@ func checkoutFiles(fsys fs.FS) []string {
 // checkJob compiles one planned job and asks every question about it.
 func checkJob(
 	ctx context.Context, cfg *config.Config, t checkTarget, inv inventory, fetcher *stubFetcher,
-	root *os.Root, pw *parsedWorkflow, pf *plannedFile, pj protocol.PlannedJob, rep *checkReport,
+	fsys fs.FS, pw *parsedWorkflow, pf *plannedFile, pj protocol.PlannedJob, rep *checkReport,
 ) jobReport {
 	jr := jobReport{key: pj.Key, name: pj.Name}
 	fail := func(text string, fixes ...string) {
@@ -622,7 +747,7 @@ func checkJob(
 	}
 	fetcher.reset()
 	job, err := workflow.CompileWith(ctx, w, pj.Key, checkScope(t, pf, pj, w), workflow.Options{
-		Actions: rootActions{root: root},
+		Actions: fsActions{fsys: fsys},
 		// Every action is let through and recorded, and the machine's own
 		// policy applied to the record below — so one refused action does not
 		// hide the rest of the job, or the next refused action.
@@ -682,7 +807,7 @@ func checkScope(t checkTarget, pf *plannedFile, pj protocol.PlannedJob, w *workf
 				"ref":         ev.Ref, "ref_name": refName, "ref_type": refType, "sha": ev.SHA,
 				"job": pj.Key, "workflow": name, "event_name": ev.Name, "event": payload,
 				"actor": ev.Actor, "triggering_actor": ev.Actor, "base_ref": baseRef, "head_ref": headRef,
-				"run_id": "1", "run_number": float64(1), "run_attempt": float64(1), "workspace": t.dir,
+				"run_id": "1", "run_number": float64(1), "run_attempt": float64(1), "workspace": t.workspace,
 			},
 			"inputs": inputs,
 			"env":    map[string]any{},
@@ -690,21 +815,22 @@ func checkScope(t checkTarget, pf *plannedFile, pj protocol.PlannedJob, w *workf
 			"needs":  workflow.NeedsContext(needs),
 		},
 		Status:       expr.StatusSuccess,
-		WorkspaceDir: t.dir,
+		WorkspaceDir: t.workspace,
 	}
 }
 
-// rootActions reads a local action's metadata through the checkout's
-// os.Root, as the agent's own loader does inside a workspace.
-type rootActions struct{ root *os.Root }
+// fsActions reads a local action's metadata out of the repository — a
+// checkout's os.Root, or a commit read without one — as the agent's own
+// loader does inside a workspace.
+type fsActions struct{ fsys fs.FS }
 
-func (l rootActions) Load(dir string) (*workflow.Action, error) {
+func (l fsActions) Load(dir string) (*workflow.Action, error) {
 	clean := path.Clean(strings.TrimPrefix(dir, "./"))
 	if clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
 		return nil, fmt.Errorf("uses: %s reaches outside the repository", dir)
 	}
 	for _, name := range []string{"action.yml", "action.yaml"} {
-		data, err := fs.ReadFile(l.root.FS(), path.Join(clean, name))
+		data, err := fs.ReadFile(l.fsys, path.Join(clean, name))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -943,6 +1069,18 @@ func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool) []findin
 }
 
 // applyWorkflowFixes writes the suggested aliases and allowlist entries.
+// suggestedFixLines says what applyWorkflowFixes would add, without adding it.
+func suggestedFixLines(rep checkReport) []string {
+	var lines []string
+	for _, l := range slices.Sorted(maps.Keys(rep.aliases)) {
+		lines = append(lines, fmt.Sprintf("[label_aliases] %s = %s", tomlKey(l), tomlStringList(rep.aliases[l])))
+	}
+	for _, a := range rep.allowed {
+		lines = append(lines, fmt.Sprintf("[actions] allowed += %q", a))
+	}
+	return lines
+}
+
 func applyWorkflowFixes(paths config.Paths, cfg *config.Config, rep checkReport) ([]string, error) {
 	var lines []string
 	_, err := editConfig(paths, func(body string) (string, error) {
@@ -978,6 +1116,9 @@ func applyWorkflowFixes(paths config.Paths, cfg *config.Config, rep checkReport)
 func printCheckReport(w io.Writer, t checkTarget, rep checkReport) {
 	st := newStyler(w)
 	what := t.dir
+	if t.fsys != nil {
+		what = fmt.Sprintf("%s at %.12s", t.where, t.commit)
+	}
 	switch {
 	case t.repoKey != "":
 		what += fmt.Sprintf(" (repos.%s, %s)", t.repoKey, orDash(t.slug))

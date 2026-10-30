@@ -157,19 +157,30 @@ func (m *Manager) runRaw(ctx context.Context, dir string, limit int, args ...str
 
 // cappedBuffer stops accepting output past its limit, so a blob of any size
 // cannot be read into memory whole before it is refused.
+//
+// The buffer is a field, not embedded. Embedded, bytes.Buffer's ReadFrom was
+// promoted, and io.Copy — which is how a command's Stdout is filled — prefers a
+// ReaderFrom to Write: the limit was never consulted, and a blob or a pack of
+// any size was read whole (A57).
 type cappedBuffer struct {
-	bytes.Buffer
+	buf   bytes.Buffer
 	limit int
 	over  bool
 }
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if c.Len()+len(p) > c.limit {
+	if c.buf.Len()+len(p) > c.limit {
 		c.over = true
 		return 0, errors.New("output limit reached")
 	}
-	return c.Buffer.Write(p)
+	return c.buf.Write(p)
 }
+
+// Bytes is what was written, up to the limit.
+func (c *cappedBuffer) Bytes() []byte { return c.buf.Bytes() }
+
+// Len is how much was written.
+func (c *cappedBuffer) Len() int { return c.buf.Len() }
 
 // treeFS is one directory's files, read out of a commit.
 type treeFS struct {

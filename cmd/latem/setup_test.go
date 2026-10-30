@@ -5,8 +5,10 @@ import (
 	"io"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/spf13/cobra"
 
@@ -104,7 +106,7 @@ func TestSetup_AFreshMachineEndToEnd(t *testing.T) {
 		t.Errorf("register %d, install %d, restart %d, doctor %d; want 1 1 0 1",
 			rec.registers, rec.svc.installs, rec.svc.restart, rec.doctors)
 	}
-	for _, want := range []string{"1/4 config", "wrote", "2/4 register", "approved", "3/4 service", "4/4 doctor",
+	for _, want := range []string{"1/5 config", "wrote", "3/5 register", "approved", "4/5 service", "5/5 doctor",
 		"(doctor ran)", "latem repo add <owner/name>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
@@ -221,5 +223,95 @@ func TestSetupTemplate_LoadsWithNoRepos(t *testing.T) {
 				t.Errorf("%s: the empty allowlist does not say how to fill it", goos)
 			}
 		}
+	}
+}
+
+// fakeInteractive says stdin is a terminal, so setup asks.
+func fakeInteractive(t *testing.T) {
+	t.Helper()
+	prev := interactive
+	interactive = func(*cobra.Command) bool { return true }
+	t.Cleanup(func() { interactive = prev })
+}
+
+// a workflow that needs an alias and an allowlist entry on a fresh machine.
+var setupRepoFiles = fstest.MapFS{
+	".github/workflows/checks.yml": {Data: []byte("on: push\njobs:\n  web:\n    runs-on: blacksmith-4vcpu-ubuntu-2404\n" +
+		"    steps:\n      - uses: oven-sh/setup-bun@v2\n      - run: bun test\n")},
+}
+
+// On a terminal, with no repositories, setup asks for one, reads its
+// workflows without a checkout, and offers what they need (A57).
+func TestSetup_AsksForARepositoryAndOffersWhatItsWorkflowsNeed(t *testing.T) {
+	fakeSetup(t, true)
+	fakeInteractive(t)
+	fakeLsRemote(t, readable("main"))
+	fakeStores(t, false)
+	noAgentRunning(t)
+	asked := fakeRepoFiles(t, setupRepoFiles)
+	dir := filepath.Join(privateTempDir(t), "fresh")
+
+	out, err := latemIn(t, dir, "nope\nme/app\ny\n\n", "setup", "--no-register", "--no-service")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	cfg := loadConfigIn(t, dir)
+	if _, ok := cfg.Repos["app"]; !ok {
+		t.Fatalf("repos = %v, want app", cfg.Repos)
+	}
+	if got := cfg.LabelAliases["blacksmith-4vcpu-ubuntu-2404"]; !slices.Equal(got, []string{"linux"}) {
+		t.Errorf("alias = %v, want [linux]", got)
+	}
+	if !slices.Contains(cfg.Actions.Allowed, "oven-sh/setup-bun") {
+		t.Errorf("actions.allowed = %v", cfg.Actions.Allowed)
+	}
+	if !slices.Equal(*asked, []treeSource{fromMirrorThenRemote}) {
+		t.Errorf("read from %v; a fresh machine has no mirror, so the remote", *asked)
+	}
+	for _, want := range []string{"2/5 repositories", "should build (owner/name)", "nope", "added repos.app",
+		"jobs in app can run on this machine", "its workflows need", "add them? [Y/n]", "added 2 entries",
+		"another (owner/name)", "3/5 register"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// --repo adds without asking; what the workflows need is said, not written.
+func TestSetup_RepoFlagAddsWithoutAsking(t *testing.T) {
+	fakeSetup(t, true)
+	fakeLsRemote(t, readable("main"))
+	fakeStores(t, false)
+	noAgentRunning(t)
+	fakeRepoFiles(t, setupRepoFiles)
+	dir := filepath.Join(privateTempDir(t), "fresh")
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service", "--repo", "me/app")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	cfg := loadConfigIn(t, dir)
+	if _, ok := cfg.Repos["app"]; !ok || len(cfg.LabelAliases) != 0 {
+		t.Errorf("repos = %v, aliases = %v: want app added and nothing else written", cfg.Repos, cfg.LabelAliases)
+	}
+	if strings.Contains(out, "add them?") || !strings.Contains(out, "latem workflows check --repo app --fix") {
+		t.Errorf("output:\n%s", out)
+	}
+
+	if _, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service", "--repo", "not a slug"); exitCode(err) != ExitUsage {
+		t.Errorf("--repo 'not a slug': exit %d (%v), want usage", exitCode(err), err)
+	}
+}
+
+// Off a terminal, with no --repo, setup asks nothing and says what adds one.
+func TestSetup_NoRepositoriesOffATerminal(t *testing.T) {
+	fakeSetup(t, true)
+	dir := filepath.Join(privateTempDir(t), "fresh")
+	out, err := latemIn(t, dir, "me/app\n", "setup", "--no-register", "--no-service")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "none yet; `latem repo add <owner/name>` adds one") || strings.Contains(out, "should build") {
+		t.Errorf("output:\n%s", out)
 	}
 }
