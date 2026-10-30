@@ -290,9 +290,13 @@ Two checks, and they prove different things:
   served either. When the tool is missing the script says so and what it did
   not check, rather than implying more than it did.
 
-An agent with `[agent] auto_update = true` performs the same two checks for
-itself, daily, against a key compiled into the binary, and replaces itself only
-while no build is in flight (RUNNER_SPEC §20). A binary built from a tree with
+`latem update` performs the same two checks against a key compiled into the
+binary, replaces the binary it runs from, and asks the running agent to move
+onto it; the agent waits for the builds in flight and re-executes in place,
+keeping its pid. Every other command mentions a newer release once a day, on a
+terminal (`LATEM_NO_UPDATE_NOTIFIER=1` turns that off). An agent with
+`[agent] auto_update = true` does the same for itself, daily, and replaces
+itself only while no build is in flight (RUNNER_SPEC §20, A56). A binary built from a tree with
 no signing key in it refuses that setting at load, because an agent that
 declined every release into a log nobody reads would be worse than one that
 never offered to update.
@@ -871,6 +875,7 @@ latem workflows check [path] [--fix]  which workflow jobs this machine can run, 
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | restart | reload | status
+latem update [--check]               install the latest release; the agent moves onto it when idle
 latem version
 ```
 
