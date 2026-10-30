@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -100,6 +101,10 @@ to do it.`,
 				Logger:     agentLogger(cmd.ErrOrStderr()),
 				Once:       once,
 				DrainAfter: drain,
+				// The agent's own PATH is the one its steps get (A59).
+				ProbeToolchains: func(ctx context.Context) system.Toolchains {
+					return system.New(system.Options{}).Toolchains(ctx, os.Getenv("PATH"))
+				},
 			})
 			if err != nil {
 				return err

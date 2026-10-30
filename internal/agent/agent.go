@@ -80,6 +80,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
+	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -176,6 +177,11 @@ type Options struct {
 	// BinaryVersion asks a latem binary its version, for SIGUSR2 (A56). Nil
 	// runs it with `version --short`.
 	BinaryVersion func(ctx context.Context, path string) (string, error)
+
+	// ProbeToolchains finds what this machine has for builds, for the note a
+	// run writes about what its job needs and the machine lacks (A59). Nil
+	// probes nothing and writes no note.
+	ProbeToolchains func(ctx context.Context) system.Toolchains
 
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration
@@ -277,6 +283,9 @@ type Agent struct {
 	// switching is set while a move onto a new binary is pending, so a second
 	// SIGUSR2, or the daily self-update, does not start another.
 	switching atomic.Bool
+
+	// toolchains is what ProbeToolchains last found (A59).
+	toolchains atomic.Pointer[system.Toolchains]
 
 	mu sync.Mutex
 	// activeRepos maps a live run id to its repo key, so the cache pruner can

@@ -278,11 +278,21 @@ func (a *Agent) buildOrchestrator() error {
 		Artifacts:    artifact.NewCollector(a.cfg.Paths.Artifacts),
 		Runners:      runners,
 		Now:          a.now,
+		Toolchains:   a.toolchains.Load,
 	})
 	if err != nil {
 		return wrapStartup("orchestrator", err)
 	}
 	a.orch = orch
+	if probe := a.opts.ProbeToolchains; probe != nil {
+		// In the background, and once: it reads every Xcode's Info.plist
+		// and asks a JDK list, a second or two that startup need not wait
+		// for. A run before it lands writes no note (A59).
+		go func() {
+			tc := probe(context.Background())
+			a.toolchains.Store(&tc)
+		}()
+	}
 	return nil
 }
 
