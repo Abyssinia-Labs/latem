@@ -429,6 +429,28 @@ labels = ["linux"]
 			want: "no ref can ever run",
 		},
 		{
+			// my-app and my_app both look their secrets up as my_app__NAME,
+			// so each would be served the other's (A50, A54).
+			name: "two repo keys whose secrets would collide",
+			toml: `
+schema_version = 1
+
+[repos.my-app]
+url = "https://github.com/acme/my-app.git"
+allowed_refs = ["main"]
+
+[repos.my_app]
+url = "https://github.com/other/my_app.git"
+allowed_refs = ["main"]
+
+[[runner]]
+name = "linux"
+executor = "docker"
+labels = ["linux"]
+`,
+			want: "repos.my-app and repos.my_app would share secrets",
+		},
+		{
 			name: "repo with no url",
 			toml: `
 schema_version = 1
