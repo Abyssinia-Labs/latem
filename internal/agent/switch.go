@@ -95,8 +95,13 @@ func (a *Agent) Switch(ctx context.Context) {
 		return
 	}
 	if to == a.version {
-		a.log.Info("SIGUSR2: the binary on disk is the one running", "version", to, "path", target)
+		// Nothing to move onto, and still a nudge from someone who may have
+		// changed the machine under it — installed an Xcode, accepted a
+		// licence — so it looks again at what it has (A59).
+		a.log.Info("SIGUSR2: the binary on disk is the one running; probing toolchains again",
+			"version", to, "path", target)
 		a.answerSwitch(SwitchCurrent, to, 0, nil)
+		a.reprobeToolchains()
 		return
 	}
 	if a.switching.Swap(true) {

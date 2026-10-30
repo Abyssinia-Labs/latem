@@ -102,6 +102,12 @@ const (
 	// retention, TTL sweep, mirror gc (§14.4, §16, §11).
 	DefaultMaintenanceInterval = 24 * time.Hour
 
+	// DefaultToolchainsInterval is how often the agent looks again at what it
+	// has for builds (A59, A61). Xcode changes under a running agent — the
+	// App Store updates it, an operator installs a second one — and a probe is
+	// a second or two of plutil and a JDK list.
+	DefaultToolchainsInterval = 15 * time.Minute
+
 	// DefaultClaimInterval is how often a worker asks the queue for work when
 	// no doorbell has rung. It is short because the doorbell only covers runs
 	// submitted to a live agent: an approval, a re-queue from gate 16, and
@@ -188,6 +194,7 @@ type Options struct {
 	HeartbeatInterval   time.Duration
 	PreflightInterval   time.Duration
 	MaintenanceInterval time.Duration
+	ToolchainsInterval  time.Duration
 	ClaimInterval       time.Duration
 	SlotWait            time.Duration
 	PreflightTimeout    time.Duration
@@ -285,8 +292,11 @@ type Agent struct {
 	// SIGUSR2, or the daily self-update, does not start another.
 	switching atomic.Bool
 
-	// toolchains is what ProbeToolchains last found (A59).
-	toolchains atomic.Pointer[system.Toolchains]
+	// toolchains is what ProbeToolchains last found (A59), every
+	// toolchainsEvery or sooner when reprobe rings.
+	toolchains      atomic.Pointer[system.Toolchains]
+	toolchainsEvery time.Duration
+	reprobe         chan struct{}
 
 	mu sync.Mutex
 	// activeRepos maps a live run id to its repo key, so the cache pruner can
@@ -330,6 +340,8 @@ func New(opts Options) (*Agent, error) {
 		heartbeatEvery:   orDuration(opts.HeartbeatInterval, DefaultHeartbeatInterval),
 		preflightEvery:   orDuration(opts.PreflightInterval, DefaultPreflightInterval),
 		maintenanceEvery: orDuration(opts.MaintenanceInterval, DefaultMaintenanceInterval),
+		toolchainsEvery:  orDuration(opts.ToolchainsInterval, DefaultToolchainsInterval),
+		reprobe:          make(chan struct{}, 1),
 		claimEvery:       orDuration(opts.ClaimInterval, DefaultClaimInterval),
 		updateEvery:      orDuration(opts.UpdateInterval, DefaultUpdateInterval),
 		updateIdleWait:   orDuration(opts.UpdateIdleWait, DefaultUpdateIdleWait),
@@ -387,6 +399,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.spawn(&wg, func() { a.heartbeatLoop(workCtx) })
 	a.spawn(&wg, func() { a.preflightLoop(workCtx) })
 	a.spawn(&wg, func() { a.maintenanceLoop(workCtx) })
+	a.spawn(&wg, func() { a.toolchainsLoop(workCtx) })
 	a.spawn(&wg, func() { a.updateLoop(workCtx) })
 
 	pool := a.startPool(workCtx)

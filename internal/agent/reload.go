@@ -133,6 +133,8 @@ func (a *Agent) Reload() ([]string, error) {
 		a.log.Info("config reloaded", "repos", len(next.Repos))
 	}
 	a.writeReloadStatus(nil, deferred)
+	// A runner's path_prepend decides where a step finds its tools (A60).
+	a.reprobeToolchains()
 	return deferred, nil
 }
 
