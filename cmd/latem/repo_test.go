@@ -134,6 +134,26 @@ func TestRepoAdd_RefusesAnUnreadableRepository(t *testing.T) {
 	}
 }
 
+// An account with no GitHub login at all: git wants a username for the https
+// URL and may not ask. The advice is to log in, not the ssh-key advice for a
+// failure nothing here involved — what a fresh macOS account was told.
+func TestRepoAdd_AnAccountWithNoGitHubLogin(t *testing.T) {
+	dir := configDirWith(t, baseConfig)
+	fakeLsRemote(t, func(bool) (string, error) {
+		return "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n",
+			errors.New("exit status 128")
+	})
+	noAgentRunning(t)
+
+	_, err := latemIn(t, dir, "", "repo", "add", "me/private")
+	if err == nil || !strings.Contains(err.Error(), "gh auth login --hostname github.com --git-protocol https") {
+		t.Fatalf("want the login named as the fix, got %v", err)
+	}
+	if strings.Contains(err.Error(), "deploy key") || strings.Contains(err.Error(), "ssh agent") {
+		t.Errorf("the deploy-key note is for ssh failures, not a missing login: %v", err)
+	}
+}
+
 func TestRepoAdd_NoVerifyAndExplicitRefs(t *testing.T) {
 	dir := configDirWith(t, baseConfig)
 	calls := fakeLsRemote(t, readable("main"))

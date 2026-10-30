@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -43,6 +45,9 @@ type toolchainDeps struct {
 	// install runs one fix, its output to w.
 	install  func(ctx context.Context, argv []string, w io.Writer) error
 	lookPath func(name string) (string, error)
+	// brewOwner names who owns the Homebrew that brew, a path, belongs to,
+	// and whether this account can install into it.
+	brewOwner func(brew string) (owner string, mine bool)
 }
 
 func realToolchainDeps() toolchainDeps {
@@ -53,9 +58,50 @@ func realToolchainDeps() toolchainDeps {
 			_, err := sys.Exec(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", "--", ref)
 			return err == nil
 		},
-		install:  runInstall,
-		lookPath: exec.LookPath,
+		install:   runInstall,
+		lookPath:  func(name string) (string, error) { return lookPathOr(name, servicePath(sys)) },
+		brewOwner: brewOwner,
 	}
+}
+
+// lookPathOr finds name on this shell's PATH or else on also, the PATH the
+// agent's steps get: an account made for the agent may have Homebrew on
+// launchd's PATH and not in its login shell's, which is not missing it.
+func lookPathOr(name, also string) (string, error) {
+	p, err := exec.LookPath(name)
+	if err == nil {
+		return p, nil
+	}
+	for _, dir := range filepath.SplitList(also) {
+		c := filepath.Join(dir, name)
+		if fi, serr := os.Stat(c); serr == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
+			return c, nil
+		}
+	}
+	return "", err
+}
+
+// brewOwner reads who owns the Homebrew prefix brew is in, and whether this
+// account may write its Cellar. One Homebrew serves a Mac, installed by one
+// user; a second account — a build user made for the agent — can run what it
+// installed and cannot install anything into it.
+func brewOwner(brew string) (string, bool) {
+	prefix := filepath.Dir(filepath.Dir(brew))
+	dir := filepath.Join(prefix, "Cellar")
+	if _, err := os.Stat(dir); err != nil {
+		dir = prefix
+	}
+	mine := syscall.Access(dir, 2 /* W_OK */) == nil
+	owner := "another user"
+	if fi, err := os.Stat(dir); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			owner = strconv.FormatUint(uint64(st.Uid), 10)
+			if u, err := user.LookupId(owner); err == nil {
+				owner = u.Username
+			}
+		}
+	}
+	return owner, mine
 }
 
 // runInstall runs one install. Setsid takes it off the terminal: sudo,
@@ -183,6 +229,9 @@ func setupToolchains(cmd *cobra.Command, p *prompter, deps toolchainDeps) (bool,
 	}
 
 	switch left := len(imageWants(ctx, cfg, deps)) + len(missingFor(cfg, jobs, tcFor)); {
+	case len(asked) == 0 && len(jobs) == 0 && len(cfg.Repos) > 0:
+		printf(out, "  no job in %s goes to a runner here, so nothing to check; "+
+			"`latem workflows check --repo <key>` says why\n", strings.Join(sortedStrings(cfg.Repos), ", "))
 	case len(asked) == 0 && len(jobs) > 0:
 		printf(out, "  nothing the jobs here need is missing\n")
 	case len(asked) == 0:
@@ -219,11 +268,13 @@ func repoJobNeeds(ctx context.Context, out io.Writer, cfg *config.Config) []jobN
 			printf(out, "  %s's workflows were not read: %v\n", key, err)
 			continue
 		}
+		// A job a policy refuses here still comes here once that is settled
+		// (setup's repositories step says how), so its needs count.
 		for _, wr := range rep.workflows {
 			for _, j := range wr.jobs {
-				if j.needs != nil && j.runner != "" {
+				if j.needs != nil && j.carrier != "" {
 					jobs = append(jobs, jobNeed{ref: fmt.Sprintf("%s %s %s", key, path.Base(wr.file), j.name),
-						runner: j.runner, report: *j.needs})
+						runner: j.carrier, report: *j.needs})
 				}
 			}
 		}
@@ -348,9 +399,17 @@ func printWant(out io.Writer, w want) {
 // succeeded; a failure is said, and is not the step's.
 func offerFix(ctx context.Context, out io.Writer, p *prompter, asking bool, deps toolchainDeps, argv []string) (bool, error) {
 	line := needs.CommandLine(argv)
-	if _, err := deps.lookPath(argv[0]); err != nil {
+	bin, err := deps.lookPath(argv[0])
+	if err != nil {
 		printf(out, "    %s — needs %s, which is not installed\n", line, argv[0])
 		return false, nil
+	}
+	if argv[0] == "brew" {
+		if owner, mine := deps.brewOwner(bin); !mine {
+			printf(out, "    %s — Homebrew here belongs to %s, and this account cannot install into it; "+
+				"%s has to run it\n", line, owner, owner)
+			return false, nil
+		}
 	}
 	if !asking {
 		printf(out, "    fix: %s\n", line)
@@ -360,7 +419,9 @@ func offerFix(ctx context.Context, out io.Writer, p *prompter, asking bool, deps
 	if err != nil || !run {
 		return false, err
 	}
-	if err := deps.install(ctx, argv, out); err != nil {
+	// The program as found, which may be on the agent's PATH and not this
+	// shell's.
+	if err := deps.install(ctx, append([]string{bin}, argv[1:]...), out); err != nil {
 		printf(out, "    %s failed: %v\n", line, err)
 		return false, nil
 	}

@@ -297,19 +297,17 @@ func setupRepositories(cmd *cobra.Command, p *prompter, f setupFlags, cfg *confi
 
 // setupCheckRepo checks a repository just added: how many of its jobs this
 // machine can run, why not the rest, and — asked, on a terminal — the
-// [label_aliases] and [actions] entries that would let more run. A failure to
-// read it is reported and does not stop setup.
+// [label_aliases] and [actions] entries that would let more run. Once they
+// are added it checks again, because a job refused for its labels is checked
+// for nothing else until a runner carries them: what stops it next is said,
+// and a setting setup does not choose for you is left as a setting to choose.
+// A failure to read it is reported and does not stop setup.
 func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 	report := func(err error) { printf(out, "  its workflows were not checked: %v\n", err) }
 
 	cfg, err := loadConfig()
-	if err != nil {
-		report(err)
-		return
-	}
-	target, err := resolveCheckTarget(ctx, cfg, "", workflowsCheckFlags{repo: key})
 	if err != nil {
 		report(err)
 		return
@@ -326,39 +324,44 @@ func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 		return
 	}
 	defer func() { _ = os.RemoveAll(empty) }()
-	target.fsys, target.where, target.commit, target.workspace = files.fsys, files.where, files.sha, empty
-	stores, err := newSecretStores(cfg.Paths)
-	if err != nil {
-		report(err)
-		return
-	}
-	rep, err := analyzeWorkflows(ctx, cfg, target, stores)
-	if err != nil {
-		report(err)
-		return
+	check := func() (checkReport, error) {
+		cfg, err := loadConfig()
+		if err != nil {
+			return checkReport{}, err
+		}
+		target, err := resolveCheckTarget(ctx, cfg, "", workflowsCheckFlags{repo: key})
+		if err != nil {
+			return checkReport{}, err
+		}
+		target.fsys, target.where, target.commit, target.workspace = files.fsys, files.where, files.sha, empty
+		stores, err := newSecretStores(cfg.Paths)
+		if err != nil {
+			return checkReport{}, err
+		}
+		return analyzeWorkflows(ctx, cfg, target, stores)
 	}
 
-	if k := kindsSummary(rep); k != "" {
-		printf(out, "\n  %s builds: %s\n", key, k)
-	}
-	printf(out, "\n  %d of %d jobs in %s can run on this machine\n", rep.jobs()-rep.failed(), rep.jobs(), key)
-	shown := 0
-refused:
-	for _, wr := range rep.workflows {
-		for _, j := range wr.jobs {
-			if j.level() != levelFail || len(j.findings) == 0 {
-				continue
-			}
-			if shown == 6 {
-				printf(out, "    …\n")
-				break refused
-			}
-			first := strings.SplitN(j.findings[0].text, "\n", 2)[0]
-			printf(out, "    %s: %s — %s\n", path.Base(wr.file), j.key, first)
-			shown++
+	for round := 0; ; round++ {
+		rep, err := check()
+		if err != nil {
+			report(err)
+			return
 		}
-	}
-	if rep.hasFixes() {
+		if round == 0 {
+			if k := kindsSummary(rep); k != "" {
+				printf(out, "\n  %s builds: %s\n", key, k)
+			}
+			printf(out, "\n  %d of %d jobs in %s can run on this machine\n", rep.jobs()-rep.failed(), rep.jobs(), key)
+		} else {
+			printf(out, "  now %d of %d can run\n", rep.jobs()-rep.failed(), rep.jobs())
+		}
+		printRefusals(out, rep)
+		// Three rounds at most: an entry setup adds can uncover another
+		// entry's need, and never a chain longer than labels, then actions.
+		if !rep.hasFixes() || round == 2 {
+			printLeftToYou(out, rep)
+			break
+		}
 		printf(out, "  its workflows need, in config.toml:\n")
 		for _, l := range suggestedFixLines(rep) {
 			printf(out, "    %s\n", l)
@@ -370,18 +373,83 @@ refused:
 				return
 			}
 		}
-		if add {
-			fixed, err := applyWorkflowFixes(config.DerivePaths(configDir()), cfg, rep)
-			if err != nil {
-				report(err)
-				return
-			}
-			printf(out, "  added %d entr%s\n", len(fixed), map[bool]string{true: "y", false: "ies"}[len(fixed) == 1])
-		} else {
+		if !add {
 			printf(out, "  `latem workflows check --repo %s --fix` adds them\n", key)
+			printLeftToYou(out, rep)
+			break
 		}
+		cfg, err := loadConfig()
+		if err != nil {
+			report(err)
+			return
+		}
+		fixed, err := applyWorkflowFixes(config.DerivePaths(configDir()), cfg, rep)
+		if err != nil {
+			report(err)
+			return
+		}
+		printf(out, "  added %d entr%s\n", len(fixed), map[bool]string{true: "y", false: "ies"}[len(fixed) == 1])
 	}
 	printf(out, "  the details: latem workflows check --repo %s\n", key)
+}
+
+// printRefusals names up to six jobs this machine refuses, each with the
+// first reason.
+func printRefusals(out io.Writer, rep checkReport) {
+	shown := 0
+	for _, wr := range rep.workflows {
+		for _, j := range wr.jobs {
+			if j.level() != levelFail || len(j.findings) == 0 {
+				continue
+			}
+			if shown == 6 {
+				printf(out, "    …\n")
+				return
+			}
+			first := strings.SplitN(j.findings[0].text, "\n", 2)[0]
+			printf(out, "    %s: %s — %s\n", path.Base(wr.file), j.key, first)
+			shown++
+		}
+	}
+}
+
+// printLeftToYou says the config.toml settings that would let more of the
+// refused jobs run and that setup does not add: whether to run remote
+// actions unisolated, or actions not pinned to a commit, is the operator's
+// call, and so is which runner a label no runner here carries should mean.
+// The other fix for each — a change to the workflow — is workflows check's
+// to say.
+func printLeftToYou(out io.Writer, rep checkReport) {
+	offered := suggestedFixLines(rep)
+	var lines []string
+	for _, wr := range rep.workflows {
+		for _, j := range wr.jobs {
+			if j.level() != levelFail {
+				continue
+			}
+			for _, f := range j.findings {
+				for _, fix := range f.fixes {
+					i := strings.Index(fix, "[actions] ")
+					if k := strings.Index(fix, "[label_aliases] "); k >= 0 && (i < 0 || k < i) {
+						i = k
+					}
+					if i < 0 {
+						continue
+					}
+					if l := fix[i:]; !slices.Contains(offered, l) && !slices.Contains(lines, l) {
+						lines = append(lines, l)
+					}
+				}
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	printf(out, "  settings that would let more run, which setup leaves to you:\n")
+	for _, l := range lines {
+		printf(out, "    %s\n", l)
+	}
 }
 
 // registered reports whether the machine already has a control plane and a

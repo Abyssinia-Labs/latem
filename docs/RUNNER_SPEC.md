@@ -2807,10 +2807,18 @@ lands, or on an agent given none, writes no note.
 
 **What it offers.** Every gap A59 names, for each job a runner here takes, read from the agent's
 mirror or else a temporary clone (A57); and each docker runner's image, when Docker does not have
-it yet, so a first job does not wait on the pull. A gap's fix is now an argv —
+it yet, so a first job does not wait on the pull. A job a native runner refuses only because its
+remote actions want isolation counts as that runner's: `[actions] allow_unisolated` is a setting
+away, and what the job needs is the same either way. A repository none of whose jobs comes here is
+said, not passed over. A gap's fix is now an argv —
 `["brew", "install", "xcodegen"]`, never a line for a shell — and doctor prints it as a line to
-type. A fix whose program is not installed (no Homebrew) is said and not offered; a tool whose
-only installer is a pipe into a shell (`curl … | bash`) is a step for a person.
+type. A fix whose program is not installed (no Homebrew) is said and not offered — looked for on the
+shell's PATH and then the agent's, which an account made for the agent may have and its login
+shell not — and so is a
+Homebrew install where this account cannot write the Cellar: one Homebrew serves a Mac, owned by
+the user who installed it, and an account made for the agent can run what it holds and install
+nothing into it. Setup names the owner. A tool whose only installer is a pipe into a shell
+(`curl … | bash`) is a step for a person.
 
 **How it runs one.** Asked, `[y/N]`, one at a time, and only on a terminal: off one, setup prints
 the fixes and installs nothing. Each runs with stdin closed and in a session of its own, so
@@ -2830,6 +2838,13 @@ secret, which §15 keeps out of config. After a keg-only install, setup writes w
 `android-commandlinetools`' root as `ANDROID_HOME`. A name the runner's env already sets is left
 as it is, and said. Doctor's probe and the agent's (A59) look on the same PATH a step gets, the
 runner's `path_prepend` included.
+
+**Checked again.** The repositories step adds the `[label_aliases]` and `[actions] allowed`
+entries a repository's workflows need (A57) and then checks it again, at most three times: a job
+refused for its labels is checked for nothing else until a runner carries them, so the reason it
+fails next is only known after. What still stops a job is said, and so are the settings that would
+let it run which setup never writes for you — `allow_unisolated`, `require_pinned = false`, an
+alias for a label no runner here carries.
 
 **With no repository.** Setup asks what the machine will build — iOS apps, macOS apps, Android
 apps, Linux builds — and checks what each needs of the runner here that would take it: Xcode and a

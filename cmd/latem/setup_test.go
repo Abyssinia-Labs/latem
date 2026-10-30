@@ -273,9 +273,12 @@ func TestSetup_AsksForARepositoryAndOffersWhatItsWorkflowsNeed(t *testing.T) {
 	if len(*asked) == 0 || slices.ContainsFunc(*asked, func(s treeSource) bool { return s != fromMirrorThenRemote }) {
 		t.Errorf("read from %v; a fresh machine has no mirror, so the remote", *asked)
 	}
+	// Checked again once the entries are in: the job is refused next for its
+	// unpinned action, a setting setup leaves alone and says.
 	for _, want := range []string{"2/6 repositories", "should build (owner/name)", "nope", "added repos.app",
 		"jobs in app can run on this machine", "its workflows need", "add them? [Y/n]", "added 2 entries",
-		"another (owner/name)", "4/6 register"} {
+		"now 0 of 1 can run", `"v2" is a tag or branch`, "which setup leaves to you",
+		"[actions] require_pinned = false", "another (owner/name)", "4/6 register"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
