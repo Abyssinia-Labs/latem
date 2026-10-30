@@ -101,9 +101,10 @@ to do it.`,
 				Logger:     agentLogger(cmd.ErrOrStderr()),
 				Once:       once,
 				DrainAfter: drain,
-				// The agent's own PATH is the one its steps get (A59).
-				ProbeToolchains: func(ctx context.Context) system.Toolchains {
-					return system.New(system.Options{}).Toolchains(ctx, os.Getenv("PATH"))
+				// The agent's own PATH is the one its steps get (A59), behind
+				// the native runners' path_prepend (A60).
+				ProbeToolchains: func(ctx context.Context, stepPath string) system.Toolchains {
+					return system.New(system.Options{}).Toolchains(ctx, stepPath)
 				},
 			})
 			if err != nil {

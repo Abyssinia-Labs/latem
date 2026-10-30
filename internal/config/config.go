@@ -402,11 +402,39 @@ type TartRunner struct {
 // the machine builds refs the operator's own team controls; §13.0 states the
 // criterion and §13.2 is the upgrade when it stops holding.
 //
-// The block exists so the disk floor is settable; everything else about the
-// native executor is determined by the host.
+// The block exists so the disk floor is settable, and so a step can find a
+// toolchain the host has but its service environment does not (A60);
+// everything else about the native executor is determined by the host.
 type NativeRunner struct {
 	// MinFreeGB defaults to [DefaultNativeMinFreeGB].
 	MinFreeGB float64 `toml:"min_free_gb"`
+
+	// Env is set for every step, beneath the job's own env: a job or step
+	// that sets a name wins. It is for where a toolchain lives — JAVA_HOME,
+	// ANDROID_HOME — and never for a secret, which belongs to [Secrets].
+	Env map[string]string `toml:"env"`
+
+	// PathPrepend goes in front of the PATH a step inherits from the agent:
+	// a keg-only Homebrew install (openjdk@17, ruby) is on no PATH the
+	// service has. Absolute directories only.
+	PathPrepend []string `toml:"path_prepend"`
+}
+
+// NativeEnv is the env a native runner sets for every step, or nil (A60).
+func (r *Runner) NativeEnv() map[string]string {
+	if r.Executor != ExecutorNative || r.Native == nil {
+		return nil
+	}
+	return r.Native.Env
+}
+
+// NativePathPrepend is what a native runner puts in front of a step's PATH,
+// or nil (A60).
+func (r *Runner) NativePathPrepend() []string {
+	if r.Executor != ExecutorNative || r.Native == nil {
+		return nil
+	}
+	return r.Native.PathPrepend
 }
 
 // Secrets configures the §15 resolution chain. Values never appear here; only

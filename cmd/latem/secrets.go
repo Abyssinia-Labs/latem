@@ -304,12 +304,18 @@ func trimPipedValue(b []byte) []byte {
 	return bytes.TrimSuffix(b, []byte("\r"))
 }
 
-// isTerminal reports whether f is a character device — a terminal, for the
-// purposes of deciding to prompt. A stat, not a terminal library, for the
-// reason useColor gives.
+// isTerminal reports whether f is a character device other than /dev/null —
+// a terminal, for the purposes of deciding to prompt. A stat, not a terminal
+// library, for the reason useColor gives.
 func isTerminal(f *os.File) bool {
 	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	// /dev/null is a character device too, and it is the stdin of a script
+	// or a service that has none: a question there would read nothing.
+	null, err := os.Stat(os.DevNull)
+	return err != nil || !os.SameFile(info, null)
 }
 
 // readHidden prompts on prompt and reads one line from the terminal f with

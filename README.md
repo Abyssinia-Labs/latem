@@ -196,11 +196,11 @@ download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
 
 ```console
 $ latem setup
-1/5 config
+1/6 config
   wrote /Users/me/.latem/config.toml
   runners: macos (native), linux (docker)
 
-2/5 repositories
+2/6 repositories
   a repository this machine should build (owner/name), or Enter to skip: me/myapp
 checking https://github.com/me/myapp.git the way the agent will fetch it …
 added repos.myapp to /Users/me/.latem/config.toml
@@ -215,7 +215,24 @@ added repos.myapp to /Users/me/.latem/config.toml
   added 2 entries
   another (owner/name), or Enter to go on:
 
-3/5 register
+3/6 toolchains
+
+  xcodegen — for myapp apple.yml apple
+    run `brew install xcodegen`? [y/N] y
+    …
+  JDK 17 (this machine has JDK [21]) — for myapp android.yml build
+    run `brew install openjdk@17`? [y/N] y
+    …
+    the macos runner's steps find it now: in config.toml, [runner.native]
+      path_prepend = ["/opt/homebrew/opt/openjdk@17/bin"]
+      JAVA_HOME = "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+
+  Xcode 27 (this machine has Xcode 26.0.1) — for myapp apple.yml apple
+    by hand: install Xcode 27 beside the one there; a step selects it with DEVELOPER_DIR
+
+  1 still missing; `latem doctor` lists it
+
+4/6 register
 to register this machine, open
 
   https://app.latem.dev/connect?code=WDJB-MJHT
@@ -228,13 +245,13 @@ waiting for approval — the code expires in 10m0s …
 verifying wss://gw.latem.dev/agent …
   connection verified
 
-4/5 service
+5/6 service
   …
-5/5 doctor
+6/6 doctor
   …
 ```
 
-`latem setup` does the five things a fresh machine needs, and skips each one
+`latem setup` does the six things a fresh machine needs, and skips each one
 that is already done, so it is safe to run again:
 
 1. **config** — writes `~/.latem/config.toml` when there is none: a native
@@ -247,16 +264,24 @@ that is already done, so it is safe to run again:
    workflows without a checkout: how many jobs this machine can run, why not
    the rest, and the `[label_aliases]` and `[actions]` entries that would let
    more run, which it adds when you say yes.
-3. **register** — approves the machine in the browser. With no token,
+3. **toolchains** — says what the jobs this machine takes need that it
+   lacks (with no repository, it asks what the machine will build) and, on a
+   terminal, offers each install a command can do, one at a time, `[y/N]`:
+   `brew install xcodegen`, `xcodebuild -downloadPlatform iOS`, a `docker
+   pull` of the runner's image. It never runs `sudo`, accepts a licence or
+   installs Xcode — those it says, for you to do. A keg-only install such as
+   `openjdk@17` is on no PATH the service has, so setup adds it to the
+   runner's `[runner.native] path_prepend` and `env` in config.toml.
+4. **register** — approves the machine in the browser. With no token,
    `latem register` asks the control plane for a code and opens the page to
    approve it on; you approve it signed in, seeing the machine's name, OS and
    labels, and the machine collects its own token. Over ssh the link is
    printed instead — open it anywhere you are signed in. `--url` points at a
    control plane other than the hosted one; `--no-register` keeps the
    machine local, which is a fully supported way to run it.
-4. **service** — installs the agent as a user service and starts it, or
+5. **service** — installs the agent as a user service and starts it, or
    restarts it when the config or the registration just changed.
-5. **doctor** — checks the result and names the fix for anything wrong.
+6. **doctor** — checks the result and names the fix for anything wrong.
 
 Then allow more repositories, see what of each this machine can run — read
 from GitHub, no checkout needed — and give them what their workflows read:
@@ -884,7 +909,7 @@ there is no subcommand to fetch them yet.
 ## Commands
 
 ```
-latem setup [--url U] [--repo owner/name] [--no-register]  config, repositories, registration, service and doctor, idempotently
+latem setup [--url U] [--repo owner/name] [--no-register]  config, repositories, toolchains, registration, service and doctor, idempotently
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]

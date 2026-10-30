@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -515,7 +516,28 @@ func validateTart(t *TartRunner, label string) []error {
 }
 
 func validateNative(n *NativeRunner, label string) []error {
-	return checkMinFree(&n.MinFreeGB, DefaultNativeMinFreeGB, label, "native")
+	problems := checkMinFree(&n.MinFreeGB, DefaultNativeMinFreeGB, label, "native")
+	for _, k := range sortedKeys(n.Env) {
+		switch upper := strings.ToUpper(k); {
+		case !envNamePattern.MatchString(k):
+			problems = append(problems, fmt.Errorf("%s: native.env.%s: a name must match %s", label, k, envNamePattern))
+		case strings.HasPrefix(upper, "GITHUB_"), strings.HasPrefix(upper, "RUNNER_"), strings.HasPrefix(upper, "LATEM_"):
+			problems = append(problems, fmt.Errorf("%s: native.env.%s: names starting GITHUB_, RUNNER_ or LATEM_ are set for each run", label, k))
+		case strings.ContainsRune(n.Env[k], 0):
+			problems = append(problems, fmt.Errorf("%s: native.env.%s: the value contains a NUL byte", label, k))
+		}
+	}
+	for i, dir := range n.PathPrepend {
+		switch {
+		case !filepath.IsAbs(dir):
+			problems = append(problems, fmt.Errorf("%s: native.path_prepend[%d] is %q; it must be an absolute directory", label, i, dir))
+		case strings.ContainsAny(dir, ":\x00"):
+			problems = append(problems, fmt.Errorf("%s: native.path_prepend[%d] is %q; a PATH entry cannot contain ':'", label, i, dir))
+		default:
+			n.PathPrepend[i] = filepath.Clean(dir)
+		}
+	}
+	return problems
 }
 
 // checkMinFree applies the §13 default and rejects a negative floor.

@@ -37,8 +37,8 @@ func TestGaps_ANativeMac(t *testing.T) {
 	if gs[0].Missing != "Xcode 27" || gs[0].Have != "Xcode 26.0.1" {
 		t.Errorf("xcode gap = %+v", gs[0])
 	}
-	if gs[1].Fix[0] != "xcodebuild -downloadPlatform iOS" || gs[2].Fix[0] != "brew install cocoapods" {
-		t.Errorf("fixes = %v, %v", gs[1].Fix, gs[2].Fix)
+	if gs[1].Fixes()[0] != "xcodebuild -downloadPlatform iOS" || gs[2].Fixes()[0] != "brew install cocoapods" {
+		t.Errorf("fixes = %v, %v", gs[1].Fixes(), gs[2].Fixes())
 	}
 
 	mac.Xcodes = append(mac.Xcodes, system.XcodeInstall{Version: system.Version{Major: 27, Text: "27.0"}})
@@ -68,10 +68,27 @@ func TestGaps_AndroidOnLinux(t *testing.T) {
 	if got := strings.Join(gapKeys(gs), " "); got != "jdk android-sdk android-emulator" {
 		t.Fatalf("gaps = %s", got)
 	}
-	if gs[0].Have != "JDK [21]" || gs[1].Fix[0] != `sdkmanager "platforms;android-36"` {
+	if gs[0].Have != "JDK [21]" || gs[1].Fixes()[0] != `sdkmanager "platforms;android-36"` {
 		t.Errorf("gaps = %+v", gs)
 	}
 	if gs := Gaps(r, box, ExecutorTart); len(gs) != 0 {
 		t.Errorf("a tart runner's toolchain is in its VM; gaps = %v", gapKeys(gs))
+	}
+}
+
+// A fix is an argv; what a person reads is the line they would type, quoted
+// where a shell would read a character.
+func TestCommandLine(t *testing.T) {
+	for _, c := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"brew", "install", "openjdk@17"}, "brew install openjdk@17"},
+		{[]string{"sdkmanager", "platforms;android-36"}, `sdkmanager "platforms;android-36"`},
+		{[]string{"echo", `a "b" $HOME`}, `echo "a \"b\" \$HOME"`},
+	} {
+		if got := CommandLine(c.argv); got != c.want {
+			t.Errorf("CommandLine(%q) = %s, want %s", c.argv, got, c.want)
+		}
 	}
 }

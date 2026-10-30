@@ -697,6 +697,37 @@ func waitForExit(pid int, timeout time.Duration) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
+// A runner's [runner.native] block (A60): its env lies beneath the job's,
+// and its path_prepend in front of the agent's PATH but behind what a step
+// added through $GITHUB_PATH. GitHub's bash reads no profile, so the order
+// is checked exactly.
+func TestExec_RunnerEnvAndPath(t *testing.T) {
+	env, _ := live(t, executor.Spec{Env: map[string]string{"SHARED": "job"}}, Options{
+		Env:         map[string]string{"JAVA_HOME": "/opt/jdk-17", "SHARED": "runner"},
+		PathPrepend: []string{"/opt/latem-runner-a", "/opt/latem-runner-b"},
+	})
+
+	run(t, env, executor.Step{Shell: executor.ShellGitHubBash, Run: `echo "/opt/latem-step" >> "$GITHUB_PATH"`})
+	_, out, _ := run(t, env, executor.Step{
+		Shell: executor.ShellGitHubBash,
+		Run:   `printf '%s|%s|%s\n' "$JAVA_HOME" "$SHARED" "$PATH"`,
+	})
+	want := "/opt/jdk-17|job|/opt/latem-step:/opt/latem-runner-a:/opt/latem-runner-b:" + os.Getenv("PATH") + "\n"
+	if out != want {
+		t.Errorf("got  %q\nwant %q", out, want)
+	}
+
+	// A step that sets PATH replaces the runner's, as it replaces the agent's.
+	_, out, _ = run(t, env, executor.Step{
+		Shell: executor.ShellGitHubBash,
+		Env:   map[string]string{"PATH": "/usr/bin:/bin"},
+		Run:   `echo "$PATH"`,
+	})
+	if out != "/opt/latem-step:/usr/bin:/bin\n" {
+		t.Errorf("a step's own PATH: %q", out)
+	}
+}
+
 // The four GitHub files, through real shells (A42 phase 2, A43). $GITHUB_ENV
 // is $LATEM_ENV under its other name and now speaks the heredoc; $GITHUB_PATH
 // goes in front of the next step's PATH; $GITHUB_OUTPUT comes back on the

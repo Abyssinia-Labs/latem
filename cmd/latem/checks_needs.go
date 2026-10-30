@@ -12,6 +12,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
 	"github.com/Abyssinia-Labs/latem/internal/system"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 )
 
 // What this machine's repositories need of it (A59).
@@ -53,9 +54,23 @@ func (d *doctor) checkNeeds(ctx context.Context) []check {
 	}
 	probe := d.toolchains
 	if probe == nil {
-		probe = func(ctx context.Context) system.Toolchains { return d.sys.Toolchains(ctx, servicePath(d.sys)) }
+		probe = d.sys.Toolchains
 	}
-	tc := probe(ctx)
+	// Probed once per PATH a native runner's steps get (A60), when a job
+	// needs it: a docker or tart runner's toolchain is not the host's.
+	probed := map[string]system.Toolchains{}
+	tcFor := func(r *config.Runner) system.Toolchains {
+		if r.Executor != config.ExecutorNative {
+			return system.Toolchains{Tools: map[string]bool{}}
+		}
+		p := ghcmd.PrependPath(r.NativePathPrepend(), servicePath(d.sys))
+		tc, ok := probed[p]
+		if !ok {
+			tc = probe(ctx, p)
+			probed[p] = tc
+		}
+		return tc
+	}
 	empty, err := os.MkdirTemp("", "latem-doctor-workspace-")
 	if err != nil {
 		return []check{fail(id, title, err.Error())}
@@ -81,14 +96,14 @@ func (d *doctor) checkNeeds(ctx context.Context) []check {
 			out = append(out, warn(cid, ctitle, "its workflows could not be read: "+err.Error()))
 			continue
 		}
-		out = append(out, d.needsCheck(cid, ctitle, key, rep, tc))
+		out = append(out, d.needsCheck(cid, ctitle, key, rep, tcFor))
 	}
 	return out
 }
 
 // needsCheck is one repository's: what its jobs on this machine need that
 // the machine lacks.
-func (d *doctor) needsCheck(id, title, key string, rep checkReport, tc system.Toolchains) check {
+func (d *doctor) needsCheck(id, title, key string, rep checkReport, tcFor func(*config.Runner) system.Toolchains) check {
 	var lines, fixes, manual []string
 	here, elsewhere := 0, 0
 	mine := checkReport{} // this machine's jobs, for the count of kinds
@@ -113,7 +128,7 @@ func (d *doctor) needsCheck(id, title, key string, rep checkReport, tc system.To
 					}
 				}
 			}
-			for _, g := range needs.Gaps(*j.needs, tc, string(runner.Executor)) {
+			for _, g := range needs.Gaps(*j.needs, tcFor(runner), string(runner.Executor)) {
 				line := fmt.Sprintf("%s needs %s", ref, g.Missing)
 				if g.Have != "" {
 					line += "; this machine has " + g.Have
@@ -121,7 +136,7 @@ func (d *doctor) needsCheck(id, title, key string, rep checkReport, tc system.To
 				if !slices.Contains(lines, line) {
 					lines = append(lines, line)
 				}
-				for _, f := range g.Fix {
+				for _, f := range g.Fixes() {
 					if !slices.Contains(fixes, f) {
 						fixes = append(fixes, f)
 					}

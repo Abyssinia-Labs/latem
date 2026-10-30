@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"time"
 
 	dockerclient "github.com/docker/docker/client"
@@ -24,6 +25,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
+	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 )
 
 // DefaultExecutor builds the executor a runner's config names (§13).
@@ -61,6 +63,8 @@ func DefaultExecutor(r *config.Runner, paths config.Paths) (executor.Executor, e
 			// discovering that at the codesign step produces a failure whose
 			// log mentions nothing useful (§23).
 			RequireGUISession: hasLabel(r.Labels, "ios"),
+			Env:               r.NativeEnv(),
+			PathPrepend:       r.NativePathPrepend(),
 		})
 
 	case config.ExecutorTart:
@@ -70,6 +74,21 @@ func DefaultExecutor(r *config.Runner, paths config.Paths) (executor.Executor, e
 	default:
 		return nil, fmt.Errorf("unknown executor %q", r.Executor)
 	}
+}
+
+// stepPath is the PATH a native step starts from: the agent's own, behind
+// every native runner's path_prepend (A60). The probe is one for the machine,
+// so where two native runners prepend differently it finds a tool on either.
+func stepPath(cfg *config.Config, agentPath string) string {
+	var prepend []string
+	for _, r := range cfg.Runners {
+		for _, dir := range r.NativePathPrepend() {
+			if !slices.Contains(prepend, dir) {
+				prepend = append(prepend, dir)
+			}
+		}
+	}
+	return ghcmd.PrependPath(prepend, agentPath)
 }
 
 func hasLabel(labels []string, want string) bool {
@@ -288,8 +307,9 @@ func (a *Agent) buildOrchestrator() error {
 		// In the background, and once: it reads every Xcode's Info.plist
 		// and asks a JDK list, a second or two that startup need not wait
 		// for. A run before it lands writes no note (A59).
+		path := stepPath(a.cfg, os.Getenv("PATH"))
 		go func() {
-			tc := probe(context.Background())
+			tc := probe(context.Background(), path)
 			a.toolchains.Store(&tc)
 		}()
 	}

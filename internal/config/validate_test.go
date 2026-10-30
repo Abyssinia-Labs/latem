@@ -230,6 +230,63 @@ concurrency = 2
 			want: "a native runner must be 1",
 		},
 		{
+			name: "native env naming a run's own variable",
+			toml: `
+schema_version = 1
+
+[repos.app]
+url = "git@github.com:me/app.git"
+allowed_refs = ["main"]
+
+[[runner]]
+name = "host"
+executor = "native"
+labels = ["macos"]
+
+  [runner.native]
+  env = { GITHUB_WORKSPACE = "/tmp" }
+`,
+			want: "are set for each run",
+		},
+		{
+			name: "native path_prepend relative",
+			toml: `
+schema_version = 1
+
+[repos.app]
+url = "git@github.com:me/app.git"
+allowed_refs = ["main"]
+
+[[runner]]
+name = "host"
+executor = "native"
+labels = ["macos"]
+
+  [runner.native]
+  path_prepend = ["opt/openjdk@17/bin"]
+`,
+			want: "must be an absolute directory",
+		},
+		{
+			name: "native path_prepend holding a list",
+			toml: `
+schema_version = 1
+
+[repos.app]
+url = "git@github.com:me/app.git"
+allowed_refs = ["main"]
+
+[[runner]]
+name = "host"
+executor = "native"
+labels = ["macos"]
+
+  [runner.native]
+  path_prepend = ["/opt/a/bin:/opt/b/bin"]
+`,
+			want: "cannot contain ':'",
+		},
+		{
 			name: "negative concurrency",
 			toml: `
 schema_version = 1

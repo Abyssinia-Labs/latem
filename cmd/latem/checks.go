@@ -113,7 +113,7 @@ type doctor struct {
 	kegRubies []string
 	// toolchains probes what the machine has for builds (A59); nil probes
 	// the real one with the service's PATH.
-	toolchains func(context.Context) system.Toolchains
+	toolchains func(ctx context.Context, stepPath string) system.Toolchains
 	// readRepo reads a configured repository; doctor reads the agent's
 	// mirror and nothing else.
 	readRepo func(context.Context, *config.Config, string, treeSource) (*repoFiles, error)

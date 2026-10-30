@@ -76,6 +76,8 @@ type runEnv struct {
 	toolCache   string // $RUNNER_TOOL_CACHE, the runner's, outliving the run
 	grace       time.Duration
 	drain       time.Duration
+	// runner is the runner's env with its PATH (A60), or nil.
+	runner map[string]string
 
 	mu      sync.Mutex
 	carried map[string]string // accumulated $LATEM_ENV assignments
@@ -218,8 +220,9 @@ func (e *runEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io
 	}
 	// [baseEnv] first, so the run's own variables and the step's both override
 	// it. Amendment A33: the locale is a default the agent supplies, not an
-	// assertion it enforces.
-	env := mergeEnv(baseEnv(), e.spec.Env, e.carried, step.Env)
+	// assertion it enforces. The runner's env is the same kind of default,
+	// one the operator wrote (A60).
+	env := mergeEnv(baseEnv(), e.runner, e.spec.Env, e.carried, step.Env)
 	// Both set after the merge, so that a job which wrote either name into
 	// $LATEM_ENV cannot point the next step's bookkeeping somewhere else.
 	env[EnvFileVar] = e.envFile
@@ -483,6 +486,27 @@ func mergeEnv(layers ...map[string]string) map[string]string {
 			}
 			out[k] = v
 		}
+	}
+	return out
+}
+
+// runnerLayer is a native runner's env with its path_prepend applied, in
+// front of the agent's own PATH or the PATH the runner's env sets (A60). A job
+// that sets PATH replaces all of it, as it would replace the agent's.
+func runnerLayer(env map[string]string, prepend []string) map[string]string {
+	if len(env) == 0 && len(prepend) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	if len(prepend) > 0 {
+		current, set := out["PATH"]
+		if !set {
+			current = os.Getenv("PATH")
+		}
+		out["PATH"] = ghcmd.PrependPath(prepend, current)
 	}
 	return out
 }
