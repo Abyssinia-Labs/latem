@@ -320,6 +320,9 @@ func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 		return
 	}
 
+	if k := kindsSummary(rep); k != "" {
+		printf(out, "\n  %s builds: %s\n", key, k)
+	}
 	printf(out, "\n  %d of %d jobs in %s can run on this machine\n", rep.jobs()-rep.failed(), rep.jobs(), key)
 	shown := 0
 	for _, wr := range rep.workflows {

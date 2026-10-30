@@ -1291,7 +1291,7 @@ latem service reload                 Apply config.toml to the running agent (SIG
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
-latem workflows check [path] [--repo R] [--offline] [--json] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout (A54, A57)
+latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem update [--check]               Install the latest release; the agent moves onto it when idle (A56)
@@ -2710,3 +2710,48 @@ answer differently: a job's runner — and with it `runner.os` — does not chan
 a condition with no status function is `success() && it`, which a false `it` makes false. The step
 is kept as a no-op with its `if:`, so it is reported skipped, its `steps.<id>` reads as a skipped
 step's does, and a log reads as GitHub's would.
+
+### Amendment from working out what a machine will build
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A59 | §5 INV-5, §19, A57 | **What a job needs of a machine — Xcode and its version, an iOS SDK or simulator, a macOS app's signing and notarization, a JDK and an Android SDK, a Docker daemon, the language runtimes — is read from the job as written, and `latem workflows check` says it for every job, with the evidence on `-v`** | Onboarding never learned what a machine would build. A config is written by operating system, doctor checks every mobile toolchain on every machine as a warning because it "cannot know what jobs a repo declares", and the answer was in the repositories all along. Since A57 a command can read a repository's files without a checkout |
+
+**What is read, and what is not.** A workflow job's leg — its steps, with `uses:` and `with:` as
+written, the labels the plan resolved for it and its matrix values — or a `.latem/jobs.yaml` job;
+the scripts its steps run, followed to a depth of two, 32 files and 64 KiB each; `package.json`
+scripts a step runs through `bun run`, `npm run` or `pnpm`; and a few repository facts:
+`.xcode-version`, the Android SDK and JDK an `app/build.gradle(.kts)` names, and whether a
+Worker's wrangler config declares `containers`. Never a compiled job: compiling refuses
+`services:`, `container:` and reusable workflows — the jobs most worth explaining — and rewrites
+`run:` text and `with:`. Nothing is run and nothing is fetched.
+
+**Commands, not words.** A hand-written reader finds the words in command position: comments,
+heredoc bodies and quoted strings are not commands, `$(…)` and backticks are commands of their
+own, and `sudo`, `env`, `bundle exec`, `bunx` and their like are seen past. That is what keeps
+"ios" in an echo, "codesign" in a comment and `eas build` — which builds on Expo's machines —
+from reading as needs; `eas build --local` does build here. A step whose `if:` is false on the
+leg's platform, decided as A58 decides it, is not read.
+
+**Evidence and strength.** Every requirement carries where it was read from and how directly:
+**declared** (a version pinned: `DEVELOPER_DIR`, an `xcode-select -s` path, a `setup-*` action's
+version input, `.xcode-version`, `compileSdk`), **invoked** (a step runs the command), or
+**inferred** (a convention: `find-xcode.sh 27`). A version's strength is kept apart from the need's:
+an `xcodebuild` invokes Xcode, and `find-xcode.sh 27` beside it only infers which. An action
+that installs a tool — `setup-node`, `setup-java`, `setup-bun` — provides it, and a requirement
+it provides asks nothing of the machine but what the action itself needs. What cannot be read —
+a remote action's contents, a script not in the repository, an `eval`, a reusable workflow — is
+reported as not read, never guessed at.
+
+**Kinds.** Each job gets one, from its platform and the most specific thing it needs: iOS, a macOS
+app, Xcode, Android, Linux with a Docker daemon, Linux, macOS, or not known. The platform is
+read from labels that name one, vendors' included (`blacksmith-…-ubuntu-2404`): looser than A58's,
+because this explains and does not decide. `workflows check` prints each job's kind and
+requirements, counts the kinds at the end — "kinds of build: 7 Linux, 2 iOS — Xcode 27" — and
+`latem setup` prints the same count for each repository it adds. A checkout with only
+`.latem/jobs.yaml` is checked too.
+
+**What it is not.** It decides nothing: a job's needs never route it, never refuse it, and never
+reach admission (INV-5 is unchanged). A control plane may be told a job's kind and requirement
+keys and versions — a closed vocabulary, never steps or evidence — and that is a later protocol
+change.

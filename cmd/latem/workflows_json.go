@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"io"
+
+	"github.com/Abyssinia-Labs/latem/internal/needs"
 )
 
 // The report as JSON, for a script (`latem workflows check --json`). Field
@@ -38,6 +40,7 @@ type jobJSON struct {
 	Level    string        `json:"level"`
 	Runner   string        `json:"runner,omitempty"`
 	Findings []findingJSON `json:"findings,omitempty"`
+	Needs    *needs.Report `json:"needs,omitempty"`
 }
 
 type findingJSON struct {
@@ -93,7 +96,7 @@ func printCheckJSON(w io.Writer, t checkTarget, rep checkReport, fixed []string)
 		for _, j := range wr.jobs {
 			wj.Jobs = append(wj.Jobs, jobJSON{
 				Key: j.key, Name: j.name, Level: levelName(j.level()), Runner: j.runner,
-				Findings: findingsJSON(j.findings),
+				Findings: findingsJSON(j.findings), Needs: j.needs,
 			})
 		}
 		out.Workflows = append(out.Workflows, wj)

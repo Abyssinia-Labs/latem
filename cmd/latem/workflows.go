@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/needs"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
@@ -45,6 +46,7 @@ type workflowsCheckFlags struct {
 	fix          bool
 	offline      bool // with --repo and no path: the agent's mirror only
 	json         bool
+	verbose      bool // where each job's needs were read from
 }
 
 func newWorkflowsCheckCommand() *cobra.Command {
@@ -72,6 +74,12 @@ For every job it reports whether a runner here takes it, and if not why:
 
 A matrix job is checked leg by leg, as the plan expands it, and each leg's
 runs-on — which may read the matrix — is matched on its own (A55).
+
+Each job's needs are said too (A59): iOS, a macOS app, Android, Linux with a
+Docker daemon, and what of Xcode, the JDK, the Android SDK and the rest its
+steps and the scripts they run invoke, with the versions they name. --verbose
+says where each was read from. What could not be read — a remote action's
+contents, a script not in the repository — is counted, not guessed.
 
 A job's if: is not evaluated: the question is whether this machine could run
 the job, not whether this event would.
@@ -116,6 +124,7 @@ Exit codes:
 	cmd.Flags().StringVar(&f.repo, "repo", "", "the [repos.*] entry to check; with no path, read without a checkout (A57)")
 	cmd.Flags().BoolVar(&f.offline, "offline", false, "with --repo and no path: read the agent's mirror, not GitHub")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the report as JSON")
+	cmd.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "say where each job's needs were read from")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "the branch pushes and pull requests are checked against (default: the repo's)")
 	cmd.Flags().BoolVar(&f.fix, "fix", false, "add the suggested [label_aliases] and [actions] entries to config.toml")
 	return cmd
@@ -151,7 +160,9 @@ func runWorkflowsCheck(cmd *cobra.Command, dir string, f workflowsCheckFlags) er
 		return err
 	}
 	if info, err := os.Stat(filepath.Join(abs, workflow.Dir)); err != nil || !info.IsDir() {
-		return fmt.Errorf("%s has no %s directory; give the path of a checkout", abs, workflow.Dir)
+		if _, err := os.Stat(filepath.Join(abs, registry.Path)); err != nil {
+			return fmt.Errorf("%s has no %s directory and no %s; give the path of a checkout", abs, workflow.Dir, registry.Path)
+		}
 	}
 	target, err := resolveCheckTarget(ctx, cfg, abs, f)
 	if err != nil {
@@ -229,14 +240,14 @@ func checkAndReport(cmd *cobra.Command, cfg *config.Config, target checkTarget, 
 			return err
 		}
 	case len(fixed) > 0:
-		printCheckReport(out, target, rep)
+		printCheckReport(out, target, rep, f.verbose)
 		printf(out, "\nfixed in %s:\n", cfg.Paths.File)
 		for _, l := range fixed {
 			printf(out, "  %s\n", l)
 		}
 		printf(out, "\n")
 	default:
-		printCheckReport(out, target, rep)
+		printCheckReport(out, target, rep, f.verbose)
 		if rep.hasFixes() {
 			printf(out, "\n`latem workflows check --fix` adds the [label_aliases] and [actions] entries above.\n")
 		}
@@ -317,6 +328,9 @@ type finding struct {
 }
 
 type jobReport struct {
+	// needs is what the job needs of a machine, read from it as written
+	// (A59); nil when it could not be read at all.
+	needs     *needs.Report
 	key, name string
 	runner    string // the runner that takes it, when one does
 	findings  []finding
@@ -399,8 +413,8 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 	}
 
 	files, err := workflowFilesIn(fsys)
-	if errors.Is(err, fs.ErrNotExist) && t.fsys != nil {
-		// A repository read without a checkout may have only jobs.yaml.
+	if errors.Is(err, fs.ErrNotExist) {
+		// A repository may have only .latem/jobs.yaml.
 		err = nil
 	}
 	if err != nil {
@@ -494,7 +508,7 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 		rep.workflows = append(rep.workflows, wr)
 	}
 	if data, err := fs.ReadFile(fsys, registry.Path); err == nil {
-		rep.workflows = append(rep.workflows, checkRegistry(cfg, t, inv, data, &rep))
+		rep.workflows = append(rep.workflows, checkRegistry(cfg, t, inv, fsys, data))
 	}
 	return rep, nil
 }
@@ -502,7 +516,7 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 // checkRegistry checks .latem/jobs.yaml's jobs: whether a runner here takes
 // each, and the secrets it declares. Its labels are matched as written —
 // [label_aliases] maps a workflow's runs-on, not these.
-func checkRegistry(cfg *config.Config, t checkTarget, inv inventory, data []byte, rep *checkReport) workflowReport {
+func checkRegistry(cfg *config.Config, t checkTarget, inv inventory, fsys fs.FS, data []byte) workflowReport {
 	wr := workflowReport{file: registry.Path, name: registry.Path, events: []string{"any ref this machine allows"}}
 	reg, err := registry.Parse(data)
 	if err != nil {
@@ -511,7 +525,8 @@ func checkRegistry(cfg *config.Config, t checkTarget, inv inventory, data []byte
 	}
 	for _, key := range slices.Sorted(maps.Keys(reg.Jobs)) {
 		job := reg.Jobs[key]
-		jr := jobReport{key: key, name: key}
+		r := needs.RegistryJob(fsys, job)
+		jr := jobReport{key: key, name: key, needs: &r}
 		fail := func(text string, fixes ...string) {
 			jr.findings = append(jr.findings, finding{level: levelFail, text: text, fixes: fixes})
 		}
@@ -724,14 +739,21 @@ func checkJob(
 	fail := func(text string, fixes ...string) {
 		jr.findings = append(jr.findings, finding{level: levelFail, text: text, fixes: fixes})
 	}
+
+	// A fresh parse, so blanking this job's if: touches no other job's
+	// compile. What the job needs is read from it before anything refuses
+	// it: a job latem cannot run is exactly the one worth explaining.
+	w, err := workflow.Parse(pw.data, pw.file)
+	if err == nil && w.Jobs[pj.Key] != nil {
+		leg := needs.Leg{Labels: pj.Labels}
+		_ = json.Unmarshal(pj.Matrix, &leg.Matrix)
+		r := needs.Job(fsys, w, pj.Key, leg)
+		jr.needs = &r
+	}
 	if pj.Error != "" {
 		fail("refused: " + pj.Error)
 		return jr
 	}
-
-	// A fresh parse, so blanking this job's if: touches no other job's
-	// compile.
-	w, err := workflow.Parse(pw.data, pw.file)
 	if err != nil {
 		fail("refused: " + err.Error())
 		return jr
@@ -1113,7 +1135,7 @@ func applyWorkflowFixes(paths config.Paths, cfg *config.Config, rep checkReport)
 	return lines, err
 }
 
-func printCheckReport(w io.Writer, t checkTarget, rep checkReport) {
+func printCheckReport(w io.Writer, t checkTarget, rep checkReport, verbose bool) {
 	st := newStyler(w)
 	what := t.dir
 	if t.fsys != nil {
@@ -1168,10 +1190,19 @@ func printCheckReport(w io.Writer, t checkTarget, rep checkReport) {
 				detail = st.dim("  runs on " + j.runner)
 			}
 			printf(w, "  %s %s%s\n", st.wrap(lv.color(), lv.marker()), label, detail)
+			if j.needs != nil {
+				printf(w, "         %s\n", st.dim("needs: "+needsLine(j.needs)))
+				if verbose {
+					printNeedsEvidence(w, st, "           ", j.needs)
+				}
+			}
 			for _, f := range j.findings {
 				printFinding(w, st, "       ", f)
 			}
 		}
+	}
+	if k := kindsSummary(rep); k != "" {
+		printf(w, "\nkinds of build: %s", k)
 	}
 	printf(w, "\n%d of %d jobs can run on this machine", rep.jobs()-rep.failed(), rep.jobs())
 	if n := rep.broken(); n > 0 {
