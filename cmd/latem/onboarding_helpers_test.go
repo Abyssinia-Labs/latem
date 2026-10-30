@@ -51,6 +51,10 @@ func init() {
 	originURL = func(context.Context, string) string {
 		panic("a test reached a real git remote get-url; use fakeOrigin")
 	}
+	realReadRepo = readRepo
+	readRepo = func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
+		panic("a test reached the real readRepo, which can clone from GitHub; use fakeRepoFiles")
+	}
 	// Nothing listens on port 1: a register that forgot --url fails at once,
 	// here, instead of introducing itself to the production control plane.
 	registerURL = "ws://127.0.0.1:1/agent"
@@ -59,6 +63,10 @@ func init() {
 		panic("a test reached setup's real service manager, Docker or doctor; use fakeSetup")
 	}
 }
+
+// realReadRepo is readRepo as it ships, for the one test that reads a mirror
+// that is not there.
+var realReadRepo func(context.Context, *config.Config, string, treeSource) (*repoFiles, error)
 
 // configDirWith is a 0700 config directory holding body as config.toml, or
 // nothing when body is empty. It is under /tmp for the socket-length reason
