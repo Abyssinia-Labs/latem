@@ -41,6 +41,7 @@ func TestRecommend_DockerTakesTheSmallerOfCPUsAndMemory(t *testing.T) {
 		{4, 64, 2},
 		{1, 2, 1},
 		{12, 7.7, 1},
+		{512, 2048, MaxSlots},
 	}
 	for _, c := range cases {
 		got := Recommend(Machine{CPUs: c.cpus, MemoryGB: c.mem}, []*config.Runner{runner("l", config.ExecutorDocker, 1)})

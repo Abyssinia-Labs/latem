@@ -31,7 +31,9 @@ func dockerShare(ctx context.Context) *capacity.Docker {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	info, err := cli.Info(ctx)
-	if err != nil || info.NCPU == 0 {
+	// A daemon that reports no CPUs or no memory has said nothing usable, and
+	// the control plane refuses a zero in either (A63).
+	if err != nil || info.NCPU <= 0 || info.MemTotal <= 0 {
 		return nil
 	}
 	return &capacity.Docker{CPUs: info.NCPU, MemoryGB: capacity.BytesToGB(uint64(max(info.MemTotal, 0)))}

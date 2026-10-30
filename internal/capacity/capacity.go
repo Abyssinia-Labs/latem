@@ -87,9 +87,15 @@ func Recommend(m Machine, runners []*config.Runner) []Advice {
 	return out
 }
 
-// Slots is how many CI-sized jobs fit in cpus and memoryGB, never fewer than one.
+// MaxSlots caps a recommendation: the control plane takes 1 to 64 (A63),
+// and a runner taking more than 64 jobs at once is a machine latem has not
+// been tried on.
+const MaxSlots = 64
+
+// Slots is how many CI-sized jobs fit in cpus and memoryGB: at least one, at
+// most MaxSlots.
 func Slots(cpus int, memoryGB float64) int {
-	n := min(cpus/JobCPUs, int(math.Floor(memoryGB/JobMemoryGB)))
+	n := min(cpus/JobCPUs, int(math.Floor(memoryGB/JobMemoryGB)), MaxSlots)
 	return max(n, 1)
 }
 
