@@ -136,7 +136,7 @@ type initParams struct {
 	// Docker adds a linux docker runner on macOS, beside the native one.
 	// Linux always has one; it is the only executor there.
 	Docker bool
-	// Image is the docker runner's default_image; empty is the placeholder.
+	// Image is the docker runner's default_image; empty is latem-ubuntu.
 	Image string
 }
 

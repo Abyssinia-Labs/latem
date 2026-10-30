@@ -132,9 +132,12 @@ concurrency = 1
 	return b.String()
 }
 
-// defaultDockerImage is the image a docker runner gets when nobody names one.
-// A placeholder that says so: the image is the operator's (§13.1).
-const defaultDockerImage = "ghcr.io/me/ci-base:latest"
+// defaultDockerImage is the image a docker runner gets when nobody names one:
+// latem-ubuntu (images/ubuntu), which stands in for GitHub's ubuntu-latest,
+// named by digest so a runner's base image moves only when this line does.
+// Published by .github/workflows/images.yml; its run summary names the next
+// digest to put here.
+const defaultDockerImage = "ghcr.io/abyssinia-labs/latem-ubuntu:24.04@sha256:ea43a6e728814f5df5a65eb7fbd94e79a45cc48963d0c6040cccb2221cfc5bf1"
 
 // writeDockerRunner is the linux docker runner: the only runner on Linux, and
 // on a Mac the second one, beside native, when a Docker daemon answers.
@@ -149,10 +152,11 @@ func writeDockerRunner(b *strings.Builder, p initParams, where string) {
 	}
 	fmt.Fprintf(b, `# --- runner: this machine's execution slot --------------------------------
 #
-# %s The image is yours, but three things
-# are required of it and "latem doctor" checks them by running it once: a
-# non-root user "runner" with uid 1000 and a writable $HOME, plus bash, git and
-# ca-certificates.
+# %s The image is latem-ubuntu, which
+# stands in for GitHub's ubuntu-latest (images/ubuntu/README.md); latem pulls
+# it on first use. Any image will do that meets three requirements, which
+# "latem doctor" checks by running it once: a non-root user "runner" with uid
+# 1000 and a writable $HOME, plus bash, git and ca-certificates.
 
 [[runner]]
 name        = "linux"
