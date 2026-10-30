@@ -73,6 +73,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
 	"github.com/Abyssinia-Labs/latem/internal/broker/remote"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
@@ -190,6 +191,11 @@ type Options struct {
 	// stepPath is the PATH a native step starts from (A60).
 	ProbeToolchains func(ctx context.Context, stepPath string) system.Toolchains
 
+	// MeasureMachine is the machine's size, for the capacity a heartbeat
+	// carries (A63), measured beside the toolchains and as often. Nil sends
+	// none.
+	MeasureMachine func(ctx context.Context) capacity.Machine
+
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration
 	PreflightInterval   time.Duration
@@ -297,6 +303,8 @@ type Agent struct {
 	toolchains      atomic.Pointer[system.Toolchains]
 	toolchainsEvery time.Duration
 	reprobe         chan struct{}
+	// machine is what MeasureMachine last found (A63).
+	machine atomic.Pointer[capacity.Machine]
 
 	mu sync.Mutex
 	// activeRepos maps a live run id to its repo key, so the cache pruner can
@@ -678,6 +686,12 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	// The remote broker sends it only to a control plane that says 2.2.
 	if tc := a.toolchains.Load(); tc != nil {
 		h.Toolchains = toolchainsAdvert(*tc)
+	}
+	// A63: its size and each runner's recommended concurrency, worked out
+	// against the config as it is now. Sent only to a control plane that
+	// says 2.3.
+	if m := a.machine.Load(); m != nil && m.CPUs > 0 && m.MemoryGB > 0 {
+		h.Capacity = capacityAdvert(*m, a.current().Runners)
 	}
 	// A52: the repositories this machine builds, by key and by owner/name,
 	// which is how an event on GitHub finds the machines that can plan it.

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/broker/remote"
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
@@ -110,6 +111,8 @@ type setupDeps struct {
 	register      func(cmd *cobra.Command, f registerFlags) error
 	doctor        func(cmd *cobra.Command) error
 	toolchains    toolchainDeps
+	// measure is the machine, for the docker runner's concurrency (A63).
+	measure func(ctx context.Context) capacity.Machine
 }
 
 type setupService interface {
@@ -125,6 +128,9 @@ var newSetupDeps = func() setupDeps {
 		register:      runRegister,
 		doctor:        runDoctorFor,
 		toolchains:    realToolchainDeps(),
+		measure: func(ctx context.Context) capacity.Machine {
+			return measureMachine(ctx, system.New(system.Options{}))
+		},
 	}
 }
 
@@ -146,7 +152,18 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 		if runtime.GOOS == "darwin" && !f.noDocker {
 			docker = deps.dockerAnswers(ctx)
 		}
-		if err := writeSetupConfig(paths, f, docker); err != nil {
+		slots, sized := 0, ""
+		if docker {
+			// The docker runner takes as many jobs at once as Docker has room
+			// for (A63), not a fixed two: Docker Desktop's VM on an 8 GB Mac
+			// holds one.
+			if m := deps.measure(ctx); m.CPUs > 0 && m.MemoryGB > 0 {
+				a := capacity.Recommend(m, []*config.Runner{{Name: "linux", Executor: config.ExecutorDocker}})[0]
+				slots = a.Recommended
+				sized = fmt.Sprintf("  linux runner: concurrency %d — %s\n", slots, a.Why)
+			}
+		}
+		if err := writeSetupConfig(paths, f, docker, slots); err != nil {
 			return err
 		}
 		changed = true
@@ -162,6 +179,7 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 		} else {
 			printf(out, "  runners: linux (docker)\n")
 		}
+		printf(out, "%s", sized)
 	} else if err != nil {
 		return err
 	} else {
@@ -470,7 +488,7 @@ func registered(cfg *config.Config) bool {
 
 // writeSetupConfig is `latem init` with no repositories, which setup's config
 // step is: the same template, the same modes, the same proof that it loads.
-func writeSetupConfig(paths config.Paths, f setupFlags, docker bool) error {
+func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerSlots int) error {
 	name := f.name
 	if name == "" {
 		if name = defaultMachineName(); name == "" {
@@ -479,7 +497,7 @@ func writeSetupConfig(paths config.Paths, f setupFlags, docker bool) error {
 	}
 	body := renderInitConfig(initParams{
 		Machine: name, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Refs: []string{"main"},
-		Docker: docker, Image: f.image,
+		Docker: docker, Image: f.image, DockerConcurrency: dockerSlots,
 	})
 	if _, err := config.Parse([]byte(body), config.Options{Dir: paths.Dir}); err != nil {
 		return fmt.Errorf("the config setup would write does not load — this is a bug in `latem setup`:\n%w", err)

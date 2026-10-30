@@ -20,6 +20,34 @@ type MachineHealth struct {
 	// Toolchains is what the machine has for builds (A61, 2.2), sent only to
 	// a control plane that says 2.2. It explains; nothing routes on it.
 	Toolchains *Toolchains `json:"toolchains,omitempty"`
+	// Capacity is what the machine has to run jobs on and what each runner's
+	// concurrency should be (A63, 2.3), sent only to a control plane that
+	// says 2.3. Like Toolchains it explains: the config decides.
+	Capacity *Capacity `json:"capacity,omitempty"`
+}
+
+// Capacity is a machine's size and the concurrency latem recommends for each
+// of its runners (A63).
+type Capacity struct {
+	CPUs     int     `json:"cpus"`
+	MemoryGB float64 `json:"memory_gb"`
+	// Docker is what the Docker daemon is given — Docker Desktop's VM on a
+	// Mac, the host itself on Linux — when a daemon answered.
+	Docker  *DockerCapacity  `json:"docker,omitempty"`
+	Runners []RunnerCapacity `json:"runners,omitempty"`
+}
+
+// DockerCapacity is what a Docker daemon says it can use.
+type DockerCapacity struct {
+	CPUs     int     `json:"cpus"`
+	MemoryGB float64 `json:"memory_gb"`
+}
+
+// RunnerCapacity is one runner's recommended concurrency, and why.
+type RunnerCapacity struct {
+	Name        string `json:"name"`
+	Recommended int    `json:"recommended"`
+	Why         string `json:"why"`
 }
 
 // Toolchains is what a machine has for builds, as a step on its native

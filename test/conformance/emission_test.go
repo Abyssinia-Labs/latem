@@ -109,6 +109,14 @@ func TestConformance_AgentEmissions(t *testing.T) {
 			AndroidSDK: true, AndroidPlatforms: []int{35, 36}, AndroidEmulator: true,
 			Tools: []string{"bun", "docker", "xcodegen"},
 		},
+		// A63: the machine's size and each runner's recommended concurrency.
+		Capacity: &protocol.Capacity{
+			CPUs: 8, MemoryGB: 16, Docker: &protocol.DockerCapacity{CPUs: 6, MemoryGB: 7.7},
+			Runners: []protocol.RunnerCapacity{
+				{Name: "ios", Recommended: 1, Why: "this Mac has 16 GB: a macOS VM takes about 8 GB and the host keeps 8, and Apple's licence allows 2 VMs"},
+				{Name: "linux", Recommended: 1, Why: "Docker has 6 CPUs and 7.7 GB, and a job takes about 2 CPUs and 4 GB"},
+			},
+		},
 	}); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}

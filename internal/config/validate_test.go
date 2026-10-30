@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -999,4 +1000,17 @@ auto_update = true
 			t.Error("auto_update defaulted to true")
 		}
 	})
+}
+
+// A machine has one native runner: a second block would run two builds on one
+// host at once, which concurrency = 1 exists to stop (A63).
+func TestValidate_OneNativeRunnerAMachine(t *testing.T) {
+	cfg := &Config{Runners: []*Runner{
+		{Name: "macos", Executor: ExecutorNative, Labels: []string{"macos"}, Concurrency: 1},
+		{Name: "android", Executor: ExecutorNative, Labels: []string{"android"}, Concurrency: 1},
+	}}
+	problems := validateRunners(cfg)
+	if !slices.ContainsFunc(problems, func(e error) bool { return strings.Contains(e.Error(), `runner "android": a second native runner`) }) {
+		t.Errorf("problems = %v, want the second native runner refused", problems)
+	}
 }

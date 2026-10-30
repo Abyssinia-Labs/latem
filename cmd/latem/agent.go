@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -105,6 +106,10 @@ to do it.`,
 				// the native runners' path_prepend (A60).
 				ProbeToolchains: func(ctx context.Context, stepPath string) system.Toolchains {
 					return system.New(system.Options{}).Toolchains(ctx, stepPath)
+				},
+				// What the heartbeat's capacity is worked out from (A63).
+				MeasureMachine: func(ctx context.Context) capacity.Machine {
+					return measureMachine(ctx, system.New(system.Options{}))
 				},
 			})
 			if err != nil {

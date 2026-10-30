@@ -346,7 +346,18 @@ func validateRunners(cfg *Config) []error {
 	}
 
 	seen := make(map[string]int, len(cfg.Runners))
+	native := -1
 	for i, r := range cfg.Runners {
+		// One native runner a machine: its concurrency of 1 (§13.3) is a limit
+		// on the host, and a second native block would run two builds on it at
+		// once all the same (A63).
+		if r.Executor == ExecutorNative {
+			if native >= 0 {
+				add("runner %q: a second native runner, beside runner[%d]; native jobs share the host, so a machine has one native runner and it takes one job at a time (§13.3)", r.Name, native)
+			} else {
+				native = i
+			}
+		}
 		// The label used in messages: the name when there is one, the index
 		// otherwise, because "runner[2]" is still enough to find the block.
 		label := fmt.Sprintf("runner[%d]", i)

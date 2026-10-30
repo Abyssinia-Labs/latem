@@ -117,8 +117,11 @@ func TestReload_ReportsWhatNeedsARestart(t *testing.T) {
 	appendConfig(t, cfg, `
 [[runner]]
 name     = "second"
-executor = "native"
+executor = "docker"
 labels   = ["second"]
+
+  [runner.docker]
+  default_image = "alpine:3"
 `)
 	deferred, err := ta.Reload()
 	if err != nil {

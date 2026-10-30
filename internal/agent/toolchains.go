@@ -5,6 +5,10 @@ import (
 	"os"
 	"reflect"
 	"time"
+
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
+	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // toolchainsLoop keeps what the agent says it has for builds current: what a
@@ -17,19 +21,30 @@ import (
 // started with, after the App Store replaced it, would have every job
 // explained against an Xcode it no longer has.
 func (a *Agent) toolchainsLoop(ctx context.Context) {
-	probe := a.opts.ProbeToolchains
-	if probe == nil {
+	probe, measure := a.opts.ProbeToolchains, a.opts.MeasureMachine
+	if probe == nil && measure == nil {
 		return
 	}
 	t := time.NewTicker(a.toolchainsEvery)
 	defer t.Stop()
 	for {
-		tc := probe(ctx, stepPath(a.current(), os.Getenv("PATH")))
-		if ctx.Err() != nil {
-			return
+		if probe != nil {
+			tc := probe(ctx, stepPath(a.current(), os.Getenv("PATH")))
+			if ctx.Err() != nil {
+				return
+			}
+			if prev := a.toolchains.Swap(&tc); prev != nil && !reflect.DeepEqual(toolchainsAdvert(*prev), toolchainsAdvert(tc)) {
+				a.log.Info("toolchains changed", "xcode", tc.XcodeVersions())
+			}
 		}
-		if prev := a.toolchains.Swap(&tc); prev != nil && !reflect.DeepEqual(toolchainsAdvert(*prev), toolchainsAdvert(tc)) {
-			a.log.Info("toolchains changed", "xcode", tc.XcodeVersions())
+		// The machine's size, on the same beat: Docker Desktop's share of
+		// it is a setting that changes under a running agent too (A63).
+		if measure != nil {
+			m := measure(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			a.machine.Store(&m)
 		}
 		select {
 		case <-ctx.Done():
@@ -47,4 +62,17 @@ func (a *Agent) reprobeToolchains() {
 	case a.reprobe <- struct{}{}:
 	default:
 	}
+}
+
+// capacityAdvert is the heartbeat's capacity (A63): the machine's size and
+// each runner's recommended concurrency, worked out against runners.
+func capacityAdvert(m capacity.Machine, runners []*config.Runner) *protocol.Capacity {
+	out := &protocol.Capacity{CPUs: m.CPUs, MemoryGB: m.MemoryGB}
+	if m.Docker != nil {
+		out.Docker = &protocol.DockerCapacity{CPUs: m.Docker.CPUs, MemoryGB: m.Docker.MemoryGB}
+	}
+	for _, a := range capacity.Recommend(m, runners) {
+		out.Runners = append(out.Runners, protocol.RunnerCapacity{Name: a.Runner, Recommended: a.Recommended, Why: a.Why})
+	}
+	return out
 }
