@@ -6,9 +6,10 @@ is multi-arch, linux/amd64 and linux/arm64, because the same jobs run on an
 x86_64 Linux desktop and, through Docker Desktop, on an Apple silicon Mac.
 
 It is published to `ghcr.io/abyssinia-labs/latem-ubuntu` by
-`.github/workflows/images.yml`, which builds it, runs `./check.sh` against it,
-and only then pushes both architectures — on a merge that changes this
-directory, on the first of every month, and on demand.
+`.github/workflows/images.yml`, which builds each architecture natively on its
+own runner, runs `./check.sh` against each, and only then pushes them and
+joins them under one tag — on a merge that changes this directory, on the
+first of every month, and on demand.
 
 ## What is in it
 
