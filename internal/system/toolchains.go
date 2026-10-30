@@ -157,9 +157,13 @@ func (s *System) jdks(ctx context.Context) []int {
 			b = Output(err)
 		}
 		for _, line := range strings.Split(string(b), "\n") {
+			// The browser plug-in's JRE is listed too, and builds nothing.
+			if strings.Contains(line, "JavaAppletPlugin.plugin") {
+				continue
+			}
 			if f := strings.Fields(line); len(f) > 0 {
-				if v, ok := ParseVersion(f[0]); ok && v.Major > 0 {
-					seen[v.Major] = true
+				if n := javaMajor(f[0]); n > 0 {
+					seen[n] = true
 				}
 			}
 		}
@@ -185,6 +189,19 @@ func (s *System) jdks(ctx context.Context) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// javaMajor is a Java version's major: 11 for 11.0.20, and 8 for 1.8.0_292,
+// which is how Java named itself before 9.
+func javaMajor(version string) int {
+	v, ok := ParseVersion(version)
+	switch {
+	case !ok:
+		return 0
+	case v.Major == 1:
+		return v.Minor
+	}
+	return v.Major
 }
 
 func majorIn(name string) int {

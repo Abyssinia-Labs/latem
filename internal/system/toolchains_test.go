@@ -95,3 +95,21 @@ func TestToolchains_ALinuxBox(t *testing.T) {
 		t.Errorf("toolchains = %+v", tc)
 	}
 }
+
+// java_home names a Java before 9 by 1.N, and lists the browser plug-in's
+// JRE beside the JDKs: the Mac mini's list, which read as JDKs 1 and 11.
+func TestToolchains_JavaHomesOldNamesAndThePlugin(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	run := newFakeRunner(map[string]fakeCmd{
+		"/usr/libexec/java_home -V": {exit: 0, out: "Matching Java Virtual Machines (3):\n" +
+			"    11.0.20 (arm64) \"Oracle Corporation\" - \"Java SE 11.0.20\" /Library/Java/JavaVirtualMachines/jdk-11.jdk/Contents/Home\n" +
+			"    1.8.0_292 (x86_64) \"AdoptOpenJDK\" - \"AdoptOpenJDK 8\" /Library/Java/JavaVirtualMachines/adoptopenjdk-8.jdk/Contents/Home\n" +
+			"    1.8.401.10 (x86_64) \"Oracle Corporation\" - \"Java\" /Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home\n" +
+			"/Library/Java/JavaVirtualMachines/jdk-11.jdk/Contents/Home\n"},
+		"sudo -n true": {exit: 1},
+	})
+	s := New(Options{GOOS: "darwin", Home: home, Root: root, Run: run.run, Getenv: func(string) string { return "" }})
+	if got := s.Toolchains(t.Context(), "").JDKs; !slices.Equal(got, []int{8, 11}) {
+		t.Errorf("jdks = %v, want [8 11]", got)
+	}
+}
