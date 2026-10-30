@@ -121,6 +121,10 @@ func TestSwitch_TheSameVersionIsCurrent(t *testing.T) {
 	if f.a.paused.Load() {
 		t.Error("an agent with nothing to move onto stopped claiming")
 	}
+	// Still a nudge: whoever sent it may have changed the machine.
+	if len(f.a.reprobe) != 1 {
+		t.Error("a SIGUSR2 with nothing to move onto did not ask for a fresh toolchain probe")
+	}
 }
 
 func TestSwitch_ABinaryThatWillNotSayItsVersionFails(t *testing.T) {

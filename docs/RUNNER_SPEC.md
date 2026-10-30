@@ -2794,10 +2794,13 @@ where a job asking for that label goes, and `latem init` writes `xcode` on every
 warns, under Executors, when a step on that runner would find no Xcode, no iOS simulator
 runtime, or no Android SDK: the job would fail at its first build step.
 
-**A run's note.** The agent probes its toolchains once, in the background, when it starts. A run
-whose job needs what its runner lacks says so in its log before the first step — "this job needs
-Xcode 27; this runner has Xcode 26.0.1" — and runs exactly as it would have. A run before the probe
-lands, or on an agent given none, writes no note.
+**A run's note.** The agent probes its toolchains in the background when it starts, and again
+every fifteen minutes, after a config reload, and on a SIGUSR2 that finds the binary on disk
+already running (A56): Xcode changes under a running agent — the App Store replaces it, an operator
+installs another — and a probe that ran only at start went on describing the Xcode the machine
+used to have. A run whose job needs what its runner lacks says so in its log before the first
+step — "this job needs Xcode 27; this runner has Xcode 26.0.1" — and runs exactly as it would have.
+A run before the first probe lands, or on an agent given none, writes no note.
 
 ### Amendment from installing what a machine is missing
 

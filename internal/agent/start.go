@@ -303,16 +303,6 @@ func (a *Agent) buildOrchestrator() error {
 		return wrapStartup("orchestrator", err)
 	}
 	a.orch = orch
-	if probe := a.opts.ProbeToolchains; probe != nil {
-		// In the background, and once: it reads every Xcode's Info.plist
-		// and asks a JDK list, a second or two that startup need not wait
-		// for. A run before it lands writes no note (A59).
-		path := stepPath(a.cfg, os.Getenv("PATH"))
-		go func() {
-			tc := probe(context.Background(), path)
-			a.toolchains.Store(&tc)
-		}()
-	}
 	return nil
 }
 
