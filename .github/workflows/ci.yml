@@ -27,10 +27,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # This job also runs on latem's own machines (latem-ci). Their macOS
+      # runner is native, and a native runner runs no remote action unless the
+      # operator gives up isolation (A47), so on macOS the job uses the Go the
+      # machine has. go.mod's version is fetched from there if it is newer
+      # (GOTOOLCHAIN=auto, Go's default). Keyed on runner.os, never a label.
       - uses: actions/setup-go@v6
+        if: runner.os == 'Linux'
         with:
           go-version-file: go.mod
           cache: true
+      - name: go (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v go >/dev/null || brew install go
+          go version
 
       # install.sh verifies a release signature when minisign is present, and
       # test/scripts exercises that path against a real keypair — but only when
