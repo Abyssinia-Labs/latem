@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,9 @@ type expander struct {
 	// scope is the admission-time scope, for the one shim that has to
 	// evaluate something before any step runs: a cache's mount point.
 	scope expr.Scope
+	// os is runner.os as the job's labels settle it — "Linux", "macOS" — or
+	// "" when they do not (A58).
+	os string
 	// caches are the declarations `uses: actions/cache` compiled into, in the
 	// order first seen and once each (A49).
 	caches    []registry.CacheDecl
@@ -96,6 +100,17 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 	switch {
 	case st.Uses == "":
 		return []Step{st}, nil
+
+	case len(stack) == 0 && x.skippedOnThisPlatform(st):
+		// A58: its if: is false on the platform this job runs on, so the
+		// action is never fetched and never asks for isolation. The step
+		// stays, with its id, name and if:, and is skipped when it is
+		// reached, as GitHub reports it.
+		name := st.Name
+		if name == "" {
+			name = "Run " + st.Uses
+		}
+		return []Step{{ID: st.ID, Name: name, If: st.If, Run: "true"}}, nil
 
 	case strings.HasPrefix(st.Uses, dockerScheme):
 		c, err := x.containerStep(st, strings.TrimPrefix(st.Uses, dockerScheme), nil, nil)
@@ -779,4 +794,70 @@ func splitArgs(s string) ([]string, error) {
 		out = append(out, cur.String())
 	}
 	return out, nil
+}
+
+// pureFunctions are the expression functions whose answer depends on their
+// arguments alone. A status function, or hashFiles, cannot be answered before
+// the step is reached.
+var pureFunctions = map[string]bool{
+	"contains": true, "startswith": true, "endswith": true, "format": true,
+	"join": true, "tojson": true, "fromjson": true,
+}
+
+// skippedOnThisPlatform reports whether st's if: is false wherever this job
+// can run (A58). It answers only for a condition that reads runner.os and
+// the matrix leg, both settled before the job is placed, through functions
+// that depend on their arguments alone; anything else is left to the run.
+//
+// GitHub evaluates the condition when the step is reached. Its answer cannot
+// differ: a job's runner, and so its runner.os, does not change mid-job, and
+// a condition with no status function is success() && it, which a false it
+// makes false.
+func (x *expander) skippedOnThisPlatform(st Step) bool {
+	if x.os == "" || strings.TrimSpace(st.If) == "" {
+		return false
+	}
+	prog, err := conditionProgram(st.If)
+	if err != nil {
+		return false
+	}
+	contexts, funcs := prog.References()
+	for _, c := range contexts {
+		if c != "runner" && c != "matrix" {
+			return false
+		}
+	}
+	for _, f := range funcs {
+		if !pureFunctions[f] {
+			return false
+		}
+	}
+	keys, computed := prog.ContextKeys("runner")
+	if computed {
+		return false
+	}
+	for _, k := range keys {
+		if !strings.EqualFold(k, "os") {
+			return false
+		}
+	}
+	v, err := prog.Eval(expr.Scope{Contexts: map[string]expr.Value{
+		"runner": map[string]any{"os": x.os},
+		"matrix": x.scope.Contexts["matrix"],
+	}})
+	return err == nil && !expr.IsTruthy(v)
+}
+
+// osOfLabels is runner.os for a job whose labels say which platform it needs:
+// macos or linux, which the compiler itself produces for GitHub's hosted
+// labels, and an executor carries only on its own platform.
+func osOfLabels(labels []string) string {
+	mac, linux := slices.Contains(labels, "macos"), slices.Contains(labels, "linux")
+	switch {
+	case mac && !linux:
+		return "macOS"
+	case linux && !mac:
+		return "Linux"
+	}
+	return ""
 }
