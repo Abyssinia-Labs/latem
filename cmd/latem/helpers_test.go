@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -259,6 +260,12 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		// real: inheriting them means reading whatever Homebrew this machine
 		// happens to have.
 		kegRubies: []string{filepath.Join(dir, "no", "keg", "ruby")},
+		// No mirrors and an empty machine, unless a test says otherwise: the
+		// real ones read this machine's repositories and toolchains (A59).
+		readRepo: func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
+			return nil, errors.New("no mirror yet")
+		},
+		toolchains: func(context.Context) system.Toolchains { return system.Toolchains{Tools: map[string]bool{}} },
 	}
 }
 

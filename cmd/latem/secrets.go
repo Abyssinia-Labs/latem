@@ -527,6 +527,9 @@ type inventory struct {
 func secretInventory(ctx context.Context, cfg *config.Config, stores secretStores) (inventory, error) {
 	inv := inventory{byName: map[string][]string{}}
 	for _, s := range stores.all() {
+		if s == nil {
+			continue // none configured: doctor reads needs, not secrets
+		}
 		names, err := s.Names(ctx)
 		if err != nil {
 			return inv, err
