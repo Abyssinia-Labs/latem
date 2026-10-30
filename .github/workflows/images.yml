@@ -1,0 +1,106 @@
+# Builds latem-ubuntu (images/ubuntu), the docker executor's default image,
+# checks it, and publishes it for linux/amd64 and linux/arm64.
+#
+# Each architecture is built and checked natively on its own runner, then the
+# two are joined under one multi-arch tag. Nothing builds under emulation.
+#
+# The runner labels are ones latem's own machines do not map: building an
+# image needs a Docker daemon, and latem's docker runner gives a step none
+# (README, "Docker inside a job").
+name: images
+
+on:
+  pull_request:
+    paths:
+      - images/ubuntu/**
+      - .github/workflows/images.yml
+  push:
+    branches: [main]
+    paths:
+      - images/ubuntu/**
+      - .github/workflows/images.yml
+  # apt packages come from whatever ubuntu:24.04 and the archive hold on the
+  # day of the build, so the image is rebuilt monthly even with nothing bumped
+  # (images/ubuntu/README.md, "Updating").
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/abyssinia-labs/latem-ubuntu
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: blacksmith-8vcpu-ubuntu-2404
+          - arch: arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      # Checked before anything is published: an image that fails §13.1 or
+      # lacks a tool its README promises never reaches a runner.
+      - name: Build
+        run: images/ubuntu/build.sh
+      - name: Check it
+        run: images/ubuntu/check.sh latem-ubuntu:local
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Push this architecture
+        if: github.event_name != 'pull_request'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker tag latem-ubuntu:local "$IMAGE:24.04-$ARCH"
+          docker push "$IMAGE:24.04-$ARCH"
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Join both architectures under one tag
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          docker buildx imagetools create \
+            --tag "$IMAGE:24.04" --tag "$IMAGE:24.04-$stamp" \
+            "$IMAGE:24.04-amd64" "$IMAGE:24.04-arm64"
+          info=$(docker buildx imagetools inspect "$IMAGE:24.04")
+          digest=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$info")
+          {
+            echo "### latem-ubuntu"
+            echo
+            echo "Pin \`default_image\` to:"
+            echo
+            echo "    $IMAGE:24.04@$digest"
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "pin: $IMAGE:24.04@$digest"
