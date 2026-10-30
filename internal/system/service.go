@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -135,8 +137,37 @@ func LaunchAgentPath(home string) string {
 	return filepath.Join(home, "Library", "LaunchAgents", ServiceLabel+".plist")
 }
 
+// ServiceRevision numbers the service definition latem writes. It goes up
+// whenever the unit or plist changes in a way an installed one should get,
+// because nothing else rewrites an installed definition: setup reinstalls
+// one with an older revision, and doctor names it.
+//
+//   - 1: no marker; everything written before revisions were.
+//   - 2: ProcessType Interactive.
+const ServiceRevision = 2
+
+// revisionMarker is the line a definition carries to say its revision.
+func revisionMarker(n int) string { return fmt.Sprintf("latem service definition, revision %d", n) }
+
+var revisionPattern = regexp.MustCompile(`latem service definition, revision ([0-9]+)`)
+
+// DefinitionRevision reads the revision an installed unit or plist carries:
+// 1 for one written before definitions said.
+func DefinitionRevision(content string) int {
+	m := revisionPattern.FindStringSubmatch(content)
+	if m == nil {
+		return 1
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 1
+	}
+	return n
+}
+
 var systemdTemplate = template.Must(template.New("unit").Parse(
-	`[Unit]
+	`# {{.Marker}}
+[Unit]
 Description=Latem runner agent
 Documentation=https://github.com/Abyssinia-Labs/latem
 After=network-online.target docker.service
@@ -183,11 +214,13 @@ func (s ServiceSpec) SystemdUnit() (string, error) {
 	}
 	var buf bytes.Buffer
 	err := systemdTemplate.Execute(&buf, struct {
+		Marker      string
 		Exec        string
 		RestartSec  int
 		StopSec     int
 		Environment []string
 	}{
+		Marker:      revisionMarker(ServiceRevision),
 		Exec:        exec,
 		RestartSec:  int(s.RestartDelay.Seconds()),
 		StopSec:     int(s.StopTimeout.Seconds()),
@@ -200,6 +233,7 @@ var plistTemplate = template.Must(template.New("plist").Parse(
 	`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- {{.Marker}} -->
 <dict>
 	<key>Label</key>
 	<string>{{.Label}}</string>
@@ -217,11 +251,14 @@ var plistTemplate = template.Must(template.New("plist").Parse(
 	<integer>{{.ThrottleInterval}}</integer>
 	<key>ExitTimeOut</key>
 	<integer>{{.ExitTimeOut}}</integer>
-	<!-- Standard, not Background: launchd throttles a Background job's CPU and
-	     disk I/O, and an Xcode build under that policy is slower for reasons
-	     that never appear in any log. -->
+	<!-- Interactive, as GitHub's own runner has it: launchd.plist(5) gives a
+	     Standard job, like one with no ProcessType, "light resource limits"
+	     on its CPU and disk I/O, and a Background job more. A build is slower
+	     under them for reasons that never appear in any log, and a test that
+	     records frames in real time fails: take-one's recorder tests wrote 11
+	     to 14 frames of 30 in the agent and passed over ssh on the same Mac. -->
 	<key>ProcessType</key>
-	<string>Standard</string>
+	<string>Interactive</string>
 	<key>WorkingDirectory</key>
 	<string>{{.WorkingDirectory}}</string>
 	<key>StandardOutPath</key>
@@ -262,6 +299,7 @@ func (s ServiceSpec) LaunchAgentPlist() (string, error) {
 	}
 	var buf bytes.Buffer
 	err := plistTemplate.Execute(&buf, struct {
+		Marker           string
 		Label            string
 		Argv             []string
 		ThrottleInterval int
@@ -271,6 +309,7 @@ func (s ServiceSpec) LaunchAgentPlist() (string, error) {
 		StderrPath       string
 		Environment      []plistEnv
 	}{
+		Marker:           revisionMarker(ServiceRevision),
 		Label:            ServiceLabel,
 		Argv:             argv,
 		ThrottleInterval: int(s.RestartDelay.Seconds()),

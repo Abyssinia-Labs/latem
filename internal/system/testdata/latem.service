@@ -1,3 +1,4 @@
+# latem service definition, revision 2
 [Unit]
 Description=Latem runner agent
 Documentation=https://github.com/Abyssinia-Labs/latem

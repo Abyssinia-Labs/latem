@@ -221,6 +221,12 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 			if err := deps.service.Install(ctx, out); err != nil {
 				return err
 			}
+		case state.Outdated():
+			// An older latem's definition: rewritten, which restarts the agent.
+			printf(out, "  %s is revision %d; writing revision %d\n", state.Path, state.Revision, system.ServiceRevision)
+			if err := deps.service.Install(ctx, out); err != nil {
+				return err
+			}
 		case changed || (!state.Running && !state.Starting):
 			if err := deps.service.Restart(ctx, out); err != nil {
 				return err
