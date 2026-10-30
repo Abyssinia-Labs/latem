@@ -194,6 +194,29 @@ func (mi *Mirror) Resolve(ctx context.Context, normalizedRef string) (string, er
 	return out, nil
 }
 
+// FetchCommit fetches one commit by its name, for a job pinned to a commit no
+// ref the mirror fetched still reaches: a re-run of a pull request that has
+// since merged, whose refs/pull/N/* GitHub deleted, or of one another machine
+// built while the merge ref pointed somewhere this one never saw. GitHub serves
+// a commit by its name, which is how actions/checkout fetches one. It lands
+// under no ref; gc.auto is off and the daily gc keeps an unreachable object for
+// thirty days, longer than any run that wants it.
+//
+// It takes the per-repo lock that Fetch holds, because it is a fetch into the
+// same bare repository.
+func (mi *Mirror) FetchCommit(ctx context.Context, sha string) error {
+	if err := validateSHA(sha); err != nil {
+		return err
+	}
+	lock := mi.mgr.repoLock(mi.repo.Key)
+	lock.Lock()
+	defer lock.Unlock()
+	if _, err := mi.mgr.run(ctx, mi.path, "fetch", "--no-tags", "--", "origin", sha); err != nil {
+		return gitErr(err, "fetching commit %s of %s", sha, mi.repo.Key)
+	}
+	return nil
+}
+
 // HasCommit reports whether a commit is present in the mirror.
 //
 // It exists for the daily gc ticker and for the assertion that a force-pushed

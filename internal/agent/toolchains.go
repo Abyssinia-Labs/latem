@@ -64,6 +64,40 @@ func (a *Agent) reprobeToolchains() {
 	}
 }
 
+// watchLoop notices the machine changing between preflights (A64): above all
+// an App Store update replacing Xcode, which takes minutes during which a
+// native runner would accept work that cannot build, and after which it may
+// want a licence or a first launch. It asks HostFingerprint — a few stats —
+// every watchEvery, and when the answer moves it runs preflight and the
+// toolchain probe at once and rings: the runner goes dark within half a
+// minute of the update and back as soon as Xcode is whole, instead of up to
+// five minutes either side.
+func (a *Agent) watchLoop(ctx context.Context) {
+	fingerprint := a.opts.HostFingerprint
+	if fingerprint == nil {
+		return
+	}
+	last := fingerprint()
+	t := time.NewTicker(a.watchEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		now := fingerprint()
+		if now == last {
+			continue
+		}
+		last = now
+		a.log.Info("the machine's Xcode changed; checking its runners again")
+		a.preflightAll(ctx)
+		a.reprobeToolchains()
+		a.ring()
+	}
+}
+
 // capacityAdvert is the heartbeat's capacity (A63): the machine's size and
 // each runner's recommended concurrency, worked out against runners.
 func capacityAdvert(m capacity.Machine, runners []*config.Runner) *protocol.Capacity {

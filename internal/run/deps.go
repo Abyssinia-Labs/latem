@@ -36,6 +36,9 @@ type Mirror interface {
 	// event named, on its ref (A52).
 	HasCommit(ctx context.Context, sha string) (bool, error)
 	IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error)
+	// FetchCommit fetches a pinned commit by its name, when no ref here
+	// reaches it any more.
+	FetchCommit(ctx context.Context, sha string) error
 	// ContainingRefs and PackSince are a checkout step's: which policy refs
 	// hold the commit it moves to, and the objects the workspace lacks for
 	// it (A53).

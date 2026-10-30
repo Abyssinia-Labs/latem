@@ -143,3 +143,31 @@ func TestResources(t *testing.T) {
 		t.Errorf("unanswered = %d, %d", cpus, mem)
 	}
 }
+
+// The fingerprint moves when an update rewrites an Xcode's Info.plist, when
+// one is removed, and when a licence is accepted — and holds still otherwise.
+func TestXcodeFingerprint(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	mkTree(t, root, "Applications/Xcode.app/Contents/Info.plist", "Library/Preferences/")
+	s := New(Options{GOOS: "darwin", Home: home, Root: root, Getenv: func(string) string { return "" }})
+
+	first := s.XcodeFingerprint()
+	if first == "" || s.XcodeFingerprint() != first {
+		t.Fatalf("fingerprint %q is empty or unstable", first)
+	}
+	plist := filepath.Join(root, "Applications/Xcode.app/Contents/Info.plist")
+	if err := os.WriteFile(plist, []byte("27.3"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updated := s.XcodeFingerprint()
+	if updated == first {
+		t.Error("an updated Info.plist left the fingerprint as it was")
+	}
+	mkTree(t, root, "Library/Preferences/com.apple.dt.Xcode.plist")
+	if s.XcodeFingerprint() == updated {
+		t.Error("an accepted licence left the fingerprint as it was")
+	}
+	if New(Options{GOOS: "linux", Home: home, Root: root}).XcodeFingerprint() != "" {
+		t.Error("a fingerprint off macOS")
+	}
+}

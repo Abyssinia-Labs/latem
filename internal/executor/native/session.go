@@ -63,8 +63,9 @@ func (r ExecRunner) Run(ctx context.Context, argv []string) ([]byte, error) {
 
 	var stdout, stderr bytes.Buffer
 	// #nosec G204 -- argv is a slice built entirely in this package: element 0
-	// is the literal "launchctl" or "security", the flags are literals, and the
-	// only variable element is a keychain path from the agent's own config.
+	// is a literal — "launchctl", "security", "xcode-select", "plutil" or "env"
+	// — the flags are literals, and the variable elements are a keychain path
+	// and a developer directory from the agent's own config or xcode-select.
 	// Nothing is broker-supplied and no shell is involved (INV-3).
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdout = &stdout

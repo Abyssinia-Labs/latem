@@ -441,3 +441,42 @@ func TestFetch_CancelledContext(t *testing.T) {
 		t.Fatal("fetched with a cancelled context")
 	}
 }
+
+// A re-run of a pull request that merged after this machine last fetched: its
+// merge commit is on no ref upstream any more, and the mirror never had it.
+// GitHub serves such a commit by its name; the upstream here is set to do the
+// same. A commit upstream does not have is an error, not a silent no-op.
+func TestFetchCommit_BringsACommitNoRefReaches(t *testing.T) {
+	f := newFixture(t)
+	runGit(t, f.up.dir, "config", "uploadpack.allowAnySHA1InWant", "true")
+	mirror := f.fetch()
+
+	runGit(t, f.up.dir, "checkout", "-q", "-b", "pr")
+	merge := f.up.commit("pr.txt", "pr\n", "the merge commit an event named")
+	runGit(t, f.up.dir, "checkout", "-q", "main")
+	runGit(t, f.up.dir, "branch", "-qD", "pr")
+
+	if got, err := mirror.HasCommit(context.Background(), merge); err != nil || got {
+		t.Fatalf("HasCommit before = %v, %v; want false — the mirror never fetched it", got, err)
+	}
+	if err := mirror.FetchCommit(context.Background(), merge); err != nil {
+		t.Fatalf("FetchCommit: %v", err)
+	}
+	if got, err := mirror.HasCommit(context.Background(), merge); err != nil || !got {
+		t.Fatalf("HasCommit after = %v, %v; want true", got, err)
+	}
+	ws, err := mirror.Checkout(context.Background(), "run_rerun", "refs/pull/16/merge", merge)
+	if err != nil {
+		t.Fatalf("Checkout of a commit fetched by its name: %v", err)
+	}
+	if head := runGit(t, ws.Path, "rev-parse", "HEAD"); head != merge {
+		t.Errorf("HEAD = %s, want %s", head, merge)
+	}
+
+	if err := mirror.FetchCommit(context.Background(), strings.Repeat("0", 39)+"1"); err == nil {
+		t.Error("FetchCommit of a commit upstream lacks reported success")
+	}
+	if err := mirror.FetchCommit(context.Background(), "main"); err == nil {
+		t.Error("FetchCommit accepted a ref name")
+	}
+}

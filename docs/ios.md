@@ -344,9 +344,17 @@ update:
 - The Tart base image is pinned to a major version by name (`latem-xcode-26`).
   Build `latem-xcode-27` alongside it, repoint `base_image`, and delete the old
   image only after a real build passes on the new one.
-- **Disable automatic macOS/Xcode updates on this machine.** An unattended
-  update reboots — see §4 — and changes the toolchain under a build without a
-  commit to blame.
+- **Automatic Xcode updates are survivable (A64).** The App Store replaces
+  Xcode in place. Within half a minute the native runner reports itself
+  unavailable: while Xcode is half-installed, then until a new licence is
+  accepted or its first launch has run, naming the command that clears it.
+  Jobs wait for it or go to another machine, and it takes work again once
+  Xcode is whole. A job running when the update landed says so in its log.
+  latem cannot run `sudo xcodebuild -license accept` or
+  `sudo xcodebuild -runFirstLaunch` for you, nor fetch a simulator runtime a
+  new Xcode wants (`xcodebuild -downloadPlatform iOS`).
+- **Automatic macOS updates restart the machine.** Whether it comes back by
+  itself is §4.
 
 ---
 

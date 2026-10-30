@@ -2939,3 +2939,38 @@ package's `preinstall`, `install`, `postinstall` and `prepare` scripts, the root
 workspaces'. The CLIs those scripts name start with `#!/usr/bin/env node`. A job whose install
 finds any such script needs Node, inferred, with the package and the script as its evidence.
 
+
+### Amendment from living with automatic updates
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A64 | §10, §13.3, §20, A52, A59 | **A native runner on a Mac is unavailable while the Xcode its steps use is missing or half-installed, wants its licence accepted, or wants its first launch, and the reason names the command that clears it. The agent fingerprints the machine's Xcodes every 30 seconds and checks its runners at once when the fingerprint moves. A job whose machine's Xcode changed while it ran says so in its log. A workflow run's job whose pull request ref is gone builds the commit its event named, fetched by its name when no ref here reaches it** | Macs update Xcode from the App Store, and macOS, by themselves, and latem should not ask anyone to turn that off. An update replaces Xcode in place: for minutes every tool behind /usr/bin's shims fails, and afterwards a licence or a first launch can stand between the machine and any build. Jobs failed one after another meanwhile, naming a framework or a licence prompt on stderr. Separately, GitHub's Re-run on a merged pull request's check sent a machine to refs/pull/16/merge, which GitHub had deleted, and the job was refused with E_INVALID_REF |
+
+**What makes the runner unavailable.** On a Mac, a native runner's preflight finds the developer
+directory a step would use: the runner's `DEVELOPER_DIR` from `[runner.native] env`, else
+`xcode-select -p`. When that is inside an Xcode.app it checks, in order:
+- the bundle's Info.plist and its `xcodebuild` exist, or Xcode is mid-update;
+- `xcodebuild -license check`, or `sudo xcodebuild -license accept` is the fix;
+- `xcodebuild -checkFirstLaunchStatus`, or `sudo xcodebuild -runFirstLaunch` is.
+
+The Command Line Tools, or no developer directory, is doctor's to report, not preflight's. latem
+runs neither fix: both need an administrator, and a licence is the operator's (A60). The runner
+takes work again on the first preflight that passes.
+
+**Noticing.** `HostFingerprint` is a few stats: every Xcode*.app's Info.plist in /Applications and
+~/Applications, where /var/db/xcode_select_link points, and
+/Library/Preferences/com.apple.dt.Xcode.plist, which records accepted licences. When it moves the
+agent runs preflight and the toolchain probe (A59) at once and rings, so a runner goes dark within
+half a minute of an update and comes back as soon as Xcode is whole, rather than up to five
+minutes either side (§20).
+
+**The note.** A job on a native runner records the machine's Xcodes as it starts. As it ends, if
+the toolchain probe now says otherwise, its log says "this machine's Xcode changed while the job
+ran (27.2 → 27.3)". An update in a job's last half minute can go unsaid.
+
+**Re-runs.** A52's pin accepts a pull request's merge commit without asking that the ref reach it.
+When the ref itself is gone, because the pull request merged or closed, gate 7 no longer refuses a
+workflow run's job that names a commit: there is no tip to resolve, and pin goes by the commit
+alone. When the mirror lacks that commit, it is fetched by its name, as actions/checkout fetches
+it; GitHub serves a commit no ref reaches until its own gc. A branch's commit is never fetched by
+name, because one the branch's fetch did not bring is not on the branch.

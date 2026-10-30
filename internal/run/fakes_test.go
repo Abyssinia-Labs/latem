@@ -56,6 +56,10 @@ type fakeSource struct {
 	containing map[string][]string
 	// packed records each PackSince the mirror was asked for, as sha^have.
 	packed []string
+	// upstream are the commits FetchCommit can bring by their names, and
+	// fetchedByName the ones it was asked for.
+	upstream      map[string]bool
+	fetchedByName []string
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -99,6 +103,21 @@ func (m *fakeMirror) HasCommit(_ context.Context, sha string) (bool, error) {
 	defer m.src.mu.Unlock()
 	_, ok := m.src.commits[sha]
 	return ok || sha == m.src.sha, nil
+}
+
+// FetchCommit brings a commit from upstream by its name, when upstream has it.
+func (m *fakeMirror) FetchCommit(_ context.Context, sha string) error {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	m.src.fetchedByName = append(m.src.fetchedByName, sha)
+	if !m.src.upstream[sha] {
+		return errors.New("fatal: remote error: upload-pack: not our ref " + sha)
+	}
+	if m.src.commits == nil {
+		m.src.commits = map[string]bool{}
+	}
+	m.src.commits[sha] = false
+	return nil
 }
 
 func (m *fakeMirror) IsAncestor(_ context.Context, ancestor, descendant string) (bool, error) {

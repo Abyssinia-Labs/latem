@@ -198,7 +198,7 @@ func (e *Executor) Preflight(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return CheckXcode(ctx, e.opts.Runner, e.opts.Env["DEVELOPER_DIR"])
 }
 
 // Session reports the launchd context this executor is running in, without

@@ -109,6 +109,11 @@ const (
 	// a second or two of plutil and a JDK list.
 	DefaultToolchainsInterval = 15 * time.Minute
 
+	// DefaultWatchInterval is how often the agent asks HostFingerprint whether
+	// the machine changed under it (A64): a few stats, so cheap enough that an
+	// App Store update to Xcode takes a runner out within half a minute.
+	DefaultWatchInterval = 30 * time.Second
+
 	// DefaultClaimInterval is how often a worker asks the queue for work when
 	// no doorbell has rung. It is short because the doorbell only covers runs
 	// submitted to a live agent: an approval, a re-queue from gate 16, and
@@ -196,11 +201,18 @@ type Options struct {
 	// none.
 	MeasureMachine func(ctx context.Context) capacity.Machine
 
+	// HostFingerprint summarises what an update to the machine's toolchain
+	// changes, cheaply (A64). When it moves the agent runs preflight and the
+	// toolchain probe at once instead of waiting for their tickers. Nil
+	// watches nothing.
+	HostFingerprint func() string
+
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration
 	PreflightInterval   time.Duration
 	MaintenanceInterval time.Duration
 	ToolchainsInterval  time.Duration
+	WatchInterval       time.Duration
 	ClaimInterval       time.Duration
 	SlotWait            time.Duration
 	PreflightTimeout    time.Duration
@@ -303,6 +315,7 @@ type Agent struct {
 	toolchains      atomic.Pointer[system.Toolchains]
 	toolchainsEvery time.Duration
 	reprobe         chan struct{}
+	watchEvery      time.Duration
 	// machine is what MeasureMachine last found (A63).
 	machine atomic.Pointer[capacity.Machine]
 
@@ -350,6 +363,7 @@ func New(opts Options) (*Agent, error) {
 		maintenanceEvery: orDuration(opts.MaintenanceInterval, DefaultMaintenanceInterval),
 		toolchainsEvery:  orDuration(opts.ToolchainsInterval, DefaultToolchainsInterval),
 		reprobe:          make(chan struct{}, 1),
+		watchEvery:       orDuration(opts.WatchInterval, DefaultWatchInterval),
 		claimEvery:       orDuration(opts.ClaimInterval, DefaultClaimInterval),
 		updateEvery:      orDuration(opts.UpdateInterval, DefaultUpdateInterval),
 		updateIdleWait:   orDuration(opts.UpdateIdleWait, DefaultUpdateIdleWait),
@@ -408,6 +422,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.spawn(&wg, func() { a.preflightLoop(workCtx) })
 	a.spawn(&wg, func() { a.maintenanceLoop(workCtx) })
 	a.spawn(&wg, func() { a.toolchainsLoop(workCtx) })
+	a.spawn(&wg, func() { a.watchLoop(workCtx) })
 	a.spawn(&wg, func() { a.updateLoop(workCtx) })
 
 	pool := a.startPool(workCtx)

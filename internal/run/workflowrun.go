@@ -26,7 +26,12 @@ func (x *execution) isWorkflowRun() bool { return x.req.Workflow != "" }
 // A pull request's merge ref is the exception to "on the ref": GitHub
 // recomputes it whenever the base branch moves, so the merge commit an event
 // named stops being reachable from the ref without anything being wrong. It
-// still has to be in the mirror, which only fetched refs put there.
+// still has to be in the mirror. When no ref the mirror fetched put it there —
+// the pull request has merged and GitHub deleted its refs, so tip is empty, or
+// another machine built it while the merge ref pointed at a commit this one
+// never fetched — it is fetched by its name, as a re-run on GitHub fetches it.
+// A branch's commit is not: one the branch's fetch did not bring is not on the
+// branch.
 func (x *execution) pin(ctx context.Context, mirror Mirror, normalized, tip string) (string, registry.Decision, error) {
 	want := x.req.SHA
 	if want == tip {
@@ -39,14 +44,24 @@ func (x *execution) pin(ctx context.Context, mirror Mirror, normalized, tip stri
 			Msg:   fmt.Sprintf("the event named %s, which %s", shortSHA(want), why),
 		}, nil
 	}
+	pull := strings.HasPrefix(normalized, "refs/pull/")
 	ok, err := mirror.HasCommit(ctx, want)
 	if err != nil {
 		return "", registry.Decision{}, err
 	}
+	if !ok && pull {
+		x.note("fetching %s by its name: no ref here reaches it", shortSHA(want))
+		if err := mirror.FetchCommit(ctx, want); err != nil {
+			return refuse(fmt.Sprintf("could not be fetched from %s (%v)", x.req.Repo, err))
+		}
+		if ok, err = mirror.HasCommit(ctx, want); err != nil {
+			return "", registry.Decision{}, err
+		}
+	}
 	if !ok {
 		return refuse("is not in this machine's mirror of " + x.req.Repo)
 	}
-	if strings.HasPrefix(normalized, "refs/pull/") {
+	if pull {
 		return want, registry.Decision{}, nil
 	}
 	on, err := mirror.IsAncestor(ctx, want, tip)
@@ -57,6 +72,16 @@ func (x *execution) pin(ctx context.Context, mirror Mirror, normalized, tip stri
 		return refuse(fmt.Sprintf("is not on %s (now %s)", normalized, shortSHA(tip)))
 	}
 	return want, registry.Decision{}, nil
+}
+
+// pullGone reports whether gate 7's refusal is a workflow run's job naming a
+// pull request's ref that no longer exists: the pull request merged or closed
+// and GitHub deleted its refs/pull/N/*. The job is pinned to a commit, so a
+// re-run of it builds that commit (pin) rather than refusing a name it does not
+// need.
+func (x *execution) pullGone(err error) bool {
+	return x.isWorkflowRun() && x.req.SHA != "" &&
+		strings.HasPrefix(x.req.Ref, "refs/pull/") && codeOf(err) == protocol.ErrInvalidRef
 }
 
 // eventJSON is the event's payload for $GITHUB_EVENT_PATH: the webhook body
