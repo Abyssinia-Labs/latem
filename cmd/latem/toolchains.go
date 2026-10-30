@@ -74,6 +74,8 @@ func lookPathOr(name, also string) (string, error) {
 	}
 	for _, dir := range filepath.SplitList(also) {
 		c := filepath.Join(dir, name)
+		// #nosec G703 -- dir is from servicePath's fixed list and name is a
+		// fix's program (brew, docker, sdkmanager…), never a repository's.
 		if fi, serr := os.Stat(c); serr == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0 {
 			return c, nil
 		}
