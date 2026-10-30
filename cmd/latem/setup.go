@@ -86,7 +86,7 @@ Exit codes:
 	cmd.Flags().StringVar(&f.url, "url", registerURL, "control plane agent endpoint to register with")
 	cmd.Flags().StringVar(&f.name, "name", "", "machine name (default: this host's name)")
 	cmd.Flags().StringSliceVar(&f.repos, "repo", nil, "a GitHub repository this machine builds, as owner/name (repeatable)")
-	cmd.Flags().StringVar(&f.image, "image", "", "default_image for the docker runner (default: a placeholder to replace)")
+	cmd.Flags().StringVar(&f.image, "image", "", "default_image for the docker runner (default: latem-ubuntu, pinned by digest)")
 	cmd.Flags().BoolVar(&f.noRegister, "no-register", false, "do not register with a control plane; this machine runs local builds only")
 	cmd.Flags().BoolVar(&f.noService, "no-service", false, "do not install or restart the agent service")
 	cmd.Flags().BoolVar(&f.noDocker, "no-docker", false, "on a Mac, do not add a docker runner even if Docker answers")

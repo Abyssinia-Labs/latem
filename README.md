@@ -239,7 +239,9 @@ that is already done, so it is safe to run again:
 
 1. **config** — writes `~/.latem/config.toml` when there is none: a native
    `macos` runner on a Mac, and a `linux` docker runner wherever a Docker
-   daemon answers (always, on Linux; `--image` sets its image).
+   daemon answers (always, on Linux), whose image is
+   [`latem-ubuntu`](images/ubuntu/README.md) pinned by digest (`--image`
+   names another).
 2. **repositories** — adds the repositories `--repo owner/name` names, or on
    a terminal with none configured asks which, and checks each one's
    workflows without a checkout: how many jobs this machine can run, why not
