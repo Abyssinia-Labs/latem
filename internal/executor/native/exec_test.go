@@ -742,11 +742,12 @@ echo "## Built 3 targets" >> "$GITHUB_STEP_SUMMARY"
 	tail := agentPath[len(agentPath)-1]
 	add, agent := strings.Index(out, "/opt/latem-test-bin:"), strings.LastIndex(out, tail)
 	switch {
-	case !loginShellKeepsPath(t):
-		// Debian's /etc/profile replaces root's PATH outright rather than
-		// prepending to it, so on that machine nothing handed to a login
-		// shell survives, from the agent or from $GITHUB_PATH.
-		t.Log("this machine's login profile replaces PATH; the ordering is not checked here")
+	case !loginShellKeepsPathOrder(t):
+		// Debian's /etc/profile replaces root's PATH outright, and macOS's
+		// path_helper moves the system directories in front of whatever it
+		// was handed: on those machines a login shell keeps no order the
+		// agent gave it, from $GITHUB_PATH or anywhere else.
+		t.Log("this machine's login profile reorders PATH; the ordering is not checked here")
 	case tail == "" || add < 0 || agent < 0 || add > agent:
 		t.Errorf("$GITHUB_PATH addition should precede the agent's PATH (add at %d, agent tail %q at %d): %q", add, tail, agent, out)
 	}
@@ -865,13 +866,18 @@ func TestExec_ToolCacheOutlivesTheRun(t *testing.T) {
 	}
 }
 
-// loginShellKeepsPath reports whether a login shell on this machine keeps a
-// PATH entry it was handed. A profile that prepends (Homebrew's shellenv,
-// conda's init) keeps it; Debian's /etc/profile, for root, does not.
-func loginShellKeepsPath(t *testing.T) bool {
+// loginShellKeepsPathOrder reports whether a login shell on this machine
+// keeps an entry put in front of PATH in front of it: what the assertion
+// above checks, asked of the machine first. A profile that only prepends
+// (Homebrew's shellenv, conda's init) keeps it; Debian's /etc/profile, for
+// root, and macOS's path_helper, which reorders, do not.
+func loginShellKeepsPathOrder(t *testing.T) bool {
 	t.Helper()
+	agent := strings.Split(os.Getenv("PATH"), ":")
+	tail := agent[len(agent)-1]
 	cmd := exec.Command(DefaultShell, "-lc", `echo "$PATH"`) //nolint:gosec // a fixed probe
 	cmd.Env = append(os.Environ(), "PATH=/opt/latem-probe:"+os.Getenv("PATH"))
 	out, err := cmd.Output()
-	return err == nil && strings.Contains(string(out), "/opt/latem-probe")
+	probe := strings.Index(string(out), "/opt/latem-probe:")
+	return err == nil && tail != "" && probe >= 0 && probe < strings.LastIndex(string(out), tail)
 }
