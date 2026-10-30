@@ -5,7 +5,9 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -333,6 +335,53 @@ func TestInstallServiceDryRunMacOS(t *testing.T) {
 	}
 	if len(rep.Notes) == 0 {
 		t.Error("a macOS install should say that a LaunchAgent needs a session")
+	}
+}
+
+// bootout returns before the job has gone, and a bootstrap of the same label
+// before launchd has reaped it fails. Reinstalling a running agent that way
+// left two machines with no agent; the install waits for launchd to let go.
+func TestInstallServiceWaitsForTheOldAgentToExit(t *testing.T) {
+	home := t.TempDir()
+	prevPoll := unloadPoll
+	unloadPoll = time.Millisecond
+	t.Cleanup(func() { unloadPoll = prevPoll })
+
+	var mu sync.Mutex
+	var calls []string
+	stillThere := 3 // launchd answers print for the old job three more times
+	s := New(Options{GOOS: "darwin", GOARCH: "arm64", Home: home, User: "tester", LookPath: fakePath(),
+		Getenv: func(string) string { return "" }, Getuid: func() int { return 501 },
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			key := strings.Join(append([]string{name}, args...), " ")
+			calls = append(calls, key)
+			if key == "launchctl print gui/501/com.latem.agent" {
+				if stillThere == 0 {
+					return []byte("Could not find service"), &CommandError{Name: name, ExitCode: 113}
+				}
+				stillThere--
+			}
+			return nil, nil
+		}})
+	spec := goldenSpec()
+	spec.Home = home
+
+	rep, err := s.InstallService(context.Background(), spec, InstallOptions{})
+	if err != nil {
+		t.Fatalf("InstallService: %v\n%s", err, stepText(rep))
+	}
+	bootout := slices.Index(calls, "launchctl bootout gui/501/com.latem.agent")
+	bootstrap := slices.Index(calls, "launchctl bootstrap gui/501 "+rep.Path)
+	prints := 0
+	for _, c := range calls[bootout+1 : bootstrap] {
+		if c == "launchctl print gui/501/com.latem.agent" {
+			prints++
+		}
+	}
+	if bootout < 0 || bootstrap < bootout || prints != 4 {
+		t.Errorf("calls = %q; want bootout, four prints until launchd let go, then bootstrap", calls)
 	}
 }
 

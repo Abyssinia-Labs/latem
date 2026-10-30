@@ -2895,3 +2895,11 @@ machine set up after it. A unit or plist now says which revision it is, in a com
 older one, which restarts the agent. Doctor names it as a warning, because the agent still works,
 and the fix restarts the agent, so doctor says to run it while nothing is building. A definition
 that cannot be read is not called old.
+
+**Reinstalling a running agent.** `launchctl bootout` returns before the job has gone: the agent
+takes SIGTERM and exits, and until launchd has reaped it, a `bootstrap` of the same label fails
+with "Bootstrap failed: 5: Input/output error". The first rollout of revision 2 hit this, and left
+the Mac mini and the MacBook with no agent until each was loaded by hand. `service install` now
+waits, up to two minutes, for `launchctl print` to stop finding the old job before it loads the new
+one. An agent finishing a run takes longer than that, and the install then says so rather than
+loading over it.

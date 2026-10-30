@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Step is one action taken, or that would be taken, while installing or
@@ -30,6 +31,9 @@ type Step struct {
 	// Optional marks a step whose failure is expected and harmless — tearing
 	// down a service that was not loaded, most often.
 	Optional bool
+	// gone, when set, makes the step a wait: until launchd no longer has
+	// this service target, rather than a command.
+	gone string
 }
 
 // String renders the step as the command an operator could type.
@@ -165,6 +169,12 @@ func (s *System) registerSteps(path string, spec ServiceSpec, opts InstallOption
 			// bootstrap a label that is already loaded, so a reinstall on a
 			// running machine fails at the second command otherwise.
 			{Desc: "unload any previous agent", Argv: []string{"launchctl", "bootout", domain + "/" + ServiceLabel}, Optional: true},
+			// bootout returns before the job has gone: the agent takes SIGTERM
+			// and exits, and until launchd has reaped it a bootstrap of the
+			// same label fails with "Bootstrap failed: 5: Input/output error".
+			// Without the wait, reinstalling a running agent left the Mac mini
+			// and the MacBook with no agent at all.
+			{Desc: "wait for the previous agent to exit", gone: domain + "/" + ServiceLabel},
 			{Desc: "load the LaunchAgent", Argv: []string{"launchctl", "bootstrap", domain, path}},
 			{Desc: "enable the LaunchAgent", Argv: []string{"launchctl", "enable", domain + "/" + ServiceLabel}, Optional: true},
 		}
@@ -251,6 +261,10 @@ func (s *System) guiDomain() string {
 }
 
 func (s *System) runStep(ctx context.Context, st Step) Step {
+	if st.gone != "" {
+		st.Err = s.waitGone(ctx, st.gone, unloadWait)
+		return st
+	}
 	if len(st.Argv) == 0 {
 		return st
 	}
@@ -258,6 +272,33 @@ func (s *System) runStep(ctx context.Context, st Step) Step {
 	st.Output = strings.TrimSpace(string(out))
 	st.Err = err
 	return st
+}
+
+// unloadWait bounds the wait for a booted-out agent to exit. An idle agent
+// is gone in a second or two; one finishing a run takes its shutdown_grace,
+// and launchd keeps waiting for it after this gives up.
+var unloadWait = 2 * time.Minute
+
+// unloadPoll is how often waitGone asks launchd.
+var unloadPoll = 250 * time.Millisecond
+
+// waitGone polls `launchctl print target` until launchd no longer knows it.
+func (s *System) waitGone(ctx context.Context, target string, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	for {
+		if _, err := s.Exec(ctx, "launchctl", "print", target); err != nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("launchd still has %s after %s: the agent is still finishing a run "+
+				"(it has its shutdown_grace to); install again once it has exited", target, within)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(unloadPoll):
+		}
+	}
 }
 
 // ServiceState is what a service manager says about the agent service.
