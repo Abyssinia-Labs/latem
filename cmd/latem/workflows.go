@@ -1069,6 +1069,18 @@ func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool) []findin
 }
 
 // applyWorkflowFixes writes the suggested aliases and allowlist entries.
+// suggestedFixLines says what applyWorkflowFixes would add, without adding it.
+func suggestedFixLines(rep checkReport) []string {
+	var lines []string
+	for _, l := range slices.Sorted(maps.Keys(rep.aliases)) {
+		lines = append(lines, fmt.Sprintf("[label_aliases] %s = %s", tomlKey(l), tomlStringList(rep.aliases[l])))
+	}
+	for _, a := range rep.allowed {
+		lines = append(lines, fmt.Sprintf("[actions] allowed += %q", a))
+	}
+	return lines
+}
+
 func applyWorkflowFixes(paths config.Paths, cfg *config.Config, rep checkReport) ([]string, error) {
 	var lines []string
 	_, err := editConfig(paths, func(body string) (string, error) {

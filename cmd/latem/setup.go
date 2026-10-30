@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"path"
 	"runtime"
+	"slices"
+	"strings"
 	"time"
 
 	dockerclient "github.com/docker/docker/client"
@@ -18,6 +22,7 @@ import (
 
 type setupFlags struct {
 	url, name, image string
+	repos            []string
 	noRegister       bool
 	noService        bool
 	noDocker         bool
@@ -34,23 +39,28 @@ func newSetupCommand() *cobra.Command {
 One command for a fresh machine, and safe to run again on one that is half
 done — each step looks at what is there and does only what is missing:
 
-  1. config   writes ~/.latem/config.toml when there is none: a native macos
-              runner on a Mac, and a linux docker runner wherever a Docker
-              daemon answers (on Linux, always). No repositories yet.
-  2. register approves this machine in the browser (` + "`latem register`" + `), unless
-              it is already registered or --no-register keeps it local.
-  3. service  installs the agent as a user service and starts it, or restarts
-              it when steps 1 or 2 changed what it should be running.
-  4. doctor   checks the result and names the fix for anything wrong.
+  1. config        writes ~/.latem/config.toml when there is none: a native
+                   macos runner on a Mac, and a linux docker runner wherever a
+                   Docker daemon answers (on Linux, always).
+  2. repositories  adds the repositories --repo names — or, on a terminal and
+                   with none configured, asks which — and checks each one's
+                   workflows, read without a checkout, offering the label
+                   aliases and allowed actions they need (A57).
+  3. register      approves this machine in the browser (` + "`latem register`" + `),
+                   unless it is already registered or --no-register keeps it
+                   local.
+  4. service       installs the agent as a user service and starts it, or
+                   restarts it when steps 1 or 3 changed what it runs.
+  5. doctor        checks the result and names the fix for anything wrong.
 
 Registering before the service starts, rather than after, is deliberate: the
 control plane connection is read only when the agent starts, so the other
 order would start the agent twice.
 
 Then:
-  latem repo add <owner/name>       allow a repository; the agent picks it up
-  latem workflows check <checkout>  what this machine can run of it
-  latem secrets set NAME            what its workflows read
+  latem repo add <owner/name>         allow another repository
+  latem workflows check --repo <key>  what this machine can run of it
+  latem secrets set NAME              what its workflows read
 
 Exit codes:
   0  set up, and doctor found nothing failing
@@ -62,12 +72,20 @@ Exit codes:
 			if err != nil {
 				return err
 			}
+			for i, r := range f.repos {
+				slug, err := parseGitHubSlug(r)
+				if err != nil {
+					return usageErrorf("--repo %s: %v", r, err)
+				}
+				f.repos[i] = slug
+			}
 			f.url = url
 			return runSetup(cmd, f, newSetupDeps())
 		},
 	}
 	cmd.Flags().StringVar(&f.url, "url", registerURL, "control plane agent endpoint to register with")
 	cmd.Flags().StringVar(&f.name, "name", "", "machine name (default: this host's name)")
+	cmd.Flags().StringSliceVar(&f.repos, "repo", nil, "a GitHub repository this machine builds, as owner/name (repeatable)")
 	cmd.Flags().StringVar(&f.image, "image", "", "default_image for the docker runner (default: a placeholder to replace)")
 	cmd.Flags().BoolVar(&f.noRegister, "no-register", false, "do not register with a control plane; this machine runs local builds only")
 	cmd.Flags().BoolVar(&f.noService, "no-service", false, "do not install or restart the agent service")
@@ -111,7 +129,7 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	changed := false
 
 	// 1 — config.
-	step("1/4 config")
+	step("1/5 config")
 	if _, err := os.Stat(paths.File); os.IsNotExist(err) {
 		docker := runtime.GOOS != "darwin"
 		if runtime.GOOS == "darwin" && !f.noDocker {
@@ -144,8 +162,17 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 			"`latem doctor` names every fix; run `latem setup` again after", err)
 	}
 
-	// 2 — register.
-	step("2/4 register")
+	// 2 — repositories.
+	step("2/5 repositories")
+	if err := setupRepositories(cmd, f, cfg); err != nil {
+		return err
+	}
+	if cfg, err = loadConfig(); err != nil {
+		return err
+	}
+
+	// 3 — register.
+	step("3/5 register")
 	switch {
 	case f.noRegister:
 		printf(out, "  skipped (--no-register): this machine builds what `latem run` asks, and nothing else\n")
@@ -158,8 +185,8 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 		changed = true
 	}
 
-	// 3 — service.
-	step("3/4 service")
+	// 4 — service.
+	step("4/5 service")
 	switch {
 	case f.noService:
 		printf(out, "  skipped (--no-service); run the agent yourself with `latem agent`\n")
@@ -184,17 +211,155 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 		}
 	}
 
-	// 4 — doctor.
-	step("4/4 doctor")
+	// 5 — doctor.
+	step("5/5 doctor")
 	doctorErr := deps.doctor(cmd)
 
 	printf(out, "\n%s\n", st.heading("next"))
 	if cfg, err := loadConfig(); err == nil && len(cfg.Repos) == 0 {
-		printf(out, "  latem repo add <owner/name>       allow a repository; the agent picks it up\n")
+		printf(out, "  latem repo add <owner/name>         allow a repository; the agent picks it up\n")
 	}
-	printf(out, "  latem workflows check <checkout>  what this machine can run of it, and the fix for the rest\n")
-	printf(out, "  latem secrets set NAME            a value its workflows read (--repo, --env to scope it)\n")
+	printf(out, "  latem workflows check --repo <key>  what this machine can run of it, and the fix for the rest\n")
+	printf(out, "  latem secrets set NAME              a value its workflows read (--repo, --env to scope it)\n")
 	return doctorErr
+}
+
+// setupRepositories adds the repositories this machine builds: those --repo
+// names, or — on a terminal, with none configured — those it is asked for.
+// Each one's workflows are read without a checkout and checked (A57).
+func setupRepositories(cmd *cobra.Command, f setupFlags, cfg *config.Config) error {
+	out := cmd.OutOrStdout()
+	asking := len(f.repos) == 0 && len(cfg.Repos) == 0 && interactive(cmd)
+	if len(f.repos) == 0 && !asking {
+		if len(cfg.Repos) == 0 {
+			printf(out, "  none yet; `latem repo add <owner/name>` adds one\n")
+		} else {
+			printf(out, "  %s\n", strings.Join(slices.Sorted(maps.Keys(cfg.Repos)), ", "))
+		}
+		return nil
+	}
+
+	p := newPrompter(cmd)
+	for i := 0; ; i++ {
+		var slug string
+		if asking {
+			q := "  a repository this machine should build (owner/name), or Enter to skip: "
+			if i > 0 {
+				q = "  another (owner/name), or Enter to go on: "
+			}
+			answer, err := p.ask(q)
+			if err != nil {
+				return err
+			}
+			if answer == "" {
+				break
+			}
+			if slug, err = parseGitHubSlug(answer); err != nil {
+				printf(out, "  %v\n", err)
+				continue
+			}
+		} else {
+			if i == len(f.repos) {
+				break
+			}
+			slug = f.repos[i]
+		}
+		key := repoKeyFor(slug)
+		if err := runRepoAdd(cmd, repoAddFlags{slug: slug, key: key, inSetup: true}); err != nil {
+			if !asking {
+				return err
+			}
+			printf(out, "  %v\n", err)
+			continue
+		}
+		setupCheckRepo(cmd, p, asking, key)
+	}
+	return nil
+}
+
+// setupCheckRepo checks a repository just added: how many of its jobs this
+// machine can run, why not the rest, and — asked, on a terminal — the
+// [label_aliases] and [actions] entries that would let more run. A failure to
+// read it is reported and does not stop setup.
+func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+	report := func(err error) { printf(out, "  its workflows were not checked: %v\n", err) }
+
+	cfg, err := loadConfig()
+	if err != nil {
+		report(err)
+		return
+	}
+	target, err := resolveCheckTarget(ctx, cfg, "", workflowsCheckFlags{repo: key})
+	if err != nil {
+		report(err)
+		return
+	}
+	files, err := readRepo(ctx, cfg, key, fromMirrorThenRemote)
+	if err != nil {
+		report(err)
+		return
+	}
+	defer files.close()
+	empty, err := os.MkdirTemp("", "latem-check-workspace-")
+	if err != nil {
+		report(err)
+		return
+	}
+	defer func() { _ = os.RemoveAll(empty) }()
+	target.fsys, target.where, target.commit, target.workspace = files.fsys, files.where, files.sha, empty
+	stores, err := newSecretStores(cfg.Paths)
+	if err != nil {
+		report(err)
+		return
+	}
+	rep, err := analyzeWorkflows(ctx, cfg, target, stores)
+	if err != nil {
+		report(err)
+		return
+	}
+
+	printf(out, "\n  %d of %d jobs in %s can run on this machine\n", rep.jobs()-rep.failed(), rep.jobs(), key)
+	shown := 0
+	for _, wr := range rep.workflows {
+		for _, j := range wr.jobs {
+			if j.level() != levelFail || len(j.findings) == 0 {
+				continue
+			}
+			if shown == 6 {
+				printf(out, "    …\n")
+				break
+			}
+			first := strings.SplitN(j.findings[0].text, "\n", 2)[0]
+			printf(out, "    %s: %s — %s\n", path.Base(wr.file), j.key, first)
+			shown++
+		}
+	}
+	if rep.hasFixes() {
+		printf(out, "  its workflows need, in config.toml:\n")
+		for _, l := range suggestedFixLines(rep) {
+			printf(out, "    %s\n", l)
+		}
+		add := false
+		if asking {
+			if add, err = p.confirm("  add them?", true); err != nil {
+				report(err)
+				return
+			}
+		}
+		if add {
+			fixed, err := applyWorkflowFixes(config.DerivePaths(configDir()), cfg, rep)
+			if err != nil {
+				report(err)
+				return
+			}
+			printf(out, "  added %d entr%s\n", len(fixed), map[bool]string{true: "y", false: "ies"}[len(fixed) == 1])
+		} else {
+			printf(out, "  `latem workflows check --repo %s --fix` adds them\n", key)
+		}
+	}
+	printf(out, "  the details: latem workflows check --repo %s\n", key)
 }
 
 // registered reports whether the machine already has a control plane and a
