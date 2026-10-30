@@ -316,7 +316,22 @@ func (r *reader) script(text, file, where, wd string, depth int) {
 }
 
 func (r *reader) command(c command, ev Evidence, wd string, depth int) {
-	add := func(key string) { r.c.add(Requirement{Key: key, Strength: Invoked, Evidence: ev}) }
+	// A command run through bundle exec, bunx or npx comes from the
+	// project's Gemfile or package registry, not from the machine's PATH.
+	var provider string
+	for _, w := range c.wrappers {
+		switch w {
+		case "bundle exec":
+			provider = "bundler"
+		case "bunx", "bun x":
+			provider = "bunx"
+		case "npx", "pnpm dlx", "pnpm exec", "yarn dlx", "yarn exec":
+			provider = w
+		}
+	}
+	add := func(key string) {
+		r.c.add(Requirement{Key: key, Strength: Invoked, ProvidedBy: provider, Evidence: ev})
+	}
 	if dd := c.env["DEVELOPER_DIR"]; dd != "" {
 		if v := xcodeVersionIn(dd); v != "" {
 			r.c.add(Requirement{Key: Xcode, Version: v, Strength: Invoked, VersionStrength: Declared, Evidence: ev})
@@ -452,12 +467,18 @@ func (r *reader) command(c command, ev Evidence, wd string, depth int) {
 			}
 		}
 	}
+	provider = ""
 	if slices.Contains(c.wrappers, "sudo") {
 		add(Sudo)
 	}
-	if slices.Contains(c.wrappers, "bundle exec") {
+	switch {
+	case slices.Contains(c.wrappers, "bundle exec"):
 		add(Bundler)
 		add(Ruby)
+	case slices.Contains(c.wrappers, "bunx") || slices.Contains(c.wrappers, "bun x"):
+		add(Bun)
+	case slices.Contains(c.wrappers, "npx"):
+		add(Node)
 	}
 }
 
