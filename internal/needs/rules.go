@@ -86,10 +86,9 @@ type reader struct {
 	platform string
 	c        *collector
 	files    int
-	// read notes what the job's commands touched that a repository fact
-	// qualifies: a wrangler deploy, a gradle build.
-	wranglerConfigs []string
-	gradle          bool
+	// gradle notes a gradle build, which the repository's build files
+	// qualify as Android's or not.
+	gradle bool
 }
 
 func newReader(fsys fs.FS, leg Leg) *reader {
@@ -430,9 +429,13 @@ func (r *reader) command(c command, ev Evidence, wd string, depth int) {
 		r.c.unknown = append(r.c.unknown, Evidence{File: ev.File, Line: ev.Line, Where: ev.Where,
 			Snippet: ev.Snippet + " — eval runs text read at run time"})
 	case "bash", "sh", "zsh", "source", ".":
-		if i := slices.Index(args, "-c"); i >= 0 && i+1 < len(args) {
-			r.script(args[i+1], ev.File, ev.Where, wd, depth)
-			return
+		// A script's own `bash -c '…'`: its text is the script. Nothing here
+		// runs it.
+		for i, a := range args {
+			if a == "-c" && i+1 < len(args) {
+				r.script(args[i+1], ev.File, ev.Where, wd, depth)
+				return
+			}
 		}
 		if s := firstNonFlag(args); s != "" {
 			r.follow(s, wd, ev, depth)

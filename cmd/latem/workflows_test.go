@@ -397,3 +397,55 @@ func TestReadRepo_OfflineWithNoMirrorSaysSo(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// Each job says what it needs of a machine, the report counts the kinds,
+// and --verbose says where each need was read from (A59).
+func TestWorkflowsCheck_SaysWhatEachJobNeeds(t *testing.T) {
+	dir := configDirWith(t, baseConfig)
+	fakeStores(t, false)
+	fakeRepoFiles(t, fstest.MapFS{
+		".github/workflows/ci.yml": {Data: []byte("on: push\njobs:\n" +
+			"  web:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bun test\n" +
+			"  ios:\n    runs-on: macos-latest\n    steps:\n" +
+			"      - run: DEVELOPER_DIR=/Applications/Xcode_27.app xcodebuild -scheme App -destination 'generic/platform=iOS Simulator' build\n")},
+	})
+	out, _ := latemIn(t, dir, "", "workflows", "check", "--repo", "app", "--no-color", "-v")
+	for _, want := range []string{
+		"needs: Linux · bun",
+		"needs: iOS · ios-sdk · xcode 27",
+		".github/workflows/ci.yml, step 1: DEVELOPER_DIR=/Applications/Xcode_27.app xcodebuild",
+		"kinds of build: 1 Linux, 1 iOS — Xcode 27",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+
+	out, _ = latemIn(t, dir, "", "workflows", "check", "--repo", "app", "--json")
+	var rep struct {
+		Workflows []struct {
+			Jobs []struct {
+				Key   string `json:"key"`
+				Needs struct {
+					Kind     string `json:"kind"`
+					Requires []struct {
+						Key, Version, Strength string
+						VersionStrength        string `json:"version_strength"`
+					} `json:"requires"`
+				} `json:"needs"`
+			} `json:"jobs"`
+		} `json:"workflows"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	for _, j := range rep.Workflows[0].Jobs {
+		if j.Key != "ios" {
+			continue
+		}
+		if j.Needs.Kind != "ios" || len(j.Needs.Requires) != 2 || j.Needs.Requires[1].Version != "27" ||
+			j.Needs.Requires[1].VersionStrength != "declared" || j.Needs.Requires[1].Strength != "invoked" {
+			t.Errorf("ios needs = %+v", j.Needs)
+		}
+	}
+}

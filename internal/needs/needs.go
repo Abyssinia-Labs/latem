@@ -14,6 +14,7 @@ package needs
 import (
 	"slices"
 	"sort"
+	"strings"
 )
 
 // Requirement keys: a closed vocabulary, so a control plane can be told about
@@ -74,6 +75,9 @@ const (
 	Declared
 )
 
+// MarshalText writes a strength by name.
+func (s Strength) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
+
 func (s Strength) String() string {
 	switch s {
 	case Declared:
@@ -103,8 +107,8 @@ type Requirement struct {
 	// Strength is how directly the job needs the thing at all;
 	// VersionStrength how directly it names Version. An xcodebuild invokes
 	// Xcode, and a find-xcode.sh 27 beside it only infers which.
-	Strength        Strength `json:"-"`
-	VersionStrength Strength `json:"-"`
+	Strength        Strength `json:"strength"`
+	VersionStrength Strength `json:"version_strength,omitempty"`
 	// ProvidedBy names the action that installs it for the job, when one
 	// does: setup-node, setup-java. Such a requirement asks nothing of the
 	// machine but what the action needs.
@@ -199,9 +203,21 @@ func kindOf(r Report) string {
 	return KindUnknown
 }
 
-// platformOf is runner.os for labels: macos or linux, alone (A58).
+// platformOf is the platform labels name: macos or linux, as the compiler
+// produces them, or a vendor's label that says which (blacksmith-…-ubuntu-
+// 2404, macos-26). Looser than the compiler's own (A58), which decides what
+// runs: this only explains.
 func platformOf(labels []string) string {
-	mac, linux := slices.Contains(labels, "macos"), slices.Contains(labels, "linux")
+	var mac, linux bool
+	for _, l := range labels {
+		l = strings.ToLower(l)
+		switch {
+		case strings.Contains(l, "macos"):
+			mac = true
+		case strings.Contains(l, "linux"), strings.Contains(l, "ubuntu"):
+			linux = true
+		}
+	}
 	switch {
 	case mac && !linux:
 		return "macOS"
