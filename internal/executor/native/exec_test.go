@@ -528,11 +528,7 @@ func TestClose_StopsAStepThatIsStillRunning(t *testing.T) {
 		done <- err
 	}()
 
-	waitForFile(t, pidFile)
-	child := readPID(t, pidFile)
-	if child == 0 {
-		t.Fatal("the step never started")
-	}
+	child := waitForPID(t, pidFile)
 
 	if err := env.Close(t.Context()); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -668,6 +664,23 @@ func waitForFile(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("the step never created %s", path)
+}
+
+// waitForPID waits for a step to record a pid, not just for the file. The
+// shell creates the file for `echo $! > child.pid` before it writes it, so a
+// file that exists can still be empty, and a test that read it then saw no
+// pid: TestClose_StopsAStepThatIsStillRunning failed that way in an agent
+// macOS was throttling.
+func waitForPID(t *testing.T, path string) int {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
+		if pid := readPID(t, path); pid != 0 {
+			return pid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the step never recorded a pid in %s", path)
+	return 0
 }
 
 func readPID(t *testing.T, path string) int {
