@@ -405,7 +405,15 @@ func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
 				"the agent refused the last reload and is running the configuration it had: "+rs.Error,
 				"fix config.toml, then: latem service reload")
 		}
-		if rs.At.After(read) {
+		if len(rs.Deferred) > 0 {
+			return warn(id, title,
+				"the agent reloaded config.toml and did not apply: "+strings.Join(rs.Deferred, "; "),
+				"latem service restart")
+		}
+		// Only a reload's time is a read of the file. The first status is
+		// written when the agent is ready, after a startup that can take
+		// minutes, and an edit made during it is in no config the agent has.
+		if rs.Reloads > 0 && rs.At.After(read) {
 			read = rs.At
 		}
 	}

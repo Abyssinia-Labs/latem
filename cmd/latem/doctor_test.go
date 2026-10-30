@@ -1152,6 +1152,42 @@ func TestDoctorConfigLoadedByAgent(t *testing.T) {
 		}
 	})
 
+	// A reload that read a runner change applied the rest and deferred that:
+	// the agent is not running the file, whatever the times say.
+	t.Run("a reload that deferred a change", func(t *testing.T) {
+		edited := time.Now().Add(-5 * time.Minute)
+		d := newDoctor(t, running(), edited)
+		installed(t, d.dir)
+		st := agent.ReloadStatus{PID: 2566, Started: agentStarted, Reloads: 1, At: edited.Add(time.Minute),
+			Deferred: []string{`runner "linux" was changed`}}
+		b, _ := json.Marshal(st)
+		if err := os.WriteFile(config.DerivePaths(d.dir).ReloadStatus, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn || !strings.Contains(got.Detail, `runner "linux"`) ||
+			!strings.Contains(strings.Join(got.Fix, " "), "latem service restart") {
+			t.Errorf("check = %+v, want a warning naming the deferred change and a restart", got)
+		}
+	})
+
+	// The first status is written when the agent is ready, minutes after it
+	// read the file; an edit in between is in no config it has.
+	t.Run("an edit during startup", func(t *testing.T) {
+		edited := agentStarted.Add(time.Minute)
+		d := newDoctor(t, running(), edited)
+		installed(t, d.dir)
+		st := agent.ReloadStatus{PID: 2566, Started: agentStarted.Add(3 * time.Minute), At: agentStarted.Add(3 * time.Minute)}
+		b, _ := json.Marshal(st)
+		if err := os.WriteFile(config.DerivePaths(d.dir).ReloadStatus, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn {
+			t.Errorf("check = %+v, want a warning: the ready status is not a read of the file", got)
+		}
+	})
+
 	t.Run("no service installed is not a finding", func(t *testing.T) {
 		d := newDoctor(t, healthyRunner("darwin"), time.Now())
 		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
