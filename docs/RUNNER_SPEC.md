@@ -1510,7 +1510,7 @@ TimeoutStopSec=1830        # shutdown_grace + margin
 WantedBy=default.target
 ```
 
-**macOS — LaunchAgent** at `~/Library/LaunchAgents/com.latem.agent.plist`, `RunAtLoad`, `KeepAlive`.
+**macOS — LaunchAgent** at `~/Library/LaunchAgents/com.latem.agent.plist`, `RunAtLoad`, `KeepAlive`, `ProcessType` `Interactive` (A62).
 
 Three things `latem doctor` must verify and explain, because getting any of them wrong produces opaque signing failures (§13.3) or a machine that silently never comes back:
 
@@ -2881,3 +2881,17 @@ mini, which lacks Xcode 27". For a docker runner it says only what no image give
 daemon, `services:`, `container:`. It never routes a job, never holds one back, and admission
 never reads either field: INV-5 is unchanged, and the machine decides what it runs from its
 own config and the pinned commit, as before.
+
+### Amendment from running a recorder's tests on the Mac mini
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A62 | §23, §19 | **The LaunchAgent's `ProcessType` is `Interactive`, as GitHub's own runner has it, not `Standard`. Every unit and plist latem writes carries a revision; `latem setup` rewrites an installed definition of an older revision, and `latem doctor` names one, with `latem service install` as the fix** | take-one's recorder tests write frames in real time. In the agent they wrote 11 to 14 frames a second where 30 were due, and a recording cap stopped 100 ms late. The same two tests passed over ssh on the same Mac, under the same load, and on Blacksmith. launchd.plist(5) gives a `Standard` job, like one with no `ProcessType`, "light resource limits" on CPU and disk I/O. The plist's own comment said `Standard` was the unthrottled choice |
+
+**Revisions.** Nothing rewrote an installed definition. `latem setup` restarts a service it finds
+installed, and a restart keeps the plist launchd already holds, so a template fix reached only a
+machine set up after it. A unit or plist now says which revision it is, in a comment
+(`latem service definition, revision 2`); one with no such line is revision 1. Setup rewrites an
+older one, which restarts the agent. Doctor names it as a warning, because the agent still works,
+and the fix restarts the agent, so doctor says to run it while nothing is building. A definition
+that cannot be read is not called old.

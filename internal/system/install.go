@@ -278,11 +278,21 @@ type ServiceState struct {
 	Starting bool
 	// Detail is the service manager's own words, for display.
 	Detail string
+	// Revision is the installed definition's ServiceRevision, 0 when there
+	// is none on disk.
+	Revision int
 	// PID is the agent process, or 0 when the service manager did not name
 	// one. It is what lets a caller ask the operating system about the
 	// process — when it started, above all — without the agent having to
 	// publish anything.
 	PID int
+}
+
+// Outdated reports an installed definition an older latem wrote, which
+// `latem service install` would rewrite. One whose revision could not be
+// read is not called outdated.
+func (st ServiceState) Outdated() bool {
+	return st.Installed && st.Revision > 0 && st.Revision < ServiceRevision
 }
 
 // ServiceStatus reports on the installed service.
@@ -296,7 +306,11 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 	default:
 		return st, fmt.Errorf("system: no service integration for %s", s.goos)
 	}
-	if _, err := os.Stat(st.Path); err == nil {
+	if data, err := os.ReadFile(st.Path); err == nil {
+		st.Installed = true
+		st.Revision = DefinitionRevision(string(data))
+	} else if _, err := os.Stat(st.Path); err == nil {
+		// There and unreadable: installed, of a revision nobody can say.
 		st.Installed = true
 	}
 

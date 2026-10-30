@@ -100,9 +100,13 @@ func TestLaunchAgentPlistGolden(t *testing.T) {
 		"<key>RunAtLoad</key>",
 		"<key>KeepAlive</key>",
 		"<integer>1830</integer>",
-		// launchd throttles a Background job's CPU and disk, which makes an
-		// Xcode build slower for reasons that appear in no log.
-		"<string>Standard</string>",
+		// launchd puts light limits on a Standard job's CPU and disk, and more
+		// on a Background one's: an Xcode build is slower for reasons that
+		// appear in no log, and real-time tests fail. GitHub's runner is
+		// Interactive too.
+		"<string>Interactive</string>",
+		// What setup and doctor read to tell an installed plist is old.
+		"latem service definition, revision 2",
 		// launchd's minimal PATH contains no Homebrew prefix, so an agent
 		// started at login cannot find tart or fastlane.
 		"/opt/homebrew/bin",
@@ -110,6 +114,36 @@ func TestLaunchAgentPlistGolden(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("plist is missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// A definition says its revision, and one from before revisions reads as 1:
+// setup reinstalls it, and doctor names it.
+func TestDefinitionRevision(t *testing.T) {
+	spec := goldenSpec()
+	plist, err := spec.LaunchAgentPlist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit, err := spec.SystemdUnit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"plist": plist, "unit": unit} {
+		if got := DefinitionRevision(content); got != ServiceRevision {
+			t.Errorf("%s: revision %d, want %d", name, got, ServiceRevision)
+		}
+	}
+	old := strings.Replace(plist, "<!-- latem service definition, revision 2 -->\n", "", 1)
+	if got := DefinitionRevision(old); got != 1 {
+		t.Errorf("a plist without the marker reads as revision %d, want 1", got)
+	}
+	st := ServiceState{Installed: true, Revision: DefinitionRevision(old)}
+	if !st.Outdated() {
+		t.Error("a revision 1 plist is not outdated")
+	}
+	if (ServiceState{Installed: true, Revision: ServiceRevision}).Outdated() || (ServiceState{}).Outdated() {
+		t.Error("a current definition, or none, read as outdated")
 	}
 }
 

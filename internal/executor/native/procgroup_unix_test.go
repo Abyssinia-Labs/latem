@@ -108,11 +108,7 @@ func TestReap_AfterTheAgentIsKilled(t *testing.T) {
 	go func() { _, _ = agent.Process.Wait(); close(agentDone) }()
 
 	pidFile := filepath.Join(ws, "child.pid")
-	waitForFile(t, pidFile)
-	child := readPID(t, pidFile)
-	if child == 0 {
-		t.Fatal("the step never recorded its child's pid; the test would prove nothing")
-	}
+	child := waitForPID(t, pidFile)
 	envDir := filepath.Join(root, EnvDirPrefix+crashedRunID)
 	pgid := recordedGroup(t, envDir)
 	t.Cleanup(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
@@ -183,8 +179,7 @@ func TestGroupRecord_OutlivesTheAgentAndTheLeader(t *testing.T) {
 	leaderDone := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(leaderDone) }()
 
-	waitForFile(t, filepath.Join(ws, "child.pid"))
-	child := readPID(t, filepath.Join(ws, "child.pid"))
+	child := waitForPID(t, filepath.Join(ws, "child.pid"))
 
 	if got := recordedGroup(t, dir); got != pgid {
 		t.Fatalf("the record names group %d, want %d", got, pgid)

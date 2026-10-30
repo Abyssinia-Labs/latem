@@ -863,6 +863,41 @@ func TestDoctorLinuxLingerAndDockerGroup(t *testing.T) {
 	}
 }
 
+// A LaunchAgent an older latem wrote is named, with the command that
+// rewrites it: nothing else does, and before revision 2 it was a job macOS
+// throttled.
+func TestDoctor_AnOutdatedServiceDefinition(t *testing.T) {
+	dir := privateDir(t)
+	cmds := healthyRunner("darwin")
+	cmds["launchctl print gui/501/com.latem.agent"] = fakeCmd{
+		out: "com.latem.agent = {\n\tstate = running\n\tpid = 2566\n}\n"}
+	d := newTestDoctor("darwin", dir, cmds, testConfig(dir), nil)
+	path := system.LaunchAgentPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("<plist><dict><key>ProcessType</key><string>Standard</string></dict></plist>")
+	got := checkByID(d.checkService(t.Context()), "service.definition")
+	if got == nil || got.Level != levelWarn {
+		t.Fatalf("check = %+v, want a warning", got)
+	}
+	if !strings.Contains(got.Detail, "revision 1; this latem writes revision 2") ||
+		!strings.Contains(strings.Join(got.Fix, " "), "latem service install") {
+		t.Errorf("detail %q, fix %q", got.Detail, got.Fix)
+	}
+
+	write("<plist>\n<!-- latem service definition, revision 2 -->\n<dict/></plist>")
+	if got := checkByID(d.checkService(t.Context()), "service.definition"); got != nil {
+		t.Errorf("a current definition was named: %+v", got)
+	}
+}
+
 func TestReportCountsAndFixes(t *testing.T) {
 	var rep report
 	rep.section("A",

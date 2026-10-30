@@ -1144,6 +1144,17 @@ func (d *doctor) checkService(ctx context.Context) []check {
 	default:
 		out = append(out, pass("service.installed", "agent service", "running from "+st.Path))
 	}
+	// Nothing rewrites an installed definition, so one an older latem wrote
+	// keeps what that latem got wrong: before revision 2, a LaunchAgent that
+	// macOS throttled.
+	if st.Outdated() {
+		out = append(out, warn("service.definition", "service definition",
+			fmt.Sprintf("%s is revision %d; this latem writes revision %d", st.Path, st.Revision, system.ServiceRevision),
+			"latem service install   # rewrites it and restarts the agent: run it while nothing is building").
+			withNotes("Revision 2 makes the LaunchAgent Interactive, as GitHub's runner is. A Standard "+
+				"job gets light CPU and disk limits from launchd, which slow a build and fail tests "+
+				"that record in real time."))
+	}
 
 	if d.sys.IsLinux() {
 		linger, err := d.sys.Linger(ctx, "")

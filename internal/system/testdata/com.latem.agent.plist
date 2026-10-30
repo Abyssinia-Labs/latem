@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- latem service definition, revision 2 -->
 <dict>
 	<key>Label</key>
 	<string>com.latem.agent</string>
@@ -17,11 +18,14 @@
 	<integer>5</integer>
 	<key>ExitTimeOut</key>
 	<integer>1830</integer>
-	<!-- Standard, not Background: launchd throttles a Background job's CPU and
-	     disk I/O, and an Xcode build under that policy is slower for reasons
-	     that never appear in any log. -->
+	<!-- Interactive, as GitHub's own runner has it: launchd.plist(5) gives a
+	     Standard job, like one with no ProcessType, "light resource limits"
+	     on its CPU and disk I/O, and a Background job more. A build is slower
+	     under them for reasons that never appear in any log, and a test that
+	     records frames in real time fails: take-one's recorder tests wrote 11
+	     to 14 frames of 30 in the agent and passed over ssh on the same Mac. -->
 	<key>ProcessType</key>
-	<string>Standard</string>
+	<string>Interactive</string>
 	<key>WorkingDirectory</key>
 	<string>/Users/tester</string>
 	<key>StandardOutPath</key>

@@ -26,7 +26,7 @@ func (f *fakeService) Status(context.Context) (system.ServiceState, error) { ret
 
 func (f *fakeService) Install(_ context.Context, w io.Writer) error {
 	f.installs++
-	f.state = system.ServiceState{Installed: true, Running: true, Path: "/fake/com.latem.agent.plist"}
+	f.state = system.ServiceState{Installed: true, Running: true, Path: "/fake/com.latem.agent.plist", Revision: system.ServiceRevision}
 	printf(w, "  [ok  ] installed (fake)\n")
 	return nil
 }
@@ -152,7 +152,7 @@ func TestSetup_RestartsAServiceWhoseConfigChanged(t *testing.T) {
 	cp := newControlPlane(t, "token")
 	noSleep(t)
 	rec := fakeSetup(t, false)
-	rec.svc.state = system.ServiceState{Installed: true, Running: true}
+	rec.svc.state = system.ServiceState{Installed: true, Running: true, Revision: system.ServiceRevision}
 	dir := configDirWith(t, baseConfig)
 
 	if out, err := latemIn(t, dir, "", "setup", "--url", cp.agentURL()); err != nil {
@@ -163,6 +163,26 @@ func TestSetup_RestartsAServiceWhoseConfigChanged(t *testing.T) {
 	}
 	if !strings.Contains(readConfigFile(t, dir), "# The operator's own note") {
 		t.Error("setup rewrote an existing config")
+	}
+}
+
+// A service an older latem installed is rewritten, not just restarted: a
+// restart keeps the definition, and before revision 2 that was a LaunchAgent
+// macOS throttled.
+func TestSetup_RewritesAnOutdatedService(t *testing.T) {
+	rec := fakeSetup(t, false)
+	rec.svc.state = system.ServiceState{Installed: true, Running: true, Path: "/fake/com.latem.agent.plist", Revision: 1}
+	dir := configDirWith(t, baseConfig)
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	if rec.svc.installs != 1 || rec.svc.restart != 0 {
+		t.Errorf("install %d, restart %d; want the definition rewritten", rec.svc.installs, rec.svc.restart)
+	}
+	if !strings.Contains(out, "is revision 1; writing revision 2") {
+		t.Errorf("output:\n%s", out)
 	}
 }
 
