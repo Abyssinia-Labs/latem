@@ -95,7 +95,8 @@ func TestSetupToolchains_OffersEachInstallAndPutsKegsOnThePath(t *testing.T) {
 	fakeInteractive(t)
 	m := rec.machine
 	m.dirs["xcodegen"], m.dirs["ruby"] = "/nowhere", "/nowhere"
-	m.gives["brew install xcodegen"] = [2]string{"xcodegen", "/opt/homebrew/bin"}
+	// /usr/local/bin is on the service's PATH on a Mac and on Linux.
+	m.gives["brew install xcodegen"] = [2]string{"xcodegen", "/usr/local/bin"}
 	m.gives["brew install ruby"] = [2]string{"ruby", "/opt/homebrew/opt/ruby/bin"}
 
 	out, err := latemIn(t, dir, "y\ny\n", "setup", "--no-register", "--no-service")
