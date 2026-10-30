@@ -181,7 +181,8 @@ type Options struct {
 	// ProbeToolchains finds what this machine has for builds, for the note a
 	// run writes about what its job needs and the machine lacks (A59). Nil
 	// probes nothing and writes no note.
-	ProbeToolchains func(ctx context.Context) system.Toolchains
+	// stepPath is the PATH a native step starts from (A60).
+	ProbeToolchains func(ctx context.Context, stepPath string) system.Toolchains
 
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration

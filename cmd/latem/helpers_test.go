@@ -265,7 +265,7 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		readRepo: func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
 			return nil, errors.New("no mirror yet")
 		},
-		toolchains: func(context.Context) system.Toolchains { return system.Toolchains{Tools: map[string]bool{}} },
+		toolchains: func(context.Context, string) system.Toolchains { return system.Toolchains{Tools: map[string]bool{}} },
 	}
 }
 

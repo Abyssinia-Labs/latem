@@ -24,7 +24,7 @@ func needsDoctor(t *testing.T, files fstest.MapFS, tc system.Toolchains) *doctor
 	d.readRepo = func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
 		return &repoFiles{fsys: files, sha: strings.Repeat("c", 40), where: "the mirror", close: func() {}}, nil
 	}
-	d.toolchains = func(context.Context) system.Toolchains { return tc }
+	d.toolchains = func(context.Context, string) system.Toolchains { return tc }
 	return d
 }
 
@@ -103,5 +103,22 @@ func TestDoctorNeeds_NoMirrorGatesNothing(t *testing.T) {
 	}
 	if g := d.gateByNeeds([]check{warn("java.version", "JDK", "not on PATH")}); g[0].Level != levelWarn {
 		t.Errorf("java.version was gated with a repository unread: %+v", g[0])
+	}
+}
+
+// A native runner's path_prepend is on its steps' PATH (A60), so the probe
+// that decides what is missing looks there too; a docker runner's job is
+// never probed on the host.
+func TestDoctorNeeds_ProbesTheRunnersPath(t *testing.T) {
+	d := needsDoctor(t, appleRepo, system.Toolchains{})
+	d.cfg.Runners[1].Native = &config.NativeRunner{PathPrepend: []string{"/opt/homebrew/opt/ruby/bin"}}
+	var paths []string
+	d.toolchains = func(_ context.Context, p string) system.Toolchains {
+		paths = append(paths, p)
+		return system.Toolchains{Tools: map[string]bool{}}
+	}
+	d.checkNeeds(t.Context())
+	if len(paths) != 1 || !strings.HasPrefix(paths[0], "/opt/homebrew/opt/ruby/bin:") {
+		t.Errorf("probed with %q, want one probe of the mac runner's PATH", paths)
 	}
 }

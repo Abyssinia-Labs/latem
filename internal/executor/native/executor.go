@@ -79,6 +79,13 @@ type Options struct {
 	// step's shell exiting and the agent closing the log pipes that something
 	// the step abandoned is still holding open.
 	PipeDrainDelay time.Duration
+
+	// Env is set for every step beneath the job's own env, and PathPrepend
+	// goes in front of the PATH a step inherits: the runner's
+	// [runner.native] block, which says where a toolchain lives that the
+	// service's environment does not (A60).
+	Env         map[string]string
+	PathPrepend []string
 }
 
 // Executor runs every step of a run directly on this host. One Executor serves
@@ -274,6 +281,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		summaryFile: filepath.Join(dir, SummaryFileName),
 		tempDir:     filepath.Join(dir, TempDirName),
 		toolCache:   spec.ToolCache,
+		runner:      runnerLayer(e.opts.Env, e.opts.PathPrepend),
 		grace:       e.grace,
 		drain:       e.drain,
 		carried:     map[string]string{},

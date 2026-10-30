@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -355,6 +356,38 @@ concurrency = 1
 	}
 	if got := cfg.Runners[0].MinFreeGB(); got != DefaultNativeMinFreeGB {
 		t.Errorf("min_free_gb = %v, want %v", got, DefaultNativeMinFreeGB)
+	}
+}
+
+func TestLoad_NativeEnvAndPath(t *testing.T) {
+	f := newFixture(t, `
+schema_version = 1
+
+[repos.app]
+url          = "git@github.com:me/app.git"
+allowed_refs = ["main"]
+
+[[runner]]
+name        = "host"
+executor    = "native"
+labels      = ["macos"]
+
+  [runner.native]
+  env          = { JAVA_HOME = "/opt/homebrew/opt/openjdk@17" }
+  path_prepend = ["/opt/homebrew/opt/openjdk@17/bin/", "/opt/homebrew/opt/ruby/bin"]
+`)
+
+	cfg, err := Load(f.Opts)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	r := cfg.Runners[0]
+	if got := r.NativeEnv()["JAVA_HOME"]; got != "/opt/homebrew/opt/openjdk@17" {
+		t.Errorf("JAVA_HOME = %q", got)
+	}
+	want := []string{"/opt/homebrew/opt/openjdk@17/bin", "/opt/homebrew/opt/ruby/bin"}
+	if got := r.NativePathPrepend(); !slices.Equal(got, want) {
+		t.Errorf("path_prepend = %q, want %q (cleaned)", got, want)
 	}
 }
 
