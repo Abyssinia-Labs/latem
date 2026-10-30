@@ -21,6 +21,10 @@ func newExecutor(t *testing.T, opts Options) *Executor {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Not the uid running the suite: in a container that is root, which
+	// Preflight treats as a LaunchDaemon before it asks launchd anything. A
+	// test about root says so.
+	e.uid = 501
 	return e
 }
 

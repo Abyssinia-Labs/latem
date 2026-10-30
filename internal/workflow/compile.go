@@ -178,6 +178,11 @@ func CompileWith(
 	// compiled for more than one run.
 	x := newExpander(opts.Actions, w.Path)
 	x.policy, x.fetcher, x.scope = opts.Policy, opts.Fetcher, sc
+	// A58: the platform the job's labels settle, for a step whose if: asks
+	// nothing else. An error here is reported where labels are compiled.
+	if labels, err := compileLabels(declared.RunsOn, w.Path, jobName, opts.LabelAliases, sc); err == nil {
+		x.os = osOfLabels(labels)
+	}
 	expanded, err := x.expandSteps(ctx, declared.Steps, nil)
 	if err != nil {
 		return nil, badRegistry("%s: job %q: %v", w.Path, jobName, err)

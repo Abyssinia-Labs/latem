@@ -2647,3 +2647,24 @@ request a day per user is far inside api.github.com's 60 an hour per address.
 and than the tag's prereleases, and older than anything newer than the tag. Two builds past the
 same tag compare as the same, so neither is offered the other. Release tags never have this
 shape.
+
+### Amendment from running latem's own CI on latem
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A58 | §13.0, A42, A47 | **A `uses:` step whose `if:` reads only `runner.os` and the matrix leg, through functions that depend on their arguments alone, and is false on the platform the job's labels settle, is decided at compile: its action is never fetched and asks for no isolation. The step stays, with its id, name and `if:`, and is skipped when reached** | latem's own `check` job runs `actions/setup-go` on Linux only (`if: runner.os == 'Linux'`) and its matrix runs the job on macOS too. On a native macOS runner the job was refused for using a remote action (A47) — an action that step would never have run there. A workflow written for both platforms should run on both, without its author choosing between isolation and a second job |
+
+**When it is decided.** The platform is `runner.os` as the job's labels settle it: `macos` alone means
+`macOS`, `linux` alone means `Linux` — labels the compiler produces itself for GitHub's hosted
+labels and that an executor carries only on its own platform — and anything else, including both,
+settles nothing. A step is decided only when its condition reads no context but `runner` (and of
+it only `os`) and `matrix`, and calls no function but `contains`, `startsWith`, `endsWith`,
+`format`, `join`, `toJSON` and `fromJSON`. A status function, `hashFiles`, `env`, `steps`, `needs`
+or anything else leaves it to the run. Only a job's own steps are decided, not a composite
+action's.
+
+**Why the answer is the run's.** GitHub evaluates the condition when the step is reached. It cannot
+answer differently: a job's runner — and with it `runner.os` — does not change during the job, and
+a condition with no status function is `success() && it`, which a false `it` makes false. The step
+is kept as a no-op with its `if:`, so it is reported skipped, its `steps.<id>` reads as a skipped
+step's does, and a log reads as GitHub's would.

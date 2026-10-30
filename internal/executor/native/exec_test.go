@@ -741,7 +741,14 @@ echo "## Built 3 targets" >> "$GITHUB_STEP_SUMMARY"
 	agentPath := strings.Split(os.Getenv("PATH"), ":")
 	tail := agentPath[len(agentPath)-1]
 	add, agent := strings.Index(out, "/opt/latem-test-bin:"), strings.LastIndex(out, tail)
-	if tail == "" || add < 0 || agent < 0 || add > agent {
+	switch {
+	case !loginShellKeepsPathOrder(t):
+		// Debian's /etc/profile replaces root's PATH outright, and macOS's
+		// path_helper moves the system directories in front of whatever it
+		// was handed: on those machines a login shell keeps no order the
+		// agent gave it, from $GITHUB_PATH or anywhere else.
+		t.Log("this machine's login profile reorders PATH; the ordering is not checked here")
+	case tail == "" || add < 0 || agent < 0 || add > agent:
 		t.Errorf("$GITHUB_PATH addition should precede the agent's PATH (add at %d, agent tail %q at %d): %q", add, tail, agent, out)
 	}
 
@@ -857,4 +864,20 @@ func TestExec_ToolCacheOutlivesTheRun(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tools, "node", "22.0.0.complete")); err != nil {
 		t.Errorf("the tool cache should outlive the run: %v", err)
 	}
+}
+
+// loginShellKeepsPathOrder reports whether a login shell on this machine
+// keeps an entry put in front of PATH in front of it: what the assertion
+// above checks, asked of the machine first. A profile that only prepends
+// (Homebrew's shellenv, conda's init) keeps it; Debian's /etc/profile, for
+// root, and macOS's path_helper, which reorders, do not.
+func loginShellKeepsPathOrder(t *testing.T) bool {
+	t.Helper()
+	agent := strings.Split(os.Getenv("PATH"), ":")
+	tail := agent[len(agent)-1]
+	cmd := exec.Command(DefaultShell, "-lc", `echo "$PATH"`) //nolint:gosec // a fixed probe
+	cmd.Env = append(os.Environ(), "PATH=/opt/latem-probe:"+os.Getenv("PATH"))
+	out, err := cmd.Output()
+	probe := strings.Index(string(out), "/opt/latem-probe:")
+	return err == nil && tail != "" && probe >= 0 && probe < strings.LastIndex(string(out), tail)
 }
