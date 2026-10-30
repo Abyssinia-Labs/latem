@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -193,5 +196,31 @@ func TestTrimPipedValue(t *testing.T) {
 		if got := string(trimPipedValue([]byte(in))); got != want {
 			t.Errorf("trimPipedValue(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The prompt reads past MAX_CANON — 1024 bytes on macOS, where a longer
+// paste used to ring the bell and never end — and does canonical mode's
+// editing itself.
+func TestReadTypedLine(t *testing.T) {
+	long := strings.Repeat("t", 1500)
+	for name, c := range map[string]struct{ in, want string }{
+		"a long paste":             {long + "\n", long},
+		"a carriage return":        {"abc\r", "abc"},
+		"erase":                    {"abx\x7fc\n", "abc"},
+		"erase a multibyte letter": {"café\x7fe\n", "cafe"},
+		"backspace":                {"ab\x08c\n", "ac"},
+		"kill the line":            {"wrong\x15right\n", "right"},
+		"end of input mid-line":    {"abc\x04", "abc"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := readTypedLine(bufio.NewReader(strings.NewReader(c.in)))
+			if err != nil || string(got) != c.want {
+				t.Errorf("got %q, %v; want %q", got, err, c.want)
+			}
+		})
+	}
+	if _, err := readTypedLine(bufio.NewReader(strings.NewReader("\x04"))); !errors.Is(err, io.EOF) {
+		t.Errorf("^D on an empty line = %v, want EOF", err)
 	}
 }

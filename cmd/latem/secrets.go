@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -312,15 +313,26 @@ func isTerminal(f *os.File) bool {
 }
 
 // readHidden prompts on prompt and reads one line from the terminal f with
-// echo off, through stty(1) rather than a terminal library. Echo is restored
-// on every path out, a cancelled context included.
+// echo off, through stty(1) rather than a terminal library. The terminal's
+// settings are restored on every path out, a cancelled context included.
+//
+// Canonical mode goes off with echo. The terminal's line discipline holds at
+// most MAX_CANON bytes of a line — 1024 on macOS — and rings the bell at the
+// rest, newline included, so a long token pasted at the prompt never arrived
+// and the command waited for ever. Read a byte at a time instead, this does
+// the editing a prompt needs: erase, kill the line, end of input.
 func readHidden(ctx context.Context, f *os.File, prompt io.Writer, label string) ([]byte, error) {
 	printf(prompt, "%s: ", label)
-	if err := stty(f, "-echo"); err != nil {
+	saved, err := sttySettings(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading the terminal's settings: %w; pipe the value in instead", err)
+	}
+	if err := stty(f, "-echo", "-icanon", "min", "1", "time", "0"); err != nil {
+		_ = stty(f, saved)
 		return nil, fmt.Errorf("turning off echo: %w; pipe the value in instead", err)
 	}
 	defer func() {
-		_ = stty(f, "echo")
+		_ = stty(f, saved)
 		printf(prompt, "\n")
 	}()
 
@@ -330,8 +342,8 @@ func readHidden(ctx context.Context, f *os.File, prompt io.Writer, label string)
 	}
 	done := make(chan result, 1)
 	go func() {
-		line, err := bufio.NewReader(f).ReadBytes('\n')
-		done <- result{bytes.TrimRight(line, "\r\n"), err}
+		line, err := readTypedLine(bufio.NewReader(f))
+		done <- result{line, err}
 	}()
 	select {
 	case <-ctx.Done():
@@ -344,9 +356,50 @@ func readHidden(ctx context.Context, f *os.File, prompt io.Writer, label string)
 	}
 }
 
-func stty(f *os.File, arg string) error {
-	// #nosec G204 -- arg is one of the two literals above; there is no shell.
-	c := exec.Command("stty", arg)
+// readTypedLine reads one line from a terminal in non-canonical mode, applying
+// the edits canonical mode would have: erase removes the last character
+// rather than the last byte, ^U clears the line, ^D ends input.
+func readTypedLine(r io.ByteReader) ([]byte, error) {
+	var line []byte
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return line, err
+		}
+		switch b {
+		case '\n', '\r':
+			return line, nil
+		case 0x7f, 0x08: // DEL, BS
+			if len(line) > 0 {
+				_, n := utf8.DecodeLastRune(line)
+				line = line[:len(line)-n]
+			}
+		case 0x15: // ^U
+			line = line[:0]
+		case 0x04: // ^D
+			if len(line) == 0 {
+				return line, io.EOF
+			}
+			return line, nil
+		default:
+			line = append(line, b)
+		}
+	}
+}
+
+// sttySettings is the terminal's state as `stty -g` prints it, which stty
+// takes back as one argument.
+func sttySettings(f *os.File) (string, error) {
+	c := exec.Command("stty", "-g")
+	c.Stdin = f
+	out, err := c.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+func stty(f *os.File, args ...string) error {
+	// #nosec G204 -- args are the literals above, or what `stty -g` printed;
+	// there is no shell.
+	c := exec.Command("stty", args...)
 	c.Stdin = f
 	return c.Run()
 }
