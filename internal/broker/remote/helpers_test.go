@@ -139,6 +139,16 @@ func (cp *controlPlane) serve(w http.ResponseWriter, r *http.Request) {
 	defer cp.removeConn(conn)
 
 	cp.mu.Lock()
+	// A partition that began between the handshake and addConn found no
+	// connection to cut: the broker can see itself connected before this
+	// handler has registered the socket. Cut it here, or the session it opened
+	// lives through the partition and the test waits on a reconnect loop that
+	// never runs.
+	if cp.partitioned {
+		cp.mu.Unlock()
+		_ = conn.CloseNow()
+		return
+	}
 	hello := cp.hello
 	cp.mu.Unlock()
 	if hello != nil {
