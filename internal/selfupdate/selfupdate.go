@@ -52,6 +52,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -66,6 +67,11 @@ import (
 // offer versions this key signed — while the option itself would read as a way
 // to run a private build, which it is not. A test injects its own.
 const DefaultFeedURL = "https://api.github.com/repos/Abyssinia-Labs/latem/releases/latest"
+
+// ReleasePage is the address a person reads a release's notes at.
+func ReleasePage(tag string) string {
+	return "https://github.com/Abyssinia-Labs/latem/releases/tag/" + tag
+}
 
 // DefaultDownloadBase is where release assets live.
 const DefaultDownloadBase = "https://github.com/Abyssinia-Labs/latem/releases/download"
@@ -192,6 +198,27 @@ func (u *Updater) Check(ctx context.Context) (Release, error) {
 		return rel, fmt.Errorf("this binary's version %q is not a release version: %w", u.Current, err)
 	}
 
+	rel, err := u.Latest(ctx)
+	if err != nil {
+		return rel, err
+	}
+	cmp, err := compareVersions(rel.Version, u.Current)
+	if err != nil {
+		return Release{}, fmt.Errorf("comparing %s against this binary's %s: %w", rel.Version, u.Current, err)
+	}
+	if cmp <= 0 {
+		return Release{}, ErrUpToDate
+	}
+	return rel, nil
+}
+
+// Latest asks the feed for its latest release and checks only that its tag is
+// a version this package can compare. It needs no key and refuses no build,
+// because nothing it returns reaches disk: it is what the command line's
+// once-a-day notice reads (A56). [Updater.Check] is the gate for an update.
+func (u *Updater) Latest(ctx context.Context) (Release, error) {
+	var rel Release
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.feedURL(), nil)
 	if err != nil {
 		return rel, err
@@ -227,12 +254,8 @@ func (u *Updater) Check(ctx context.Context) (Release, error) {
 		return rel, fmt.Errorf("the feed's latest release %s is a draft or prerelease", feed.TagName)
 	}
 
-	cmp, err := compareVersions(feed.TagName, u.Current)
-	if err != nil {
-		return rel, fmt.Errorf("comparing %s against this binary's %s: %w", feed.TagName, u.Current, err)
-	}
-	if cmp <= 0 {
-		return rel, ErrUpToDate
+	if _, err := parseVersion(feed.TagName); err != nil {
+		return rel, fmt.Errorf("the feed's latest release %q is not a version: %w", feed.TagName, err)
 	}
 
 	rel.Version = feed.TagName
@@ -415,18 +438,28 @@ func extractBinary(archive []byte, dir string) (string, error) {
 // confirmVersion runs the downloaded binary and requires it to agree about
 // what it is.
 func confirmVersion(ctx context.Context, path, want string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, path, "version", "--short").Output() //nolint:gosec // a path this package just wrote
+	got, err := BinaryVersion(ctx, path)
 	if err != nil {
 		return fmt.Errorf("the downloaded binary would not run (wrong platform?): %w", err)
 	}
-	got := strings.TrimSpace(string(out))
 	if got != want && got != strings.TrimPrefix(want, "v") {
 		return fmt.Errorf("the downloaded binary reports version %q, and the release said %q", got, want)
 	}
 	return nil
+}
+
+// BinaryVersion runs the latem binary at path and returns the version it
+// reports. It is how a downloaded release is checked against its tag, and how
+// a running agent learns what `latem update` left at its own path (A56).
+func BinaryVersion(ctx context.Context, path string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, path, "version", "--short").Output() //nolint:gosec // a latem binary: one this package wrote, or the running agent's own
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // Install replaces target with the staged binary, atomically.
@@ -459,19 +492,36 @@ func Install(staged, target string) error {
 type version struct {
 	major, minor, patch int
 	pre                 string
+	// after marks a build made from a tree past this tag: commits after it, a
+	// modified tree, or both (A56).
+	after bool
 }
+
+// describeSuffix is what `git describe --tags --dirty` appends to the tag a
+// build was made after — `-<commits since it>-g<abbreviated commit>`, then
+// `-dirty` for a modified tree — and so what the Makefile stamps on every
+// build from source.
+var describeSuffix = regexp.MustCompile(`(?:-[0-9]+-g[0-9a-f]{4,40}(?:-dirty)?|-dirty)$`)
 
 // parseVersion accepts `v1.2.3` and `1.2.3`, with an optional `-suffix`.
 //
 // Deliberately strict. This is the input to a comparison that decides whether
 // to replace a binary, and a lenient parser's mistakes all look like
 // "installed something older on purpose".
+//
+// One suffix is read rather than taken as a prerelease: the one `git describe`
+// adds. Semver would sort `v0.1.2-69-gbf886f2` before v0.1.2, so a machine
+// built 69 commits after v0.1.2 was offered v0.1.2 as an update — the
+// downgrade §20 refuses, arriving through the parser (A56).
 func parseVersion(s string) (version, error) {
 	var v version
 
 	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "v"))
 	if s == "" {
 		return v, errors.New("empty")
+	}
+	if loc := describeSuffix.FindStringIndex(s); loc != nil {
+		v.after, s = true, s[:loc[0]]
 	}
 	if i := strings.IndexAny(s, "-+"); i >= 0 {
 		v.pre, s = s[i+1:], s[:i]
@@ -490,6 +540,11 @@ func parseVersion(s string) (version, error) {
 	}
 	return v, nil
 }
+
+// Compare reports whether release version a is newer than (1), the same as
+// (0), or older than (-1) b, by the rules [Updater.Check] applies. A build from
+// commits after a tag is newer than that tag and older than the next.
+func Compare(a, b string) (int, error) { return compareVersions(a, b) }
 
 // compareVersions reports whether a is newer than (1), the same as (0), or
 // older than (-1) b.
@@ -515,11 +570,21 @@ func compareVersions(a, b string) (int, error) {
 	// v0.2.0, and one on v0.2.0 does not move to v0.2.0-rc.2.
 	switch {
 	case va.pre == vb.pre:
-		return 0, nil
 	case va.pre == "":
 		return 1, nil
 	case vb.pre == "":
 		return -1, nil
+	default:
+		return strings.Compare(va.pre, vb.pre), nil
 	}
-	return strings.Compare(va.pre, vb.pre), nil
+	// The same tag. A build from past it is newer than the tag itself; two
+	// builds past the same tag are not ordered, and saying "the same" keeps
+	// either from being offered the other.
+	switch {
+	case va.after == vb.after:
+		return 0, nil
+	case va.after:
+		return 1, nil
+	}
+	return -1, nil
 }

@@ -42,6 +42,8 @@ func run() int {
 	defer stop()
 
 	root := newRootCommand()
+	// After everything the command printed, error included (A56).
+	defer startNotice(root, os.Args[1:], os.Stderr)()
 	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return ExitOK
@@ -92,7 +94,8 @@ Start here:
   latem repo add <owner/name>  allow a repository
   latem workflows check [dir]  which of its workflow jobs this machine can run
   latem doctor                 check this machine and name the fix for anything wrong
-  latem run <repo> <job>       trigger a build locally`
+  latem run <repo> <job>       trigger a build locally
+  latem update                 install the latest release`
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
@@ -142,6 +145,7 @@ func newRootCommand() *cobra.Command {
 		newDoctorCommand(),
 		newCacheCommand(),
 		newServiceCommand(),
+		newUpdateCommand(),
 		newVersionCommand(),
 	)
 

@@ -189,6 +189,24 @@ func TestCheck(t *testing.T) {
 		})
 	}
 
+	// A build from source after v0.3.0 already has everything v0.3.0 has.
+	// Semver alone sorts its describe suffix as a prerelease, before v0.3.0,
+	// and offered the tag it was built from as an update (A56).
+	for _, current := range []string{"v0.3.0-69-gbf886f2", "v0.3.0-dirty", "v0.3.0-2-gabc1234-dirty"} {
+		t.Run("a build past the same tag: "+current, func(t *testing.T) {
+			_, err := r.updater(t, current).Check(context.Background())
+			if !errors.Is(err, ErrUpToDate) {
+				t.Fatalf("Check on %s = %v, want ErrUpToDate", current, err)
+			}
+		})
+	}
+	t.Run("a build past an older tag", func(t *testing.T) {
+		rel, err := r.updater(t, "v0.2.9-4-g0123abc").Check(context.Background())
+		if err != nil || rel.Version != "v0.3.0" {
+			t.Fatalf("Check = %+v, %v; want v0.3.0", rel, err)
+		}
+	})
+
 	t.Run("a dev build", func(t *testing.T) {
 		_, err := r.updater(t, DevVersion).Check(context.Background())
 		if err == nil {
@@ -206,6 +224,26 @@ func TestCheck(t *testing.T) {
 			t.Fatalf("Check with no key = %v, want ErrNoTrustedKey", err)
 		}
 	})
+}
+
+// Latest is the notice's read: no key, no opinion about the running build,
+// and still no tag it cannot compare.
+func TestLatest(t *testing.T) {
+	r := newRelease(t, "v0.3.0")
+	u := r.updater(t, DevVersion)
+	u.Key = PublicKey{}
+	rel, err := u.Latest(context.Background())
+	if err != nil || rel.Version != "v0.3.0" || rel.Bare != "0.3.0" {
+		t.Fatalf("Latest = %+v, %v; want v0.3.0", rel, err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"nightly","draft":false,"prerelease":false}`)
+	}))
+	defer srv.Close()
+	if _, err := (&Updater{FeedURL: srv.URL}).Latest(context.Background()); err == nil {
+		t.Fatal("a tag that is not a version was returned")
+	}
 }
 
 func TestCheck_RefusesAFeedItCannotBelieve(t *testing.T) {
@@ -472,6 +510,13 @@ func TestCompareVersions(t *testing.T) {
 		// updates to the real thing.
 		{"v0.2.0", "v0.2.0-rc.1"},
 		{"v0.2.0-rc.2", "v0.2.0-rc.1"},
+		// A build from source is past the tag `git describe` names, and
+		// before the next one (A56).
+		{"v0.1.2-69-gbf886f2", "v0.1.2"},
+		{"v0.1.3", "v0.1.2-69-gbf886f2"},
+		{"v0.1.2-dirty", "v0.1.2"},
+		{"v0.2.0-rc.1-3-gabcdef0", "v0.2.0-rc.1"},
+		{"v0.2.0", "v0.2.0-rc.1-3-gabcdef0"},
 	}
 	for _, p := range newer {
 		got, err := compareVersions(p[0], p[1])
@@ -488,6 +533,9 @@ func TestCompareVersions(t *testing.T) {
 
 	if got, err := compareVersions("v0.1.0", "0.1.0"); err != nil || got != 0 {
 		t.Errorf("compareVersions ignoring the v prefix = %d, %v", got, err)
+	}
+	if got, err := compareVersions("v0.1.2-69-gbf886f2", "v0.1.2-67-g9e9d735"); err != nil || got != 0 {
+		t.Errorf("two builds past one tag = %d, %v; want 0, so neither is offered the other", got, err)
 	}
 
 	// Refused rather than guessed: every one of these would otherwise compare

@@ -1294,6 +1294,7 @@ latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars]
 latem workflows check [path] [--fix]   Plan and compile a checkout's workflows offline (A54)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
+latem update [--check]               Install the latest release; the agent moves onto it when idle (A56)
 latem version
 ```
 
@@ -1336,6 +1337,8 @@ The five things that turn that sentence into something implementable, each recor
 5. **"No run active" is arranged, not observed.** Checking that nothing is in flight and then re-execing is a race with a worker about to claim, and losing it orphans a build — which §6's reconciliation then correctly marks `interrupted` and reaps. So the agent *stops claiming first*, then waits for idle, with two constraints: the pause must be reversible (`draining` is a one-way latch whose only caller is shutdown, and a machine that failed to download an update must go back to work), and the wait must be bounded. Ten minutes: this is capacity given up for an update rather than for a shutdown, and an update that does not happen today happens tomorrow.
 
 **A build that trusts no signing key refuses `auto_update = true` at load.** The signing key is embedded at build time, so this is a property of the binary rather than of the machine: a `go build` from a tree whose `internal/selfupdate/trusted.pub` is still the placeholder can verify nothing, and would check a feed daily and decline every release into a log nobody reads. That is the same decision A27 made about an approval that recorded nothing and A38 made about a documented `~` no executor expanded — **a control that reads as a control and does nothing is worse than an absent one**, because it stops the operator looking. The refusal is narrow: it is keyed on the key, not on the calendar, so a release binary accepts the value and a hand-built one does not.
+
+**By hand, and the notice.** `latem update` is the same chain run once, on request, against the binary the command runs from; SIGUSR2 then moves the running agent onto it without cancelling a run. Every other command says once a day, on a terminal, when a newer release exists. A build from commits after a tag compares as newer than that tag. Amendment A56.
 
 **Metrics.** INV-1 forbids binding a non-loopback listener; it does not forbid loopback. `metrics_addr` (default `127.0.0.1:9838`, empty to disable) serves counters and gauges — runs by terminal state, run duration, queue depth, cache volume sizes, disk free per runner, broker connection state, log frames dropped. The config loader rejects a non-loopback value, so the invariant is enforced where it cannot be forgotten. Anyone wanting these off-machine points a local Prometheus at it or tunnels; the agent does not grow a remote surface for observability.
 
@@ -2591,3 +2594,56 @@ the machine already has `[broker.remote]` and a readable token, or `--no-registe
 or 2 changed anything or it is installed and not running. Registration comes before the service
 rather than after because `[broker.remote]` is restart-only: the other order starts the agent
 twice. (4) It runs doctor, and exits with doctor's verdict. `install.sh` now ends by naming it.
+
+### Amendment from updating by hand
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A56 | §19, §20, A41, A54 | **`latem update` installs the latest release, verified exactly as §20's self-update verifies one, and SIGUSR2 moves the running agent onto it at its next idle moment, in place. Every other command says once a day, on a terminal, when a newer release exists. A version `git describe` stamped — a build from commits after a tag — compares as newer than that tag** | A machine moved onto a new latem only by someone building it and restarting its service: `auto_update` is off by default, daily, and silent. And the comparison §20 rests on was wrong for every build from source. The Makefile stamps `git describe --tags --dirty`, so a machine built 69 commits after v0.1.2 is `v0.1.2-69-gbf886f2`, which semver reads as a prerelease of v0.1.2 and sorts before it — so the self-update offered that machine v0.1.2, the downgrade item 2 refuses, arriving through the parser |
+
+**The command.** `latem update [--check]`. It is A41's chain, unchanged: the feed supplies a
+version and nothing else, the signed manifest binds every archive to its version's name, the
+release must be strictly newer than this binary, and the downloaded binary is asked its version
+before it replaces anything. What it replaces is the file the command is running from, symlinks
+resolved, staged beside it and renamed over it. It refuses a `dev` build, which has no version to
+compare, and a build that trusts no key, which can verify nothing. `--check` reports and changes
+nothing. Up to date, it still asks the running agent to move onto this binary, which is how an
+agent left on an older file — replaced by hand, or restarted before a move it was waiting on —
+catches up.
+
+**Moving the agent: SIGUSR2.** The signal names no file and no version. The agent asks the binary
+at its own path what it is (`version --short`), and if that is what it runs, the answer is
+`current` and nothing pauses. Otherwise it does what §20 item 5 does: stop claiming, wait for the
+runs in flight, re-exec in place. The pid survives the exec, so launchd and systemd see a service
+that never stopped, and an agent run in a terminal moves too. Two choices differ from the daily
+self-update, both because a person asked for this one. The wait is `shutdown_grace`, the time this
+operator has already said runs may need to finish, not ten minutes. And running out of it is not
+"tomorrow": the agent takes work again and moves at the first moment nothing is running, checked
+every 30 seconds. It never cancels a run to move. While a move is pending the daily self-update
+skips its check, so the two never pause and resume claims over each other.
+
+**Who may be signalled.** As A54 decided for SIGHUP: only the process holding the config
+directory's flock, and only when its status file says it handles the signal. Go's default action
+for an unhandled SIGUSR2 is to exit, so signalling an older agent would stop a build machine to
+update it. A54's status file gains `version`, `binary` and `switch` (the answer to the last
+SIGUSR2: `current`, `waiting` with the number of runs, `switching`, or `failed` with the reason).
+An agent that writes a version handles SIGUSR2; one that writes none predates this amendment, and
+the command says `latem service restart` instead. The command waits up to 30 seconds for the
+answer: the new image's first status with the same pid, or `waiting`, `current` or `failed`.
+
+**The notice.** After every command except `agent`, `update` and shell completion — and only when
+stderr is a terminal, `CI` is unset and `LATEM_NO_UPDATE_NOTIFIER` is unset — the command prints
+three lines to stderr when the feed's latest release is newer than it: the two versions, `To
+upgrade, run: latem update`, and the release's page. The answer is remembered in
+`<user cache dir>/latem/release.json` for 24 hours. A stale one is refreshed in the background
+while the command runs, and a finished command waits at most one second more for it; an answer
+that arrives later is still remembered for the next command. A failed check is remembered too, so
+an offline machine, or one reading a feed that is not public, asks once a day and prints nothing.
+The read needs no key, because nothing it returns reaches disk. It never fails a command. One
+request a day per user is far inside api.github.com's 60 an hour per address.
+
+**Versions past a tag.** A version ending in what `git describe --tags --dirty` appends —
+`-<commits>-g<abbreviated commit>`, `-dirty`, or both — is past that tag. It is newer than the tag
+and than the tag's prereleases, and older than anything newer than the tag. Two builds past the
+same tag compare as the same, so neither is offered the other. Release tags never have this
+shape.

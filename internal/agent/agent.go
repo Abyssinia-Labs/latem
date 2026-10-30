@@ -173,6 +173,10 @@ type Options struct {
 	// rather than become the new binary substitutes its own.
 	Exec func(path string, argv, env []string) error
 
+	// BinaryVersion asks a latem binary its version, for SIGUSR2 (A56). Nil
+	// runs it with `version --short`.
+	BinaryVersion func(ctx context.Context, path string) (string, error)
+
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration
 	PreflightInterval   time.Duration
@@ -239,7 +243,8 @@ type Agent struct {
 	draining atomic.Bool
 
 	// paused stops the pool claiming without the one-way finality of
-	// draining. Self-update is its only user, and the difference matters:
+	// draining. Self-update and SIGUSR2 (A56) are its users, and the
+	// difference matters:
 	// draining is a decision to stop for good, and this is a pause that has to
 	// end even when the thing it was waiting for failed (§20, selfupdate.go).
 	paused atomic.Bool
@@ -255,11 +260,23 @@ type Agent struct {
 	// [Agent.current] reads it; cfg stays the config the agent started with,
 	// which is the right answer for everything restart-only.
 	live atomic.Pointer[config.Config]
-	// reloadMu serialises reloads and guards the three fields after it.
+	// reloadMu serialises reloads and status writes, and guards the fields
+	// after it.
 	reloadMu  sync.Mutex
 	reloader  *config.Reloader
 	reloads   int
 	startedAt time.Time
+	reloadErr string
+	deferred  []string
+	// binary is the file this agent runs, as its status reports it (A56).
+	binary string
+	// switchRequests counts SIGUSR2s and switchState is the last answer (A56).
+	switchRequests int
+	switchState    *SwitchState
+
+	// switching is set while a move onto a new binary is pending, so a second
+	// SIGUSR2, or the daily self-update, does not start another.
+	switching atomic.Bool
 
 	mu sync.Mutex
 	// activeRepos maps a live run id to its repo key, so the cache pruner can

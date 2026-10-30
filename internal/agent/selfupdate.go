@@ -101,6 +101,12 @@ func (a *Agent) updateLoop(ctx context.Context) {
 // updateOnce performs one check-and-maybe-replace cycle against the binary at
 // target.
 func (a *Agent) updateOnce(ctx context.Context, src releaseSource, target string) {
+	if a.switching.Load() {
+		// A SIGUSR2 is already moving this agent onto the binary on disk,
+		// and a second pause-and-swap would race it (A56).
+		a.log.Debug("self-update: a move onto the binary on disk is pending; skipping this check")
+		return
+	}
 	rel, err := src.Check(ctx)
 	switch {
 	case errors.Is(err, selfupdate.ErrUpToDate):
@@ -252,7 +258,7 @@ func (a *Agent) reexec(path string) error {
 	if a.opts.Exec != nil {
 		return a.opts.Exec(path, os.Args, os.Environ())
 	}
-	a.log.Info("self-update: re-executing", "path", path, "args", os.Args)
+	a.log.Info("re-executing", "path", path, "args", os.Args)
 	// Only returns on failure.
 	return syscall.Exec(path, os.Args, os.Environ()) //nolint:gosec // the path this agent just verified and installed
 }
