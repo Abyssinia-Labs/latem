@@ -52,3 +52,33 @@ func TestExecute_NoToolchainsNoNote(t *testing.T) {
 		t.Errorf("a note without a probe:\n%s", log)
 	}
 }
+
+// An App Store update that lands while a job runs on a native runner is said
+// in its log as the job ends (A64); a job whose Xcode held still says nothing.
+func TestExecute_NotesAnXcodeChangedMidJob(t *testing.T) {
+	for name, after := range map[string]string{"updated": "27.3", "unchanged": "27.2"} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.exec.name = "native"
+			h.runners = []Runner{{Name: "mac", Labels: []string{"macos", "xcode"}, Executor: h.exec}}
+			calls := 0
+			h.opts.Toolchains = func() *system.Toolchains {
+				calls++
+				v := "27.2"
+				if calls > 1 {
+					v = after
+				}
+				return &system.Toolchains{Xcodes: []system.XcodeInstall{{Version: system.Version{Major: 27, Text: v}}}}
+			}
+			o := h.build()
+			req := h.request("macos")
+			req.Repo = "strict"
+			res := h.run(o, req)
+			log := h.logContents(res.RunID)
+			said := strings.Contains(log, "this machine's Xcode changed while the job ran (27.2 → 27.3)")
+			if said != (after != "27.2") {
+				t.Errorf("note said: %v, want %v:\n%s", said, after != "27.2", log)
+			}
+		})
+	}
+}

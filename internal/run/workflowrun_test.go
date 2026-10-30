@@ -190,6 +190,61 @@ func TestExecute_WorkflowRunJobPinsItsCommit(t *testing.T) {
 	}
 }
 
+// A re-run of a pull request that has since merged: GitHub deleted its merge
+// ref, and the job builds the commit its event named, fetched by its name when
+// no ref here reaches it. A commit upstream no longer has is still refused, and
+// a branch's commit is never fetched by its name.
+func TestExecute_WorkflowRunJobAfterItsPullRequestMerged(t *testing.T) {
+	const merge = "3333333333333333333333333333333333333333"
+	const lost = "4444444444444444444444444444444444444444"
+
+	for name, c := range map[string]struct {
+		ref, sha  string
+		inMirror  bool
+		state     protocol.RunState
+		wantInMsg string
+		fetched   bool
+	}{
+		"in the mirror":       {"refs/pull/16/merge", merge, true, protocol.StateSucceeded, "", false},
+		"fetched by its name": {"refs/pull/16/merge", merge, false, protocol.StateSucceeded, "", true},
+		"gone upstream too":   {"refs/pull/16/merge", lost, false, protocol.StateRejected, "could not be fetched", true},
+		"a deleted branch":    {"refs/heads/gone", merge, false, protocol.StateRejected, `ref "refs/heads/gone" does not exist`, false},
+		"a branch's lost tip": {"refs/heads/main", lost, false, protocol.StateRejected, "is not in this machine's mirror", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.source.registry = ""
+			h.source.upstream = map[string]bool{merge: true}
+			h.cfg.Repos["app"].AllowedRefs = append(h.cfg.Repos["app"].AllowedRefs, "refs/pull/**")
+			if c.inMirror {
+				h.source.commits = map[string]bool{c.sha: false}
+			}
+			o := h.build()
+
+			req := workflowRequest(h, "web2")
+			req.Ref, req.SHA = c.ref, c.sha
+			req.Event.Ref, req.Event.SHA = c.ref, c.sha
+			r := h.admitAndClaim(o, req)
+			h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", runWorkflowFile)
+			res, err := o.Execute(t.Context(), r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.State != c.state || !strings.Contains(res.ErrorMsg, c.wantInMsg) {
+				t.Fatalf("got %s/%s %q, want %s containing %q", res.State, res.ErrorCode, res.ErrorMsg, c.state, c.wantInMsg)
+			}
+			if got := len(h.source.fetchedByName) > 0; got != c.fetched {
+				t.Errorf("fetched by name: %v, want %v", h.source.fetchedByName, c.fetched)
+			}
+			if c.state == protocol.StateSucceeded {
+				if co := h.source.checkedOut; len(co) == 0 || co[len(co)-1] != [2]string{c.ref, c.sha} {
+					t.Errorf("checked out %v, want %s at %s", co, c.ref, c.sha)
+				}
+			}
+		})
+	}
+}
+
 const matrixWorkflowFile = `
 on: [push]
 jobs:

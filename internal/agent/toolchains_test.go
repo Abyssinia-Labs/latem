@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -102,4 +103,30 @@ func TestCapacity_InTheHeartbeat(t *testing.T) {
 	if measured.Load() != 1 {
 		t.Errorf("measured %d times, want once before the hour-long tick", measured.Load())
 	}
+}
+
+// An update to Xcode moves the fingerprint, and the agent checks its runners
+// at once rather than at the next five-minute preflight (A64).
+func TestWatch_PreflightsWhenXcodeChanges(t *testing.T) {
+	var fp atomic.Value
+	fp.Store("27.2")
+	ta := newTestAgent(t, newConfigDir(t, configOptions{}), func(o *Options) {
+		o.HostFingerprint = func() string { return fp.Load().(string) }
+		o.WatchInterval = 20 * time.Millisecond
+		o.PreflightInterval = time.Hour
+	})
+	ta.run(t)
+	waitFor(t, "the runner available", 10*time.Second, func() bool { return ta.availableRunners() == 1 })
+
+	ta.exec.setPreflight(errors.New("Xcode at /Applications/Xcode.app is missing or half-installed"))
+	time.Sleep(100 * time.Millisecond)
+	if ta.availableRunners() != 1 {
+		t.Fatal("the runner went dark with the fingerprint unchanged; the hour-long preflight fired")
+	}
+	fp.Store("27.3 half-installed")
+	waitFor(t, "the runner unavailable", 10*time.Second, func() bool { return ta.availableRunners() == 0 })
+
+	ta.exec.setPreflight(nil)
+	fp.Store("27.3")
+	waitFor(t, "the runner back", 10*time.Second, func() bool { return ta.availableRunners() == 1 })
 }

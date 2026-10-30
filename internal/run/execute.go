@@ -53,8 +53,11 @@ type execution struct {
 	refNormalized string
 	sha           string
 	runner        *Runner
-	sec           *secrets.Set
-	env           executor.Env
+	// xcodeAtStart is the machine's Xcodes as the job began on a native
+	// runner, for the note that they changed under it (A64).
+	xcodeAtStart *string
+	sec          *secrets.Set
+	env          executor.Env
 	// stepArtifacts are what upload-artifact steps collected as they ran
 	// (A49), reported with the run alongside §17's end-of-job collection.
 	stepArtifacts []protocol.ArtifactRef
@@ -245,8 +248,13 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// Gate 7 — normalization. Exactly one of refs/heads/<ref> and
 	// refs/tags/<ref> must exist; both is E_AMBIGUOUS_REF and never a guess.
 	normalized, err := registry.NormalizeRef(ctx, mirror, x.req.Ref)
+	gone := false
 	if err != nil {
-		return nil, registry.Decision{}, err
+		if !x.pullGone(err) {
+			return nil, registry.Decision{}, err
+		}
+		normalized, gone = x.req.Ref, true
+		x.note("%s no longer exists; building the commit the event named", normalized)
 	}
 
 	// Gate 9 — resolve, BEFORE gate 8 decides (amendment A27). §10 used to
@@ -261,9 +269,12 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// clone, and nothing from the commit is trusted or even looked at. What it
 	// buys is that every parked run records exactly the commit an operator is
 	// being asked to approve.
-	sha, err := mirror.Resolve(ctx, normalized)
-	if err != nil {
-		return nil, registry.Decision{}, err
+	// A gone pull request ref has no tip; pin goes by the event's commit alone.
+	var sha string
+	if !gone {
+		if sha, err = mirror.Resolve(ctx, normalized); err != nil {
+			return nil, registry.Decision{}, err
+		}
 	}
 	if x.isWorkflowRun() {
 		pinned, dec, err := x.pin(ctx, mirror, normalized, sha)
@@ -455,6 +466,8 @@ func (x *execution) finish(ctx context.Context, out outcome) Result {
 	if cancelled {
 		out = cancelOutcome(out, reason, actor)
 	}
+
+	x.noteXcodeChanged()
 
 	if x.ws == nil || !collectible(out.state) {
 		return x.terminate(ctx, out)

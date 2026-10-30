@@ -24,6 +24,10 @@ func (x *execution) noteNeeds(reg *registry.Registry, runner *Runner) {
 	if tc == nil || job == nil {
 		return
 	}
+	if executorName(runner) == "native" {
+		v := tc.XcodeVersions()
+		x.xcodeAtStart = &v
+	}
 	root, err := os.OpenRoot(x.ws.Path)
 	if err != nil {
 		return
@@ -54,4 +58,33 @@ func (x *execution) noteNeeds(reg *registry.Registry, runner *Runner) {
 		}
 		x.note("%s", msg)
 	}
+}
+
+// noteXcodeChanged says, as a job on a native runner ends, that the machine's
+// Xcode changed while it ran (A64). An App Store update replaces Xcode in
+// place without asking whether a build is using it, and the failure that
+// follows names a missing framework or a dead simulator, never the update.
+// The agent probes again within half a minute of an update, so one that lands
+// in a job's last seconds can go unsaid.
+func (x *execution) noteXcodeChanged() {
+	if x.xcodeAtStart == nil {
+		return
+	}
+	tc := x.o.toolchains()
+	if tc == nil {
+		return
+	}
+	before, now := *x.xcodeAtStart, tc.XcodeVersions()
+	if now == before {
+		return
+	}
+	x.note("this machine's Xcode changed while the job ran (%s → %s); an App Store update replaces Xcode "+
+		"in place, so a failure in this job may be the update's", orNone(before), orNone(now))
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }

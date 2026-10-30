@@ -111,6 +111,8 @@ to do it.`,
 				MeasureMachine: func(ctx context.Context) capacity.Machine {
 					return measureMachine(ctx, system.New(system.Options{}))
 				},
+				// An App Store update to Xcode, noticed in half a minute (A64).
+				HostFingerprint: system.New(system.Options{}).XcodeFingerprint,
 			})
 			if err != nil {
 				return err

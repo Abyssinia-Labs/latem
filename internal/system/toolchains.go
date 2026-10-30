@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -261,4 +262,34 @@ func lookIn(name, pathList string) string {
 		}
 	}
 	return ""
+}
+
+// XcodeFingerprint is a cheap summary of what an App Store update to Xcode, a
+// switch of xcode-select or an accepted licence changes: each Xcode*.app's
+// Info.plist, where /var/db/xcode_select_link points, and the machine's record
+// of accepted licences. Only stats and a readlink, so the agent can ask it
+// every half a minute and look again properly when it changes (A64). Empty
+// off macOS.
+func (s *System) XcodeFingerprint() string {
+	if !s.IsMacOS() {
+		return ""
+	}
+	var b strings.Builder
+	stamp := func(path string) {
+		if fi, err := os.Stat(path); err == nil {
+			fmt.Fprintf(&b, "%s %d %d\n", path, fi.Size(), fi.ModTime().UnixNano())
+		} else {
+			fmt.Fprintf(&b, "%s absent\n", path)
+		}
+	}
+	for _, dir := range s.applicationDirs() {
+		apps, _ := filepath.Glob(filepath.Join(dir, "Xcode*.app"))
+		for _, app := range apps {
+			stamp(filepath.Join(app, "Contents", "Info.plist"))
+		}
+	}
+	link, _ := os.Readlink(s.sysPath("/var/db/xcode_select_link"))
+	fmt.Fprintf(&b, "selected %s\n", link)
+	stamp(s.sysPath("/Library/Preferences/com.apple.dt.Xcode.plist"))
+	return b.String()
 }
