@@ -39,6 +39,14 @@ type ReloadStatus struct {
 	// Deferred lists what the last reload read and did not apply, because it
 	// needs a restart.
 	Deferred []string `json:"deferred,omitempty"`
+
+	// Version is what this agent runs, and Binary the file it runs, symlinks
+	// resolved (A56). A status with a version is also the agent's word that it
+	// handles SIGUSR2: one written before A56 has none.
+	Version string `json:"version,omitempty"`
+	Binary  string `json:"binary,omitempty"`
+	// Switch is the answer to the last SIGUSR2, if there has been one.
+	Switch *SwitchState `json:"switch,omitempty"`
 }
 
 // maxReloadStatusBytes bounds the read. The file is the agent's own, but a
@@ -134,6 +142,9 @@ func (a *Agent) startReloads() {
 	a.reloadMu.Lock()
 	defer a.reloadMu.Unlock()
 	a.startedAt = a.now()
+	if bin, err := runningBinary(); err == nil {
+		a.binary = bin
+	}
 	a.writeReloadStatus(nil, nil)
 }
 
@@ -142,6 +153,16 @@ func (a *Agent) startReloads() {
 // status is a report about the agent, and an agent that could not write a
 // report has still reloaded.
 func (a *Agent) writeReloadStatus(reloadErr error, deferred []string) {
+	a.reloadErr, a.deferred = "", deferred
+	if reloadErr != nil {
+		a.reloadErr = reloadErr.Error()
+	}
+	a.writeStatus()
+}
+
+// writeStatus writes the whole status: the last reload's outcome, what this
+// agent runs, and its answer to the last SIGUSR2. reloadMu is held.
+func (a *Agent) writeStatus() {
 	path := a.cfg.Paths.ReloadStatus
 	if path == "" {
 		return
@@ -151,10 +172,11 @@ func (a *Agent) writeReloadStatus(reloadErr error, deferred []string) {
 		Started:  a.startedAt,
 		Reloads:  a.reloads,
 		At:       a.now(),
-		Deferred: deferred,
-	}
-	if reloadErr != nil {
-		st.Error = reloadErr.Error()
+		Error:    a.reloadErr,
+		Deferred: a.deferred,
+		Version:  a.version,
+		Binary:   a.binary,
+		Switch:   a.switchState,
 	}
 	data, err := json.Marshal(st)
 	if err != nil {

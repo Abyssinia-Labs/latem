@@ -52,7 +52,14 @@ environments, [label_aliases], [actions], and log retention. Changes to
 [[runner]], [machine] id, [broker.*], [secrets], and the [agent] knobs other
 than log_retention need a restart, and the agent says which ones it read but
 did not apply. A file that does not load is refused and the agent keeps the
-config it had.`,
+config it had.
+
+SIGUSR2 — sent by ` + "`latem update`" + ` after it replaces the binary — moves the agent
+onto the binary at its own path if that is a different version. It stops
+taking runs, waits up to agent.shutdown_grace for the ones in flight, and
+re-executes in place, keeping its pid. If runs are still going it takes work
+again and moves at the first moment nothing is running. It never cancels a run
+to do it.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Step 1 of §6, and the reason it is here rather than inside
@@ -70,6 +77,13 @@ config it had.`,
 			hup := make(chan os.Signal, 1)
 			signal.Notify(hup, syscall.SIGHUP)
 			defer signal.Stop(hup)
+			// SIGUSR2 likewise, for `latem update` (A56). Notify with no
+			// signal named would relay every signal, hence the check.
+			usr2 := make(chan os.Signal, 1)
+			if sig, ok := agent.SwitchSignal(); ok {
+				signal.Notify(usr2, sig)
+				defer signal.Stop(usr2)
+			}
 
 			var drain time.Duration
 			if drainFor != "" {
@@ -91,6 +105,7 @@ config it had.`,
 				return err
 			}
 			go reloadOnHangup(cmd.Context(), a, hup)
+			go switchOnSignal(cmd.Context(), a, usr2)
 			// The context is already wired to SIGINT and SIGTERM by main, so
 			// §6 step 9 is a plain block on it. Run returns after draining.
 			return a.Run(cmd.Context())
@@ -113,6 +128,20 @@ func reloadOnHangup(ctx context.Context, a *agent.Agent, hup <-chan os.Signal) {
 			return
 		case <-hup:
 			_, _ = a.Reload()
+		}
+	}
+}
+
+// switchOnSignal turns each SIGUSR2 into a move onto the binary at the
+// agent's own path, once nothing is running (A56). `latem update` sends it
+// after replacing that file.
+func switchOnSignal(ctx context.Context, a *agent.Agent, usr2 <-chan os.Signal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-usr2:
+			a.Switch(ctx)
 		}
 	}
 }
