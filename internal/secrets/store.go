@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -250,13 +251,23 @@ func (s *KeychainStore) Set(ctx context.Context, name string, value Value) error
 	if err := validName(name); err != nil {
 		return fmt.Errorf("keychain: %w", err)
 	}
+	// Every word is a constant, the validated name, or hex: nothing needs
+	// security's quoting.
+	prefix := "add-generic-password -U -s " + s.service + " -a " + name + " -X "
+	// `security -i` reads a command line of at most 4095 bytes and runs what
+	// is left over as a command of its own. An add cut there stores a
+	// truncated value over the good one (-U), and the remainder comes back on
+	// stderr as `unknown command "<hex of the value>"`. So a value that would
+	// not fit is refused before anything is sent.
+	if limit := (keychainMaxLine - len(prefix) - 1) / 2; len(value) > limit {
+		return fmt.Errorf("keychain: a value of %d bytes is longer than security(1) can take in one command "+
+			"(%d bytes for this name); store it with --store file", len(value), limit)
+	}
 	encoded := make([]byte, hex.EncodedLen(len(value)))
 	hex.Encode(encoded, value)
 	defer zero(encoded)
-	// Every word is a constant, the validated name, or hex: nothing needs
-	// security's quoting.
-	cmd := make([]byte, 0, len(encoded)+64)
-	cmd = append(cmd, "add-generic-password -U -s "+s.service+" -a "+name+" -X "...)
+	cmd := make([]byte, 0, len(prefix)+len(encoded)+1)
+	cmd = append(cmd, prefix...)
 	cmd = append(cmd, encoded...)
 	cmd = append(cmd, '\n')
 	defer zero(cmd)
@@ -268,10 +279,21 @@ func (s *KeychainStore) Set(ctx context.Context, name string, value Value) error
 	// `security -i` reports a failed command on stderr and, for some, still
 	// exits zero; an add that succeeded prints nothing.
 	if msg := strings.TrimSpace(string(stderr)); msg != "" {
-		return fmt.Errorf("keychain: security did not add the item: %s", firstLine(msg))
+		// Whatever security says, it says without the value: a run of hex
+		// in its complaint can only be the value echoed back (INV-4).
+		return fmt.Errorf("keychain: security did not add the item: %s",
+			hexRun.ReplaceAllString(firstLine(msg), "<value elided>"))
 	}
 	return nil
 }
+
+// keychainMaxLine is the longest command line `security -i` runs whole, its
+// newline included, with a margin under the 4095 bytes it reads.
+const keychainMaxLine = 4000
+
+// hexRun is sixteen or more hex digits: not something security prints in an
+// error of its own.
+var hexRun = regexp.MustCompile(`[0-9a-fA-F]{16,}`)
 
 // Remove deletes the item for name.
 func (s *KeychainStore) Remove(ctx context.Context, name string) (bool, error) {

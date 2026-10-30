@@ -166,6 +166,52 @@ func TestKeychainStore_SetReportsWhatSecuritySaid(t *testing.T) {
 	}
 }
 
+// security -i runs a long line as two commands: an add with the value cut
+// short, which -U writes over the good one, and the rest echoed back as an
+// unknown command — hex of the value, on the terminal. A value that would not
+// fit is refused before security sees any of it.
+func TestKeychainStore_RefusesAValueSecurityWouldCut(t *testing.T) {
+	r := &inputRunner{fakeRunner: fakeRunner{fn: func([]string) ([]byte, []byte, error) { return nil, nil, nil }}}
+	s, _ := NewKeychainStore("", r)
+
+	pem := strings.Repeat("k", 2100)
+	err := s.Set(context.Background(), "TOKEN", Value(pem))
+	if err == nil || !strings.Contains(err.Error(), "--store file") {
+		t.Fatalf("a 2,100-byte value was not refused: %v", err)
+	}
+	if len(r.stdin) != 0 {
+		t.Error("security was handed part of a value it would have cut")
+	}
+
+	// The longest value that fits goes as one line within the limit.
+	prefix := "add-generic-password -U -s latem -a TOKEN -X "
+	most := (keychainMaxLine - len(prefix) - 1) / 2
+	if err := s.Set(context.Background(), "TOKEN", Value(strings.Repeat("k", most))); err != nil {
+		t.Fatalf("a %d-byte value was refused: %v", most, err)
+	}
+	if n := len(r.stdin[0]); n > keychainMaxLine || n > 4095 {
+		t.Errorf("sent a %d-byte line", n)
+	}
+}
+
+// Whatever security says goes back to the terminal, so a value it echoed in
+// that message must not.
+func TestKeychainStore_AnErrorNeverCarriesTheValue(t *testing.T) {
+	value := "a value security echoed back"
+	echoed := hex.EncodeToString([]byte(value))
+	r := &inputRunner{fakeRunner: fakeRunner{fn: func([]string) ([]byte, []byte, error) {
+		return nil, []byte(`security: unknown command "` + echoed + `"` + "\n"), nil
+	}}}
+	s, _ := NewKeychainStore("", r)
+	err := s.Set(context.Background(), "X", Value(value))
+	if err == nil {
+		t.Fatal("an error from security passed as success")
+	}
+	if strings.Contains(err.Error(), echoed[:16]) {
+		t.Errorf("the value's hex reached the error: %v", err)
+	}
+}
+
 func TestKeychainStore_Remove(t *testing.T) {
 	code := 0
 	r := &inputRunner{fakeRunner: fakeRunner{fn: func([]string) ([]byte, []byte, error) {
