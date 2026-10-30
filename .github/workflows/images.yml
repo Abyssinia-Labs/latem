@@ -1,0 +1,80 @@
+# Builds latem-ubuntu (images/ubuntu), the docker executor's default image,
+# checks it, and publishes it for linux/amd64 and linux/arm64.
+name: images
+
+on:
+  pull_request:
+    paths:
+      - images/ubuntu/**
+      - .github/workflows/images.yml
+  push:
+    branches: [main]
+    paths:
+      - images/ubuntu/**
+      - .github/workflows/images.yml
+  # apt packages come from whatever ubuntu:24.04 and the archive hold on the
+  # day of the build, so the image is rebuilt monthly even with nothing bumped
+  # (images/ubuntu/README.md, "Updating").
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  latem-ubuntu:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # arm64 builds under QEMU on this runner, which build.sh budgets at half an
+    # hour from a cold cache.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/abyssinia-labs/latem-ubuntu
+    steps:
+      - uses: actions/checkout@v5
+
+      # Checked before anything is published: an image that fails §13.1 or
+      # lacks a tool its README promises never reaches a runner.
+      - name: Build for this runner
+        run: images/ubuntu/build.sh
+      - name: Check it
+        run: images/ubuntu/check.sh latem-ubuntu:local
+
+      - name: Register QEMU for the other architecture
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+      - name: Build both architectures
+        if: github.event_name == 'pull_request'
+        run: images/ubuntu/build.sh --all
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Build and push both architectures
+        if: github.event_name != 'pull_request'
+        run: images/ubuntu/build.sh --push
+
+      - name: Name the digest to pin
+        if: github.event_name != 'pull_request'
+        run: |
+          info=$(docker buildx imagetools inspect "$IMAGE:24.04")
+          digest=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$info")
+          {
+            echo "### latem-ubuntu"
+            echo
+            echo "Pin \`default_image\` to:"
+            echo
+            echo "    $IMAGE:24.04@$digest"
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "pin: $IMAGE:24.04@$digest"

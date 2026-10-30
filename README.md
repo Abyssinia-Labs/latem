@@ -74,7 +74,11 @@ Two executors, behind one interface.
 
 **Docker** runs a job in a container, on any host with a daemon. It is the
 isolating one: a build reaches the workspace, the caches it declared, and
-nothing else.
+nothing else — including the daemon itself, so a step that runs `docker build`
+or `wrangler containers build` has nothing to talk to and needs a native runner
+on a Linux host. Its image is
+[`latem-ubuntu`](images/ubuntu/README.md), which stands in for GitHub's
+`ubuntu-latest`.
 
 **Native** runs a job on the host's own OS, as the agent's user. It needs
 nothing installed and no disk, and it is how you use a machine that is already

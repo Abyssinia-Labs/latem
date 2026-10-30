@@ -5,11 +5,10 @@ GitHub's `ubuntu-latest` closely enough to run workflows written against it. It
 is multi-arch, linux/amd64 and linux/arm64, because the same jobs run on an
 x86_64 Linux desktop and, through Docker Desktop, on an Apple silicon Mac.
 
-> **Status: never built.** It was written on a machine whose Docker daemon was
-> not running, so no layer here has executed. Upstream URLs and checksums were
-> fetched and verified (`SHA256SUMS`), and the scripts pass `bash -n`; nothing
-> more. The first person to build it should run `./build.sh && ./check.sh`,
-> put the size below, and delete this note.
+It is published to `ghcr.io/abyssinia-labs/latem-ubuntu` by
+`.github/workflows/images.yml`, which builds it, runs `./check.sh` against it,
+and only then pushes both architectures — on a merge that changes this
+directory, on the first of every month, and on demand.
 
 ## What is in it
 
@@ -30,17 +29,18 @@ browser (each project pins its own Playwright, and browser builds follow the
 pin), and a Docker daemon.
 
 The toolcache is laid out the way `actions/setup-node` and
-`actions/setup-python` expect, and `RUNNER_TOOL_CACHE` points at it. latem does
-not run JavaScript actions yet; once it does, those actions will find these
-versions instead of downloading them. The Python builds are the ones
-setup-python installs on `ubuntu-latest`.
+`actions/setup-python` expect, and `RUNNER_TOOL_CACHE` points at it, so those
+actions — which latem runs (amendment A51) — find these versions instead of
+downloading them. The Python builds are the ones setup-python installs on
+`ubuntu-latest`.
 
 `npm install -g` works without sudo, because the toolcache is owned by uid 1000
 and npm's global prefix is the Node directory. `playwright install --with-deps`
 only downloads the browser. It still runs `sudo apt-get update`, and any package
 a different Playwright version wants that this one did not is installed then.
 
-**Size:** not yet measured. `./check.sh` prints it.
+**Size:** 3.2 GB uncompressed (linux/arm64, the first build, on Docker
+Desktop; `./check.sh` passed with no failures). `./check.sh` prints it.
 
 ## Build, check, publish
 
@@ -55,15 +55,17 @@ first use. Building arm64 on an x86_64 host needs QEMU registered, once per
 boot. The script detects when it is missing and prints the command. Docker
 Desktop already has it.
 
-To publish (the default `IMAGE` is shown):
+CI publishes it (`.github/workflows/images.yml`); the job summary of each run
+names the digest it pushed. To publish by hand instead (the default `IMAGE` is
+shown):
 
 ```bash
 docker login ghcr.io
 IMAGE=ghcr.io/abyssinia-labs/latem-ubuntu ./build.sh --push
 ```
 
-This pushes `:24.04` and `:24.04-YYYYMMDD`. Name the image by digest in each
-runner's config:
+Either way it pushes `:24.04` and `:24.04-YYYYMMDD`. Name the image by digest
+in each runner's config:
 
 ```toml
 [runner.docker]
