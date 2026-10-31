@@ -922,6 +922,7 @@ latem repo add <owner/name> | list | remove <name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]
 latem workflows check [path | --repo R] [--offline] [--json] [--fix]  which workflow jobs this machine can run, and the fix for the rest
+latem store check [path | --repo R] [--platform ios|android] [--json]  whether a preview would reach testers from this machine; read-only
 latem doctor [--secrets] [--fix]
 latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | restart | reload | status

@@ -172,7 +172,7 @@ func (d *doctor) run(ctx context.Context) report {
 	// which toolchain checks apply (A59).
 	needsChecks := d.checkNeeds(ctx)
 
-	var rep report
+	rep := report{fixHint: "run `latem doctor --fix` for a consolidated list of the commands above."}
 	rep.section("Tooling", d.checkTooling(ctx)...)
 	rep.section("Mobile toolchain", d.gateByNeeds(d.checkMobileToolchain(ctx))...)
 	rep.section("Configuration", d.checkConfiguration(ctx)...)
@@ -844,57 +844,83 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 
 	out := make([]check, 0, len(d.cfg.Repos))
 	for _, name := range sortedStrings(d.cfg.Repos) {
-		repo := d.cfg.Repos[name]
-		id, title := "repo."+name, "repo / "+name
-		// --end-of-options rather than --, per amendment A7: -- would mean
-		// "a pathspec follows" and the URL is not a path.
-		//
-		// `env -u SSH_AUTH_SOCK` as argv[0], for the same reason checkLocale
-		// uses env(1): the question is not whether *you* can read this
-		// repository but whether a process started by launchd or systemd can,
-		// and that process does not inherit your interactive ssh agent. A
-		// probe that keeps the variable passes on the machine where the
-		// service is about to fail, which makes this check report the one
-		// state it exists to catch as healthy. Nothing else is unset — an
-		// https credential helper needs PATH to find the program it shells
-		// out to.
-		outBytes, err := d.sys.Exec(ctx, "env", "-u", "SSH_AUTH_SOCK",
-			"git", "ls-remote", "--heads", "--end-of-options", repo.URL)
-		if err == nil {
-			out = append(out, pass(id, title, repo.URL))
-			continue
-		}
-
-		// It failed without an agent. If it succeeds with one, the diagnosis
-		// is not "no credential" but "a credential only your session holds" —
-		// the worst shape a credential problem takes, because every check the
-		// operator runs by hand agrees with them.
-		if _, agentErr := d.sys.Exec(ctx, "git", "ls-remote", "--heads", "--end-of-options", repo.URL); agentErr == nil {
-			out = append(out, fail(id, "repo / "+name,
-				fmt.Sprintf("%s — readable from your shell, not from a service", repo.URL),
-				"ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS: hand the passphrase to the login keychain",
-				"ssh-keygen -t ed25519 -N '' -f ~/.ssh/"+name+"_deploy   # or a passphraseless deploy key",
-			).withNotes(
-				"This repository answered when the probe kept your SSH_AUTH_SOCK and refused when it "+
-					"did not. An agent started by launchd or systemd runs without that socket, so it "+
-					"will refuse there too — a run fails E_SOURCE at gate 6 while `git ls-remote` in "+
-					"your terminal keeps saying the credential is fine.",
-				"The key needs to be usable with no agent and no terminal: a passphraseless deploy "+
-					"key, or a passphrase the login keychain can supply unprompted.",
-			))
-			continue
-		}
-
-		detail := gitRemoteError(string(outBytes))
-		if detail == "" {
-			detail = err.Error()
-		}
-		notes, fixes := repoFailureAdvice(repo.URL, string(outBytes))
-		out = append(out, fail(id, title, fmt.Sprintf("%s — %s", repo.URL, detail), fixes...).
-			withNotes(notes...))
+		out = append(out, d.checkRemote(ctx, "repo."+name, "repo / "+name, name, d.cfg.Repos[name].URL))
 	}
 	// A34, per repo and from the mirror rather than the remote.
 	return append(out, d.checkSchemes(ctx)...)
+}
+
+// checkRemote asks whether a process on this machine can read url. name is
+// only the suggestion a deploy key's file is named after.
+func (d *doctor) checkRemote(ctx context.Context, id, title, name, url string) check {
+	// --end-of-options rather than --, per amendment A7: -- would mean
+	// "a pathspec follows" and the URL is not a path.
+	//
+	// `env -u SSH_AUTH_SOCK` as argv[0], for the same reason checkLocale
+	// uses env(1): the question is not whether *you* can read this
+	// repository but whether a process started by launchd or systemd can,
+	// and that process does not inherit your interactive ssh agent. A
+	// probe that keeps the variable passes on the machine where the
+	// service is about to fail, which makes this check report the one
+	// state it exists to catch as healthy. Nothing else is unset — an
+	// https credential helper needs PATH to find the program it shells
+	// out to.
+	outBytes, err := d.sys.Exec(ctx, "env", "-u", "SSH_AUTH_SOCK",
+		"git", "ls-remote", "--heads", "--end-of-options", url)
+	if err == nil {
+		return pass(id, title, url)
+	}
+
+	// It failed without an agent. If it succeeds with one, the diagnosis
+	// is not "no credential" but "a credential only your session holds" —
+	// the worst shape a credential problem takes, because every check the
+	// operator runs by hand agrees with them.
+	if _, agentErr := d.sys.Exec(ctx, "git", "ls-remote", "--heads", "--end-of-options", url); agentErr == nil {
+		return fail(id, title,
+			fmt.Sprintf("%s — readable from your shell, not from a service", url),
+			"ssh-add --apple-use-keychain ~/.ssh/id_ed25519   # macOS: hand the passphrase to the login keychain",
+			"ssh-keygen -t ed25519 -N '' -f ~/.ssh/"+name+"_deploy   # or a passphraseless deploy key",
+		).withNotes(
+			"This repository answered when the probe kept your SSH_AUTH_SOCK and refused when it "+
+				"did not. An agent started by launchd or systemd runs without that socket, so it "+
+				"will refuse there too — a run fails E_SOURCE at gate 6 while `git ls-remote` in "+
+				"your terminal keeps saying the credential is fine.",
+			"The key needs to be usable with no agent and no terminal: a passphraseless deploy "+
+				"key, or a passphrase the login keychain can supply unprompted.",
+		)
+	}
+
+	if d.loginOutOfReach(ctx, url, string(outBytes)) {
+		return warn(id, title, fmt.Sprintf("%s — not asked: this session cannot open the login keychain", url)).
+			withManual("Run this again in a terminal on the Mac itself").
+			withNotes(
+				"A session with no GUI, which is what ssh gets, cannot open the login keychain, "+
+					"and that is where gh keeps its login. git finds no credential and says so in "+
+					"the words it uses for a machine with no login at all, so from here the two "+
+					"cannot be told apart. The agent runs in the GUI session: this says nothing about it.",
+				"`gh auth login` from here is the wrong answer. It cannot reach the keychain "+
+					"either, and may write the token to a plain file instead.",
+			)
+	}
+
+	detail := gitRemoteError(string(outBytes))
+	if detail == "" {
+		detail = err.Error()
+	}
+	notes, fixes := repoFailureAdvice(url, string(outBytes))
+	return fail(id, title, fmt.Sprintf("%s — %s", url, detail), fixes...).withNotes(notes...)
+}
+
+// loginOutOfReach reports an https remote that found no credential in a Mac
+// session that could not have reached one. Everything else about the failure is
+// the same as a machine with no login, so only the session tells them apart.
+func (d *doctor) loginOutOfReach(ctx context.Context, url, output string) bool {
+	if !strings.HasPrefix(url, "https://") ||
+		(!strings.Contains(output, "could not read Username") && !strings.Contains(output, "could not read Password")) {
+		return false
+	}
+	lc, err := d.sys.LaunchContext(ctx)
+	return err == nil && lc == system.LaunchContextBackground
 }
 
 // ----------------------------------------------------------------- secrets

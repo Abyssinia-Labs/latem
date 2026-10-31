@@ -577,6 +577,47 @@ func TestDoctorRepoReachability(t *testing.T) {
 		}
 	})
 
+	// A Mac over ssh, with gh's login in a keychain the session cannot open.
+	// git says what it says on a machine with no login, and the fix for that
+	// one, gh auth login, can leave a token in a plain file on this one.
+	t.Run("a login out of this session's reach", func(t *testing.T) {
+		const noAgent = "env -u SSH_AUTH_SOCK " + probe
+		const noLogin = "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled"
+		for name, tt := range map[string]struct {
+			goos, session string
+			want          level
+		}{
+			"over ssh":          {"darwin", "Background", levelWarn},
+			"at the Mac itself": {"darwin", "Aqua", levelFail},
+			"a daemon":          {"darwin", "System", levelFail},
+			"on Linux":          {"linux", "", levelFail},
+		} {
+			t.Run(name, func(t *testing.T) {
+				cmds := healthyRunner(tt.goos)
+				cmds[noAgent] = fakeCmd{exit: 128, out: noLogin}
+				cmds[probe] = fakeCmd{exit: 128, out: noLogin}
+				if tt.session != "" {
+					cmds["launchctl managername"] = fakeCmd{out: tt.session}
+				}
+				d := newTestDoctor(tt.goos, dir, cmds, cfg, nil)
+
+				got := d.checkRepos(context.Background())
+				if len(got) != 1 || got[0].Level != tt.want {
+					t.Fatalf("got %+v, want level %v", got, tt.want)
+				}
+				if tt.want != levelWarn {
+					return
+				}
+				if len(got[0].Fix) != 0 {
+					t.Errorf("a login that may be fine should get no fix: %q", got[0].Fix)
+				}
+				if !strings.Contains(strings.Join(got[0].Manual, " "), "on the Mac itself") {
+					t.Errorf("should send the operator to the Mac: %q", got[0].Manual)
+				}
+			})
+		}
+	})
+
 	// The failure a plain `git ls-remote` cannot see, because the operator's
 	// own shell is the thing hiding it. `gh auth login --git-protocol ssh`
 	// produces exactly this state: a passphrase-protected key held by an

@@ -117,6 +117,9 @@ type section struct {
 // report is a whole doctor run.
 type report struct {
 	Sections []section
+	// fixHint is the last line of a report with failures. Empty says nothing:
+	// `store check`'s fixes are all under their checks already.
+	fixHint string
 }
 
 func (r *report) section(name string, checks ...check) {
@@ -312,8 +315,8 @@ func printReport(w io.Writer, rep report, showFix, color bool) {
 		}
 	}
 
-	if failed > 0 && !showFix {
-		printf(w, "\nrun `latem doctor --fix` for a consolidated list of the commands above.\n")
+	if failed > 0 && !showFix && rep.fixHint != "" {
+		printf(w, "\n%s\n", rep.fixHint)
 	}
 }
 
