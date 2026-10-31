@@ -272,6 +272,9 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 			return nil, errors.New("no mirror yet")
 		},
 		toolchains: func(context.Context, string) system.Toolchains { return system.Toolchains{Tools: map[string]bool{}} },
+		// A service that can reach Docker; the real one reads this machine's
+		// /proc and its Docker socket.
+		canConnect: func(int, string) (bool, error) { return true, nil },
 	}
 }
 

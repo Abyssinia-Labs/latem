@@ -396,3 +396,76 @@ func TestDoctorDisk_AnUnreadableFilesystemIsNotHealthy(t *testing.T) {
 		t.Errorf("the failure does not carry the reason: %q", rep[0].Detail)
 	}
 }
+
+// The agent runs under the user manager and doctor runs in a shell, and the two
+// can disagree: a machine that installed Docker, added its account to the group,
+// enabled linger and logged back in passes every shell check with a docker
+// runner that has been unavailable since it started.
+func TestDoctorDockerForTheAgent(t *testing.T) {
+	run := func(t *testing.T, cmds map[string]fakeCmd, connects func(int, string) (bool, error)) (check, bool) {
+		t.Helper()
+		dir := privateDir(t)
+		d := newTestDoctor("linux", dir, cmds, gpuRunnerConfig(dir), nil)
+		d.canConnect = connects
+		for _, c := range d.checkDocker(t.Context()) {
+			if c.ID == "docker.service" {
+				return c, true
+			}
+		}
+		return check{}, false
+	}
+	running := func() map[string]fakeCmd {
+		cmds := healthyRunner("linux")
+		cmds["systemctl --user show -p MainPID --value latem.service"] = fakeCmd{out: "4242\n"}
+		return cmds
+	}
+
+	t.Run("an agent that can reach the socket", func(t *testing.T) {
+		got, ok := run(t, running(), func(pid int, socket string) (bool, error) {
+			if pid != 4242 || socket != system.DockerSocket {
+				t.Errorf("asked about pid %d and %s", pid, socket)
+			}
+			return true, nil
+		})
+		if !ok || got.Level != levelPass {
+			t.Fatalf("got %+v, want a pass", got)
+		}
+	})
+
+	t.Run("an agent that started before the group was added", func(t *testing.T) {
+		got, ok := run(t, running(), func(int, string) (bool, error) { return false, nil })
+		if !ok || got.Level != levelFail {
+			t.Fatalf("got %+v, want a failure", got)
+		}
+		// Logging out is what everyone tries first, and under linger it does
+		// nothing, so the fix has to be the one that works.
+		if strings.Join(got.Fix, " ") != "sudo reboot" {
+			t.Errorf("fix = %v", got.Fix)
+		}
+		notes := strings.Join(got.Notes, " ")
+		for _, want := range []string{"logging out", "newgrp", "latem service restart", "user@$(id -u).service"} {
+			if !strings.Contains(notes, want) {
+				t.Errorf("the notes do not rule out %q: %s", want, notes)
+			}
+		}
+	})
+
+	t.Run("no verdict is not a pass", func(t *testing.T) {
+		if got, ok := run(t, running(), func(int, string) (bool, error) {
+			return false, errors.New("no such socket")
+		}); ok {
+			t.Errorf("a socket elsewhere reported %+v, want nothing", got)
+		}
+	})
+
+	t.Run("no agent running has nothing to ask", func(t *testing.T) {
+		cmds := healthyRunner("linux")
+		cmds["systemctl --user is-active latem.service"] = fakeCmd{out: "inactive"}
+		if got, ok := run(t, cmds, func(int, string) (bool, error) {
+			t.Error("asked about a process that is not there")
+			return false, nil
+		}); ok {
+			t.Errorf("got %+v", got)
+		}
+	})
+}

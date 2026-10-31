@@ -127,6 +127,9 @@ type doctor struct {
 	// machine measures this machine for capacity's recommendation (A63);
 	// nil measures the real one.
 	machine func(context.Context) capacity.Machine
+	// canConnect is whether a running process may connect to a Unix socket
+	// (A66); nil asks the real one through /proc.
+	canConnect func(pid int, socket string) (bool, error)
 }
 
 func newDoctor() *doctor {
@@ -278,14 +281,58 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 			out = append(out, fail("docker.group", "docker group",
 				fmt.Sprintf("%s is not in the docker group", d.sys.User()),
 				fmt.Sprintf("sudo usermod -aG docker %s", d.sys.User()),
-				"newgrp docker   # or log out and back in").
+				"sudo reboot   # with no agent service, `newgrp docker` is enough").
 				withNotes("A shell that was open before the group was added still does not have it. "+
-					"The error this produces names the socket, not the group."))
+					"The error this produces names the socket, not the group.",
+					serviceGroupsNote))
 		default:
 			out = append(out, pass("docker.group", "docker group", d.sys.User()+" can reach the daemon socket"))
+			if required {
+				out = append(out, d.checkServiceDocker(ctx)...)
+			}
 		}
 	}
 	return out
+}
+
+// serviceGroupsNote is why a group added to the account does not reach the
+// agent, which is the one thing a person who has just added it will not guess.
+const serviceGroupsNote = "The agent is not in your shell. A user service has the groups its " +
+	"systemd user manager started with, and linger keeps that manager running through a logout, " +
+	"so neither logging out, newgrp nor `latem service restart` gives it a group added since. " +
+	"A reboot does. So does `sudo systemctl restart user@$(id -u).service`, which also ends " +
+	"everything else in your session."
+
+// checkServiceDocker asks whether the running agent can reach the socket this
+// shell just reached.
+//
+// Everything above runs in doctor's own process, and on Linux that is the
+// wrong one to ask: a shell with the group and an agent without it pass every
+// other check while the docker runner reports unavailable to the control plane.
+// No verdict means nothing to report, not a pass: the service is down, which
+// checkService says, or Docker is somewhere other than the default socket.
+func (d *doctor) checkServiceDocker(ctx context.Context) []check {
+	st, err := d.sys.ServiceStatus(ctx)
+	if err != nil || !st.Running || st.PID == 0 {
+		return nil
+	}
+	connects := d.canConnect
+	if connects == nil {
+		connects = d.sys.ProcessCanConnect
+	}
+	ok, err := connects(st.PID, system.DockerSocket)
+	switch {
+	case err != nil:
+		return nil
+	case ok:
+		return []check{pass("docker.service", "docker for the agent",
+			fmt.Sprintf("the running agent (pid %d) can reach the daemon socket", st.PID))}
+	}
+	return []check{fail("docker.service", "docker for the agent",
+		fmt.Sprintf("this shell reaches the daemon, but the running agent (pid %d) lacks the socket's group, "+
+			"so its docker runners are unavailable", st.PID),
+		"sudo reboot").
+		withNotes(serviceGroupsNote)}
 }
 
 func (d *doctor) checkTart(ctx context.Context) check {

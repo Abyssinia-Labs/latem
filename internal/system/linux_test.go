@@ -2,6 +2,9 @@ package system
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -136,5 +139,71 @@ func TestSysPathIsAbsoluteOnARealMachine(t *testing.T) {
 	rooted := New(Options{GOOS: "linux", Root: "/fixture", Home: t.TempDir(), Getenv: func(string) string { return "" }})
 	if got := rooted.sysPath("proc/meminfo"); got != "/fixture/proc/meminfo" {
 		t.Errorf("rooted = %q", got)
+	}
+}
+
+// The agent is a child of its user manager, so what counts is what the process
+// holds. Membership on file, and the shell asking, are both beside the point.
+func TestProcessCanConnect_GoesByWhatTheProcessHolds(t *testing.T) {
+	root := t.TempDir()
+	sock := filepath.Join(root, DockerSocket)
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's own owner and group, whatever they are where this runs.
+	info, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, group, ok := fileOwner(info)
+	if !ok {
+		t.Fatal("the fixture has no owner")
+	}
+	stranger, other := owner+1, group+1
+
+	tests := []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		{"holds the socket's group", fmt.Sprintf("Uid:\t%[1]d\t%[1]d\t%[1]d\t%[1]d\nGid:\t%[2]d\t%[2]d\t%[2]d\t%[2]d\nGroups:\t%[2]d %[3]d \n", stranger, other, group), true},
+		{"has it as its primary group", fmt.Sprintf("Uid:\t%[1]d\t%[1]d\t%[1]d\t%[1]d\nGid:\t%[2]d\t%[2]d\t%[2]d\t%[2]d\nGroups:\t\n", stranger, group), true},
+		{"started before the group was added", fmt.Sprintf("Uid:\t%[1]d\t%[1]d\t%[1]d\t%[1]d\nGid:\t%[2]d\t%[2]d\t%[2]d\t%[2]d\nGroups:\t%[2]d \n", stranger, other), false},
+		{"owns the socket", fmt.Sprintf("Uid:\t%[1]d\t%[1]d\t%[1]d\t%[1]d\nGid:\t%[2]d\t%[2]d\t%[2]d\t%[2]d\nGroups:\t\n", owner, other), true},
+		{"root", fmt.Sprintf("Uid:\t0\t0\t0\t0\nGid:\t%[1]d\t%[1]d\t%[1]d\t%[1]d\nGroups:\t\n", other), true},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pid := 100 + i
+			dir := filepath.Join(root, "proc", fmt.Sprint(pid))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "status"), []byte("Name:\tlatem\n"+tt.status), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			s := New(Options{GOOS: "linux", Root: root, Home: t.TempDir(), Getenv: func(string) string { return "" }})
+			got, err := s.ProcessCanConnect(pid, DockerSocket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("ProcessCanConnect = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	s := New(Options{GOOS: "linux", Root: root, Home: t.TempDir(), Getenv: func(string) string { return "" }})
+	if _, err := s.ProcessCanConnect(999, DockerSocket); err == nil {
+		t.Error("a process that has gone gave an answer")
+	}
+	if _, err := s.ProcessCanConnect(100, "/var/run/elsewhere.sock"); err == nil {
+		t.Error("a socket that is not there gave an answer")
 	}
 }

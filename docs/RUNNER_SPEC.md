@@ -1494,6 +1494,8 @@ They are nullable with no default, so migration `0002` applies forward over an e
 
 **Linux — systemd user unit** at `~/.config/systemd/user/latem.service`, with `loginctl enable-linger $USER` so it survives logout.
 
+A user unit has the groups its user manager started with, and linger keeps that manager running through a logout. So a group added to the account reaches every new login and does not reach the agent: `docker` in particular has to be in place before the manager starts, or the machine rebooted after. `latem doctor` compares the running agent's own groups with the Docker socket's (A66).
+
 ```ini
 [Unit]
 Description=Latem runner agent
@@ -2974,3 +2976,13 @@ workflow run's job that names a commit: there is no tip to resolve, and pin goes
 alone. When the mirror lacks that commit, it is fetched by its name, as actions/checkout fetches
 it; GitHub serves a commit no ref reaches until its own gc. A branch's commit is never fetched by
 name, because one the branch's fetch did not bring is not on the branch.
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A66 | §19, §23, A63 | **On Linux, doctor asks whether the running agent can reach Docker, not only whether doctor's own shell can: it reads the agent's credentials from /proc and compares them with the socket's owner, group and mode. When they do not let it in, doctor fails with the fix, which is a reboot** | A machine set up by installing Docker, adding its account to the group, enabling linger, logging out and back in, and running `latem setup` had a docker runner that was unavailable from its first heartbeat, with every doctor check green. The new login had the group. The agent did not: it is a child of the user manager, which had started before the group was added and which linger keeps through a logout. `newgrp` and `latem service restart` do not reach it either, and doctor's own fix said to log out and back in |
+
+**What it can't see.** The check goes by mode bits, so it would say no to a socket that lets the agent in
+through an ACL, which is not how Docker sets one up. It looks only at the default socket, because that
+is where the agent looks: the unit sets no DOCKER_HOST. A Docker the shell reaches some other way, such
+as rootless Docker with DOCKER_HOST in a profile, gives no verdict rather than a false one, and the
+runner's own unavailable reason remains the answer there.

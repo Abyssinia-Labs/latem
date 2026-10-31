@@ -1,9 +1,14 @@
 package system
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -46,6 +51,97 @@ func (s *System) InDockerGroup(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// DockerSocket is where the agent service finds Docker: the client's default,
+// because latem's unit sets no DOCKER_HOST.
+const DockerSocket = "/var/run/docker.sock"
+
+// ProcessCanConnect reports whether a running process's own credentials let it
+// connect to the Unix socket at path, which takes write permission.
+//
+// [System.InDockerGroup] answers for the shell asking, and on Linux the agent
+// is not in that shell. A systemd user service has the groups its user manager
+// started with, and linger keeps that manager through a logout, so a group
+// added since reaches every new login and never reaches the agent. Reading
+// /proc is the one way to ask about the process that matters.
+//
+// An ACL on the socket is not read: it is not how Docker is set up, and the
+// answer would be "no" for a socket that does let the process in.
+func (s *System) ProcessCanConnect(pid int, path string) (bool, error) {
+	info, err := os.Stat(s.sysPath(path))
+	if err != nil {
+		return false, err
+	}
+	owner, group, ok := fileOwner(info)
+	if !ok {
+		return false, fmt.Errorf("system: %s has no owner to compare", path)
+	}
+	data, err := os.ReadFile(s.sysPath(fmt.Sprintf("/proc/%d/status", pid)))
+	if err != nil {
+		return false, err
+	}
+	uid, gids, err := procCredentials(data)
+	if err != nil {
+		return false, fmt.Errorf("system: process %d: %w", pid, err)
+	}
+	mode := info.Mode().Perm()
+	switch {
+	case uid == 0:
+		return true, nil
+	case uid == owner:
+		return mode&0o200 != 0, nil
+	case slices.Contains(gids, group):
+		return mode&0o020 != 0, nil
+	default:
+		return mode&0o002 != 0, nil
+	}
+}
+
+// procCredentials reads the effective uid and every group from a
+// /proc/<pid>/status:
+//
+//	Uid:	1000	1000	1000	1000
+//	Gid:	1000	1000	1000	1000
+//	Groups:	10 965 1000
+//
+// The second column of the first two is the effective id.
+func procCredentials(status []byte) (uid uint32, gids []uint32, err error) {
+	seenUID := false
+	sc := bufio.NewScanner(bytes.NewReader(status))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "Uid:", "Gid:":
+			if len(fields) < 3 {
+				return 0, nil, fmt.Errorf("short %s line", fields[0])
+			}
+			n, perr := strconv.ParseUint(fields[2], 10, 32)
+			if perr != nil {
+				return 0, nil, perr
+			}
+			if fields[0] == "Uid:" {
+				uid, seenUID = uint32(n), true
+			} else {
+				gids = append(gids, uint32(n))
+			}
+		case "Groups:":
+			for _, f := range fields[1:] {
+				n, perr := strconv.ParseUint(f, 10, 32)
+				if perr != nil {
+					return 0, nil, perr
+				}
+				gids = append(gids, uint32(n))
+			}
+		}
+	}
+	if !seenUID {
+		return 0, nil, errors.New("no Uid line")
+	}
+	return uid, gids, nil
 }
 
 // Linger reports whether systemd keeps this user's services running after
