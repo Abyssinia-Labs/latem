@@ -691,6 +691,16 @@ func TestStoreCheck_ASigningStoreThisMachineCannotReadFails(t *testing.T) {
 	wantLevel(t, h.mustCheck(t, h.run(t.Context()), "store.ios.match"), levelFail)
 }
 
+func TestStoreCheck_AnAppInARemoteRepositoryKeepsItsURL(t *testing.T) {
+	h := newStoreHarness(t)
+	h.where, h.project.dir = "https://github.com/example/app.git", "packages/app"
+
+	c := h.mustCheck(t, h.run(t.Context()), "store.project")
+	if !strings.Contains(c.Detail, "https://github.com/example/app.git/packages/app") {
+		t.Errorf("detail = %q", c.Detail)
+	}
+}
+
 // Found on the machine that uploads Tsedal: run over ssh, this failed, and named
 // a fix that could only have made things worse.
 func TestStoreCheck_ASigningStoreThisSessionCannotAskIsNotAFailure(t *testing.T) {

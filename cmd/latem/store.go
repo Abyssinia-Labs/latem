@@ -322,7 +322,7 @@ func (s *storeChecker) checkProject() []check {
 	p := s.project
 	label := s.where
 	if p.dir != "" && p.dir != "." {
-		label = filepath.Join(s.where, p.dir)
+		label = s.where + "/" + p.dir // not Join: where can be a URL
 	}
 	var out []check
 	name := p.name
