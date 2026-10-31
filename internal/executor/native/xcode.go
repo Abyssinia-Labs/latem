@@ -25,6 +25,11 @@ import (
 // latem runs neither command: both need an administrator, and a licence is
 // the operator's to accept (A60).
 //
+// A probe that does not answer in time is no verdict. By then the bundle's
+// files are all there, and what makes xcodebuild slow is usually a build using
+// the machine, so refusing would take a working runner dark until the next
+// preflight, five minutes off, for being busy (A67).
+//
 // developerDir is the one a step would use: the runner's DEVELOPER_DIR when
 // its [runner.native] env sets one, else xcode-select's. The Command Line
 // Tools, or no developer directory at all, is not this check's business;
@@ -71,17 +76,11 @@ func CheckXcode(ctx context.Context, r Runner, developerDir string) error {
 		{"-checkFirstLaunchStatus", "-runFirstLaunch", "its first-launch setup"},
 	} {
 		_, err := r.Run(ctx, append(append([]string(nil), xcodebuild...), strings.Fields(c.probe)...))
-		switch {
-		case err == nil:
+		if err == nil || errors.Is(err, context.DeadlineExceeded) {
 			continue
-		case errors.Is(err, context.DeadlineExceeded):
-			return codeErr(protocol.ErrExecutor,
-				"native executor: %s at %s did not answer `xcodebuild %s` in time; it may be mid-update",
-				name, app, c.probe)
-		default:
-			return codeErr(protocol.ErrExecutor,
-				"native executor: %s at %s needs %s: `%s %s` on this Mac", name, app, c.what, sudo, c.fix)
 		}
+		return codeErr(protocol.ErrExecutor,
+			"native executor: %s at %s needs %s: `%s %s` on this Mac", name, app, c.what, sudo, c.fix)
 	}
 	return nil
 }

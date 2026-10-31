@@ -2956,6 +2956,8 @@ directory a step would use: the runner's `DEVELOPER_DIR` from `[runner.native] e
 - `xcodebuild -license check`, or `sudo xcodebuild -license accept` is the fix;
 - `xcodebuild -checkFirstLaunchStatus`, or `sudo xcodebuild -runFirstLaunch` is.
 
+An `xcodebuild` probe that does not answer in time is no verdict, and the check moves on (A67).
+
 The Command Line Tools, or no developer directory, is doctor's to report, not preflight's. latem
 runs neither fix: both need an administrator, and a licence is the operator's (A60). The runner
 takes work again on the first preflight that passes.
@@ -3042,3 +3044,17 @@ through an ACL, which is not how Docker sets one up. It looks only at the defaul
 is where the agent looks: the unit sets no DOCKER_HOST. A Docker the shell reaches some other way, such
 as rootless Docker with DOCKER_HOST in a profile, gives no verdict rather than a false one, and the
 runner's own unavailable reason remains the answer there.
+
+### Amendment from a test that timed out on a busy Mac
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A67 | §13.3, §20, A64 | **An `xcodebuild` probe in native preflight that does not answer in time says nothing about Xcode, so the runner stays available** | A64 refused such a runner as possibly mid-update. A cold `xcodebuild` on a loaded 8 GB Mac took longer than `ProbeTimeout`, so a machine with a whole Xcode went dark until the next preflight, five minutes off, for being busy. A latem test failed this way on 2026-10-31 |
+
+**What still makes the runner unavailable.** Everything in A64 that is an answer: missing files, or
+`xcodebuild` refusing for a licence or a first launch. Being half-installed is what the file checks
+find, and they need no process to answer.
+
+**What this gives up.** An Xcode that hangs rather than refuses keeps its runner, and its jobs fail
+on their own with what they saw. That is rarer than a busy Mac, and costs one job rather than five
+minutes of every job.
