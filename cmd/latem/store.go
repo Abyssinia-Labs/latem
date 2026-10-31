@@ -370,7 +370,10 @@ func (s *storeChecker) checkRepoEntry() check {
 		repo = "<owner/name>"
 	}
 	return warn(id, title, "this machine has no [repos.*] entry for it, so only machine-wide secrets were read",
-		"latem repo add "+repo)
+		"latem repo add "+repo).
+		withNotes("That entry also makes this machine take the repository's jobs. To check it without " +
+			"that, give the check a directory of its own, holding a config.toml with the entry and a " +
+			"secrets.env, and run `latem --config-dir <dir> store check --repo " + repo + "`. No agent reads it.")
 }
 
 // resolver is the secrets chain, looked up the way a run looks up a name (A50).

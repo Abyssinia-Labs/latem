@@ -888,6 +888,9 @@ func TestStoreCheck_AMachineNotBuildingTheRepositorySaysWhySecretsAreMissing(t *
 	if !strings.Contains(remedies(c), "latem repo add example/app") {
 		t.Errorf("should give the command: %q", remedies(c))
 	}
+	if !strings.Contains(strings.Join(c.Notes, " "), "take the repository's jobs") {
+		t.Errorf("that command changes what a runner builds, and should say so: %q", c.Notes)
+	}
 	if got := remedies(h.mustCheck(t, rep, "store.ios.secrets")); strings.Contains(got, "--repo") {
 		t.Errorf("no repository to scope to: %q", got)
 	}
