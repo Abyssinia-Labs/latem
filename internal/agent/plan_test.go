@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -114,6 +115,44 @@ func TestAgent_PlansAnEventFromItsMirror(t *testing.T) {
 		defer cp.mu.Unlock()
 		return len(cp.lastHealth.Repos) == 1 && cp.lastHealth.Repos[0].Key == "app"
 	})
+}
+
+// A beat says how this machine would read a job (A68): its aliases, and a
+// digest of each variable that is not the variable.
+func TestHeartbeat_SaysHowThisMachineReadsAJob(t *testing.T) {
+	cfg := newConfigDir(t, configOptions{})
+	cfg.LabelAliases = map[string][]string{"blacksmith-4vcpu-ubuntu-2404": {"linux"}}
+	cfg.Repos["app"].Vars = map[string]string{"LATEM": "a value only this config holds"}
+	ta := newTestAgent(t, cfg, nil)
+	ta.run(t)
+	waitFor(t, "a heartbeat", 10*time.Second, func() bool {
+		_, _, ok := ta.localBrk.Health()
+		return ok
+	})
+
+	h, _, _ := ta.localBrk.Health()
+	if !maps.EqualFunc(h.LabelAliases, cfg.LabelAliases, slices.Equal[[]string]) {
+		t.Errorf("aliases %v, want the config's", h.LabelAliases)
+	}
+	if len(h.Repos) != 1 || h.Repos[0].Vars["LATEM"] == "" {
+		t.Fatalf("repos %+v, want LATEM's digest", h.Repos)
+	}
+	if strings.Contains(h.Repos[0].Vars["LATEM"], "value") {
+		t.Errorf("the digest is the value: %q", h.Repos[0].Vars["LATEM"])
+	}
+}
+
+func TestVarDigests_TellTwoAnswersApart(t *testing.T) {
+	a := varDigests(map[string]string{"X": "true"})["X"]
+	if b := varDigests(map[string]string{"X": "true"})["X"]; a != b {
+		t.Errorf("the same value on two machines: %q, %q", a, b)
+	}
+	if b := varDigests(map[string]string{"X": "false"})["X"]; a == b {
+		t.Errorf("two values read the same: %q", a)
+	}
+	if len(a) != 16 {
+		t.Errorf("digest %q, want 16 characters", a)
+	}
 }
 
 const runFlow = `

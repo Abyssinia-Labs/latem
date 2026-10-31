@@ -24,6 +24,10 @@ type MachineHealth struct {
 	// concurrency should be (A63, 2.3), sent only to a control plane that
 	// says 2.3. Like Toolchains it explains: the config decides.
 	Capacity *Capacity `json:"capacity,omitempty"`
+	// LabelAliases is the machine's [label_aliases] (A68, 2.4), sent only to
+	// a control plane that says 2.4: how a job's runs_on reads on this
+	// machine, which is how it will compile here.
+	LabelAliases map[string][]string `json:"label_aliases,omitempty"`
 }
 
 // Capacity is a machine's size and the concurrency latem recommends for each
@@ -70,6 +74,10 @@ type Toolchains struct {
 type RepoInfo struct {
 	Key    string `json:"key"`
 	GitHub string `json:"github,omitempty"`
+	// Vars is a digest of each of the repository's variables, by name (A68,
+	// 2.4), sent only to a control plane that says 2.4: enough to tell two
+	// machines' answers apart. An unset variable is an absent name.
+	Vars map[string]string `json:"vars,omitempty"`
 }
 
 // RunnerInfo describes one execution slot.

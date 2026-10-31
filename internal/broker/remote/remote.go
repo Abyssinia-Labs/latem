@@ -705,17 +705,23 @@ func (b *Broker) SpeaksRequires() bool {
 	return versionAtLeast(b.peerVersion, 2, 2)
 }
 
-// planForPeer is p without 2.2's fields, for a control plane that has not
-// said 2.2. A copy: the caller's slices are not written.
+// planForPeer is p without the fields a control plane has not said it knows.
+// A copy: the caller's slices are not written.
 func (b *Broker) planForPeer(p protocol.PlanResult) protocol.PlanResult {
-	if b.SpeaksRequires() {
+	requires, placement := b.SpeaksRequires(), b.speaksPlacement()
+	if requires && placement {
 		return p
 	}
 	workflows := slices.Clone(p.Workflows)
 	for i := range workflows {
 		jobs := slices.Clone(workflows[i].Jobs)
 		for j := range jobs {
-			jobs[j].Requires = nil
+			if !requires {
+				jobs[j].Requires = nil
+			}
+			if !placement {
+				jobs[j].RunsOn, jobs[j].ReadsVars = nil, nil
+			}
 		}
 		workflows[i].Jobs = jobs
 	}
@@ -731,6 +737,15 @@ func (b *Broker) speaksCapacity() bool {
 	return versionAtLeast(b.peerVersion, 2, 3)
 }
 
+// speaksPlacement reports whether the control plane said 2.4, so resolves a
+// job's runs_on on each machine, and compares what machines say of its vars
+// (A68).
+func (b *Broker) speaksPlacement() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return versionAtLeast(b.peerVersion, 2, 4)
+}
+
 // healthForPeer is h without 2.2's toolchains, for a control plane that has
 // not said 2.2.
 func (b *Broker) healthForPeer(h protocol.MachineHealth) protocol.MachineHealth {
@@ -741,6 +756,14 @@ func (b *Broker) healthForPeer(h protocol.MachineHealth) protocol.MachineHealth 
 	// strictly as plans.
 	if !b.speaksCapacity() {
 		h.Capacity = nil
+	}
+	// And 2.4's aliases and digests. A copy: the caller's slice is not written.
+	if !b.speaksPlacement() {
+		h.LabelAliases = nil
+		h.Repos = slices.Clone(h.Repos)
+		for i := range h.Repos {
+			h.Repos[i].Vars = nil
+		}
 	}
 	return h
 }

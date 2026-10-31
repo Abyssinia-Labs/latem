@@ -3058,3 +3058,73 @@ find, and they need no process to answer.
 **What this gives up.** An Xcode that hangs rather than refuses keeps its runner, and its jobs fail
 on their own with what they saw. That is rarer than a busy Mac, and costs one job rather than five
 minutes of every job.
+
+### Amendment from a third machine joining a repository
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A68 | §5 INV-5, §7, §20, A47, A50, A52, A61 | **Protocol 2.4. A machine joining a repository does not change where another machine's jobs go or whether they run, unless it can take them and agrees with the fleet about them. A plan says each job's `runs_on` before any machine's aliases, and which variables decide its place. A heartbeat says the machine's aliases and a digest of each variable. The control plane reads a job's labels on each machine with that machine's aliases, asks the machine that stands for a repository to plan it, and keeps a job off a machine that would answer its variables differently from that one, saying so from that machine's first heartbeat** | A plan was one machine's reading, and every other machine lived with it. `requestPlan` asked the online machine whose id sorted first, and a job's `labels` carried that machine's `[label_aliases]`. On 2026-10-31 the Linux desktop joined Tsedal, its id sorted first, and it had no Blacksmith alias, so PR #5's `web` job kept the raw label `blacksmith-4vcpu-ubuntu-2404` and waited, though the mini's own alias maps it to `linux`. Reading the code found a quieter case. A job's `if:` is answered not by the plan but by the machine that takes the job, from its own `[repos.<key>.vars]`, so `if: vars.LATEM == 'true'` on a machine without the variable skips the job with no error |
+
+**Labels are read on each machine.** `runs_on` is each label as written, lowercased, without
+`self-hosted`, with `hosted`: what it stands for on a machine with no alias for it. For each
+machine the control plane takes that machine's alias for the label, else `hosted`, else the label.
+That is `compileLabels`' own order, so placement now asks what the machine will ask when it
+compiles the job (A50), and a job cannot reach a machine that would refuse it because the planner's
+alias covered it. A plan's `labels` stays, for an older control plane or machine, and for `requires`,
+which is read from it and only explains (A61).
+
+**Who stands for a repository.** Its default machine, then the machine that has advertised it
+longest, and never the machine id. `repos[].since` is stamped by the control plane the first time a
+machine advertises a repository and kept while it stays advertised; a row from before it exists
+reads as the machine's age. A machine that joins comes last, so it plans nothing while another
+machine can. Planning is not held for the one that stands: a laptop with its lid shut must not stop
+a repository's events, so the next machine in that order plans.
+
+**Variables.** `reads_vars` names what decides whether a job runs, where, and as what: its `if:`,
+`runs-on`, `environment`, `strategy`, `name`, `concurrency` and `continue-on-error`, and its
+workflow's `concurrency`. A step's reads are not there, because they change what a job does on a
+machine and not whether it does it, and a value that differs per machine for a step is fair use of a
+machine's config. The names are read from the file, so they are the commit's and no machine's;
+`"*"` says the job reads `vars` in a way no list can describe, and every variable is compared.
+
+Among the machines with a runner for the job, online or not, the one that stands gives the answer,
+and a machine that differs from it on a name the job reads is not given the job. An unset variable
+is an answer. A machine that has not reported its variables is not compared. With the machine that
+stands offline, and the others differing from it, the job waits and names the variable and both
+machines rather than run on another answer.
+
+This does not decide which value is right. There is no authority to ask: GitHub holds no latem
+variables, and Tsedal's `LATEM` is set only in latem on purpose. It keeps the answer the repository
+was already getting, which is what makes joining safe, and tells a person where the machines
+differ. A heartbeat carries the first 8 bytes of each value's SHA-256 and not the value: comparing
+needs no more, and a machine's config stays on the machine.
+
+**What the app says.** Each plan records, per workflow, what its variable-reading jobs ask of a
+machine. Overview's Needs you names each machine that differs from the one that stands, with the
+jobs and the variables, from the first heartbeat that says so and before any event. A job held by a
+difference shows as unplaceable, with the variable in its reason.
+
+**What a machine joining can still change.** A machine that can take a job and agrees about it
+shares it: that is what adding one is for, and a repository's default machine still pins its jobs.
+A machine that joins can plan an event nothing else can, which would otherwise have waited, and then
+what only a plan answers is its answer. Whatever it differs on is already named in Needs you, except
+`run-name`, which only labels a run and is not compared. A `windows-*` label is refused by the
+planner unless the planner has an alias for it, as A47 had it: an alias on another machine does not
+rescue the job, and it fails with that error. Until a workflow has been planned once, nothing is
+known of its jobs, and a difference first shows on the job.
+
+**To whom.** All four fields go only to a control plane whose hello says 2.4, and the remote broker
+strips them otherwise, because a 2.3 control plane decodes plans and heartbeats strictly. So the
+control plane is upgraded first: Convex, then the gateway, then agents. A job with no `runs_on` is
+placed by `labels`, and a machine that speaks less than 2.4 reports no aliases and is placed by
+`labels` too, so an agent already running behaves exactly as it did.
+
+**INV-5** is unchanged. Labels and variable names are the pinned commit's, read by the agent, and the
+control plane holds them to place a job as it already held `labels`. No step reaches it, and the
+machine that takes a job still compiles it from the commit and its own config, and refuses what it
+would have refused.
+
+**What was not done.** Preferring a planner whose config covers a repository's workflows would leave
+one machine's config deciding, and only move which. Sending variable values through the control
+plane so that every machine answers alike would need a place where the true value lives, and there
+is none. Holding a job whenever machines differ would let a newcomer stop jobs that ran yesterday.

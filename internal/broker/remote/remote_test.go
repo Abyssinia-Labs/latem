@@ -440,6 +440,58 @@ func TestRequires_OnlyToAControlPlaneThatSays22(t *testing.T) {
 	}
 }
 
+// A job's runs_on and reads_vars, and a heartbeat's aliases and digests (A68),
+// go only to a control plane that says 2.4: a 2.3 one decodes both strictly.
+func TestPlacement_OnlyToAControlPlaneThatSays24(t *testing.T) {
+	plan := protocol.PlanResult{ID: "p-1", Workflows: []protocol.PlannedWorkflow{{
+		File: ".github/workflows/ci.yml", Name: "ci",
+		Jobs: []protocol.PlannedJob{{Key: "web", Name: "web", TimeoutMinutes: 360,
+			RunsOn:    []protocol.RunsOnLabel{{Label: "blacksmith-4vcpu-ubuntu-2404"}},
+			ReadsVars: []string{"LATEM"},
+			Requires:  []protocol.Requirement{{Key: "bun"}}}},
+	}}}
+	health := protocol.MachineHealth{MachineID: "m",
+		LabelAliases: map[string][]string{"blacksmith-4vcpu-ubuntu-2404": {"linux"}},
+		Repos:        []protocol.RepoInfo{{Key: "app", Vars: map[string]string{"LATEM": "b5bea41b6c623f7c"}}}}
+
+	for _, c := range []struct {
+		version string
+		want    bool
+	}{{"2.2", false}, {"2.3", false}, {"2.4", true}, {"2.10", true}} {
+		h := newHarness(t, nil)
+		h.CP.SetHello(&helloFrame{Version: c.version})
+		h.CP.Partition()
+		h.CP.Await(t, "the partition", func() bool { return !h.Connected() })
+		h.CP.Heal()
+		h.AwaitConnected(t)
+		h.CP.Await(t, "the hello", func() bool { return h.speaksPlacement() == c.want && h.SpeaksRequires() })
+
+		if err := h.ReportPlan(t.Context(), plan); err != nil {
+			t.Fatalf("%q: ReportPlan: %v", c.version, err)
+		}
+		if err := h.Heartbeat(t.Context(), health); err != nil {
+			t.Fatalf("%q: Heartbeat: %v", c.version, err)
+		}
+		h.CP.Await(t, "the beat", func() bool { return len(h.CP.Heartbeats()) > 0 })
+		plans, beats := h.CP.Plans(), h.CP.Heartbeats()
+		job, beat := plans[len(plans)-1].Workflows[0].Jobs[0], beats[len(beats)-1]
+		for what, got := range map[string]bool{
+			"runs_on": job.RunsOn != nil, "reads_vars": job.ReadsVars != nil,
+			"label_aliases": beat.LabelAliases != nil, "vars": beat.Repos[0].Vars != nil,
+		} {
+			if got != c.want {
+				t.Errorf("hello %q: %s sent %v, want %v", c.version, what, got, c.want)
+			}
+		}
+		if job.Requires == nil {
+			t.Errorf("hello %q: a control plane that says 2.2 lost requires", c.version)
+		}
+	}
+	if plan.Workflows[0].Jobs[0].RunsOn == nil || health.Repos[0].Vars == nil {
+		t.Error("stripping for an old control plane wrote the caller's values")
+	}
+}
+
 // A heartbeat's capacity (A63) goes only to a control plane that says 2.3:
 // a 2.2 one decodes heartbeats strictly, and would refuse the field.
 func TestCapacity_OnlyToAControlPlaneThatSays23(t *testing.T) {

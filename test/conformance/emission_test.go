@@ -39,8 +39,8 @@ func TestConformance_AgentEmissions(t *testing.T) {
 	dir := shortTemp(t)
 	db := openStore(t, dir)
 	rec := newRecorder(t, "tok-conformance")
-	// A61: a control plane that says 2.2 is sent a plan's requires and a
-	// heartbeat's toolchains.
+	// A61, A68: a control plane that says 2.4 is sent a plan's requires,
+	// runs_on and reads_vars, and a heartbeat's toolchains and label_aliases.
 	rec.hello = []byte(`{"kind":"hello","hello":{"protocol_version":"` + protocol.Version + `"}}`)
 
 	ctx := context.Background()
@@ -102,7 +102,11 @@ func TestConformance_AgentEmissions(t *testing.T) {
 		DiskFreeGB: 412.5,
 		// A52: how an installation's repository finds its machines. A
 		// repository not on GitHub has a key and no slug.
-		Repos: []protocol.RepoInfo{{Key: "myapp", GitHub: "Abyssinia-Labs/myapp"}, {Key: "scratch"}},
+		Repos: []protocol.RepoInfo{
+			{Key: "myapp", GitHub: "Abyssinia-Labs/myapp", Vars: map[string]string{"LATEM": "b5bea41b6c623f7c"}},
+			{Key: "scratch"},
+		},
+		LabelAliases: map[string][]string{"blacksmith-6vcpu-macos-26": {"macos"}},
 		// A61: versions and names, never a path.
 		Toolchains: &protocol.Toolchains{
 			Xcode: []string{"26.0.1", "27.0"}, IOSSimulator: true, JDK: []int{17, 21},
@@ -179,6 +183,11 @@ func TestConformance_AgentEmissions(t *testing.T) {
 				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
 				// A61: what it needs that nothing in it provides.
 				Requires: []protocol.Requirement{{Key: "xcode", Version: "27"}, {Key: "ios-simulator"}},
+				RunsOn: []protocol.RunsOnLabel{
+					{Label: "macos-latest", Hosted: []string{"macos"}},
+					{Label: "blacksmith-6vcpu-macos-26"},
+				},
+				ReadsVars: []string{"LATEM"},
 			}, {
 				Key: "web", Name: "Web build", Needs: []string{"lint"}, Labels: []string{"linux"},
 				Environment: "staging", Permissions: map[string]string{},

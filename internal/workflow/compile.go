@@ -493,22 +493,10 @@ func compileLabels(runsOn StringList, file, job string, aliases map[string][]str
 	if len(runsOn) == 0 {
 		return nil, badRegistry("%s: job %q has no runs-on", file, job)
 	}
-	// An expression is answered as a plan is (A55): from the event, the
-	// inputs, the vars and the matrix leg, all known before a machine is
-	// chosen. Each label it yields is checked as a written one is.
-	var written StringList
-	for _, raw := range runsOn {
-		if !expr.Has(raw) {
-			written = append(written, raw)
-			continue
-		}
-		labels, err := runsOnValues(raw, sc)
-		if err != nil {
-			return nil, badRegistry("%s: job %q: runs-on: %v", file, job, err)
-		}
-		written = append(written, labels...)
+	runsOn, err := answeredRunsOn(runsOn, file, job, sc)
+	if err != nil {
+		return nil, err
 	}
-	runsOn = written
 	out := make([]string, 0, len(runsOn))
 	seen := map[string]bool{}
 	add := func(l string) {
@@ -552,6 +540,43 @@ func compileLabels(runsOn StringList, file, job string, aliases map[string][]str
 				"name the labels that distinguish the machine you want", file, job)
 	}
 	return out, nil
+}
+
+// answeredRunsOn is runs-on with its expressions answered, as a plan answers
+// them (A55): from the event, the inputs, the vars and the matrix leg, all
+// known before a machine is chosen. Each label an expression yields is checked
+// as a written one is.
+func answeredRunsOn(runsOn StringList, file, job string, sc expr.Scope) (StringList, error) {
+	var written StringList
+	for _, raw := range runsOn {
+		if !expr.Has(raw) {
+			written = append(written, raw)
+			continue
+		}
+		labels, err := runsOnValues(raw, sc)
+		if err != nil {
+			return nil, badRegistry("%s: job %q: runs-on: %v", file, job, err)
+		}
+		written = append(written, labels...)
+	}
+	return written, nil
+}
+
+// plannedRunsOn is what [compileLabels] reads before it looks at any aliases
+// (A68), for a control plane to finish on each machine with that machine's
+// own: the same rule, alias first, then the hosted label, then the label.
+func plannedRunsOn(written StringList) []protocol.RunsOnLabel {
+	var out []protocol.RunsOnLabel
+	seen := map[string]bool{}
+	for _, raw := range written {
+		l := strings.ToLower(strings.TrimSpace(raw))
+		if l == "self-hosted" || seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, protocol.RunsOnLabel{Label: l, Hosted: hostedLabel(l)})
+	}
+	return out
 }
 
 var (
