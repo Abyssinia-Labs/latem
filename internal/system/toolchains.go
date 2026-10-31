@@ -247,8 +247,11 @@ func androidPlatforms(sdk string) []int {
 	return out
 }
 
-// sysPath is an absolute system path under the configured root.
-func (s *System) sysPath(p string) string { return filepath.Join(s.root, p) }
+// sysPath is an absolute system path under the configured root. It is absolute
+// whatever it is given: with no root, which is every real machine, Join alone
+// returns a relative path unchanged, and one that resolves from `/` and from
+// nowhere else passes everywhere a test sets a root.
+func (s *System) sysPath(p string) string { return filepath.Join("/", s.root, p) }
 
 // lookIn finds name in a PATH list, as exec.LookPath does in $PATH.
 func lookIn(name, pathList string) string {

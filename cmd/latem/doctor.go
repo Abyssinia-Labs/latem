@@ -206,7 +206,7 @@ almost none of them produce an error message that names the environment.
 
 What it checks (§19, §23):
   - git, docker, and tart: present, and new enough
-  - the Docker daemon, and whether this user can reach it
+  - the Docker daemon, and whether this user and the running agent can reach it
   - the base image contract (§13.1) by running the image once
   - the NVIDIA toolkit when a gpu runner is configured, and /dev/kvm for
     Android emulator jobs

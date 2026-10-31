@@ -23,7 +23,7 @@ func (s *System) Resources(ctx context.Context) (cpus int, memory uint64) {
 		return cpus, memory
 	}
 	cpus = s.intOf(ctx, "getconf", "_NPROCESSORS_ONLN")
-	data, err := os.ReadFile(s.sysPath("proc/meminfo"))
+	data, err := os.ReadFile(s.sysPath("/proc/meminfo"))
 	if err != nil {
 		return cpus, 0
 	}
