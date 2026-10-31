@@ -105,9 +105,12 @@ jobs:
 
   # Integration tests need a Docker daemon, so they run separately from the
   # gate. Not required to merge a leaf workstream; required before M3 closes.
+  #
+  # latem's docker runner gives a step no daemon, so this copy is GitHub's.
+  # vars.LATEM is set only on latem's machines, which skip it.
   integration:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.LATEM != 'true'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -127,4 +130,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
+
+  # The same tests on latem: a native runner with this label to itself, on a
+  # host with a Docker daemon, Go and gcc. There is no setup-go, because a
+  # remote action on a native runner needs allow_unisolated.
+  #
+  # Only the machine with that runner sets vars.LATEM_HOST_RUNNER. runs-on is
+  # decided by the machine that plans the job and if: by the one that takes it,
+  # so when that machine is off, another plans this for an ordinary runner,
+  # which skips it. A plain runs-on: docker-host would wait for it instead.
+  integration-host:
+    runs-on: ${{ vars.LATEM_HOST_RUNNER == 'true' && 'docker-host' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    if: github.event_name == 'push' && vars.LATEM_HOST_RUNNER == 'true'
+    steps:
+      - uses: actions/checkout@v5
+      # As above: a skipped suite and a passing one look the same.
+      - name: require a Docker daemon
+        run: docker info >/dev/null
+      - name: integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
           go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
