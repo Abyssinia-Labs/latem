@@ -121,3 +121,20 @@ func TestCheckKVM(t *testing.T) {
 		t.Errorf("Present with an error set: %+v", got)
 	}
 }
+
+// With no root, which is every real machine, a system path stays absolute. A
+// relative one resolves from `/` and from nowhere else, so memory read as zero
+// for any process started in a home directory, and every test passed because
+// every test sets a root.
+func TestSysPathIsAbsoluteOnARealMachine(t *testing.T) {
+	s := New(Options{GOOS: "linux", Home: t.TempDir(), Getenv: func(string) string { return "" }})
+	for _, p := range []string{"proc/meminfo", "/proc/meminfo"} {
+		if got := s.sysPath(p); got != "/proc/meminfo" {
+			t.Errorf("sysPath(%q) = %q, want /proc/meminfo", p, got)
+		}
+	}
+	rooted := New(Options{GOOS: "linux", Root: "/fixture", Home: t.TempDir(), Getenv: func(string) string { return "" }})
+	if got := rooted.sysPath("proc/meminfo"); got != "/fixture/proc/meminfo" {
+		t.Errorf("rooted = %q", got)
+	}
+}
