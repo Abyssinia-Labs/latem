@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -50,6 +51,7 @@ func TestKill9AgentChild(t *testing.T) {
 		Version:       "kill9-child",
 		Logger:        testLogger(t),
 		ClaimInterval: 100 * time.Millisecond,
+		NewExecutor:   crashExecutor,
 	})
 	if err != nil {
 		t.Fatalf("child: %v", err)
@@ -59,6 +61,24 @@ func TestKill9AgentChild(t *testing.T) {
 		t.Fatalf("child: %v", err)
 	}
 }
+
+// crashExecutor is the real executor without its preflight.
+//
+// Native preflight asks this Mac about its session and its Xcode, and this test
+// is about what a crash leaves behind. A real answer would make the test report
+// on the machine: a runner refused for a licence waits for a preflight five
+// minutes off, and the failure reads as a step that never started.
+func crashExecutor(r *config.Runner, paths config.Paths) (executor.Executor, error) {
+	e, err := DefaultExecutor(r, paths)
+	if err != nil {
+		return nil, err
+	}
+	return noPreflight{e}, nil
+}
+
+type noPreflight struct{ executor.Executor }
+
+func (noPreflight) Preflight(context.Context) error { return nil }
 
 // The M4 acceptance criterion, demonstrated rather than asserted:
 //
@@ -181,7 +201,7 @@ jobs:
 	// Restart. Everything M4 promises has to happen here, because SIGKILL gave
 	// the dying process no chance to do any of it.
 	restarted := newTestAgent(t, cfg, func(o *Options) {
-		o.NewExecutor = DefaultExecutor
+		o.NewExecutor = crashExecutor
 		// Nothing should be claimed during this phase: the queue is empty and
 		// the interrupted run is terminal.
 		o.ClaimInterval = time.Hour

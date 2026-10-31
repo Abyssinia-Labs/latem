@@ -65,7 +65,8 @@ func TestCheckXcode(t *testing.T) {
 		"licence":            {fail: map[string]error{"-license": refused}, wantIn: "Xcode 27.3 at %s needs its licence accepted: `sudo xcodebuild -license accept` on this Mac"},
 		"first launch":       {fail: map[string]error{"-checkFirstLaunchStatus": refused}, wantIn: "needs its first-launch setup: `sudo xcodebuild -runFirstLaunch` on this Mac"},
 		"mid update":         {gone: true, wantIn: "%s is missing or half-installed"},
-		"not answering":      {fail: map[string]error{"-license": context.DeadlineExceeded}, wantIn: "did not answer `xcodebuild -license check` in time"},
+		"not answering":      {fail: map[string]error{"-license": context.DeadlineExceeded, "-checkFirstLaunchStatus": context.DeadlineExceeded}, wantRun: "-checkFirstLaunchStatus"},
+		"slow, then refused": {fail: map[string]error{"-license": context.DeadlineExceeded, "-checkFirstLaunchStatus": refused}, wantIn: "needs its first-launch setup"},
 		"the runner's own":   {own: true, fail: map[string]error{"-license": refused}, wantIn: "`sudo env DEVELOPER_DIR=%s/Contents/Developer xcodebuild -license accept`"},
 		"command line tools": {clt: true},
 	} {
@@ -117,6 +118,18 @@ func TestPreflight_XcodeMidUpdate(t *testing.T) {
 	e.goos = "darwin"
 	if err := e.Preflight(t.Context()); err == nil || !strings.Contains(err.Error(), "half-installed") {
 		t.Fatalf("Preflight = %v, want the runner refused while Xcode is half-installed", err)
+	}
+}
+
+// A Mac too busy to answer in time still has a whole Xcode, so its runner keeps
+// taking work rather than going dark until the next preflight (A67).
+func TestPreflight_SlowXcodeKeepsTheRunner(t *testing.T) {
+	_, dev := fakeXcode(t)
+	slow := map[string]error{"-license": context.DeadlineExceeded, "-checkFirstLaunchStatus": context.DeadlineExceeded}
+	e := newExecutor(t, Options{Runner: sessionThen{managerRunner("Aqua"), &xcodeRunner{selected: dev, version: "27.3", fail: slow}}})
+	e.goos = "darwin"
+	if err := e.Preflight(t.Context()); err != nil {
+		t.Fatalf("Preflight = %v, want a slow xcodebuild to leave the runner available", err)
 	}
 }
 

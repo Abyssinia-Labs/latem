@@ -106,7 +106,7 @@
 // A third fails every build rather than every signature: the Xcode the steps
 // use is mid-update, or wants its licence accepted or its first launch run
 // after one. [CheckXcode] names which, and the command; Preflight refuses work
-// until it passes (A64).
+// until it passes (A64). An xcodebuild too slow to answer is not refused (A67).
 //
 // Both are exported as plain functions taking an injectable [Runner] so that
 // `latem doctor` reports the same diagnosis the agent acts on, rather than a
