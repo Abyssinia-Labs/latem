@@ -1,156 +1,30 @@
-# WS-00 owns this file.
+# Throwaway: never merged. Prints what a step on the desktop's host runner finds.
 name: ci
 
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # The gate every workstream must pass, on both platforms the agent targets.
-  # macOS is not optional here: the Tart and native executors, the keychain
-  # paths, and the LaunchAgent handling only exist on darwin, and a Linux-only
-  # pipeline would let them rot between releases.
-  check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15]
-    runs-on: ${{ matrix.os }}
+  host-path:
+    runs-on: docker-host
+    if: vars.LATEM == 'true'
     steps:
-      - uses: actions/checkout@v5
-
-      # This job also runs on latem's own machines (latem-ci). Their macOS
-      # runner is native, and a native runner runs no remote action unless the
-      # operator gives up isolation (A47), so on macOS the job uses the Go the
-      # machine has. go.mod's version is fetched from there if it is newer
-      # (GOTOOLCHAIN=auto, Go's default). Keyed on runner.os, never a label.
-      - uses: actions/setup-go@v6
-        if: runner.os == 'Linux'
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: go (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          command -v go >/dev/null || brew install go
-          go version
-
-      # install.sh verifies a release signature when minisign is present, and
-      # test/scripts exercises that path against a real keypair — but only when
-      # the tool is installed, and it skips otherwise. A test that skips on
-      # every runner is not a test, so one of the two platforms carries it.
-      # apt has it; brew would cost a minute on every macOS run for the same
-      # assertion.
-      #
-      # Keyed on runner.os rather than on the matrix label. The label version
-      # of this condition stopped matching the moment the runners moved to
-      # another provider, and the failure was silent in the worst way: the step
-      # was skipped, minisign was absent, and the tests it exists for went back
-      # to reporting themselves as skipped on every platform.
-      - name: minisign
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq minisign
-
-      - name: build
-        run: go build ./...
-
-      - name: vet
-        run: go vet ./...
-
-      - name: test
-        run: go test -race -count=1 ./...
-
-  lint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      # v7 or later, because golangci-lint v2 is not supported by the v6
-      # action: it rejects the version string outright ("invalid version string
-      # 'v2.12.2'"). .golangci.yml has been on the v2 schema since it was
-      # written, so this job had never once run the linter it names.
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          # The same file `make lint` reads, so a local run and this one cannot
-          # disagree about which linter judged the tree.
-          version-file: .golangci-lint-version
-
-  # go.mod has one owner (docs/PLAN.md, rule 2). This job makes a stray `go get`
-  # visible in review rather than in someone else's rebase.
-  tidy:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: go mod tidy is a no-op
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-
-  # Integration tests need a Docker daemon, so they run separately from the
-  # gate. Not required to merge a leaf workstream; required before M3 closes.
-  #
-  # latem's docker runner gives a step no daemon, so this copy is GitHub's.
-  # vars.LATEM is set only on latem's machines, which skip it.
-  integration:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'push' && vars.LATEM != 'true'
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      # Before the tests, not after: every integration test skips itself when
-      # no daemon answers, and a skipped suite and a passing one produce the
-      # same green tick. This job exists to exercise Docker, so a runner
-      # without it is a broken job rather than a quiet one.
-      - name: require a Docker daemon
-        run: docker info >/dev/null
-      # pipefail, because the exit status of `go test | tee` is tee's. Without
-      # it this step cannot fail: the job reported success while its own log
-      # said FAIL, and had been doing so for as long as the tee had been there.
-      - name: integration
+      - name: as shell bash
         shell: bash
         run: |
-          set -euo pipefail
-          go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
-
-  # The same tests on latem: a native runner with this label to itself, on a
-  # host with a Docker daemon, Go and gcc. There is no setup-go, because a
-  # remote action on a native runner needs allow_unisolated.
-  #
-  # Only the machine with that runner sets vars.LATEM_HOST_RUNNER. runs-on is
-  # decided by the machine that plans the job and if: by the one that takes it,
-  # so when that machine is off, another plans this for an ordinary runner,
-  # which skips it. A plain runs-on: docker-host would wait for it instead.
-  integration-host:
-    runs-on: ${{ vars.LATEM_HOST_RUNNER == 'true' && 'docker-host' || 'blacksmith-4vcpu-ubuntu-2404' }}
-    if: github.event_name == 'push' && vars.LATEM_HOST_RUNNER == 'true'
-    steps:
-      - uses: actions/checkout@v5
-      # As above: a skipped suite and a passing one look the same.
-      - name: require a Docker daemon
-        run: docker info >/dev/null
-      - name: integration
+          echo "PATH=$PATH"
+          echo "user=$(id -un)"
+          grep -E '^(NAME|ID|ID_LIKE)=' /etc/os-release
+          for t in go gcc git docker python3 cargo; do printf '%s: ' "$t"; command -v "$t" || echo none; done
+          ls -l /usr/bin/go /usr/lib/go/bin/go 2>&1 || true
+          pacman -Q go gcc 2>&1 || true
+          grep -E ' (installed|upgraded|removed) (go|gcc) ' /var/log/pacman.log 2>&1 | tail -5 || true
+          tail -3 /var/log/pacman.log 2>&1 || true
+          ls -ld /usr/local/go "$HOME/go" "$HOME/sdk" 2>&1 || true
+      - name: as a login shell
         shell: bash
         run: |
-          set -euo pipefail
-          go version
-          go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
+          bash -lc 'echo "PATH=$PATH"; command -v go || echo "go: none"'
