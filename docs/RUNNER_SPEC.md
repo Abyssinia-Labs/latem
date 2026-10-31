@@ -1298,6 +1298,7 @@ latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
+latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
 latem update [--check]               Install the latest release; the agent moves onto it when idle (A56)
@@ -2974,3 +2975,53 @@ workflow run's job that names a commit: there is no tip to resolve, and pin goes
 alone. When the mirror lacks that commit, it is fetched by its name, as actions/checkout fetches
 it; GitHub serves a commit no ref reaches until its own gc. A branch's commit is never fetched by
 name, because one the branch's fetch did not bring is not on the branch.
+
+
+### Amendment from moving an app off EAS
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A65 | §19, A35, A50, A57 | **`latem store check` says whether a preview would reach testers from this machine: the secrets by name, the signing store, the App Store Connect key, the app record, the App Store profile and its certificate, the upload key, the Play service account, and the last upload on each store. It only reads. Nothing it does can create or change anything at Apple, at Google or in the signing store, and it never opens a Play edit** | Moving one Expo app off EAS meant nine secrets set by hand, and each mistake surfaced as a failed upload after a build of six to eleven minutes. `doctor --secrets` asks whether a name resolves and whether Apple takes the key (A35); it does not know which app a machine is for, so it could not say whether that app has a record, a profile, or a certificate about to expire. Everything that decides those can be read in a few seconds |
+
+**What it reads.** An Expo project's `app.json`, found below the path when a monorepo keeps it in a
+package, for the bundle ID and the package, and `fastlane/Matchfile` for the signing store and its
+branch. A `Matchfile` is read for its strings and not run, and an `app.config.ts` is not run at all:
+it is code, and a check does not execute a project to read a value out of it, so `--bundle-id` and
+`--package` stand in. With `--repo` and no path the tree is read as in A57, and the agent's mirror
+is never written. A project with both flags need not be an Expo project.
+
+Secrets are looked up as a run looks them up (A50). A value is resolved only to be used or measured,
+and zeroed after. Reports carry names, ids, dates and Apple's and Google's own messages, never a
+value (INV-4); an alias and keytool's output count as values, and neither reaches a report.
+
+**What it cannot do.** Every request to App Store Connect is a GET, through one function that takes
+no method. Reads that would return a profile's or a certificate's contents do not ask for them. The
+one POST anywhere is the assertion traded for an access token at
+`https://oauth2.googleapis.com/token`, which is the only address it goes to: a key file's
+`token_uri` is not read. Play is read through `applications.tracks.releases.list`, which has no edit
+in its path, because a new edit invalidates the same user's open one and a timed check could
+otherwise kill a running `fastlane supply`. The signing store is asked `git ls-remote`, for a
+reachable branch, and is not cloned. keytool reads a keystore only from a file, so the keystore is on
+disk for as long as keytool runs, at mode 0600 in a directory of its own, as a build's script has it;
+the password reaches keytool through the environment, and the alias is matched here rather than
+passed.
+
+A `Matchfile`'s URL is passed to git only if it is https or ssh. It is a file in a repository, and
+INV-3's reasoning applies to what a repository can make a machine run.
+
+**Levels.** As `doctor`'s, and for what actually breaks. A date warns inside 30 days and fails inside
+7: an expired certificate stops new uploads and leaves live apps alone, and a TestFlight build stops
+opening after 90 days. Missing secrets, keys a store refuses, a profile that is not `ACTIVE` and a
+rejected upload fail. An app with nothing uploaded yet warns, because a new app has no reason to
+have a build. `IOS_DISTRIBUTION` and `DISTRIBUTION` both pass, and the report shows which one this
+is: EAS's certificate carries the older type and the older name, and both sign for the App Store.
+
+An agreement that has lapsed shows only as Apple's refusal of a read, because Apple's API cannot list
+them. The check says so and names the Account Holder, who alone can accept one. latem never does
+(A60). Every fix a check names for signing says to run it at a terminal: a runner consumes signing
+material and never creates it (§18.1, `docs/ios.md`).
+
+**What it leaves out.** Anything that writes, any change to the protocol, and anything in a control
+plane. Whether a workflow is switched on, and whether a push reaches a machine, are the control
+plane's to know. `MATCH_PASSWORD` and `ANDROID_KEY_PASSWORD` are checked by name: proving either
+would mean decrypting the signing store or exporting a key.

@@ -143,6 +143,19 @@ The JSON key is multi-line. Same warning as the iOS `.p8`: §16 registers every
 individual line of a multi-line secret with the redactor, because registering
 only the whole value redacts nothing when the value never appears on one line.
 
+To check both sides without spending a build:
+
+```console
+$ latem store check ~/src/myapp --platform android
+```
+
+It reads the package from `app.json`, opens the keystore with keytool, trades the
+service account's key for a token, and reads the last release on the internal
+track (`--track` for another). A key Google refuses and an invite that has not
+landed fail differently, and each names its fix. It reads the track with
+`applications.tracks.releases.list` and never opens an edit, because a new edit
+invalidates one a running `supply` upload holds, so it is safe beside a build.
+
 ---
 
 ## 3. `/dev/kvm` and emulator tests

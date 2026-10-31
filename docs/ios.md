@@ -375,6 +375,18 @@ sorted by how often each is the answer, not by how interesting it is.
 `latem doctor` is meant to collapse steps 1–6 into one command (§19). Until it
 exists, this is the list.
 
+For a failed upload rather than a failed build, ask the store first:
+
+```console
+$ latem store check ~/src/myapp
+```
+
+It reads the app's bundle ID from `app.json` and asks Apple, read-only, for the
+app record, the App Store profile and its certificate with their expiry, and the
+last upload, after checking the secrets by name, the signing store and the key
+(A35). It is safe beside a running build, and it creates nothing: the fixes it
+names for signing are for a person at a terminal, not for a runner (§5).
+
 ---
 
 ## See also
