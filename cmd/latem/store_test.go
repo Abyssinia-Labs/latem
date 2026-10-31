@@ -691,6 +691,23 @@ func TestStoreCheck_ASigningStoreThisMachineCannotReadFails(t *testing.T) {
 	wantLevel(t, h.mustCheck(t, h.run(t.Context()), "store.ios.match"), levelFail)
 }
 
+// Found on the machine that uploads Tsedal: run over ssh, this failed, and named
+// a fix that could only have made things worse.
+func TestStoreCheck_ASigningStoreThisSessionCannotAskIsNotAFailure(t *testing.T) {
+	h := newStoreHarness(t)
+	const noLogin = "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+	h.cmds["launchctl managername"] = fakeCmd{out: "Background"}
+	h.cmds["env -u SSH_AUTH_SOCK git ls-remote --heads --end-of-options "+storeTestStore] = fakeCmd{exit: 128, out: noLogin}
+	h.cmds["git ls-remote --heads --end-of-options "+storeTestStore] = fakeCmd{exit: 128, out: noLogin}
+	rep := h.run(t.Context())
+
+	c := h.mustCheck(t, rep, "store.ios.match")
+	wantLevel(t, c, levelWarn)
+	if len(c.Fix) != 0 {
+		t.Errorf("no fix is known to be needed: %q", c.Fix)
+	}
+}
+
 func TestStoreCheck_AMatchfileURLThatIsNotGitOverAWireIsNeverPassedToGit(t *testing.T) {
 	for _, url := range []string{"--upload-pack=/bin/sh", "ext::sh -c id", "file:///tmp/x", "/tmp/store"} {
 		h := newStoreHarness(t)

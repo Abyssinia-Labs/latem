@@ -387,6 +387,10 @@ last upload, after checking the secrets by name, the signing store and the key
 (A35). It is safe beside a running build, and it creates nothing: the fixes it
 names for signing are for a person at a terminal, not for a runner (§5).
 
+Over ssh, run it for everything but the signing store. A session with no GUI
+cannot open the login keychain, so an https store whose login is there comes
+back as a warning, not an answer. Run it in a terminal on the Mac for that row.
+
 ---
 
 ## See also

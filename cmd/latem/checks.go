@@ -843,12 +843,37 @@ func (d *doctor) checkRemote(ctx context.Context, id, title, name, url string) c
 		)
 	}
 
+	if d.loginOutOfReach(ctx, url, string(outBytes)) {
+		return warn(id, title, fmt.Sprintf("%s — not asked: this session cannot open the login keychain", url)).
+			withManual("Run this again in a terminal on the Mac itself").
+			withNotes(
+				"A session with no GUI, which is what ssh gets, cannot open the login keychain, "+
+					"and that is where gh keeps its login. git finds no credential and says so in "+
+					"the words it uses for a machine with no login at all, so from here the two "+
+					"cannot be told apart. The agent runs in the GUI session: this says nothing about it.",
+				"`gh auth login` from here is the wrong answer. It cannot reach the keychain "+
+					"either, and may write the token to a plain file instead.",
+			)
+	}
+
 	detail := gitRemoteError(string(outBytes))
 	if detail == "" {
 		detail = err.Error()
 	}
 	notes, fixes := repoFailureAdvice(url, string(outBytes))
 	return fail(id, title, fmt.Sprintf("%s — %s", url, detail), fixes...).withNotes(notes...)
+}
+
+// loginOutOfReach reports an https remote that found no credential in a Mac
+// session that could not have reached one. Everything else about the failure is
+// the same as a machine with no login, so only the session tells them apart.
+func (d *doctor) loginOutOfReach(ctx context.Context, url, output string) bool {
+	if !strings.HasPrefix(url, "https://") ||
+		(!strings.Contains(output, "could not read Username") && !strings.Contains(output, "could not read Password")) {
+		return false
+	}
+	lc, err := d.sys.LaunchContext(ctx)
+	return err == nil && lc == system.LaunchContextBackground
 }
 
 // ----------------------------------------------------------------- secrets

@@ -3009,6 +3009,11 @@ passed.
 A `Matchfile`'s URL is passed to git only if it is https or ssh. It is a file in a repository, and
 INV-3's reasoning applies to what a repository can make a machine run.
 
+An https remote that finds no credential in a Mac session with no GUI is a warning with no fix, here
+and in `doctor`. ssh cannot open the login keychain, so git's words there do not mean the machine has
+no login, and `gh auth login` from that session may write the token to a plain file. The first run
+against a real app, from the Mac that uploads it, failed on exactly this.
+
 **Levels.** As `doctor`'s, and for what actually breaks. A date warns inside 30 days and fails inside
 7: an expired certificate stops new uploads and leaves live apps alone, and a TestFlight build stops
 opening after 90 days. Missing secrets, keys a store refuses, a profile that is not `ACTIVE` and a
