@@ -323,6 +323,11 @@ func splitCommands(text string) [][]string {
 
 var assignment = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
 
+// envAssignment is a word env(1) takes as NAME=value. A shell's names are
+// narrow and env's are not: Gradle's ORG_GRADLE_PROJECT_android.injected.… has
+// dots in it, and the build behind one was read as a command of that name.
+var envAssignment = regexp.MustCompile(`^[^=\s-][^=\s]*=`)
+
 // keywords are shell syntax that can stand where a command does.
 var keywords = map[string]bool{
 	"if": true, "then": true, "else": true, "elif": true, "fi": true, "do": true, "done": true,
@@ -398,7 +403,7 @@ func unwrap(words []string) (rest, wrappers []string) {
 			words = skipFlags(words[1:], map[string]bool{"-u": true, "-g": true, "-C": true, "-D": true})
 		case "env":
 			words = skipFlags(words[1:], map[string]bool{"-u": true, "-C": true, "-S": true})
-			for len(words) > 0 && assignment.MatchString(words[0]) {
+			for len(words) > 0 && envAssignment.MatchString(words[0]) {
 				words = words[1:]
 			}
 		case "nice":

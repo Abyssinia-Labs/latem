@@ -345,3 +345,35 @@ jobs:
 		t.Error("an install with no lifecycle scripts was said to need Node")
 	}
 }
+
+// The shape of a preview build that was read as plain macOS: its gradlew sits
+// behind env and a name with dots in it, and the prebuild beside it is named
+// from where a sourced script had cd'd to.
+func TestJob_AnAndroidBuildBehindEnvAndACd(t *testing.T) {
+	fsys := fstest.MapFS{
+		".github/workflows/preview.yml": {Data: []byte(`
+on: push
+jobs:
+  android:
+    runs-on: [macos, xcode]
+    steps:
+      - run: packages/app/ci/android/preview.sh
+`)},
+		"packages/app/ci/android/preview.sh": {Data: []byte(`#!/usr/bin/env bash
+. ci/lib/env.sh
+ci/prebuild.sh android
+(
+  cd android
+  env \
+    "ORG_GRADLE_PROJECT_android.injected.signing.store.file=$KEYSTORE" \
+    ./gradlew :app:bundleRelease --no-daemon
+)
+`)},
+		"packages/app/ci/prebuild.sh": {Data: []byte("CI=1 bunx expo prebuild --platform \"$platform\" --clean\n")},
+	}
+	r := jobOf(t, fsys, ".github/workflows/preview.yml", "android", mac)
+	if r.Kind != KindAndroid {
+		t.Errorf("kind = %q, requires %+v", r.Kind, r.Requires)
+	}
+	requireKeys(t, r, AndroidSDK, JDK, Gradle, Node)
+}

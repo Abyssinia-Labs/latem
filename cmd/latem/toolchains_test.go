@@ -63,6 +63,8 @@ func (m *fakeMachine) deps() toolchainDeps {
 		brewOwner: func(string) (string, bool) {
 			return m.brewOwner, m.brewOwner == ""
 		},
+		host:   func() system.Host { return system.Host{OS: "macOS", Arch: "arm64"} },
+		stores: func(config.Paths) (secretStores, error) { return secretStores{}, nil },
 	}
 }
 

@@ -359,6 +359,15 @@ type jobReport struct {
 	// needs is that runner's to have.
 	carrier  string
 	findings []finding
+
+	// What readiness reports of the job (A69), beside the findings a person
+	// reads: the labels it asks for, whether it uses remote actions that a
+	// native runner refuses, the actions it names by a tag, or that are not
+	// allowed, and the secrets with no value here.
+	labels             []string
+	unisolated         bool
+	moving, notAllowed []string
+	secrets            []string
 }
 
 func (j jobReport) level() level {
@@ -761,7 +770,7 @@ func checkJob(
 	ctx context.Context, cfg *config.Config, t checkTarget, inv inventory, fetcher *stubFetcher,
 	fsys fs.FS, pw *parsedWorkflow, pf *plannedFile, pj protocol.PlannedJob, rep *checkReport,
 ) jobReport {
-	jr := jobReport{key: pj.Key, name: pj.Name}
+	jr := jobReport{key: pj.Key, name: pj.Name, labels: pj.Labels}
 	fail := func(text string, fixes ...string) {
 		jr.findings = append(jr.findings, finding{level: levelFail, text: text, fixes: fixes})
 	}
@@ -808,12 +817,13 @@ func checkJob(
 		// made, exactly what a run of it would be given as run.matrix.
 		Matrix: pj.Matrix,
 	})
-	checkActions(cfg, fetcher.seen(), rep, fail)
+	checkActions(cfg, fetcher.seen(), rep, &jr, fail)
 	if err != nil {
 		fail("refused: " + err.Error())
 		return jr
 	}
 
+	jr.labels, jr.unisolated = job.RunsOn, job.RequiresIsolation
 	jr.runner, jr.carrier = checkRunner(cfg, job, rep, fail)
 	checkSecrets(t, inv, job, &jr)
 	return jr
@@ -926,7 +936,7 @@ func (s *stubFetcher) reset() { s.refs = nil }
 func (s *stubFetcher) seen() []actions.Ref { return slices.Clone(s.refs) }
 
 // checkActions applies the machine's [actions] policy to what a job used.
-func checkActions(cfg *config.Config, refs []actions.Ref, rep *checkReport, fail func(string, ...string)) {
+func checkActions(cfg *config.Config, refs []actions.Ref, rep *checkReport, jr *jobReport, fail func(string, ...string)) {
 	allow := actions.Policy{Allowed: cfg.Actions.Allowed}
 	pinned := cfg.Actions.PinningRequired()
 	done := map[string]bool{}
@@ -941,8 +951,10 @@ func checkActions(cfg *config.Config, refs []actions.Ref, rep *checkReport, fail
 			if !slices.Contains(rep.allowed, r.Slug()) {
 				rep.allowed = append(rep.allowed, r.Slug())
 			}
+			jr.notAllowed = append(jr.notAllowed, r.Slug())
 		}
 		if pinned && !r.Pinned() {
+			jr.moving = append(jr.moving, r.String())
 			fail(fmt.Sprintf("uses %s: %q is a tag or branch, and this machine runs actions pinned to a commit", r, r.Ref),
 				fmt.Sprintf("pin it in the workflow: uses: %s@<the 40-character commit %s names>", strings.TrimSuffix(r.String(), "@"+r.Ref), r.Ref),
 				"or accept moving refs on this machine: [actions] require_pinned = false")
@@ -1060,6 +1072,7 @@ func checkSecrets(t checkTarget, inv inventory, job *registry.Job, jr *jobReport
 			missing = append(missing, name)
 		}
 	}
+	jr.secrets = missing
 	if len(missing) == 0 {
 		return
 	}

@@ -910,6 +910,8 @@ there is no subcommand to fetch them yet.
 
 ```
 latem setup [--url U] [--repo owner/name] [--no-register]  config, repositories, toolchains, registration, service and doctor, idempotently
+latem setup --json                                        what this machine builds and what is in the way; changes nothing
+latem setup android-sdk                                   Google's Android command-line tools in ~/Android/Sdk, on Linux
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]

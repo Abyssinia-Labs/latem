@@ -3128,3 +3128,73 @@ would have refused.
 one machine's config deciding, and only move which. Sending variable values through the control
 plane so that every machine answers alike would need a place where the true value lives, and there
 is none. Holding a job whenever machines differ would let a newcomer stop jobs that ran yesterday.
+
+### Amendment from a Linux desktop that should build Android
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A69 | §3, §8, §19, A59, A60 | **`latem setup`'s toolchains step becomes a screen: every kind of build in the machine's repositories, whichever machine their jobs ask for today, whether this operating system could do it, and what is in the way. It finds what is installed, says each distribution's commands, sets what a step needs, and turns a kind on with a label once a check of it passes. `internal/readiness` is the one answer behind the screen, `--json` and a log. `latem setup android-sdk` installs Google's command-line tools for one user** | A desktop got JDK 27 and nothing said what to do next. The step only looked at jobs whose labels already reached a runner here, so a machine could not be told what it might take: Android asked for `[macos, xcode]`, so to Linux it did not exist. Every fix was Homebrew's. A JDK was looked for only in `/usr/lib/jvm`, and any folder there counted, JRE or not. Nothing set `JAVA_HOME` unless Homebrew had installed the JDK, and on Linux a second JDK is reached no other way |
+
+**One answer.** `readiness.Build` takes the machine and returns a plan, and does nothing else. Each
+kind is ready, missing something, off, or impossible here, with its runner, the label that switches
+it, and what is in the way. An item says what closes it: commands latem runs once asked (A60),
+commands that are a person's to type, changes to `config.toml`, or words. The classifier's reading
+is its input, so what it gets wrong the plan gets wrong: building this found a Gradle build behind
+`env "ORG_GRADLE_PROJECT_android.injected.…=…"`, a name with dots in it, read as a command of that
+name, and a script named from where a sourced script had `cd`'d to. Both are fixed.
+
+**Needs still do not route.** The screen reads every job in the repositories, whatever its labels,
+but a kind goes on only as a label on a runner, in `config.toml`, which a person confirms. A job
+comes here when its `runs-on` asks for that label, and the screen says when a workflow asks for
+something else: that is a change to the repository. INV-5 is unchanged, and so is placement.
+
+**Off a terminal** nothing changes in what setup does: it says the fixes, prints the plan and goes
+on to the next step, so `install.sh` and a provisioning script still run to the end. `--plain` asks
+one question at a time on a terminal, as A60 did. `--json` is the plan, and writes nothing.
+
+**Found before installed.** A JDK is a folder with `bin/javac`, in `/usr/lib/jvm`, `/usr/java`,
+`/opt`, SDKMAN's, mise's, asdf's, IntelliJ's and Gradle's folders, or Android Studio's runtime. Its
+version is the `release` file's, because a folder's name is not always a version:
+`temurin-17-jdk-amd64` and `zulu17-ca-amd64` are 17 too. A JDK on the machine and not what a step
+finds is a setting, not an install: `JAVA_HOME` on the runner. That is an item only where it can
+matter: where jobs already run here it is shown and not counted, because their scripts found the
+JDK themselves. An Android job that names no JDK wants 17, which is what AGP 9 takes.
+
+**What a machine is told to do.** `/etc/os-release` gives the Linux family: Arch, Debian or Fedora,
+through `ID_LIKE` for a derivative. Each has its own package names, and each line wants `sudo`, so
+it is a person's to type (A60). The screen opens their own shell with the line above the prompt, and
+looks again when they leave. It does not type for them: a command that latem starts cannot be told
+from one latem ran. Doctor says the same lines. Homebrew stays the Mac's.
+
+**The Android SDK** is built up a step at a time, each needing the last: the command-line tools,
+the licence, platform-tools, then a platform. `sdkmanager` is on no PATH, and runs on a JDK.
+`latem setup android-sdk` puts the tools in `$ANDROID_HOME` or `~/Android/Sdk`: no package gives
+these on every distribution, and those that do install where only root can add to them. It reads
+Google's manifest rather than pinning a version, which would go stale, downloads what that names
+over HTTPS, checks the size and the SHA-1 the manifest publishes, and unpacks as the user, refusing
+a path outside itself and anything that is not a file or a folder. Nothing lands at `latest` until
+all of it has. The licence stays the person's: `sdkmanager --licenses`, in the shell the screen
+opens.
+
+**Settings.** The screen offers what setup left to a person until now: `allow_unisolated`,
+`require_pinned = false` and an `[actions] allowed` entry, and a native runner on a machine that
+has none. It says what the first two give up before asking, and the answer defaults to no. Asked
+one at a time by name, on a terminal, this is the operator's decision being made by the operator,
+which A60 kept it. Off a terminal they are said and never written.
+
+**Switching a kind on.** Android is the label `android`, and a Linux job that talks to a Docker
+daemon is `docker-host`. A kind goes on only with nothing in the way, and after its proof: its tools
+run in a step's environment, which is the service's PATH and the runner's env and nothing from the
+shell setup was started in. A proof is a check that the tools run, not a build: a real one takes
+minutes, and the first job is that. Switching off takes the label away, with a yes.
+
+**The screen** is `stty(1)` and escape codes, like `readHidden`: no dependency joins §3's list. A
+read comes back within a tenth of a second with or without a key, so nothing is left blocked in a
+read to steal a key from a shell the terminal has been handed to. All of it but that loop is a
+model tested without a terminal: a key changes a cursor or calls a hook, and a view is drawn from
+what is true now.
+
+**What was not done.** The app does not show this yet: a heartbeat carries what a machine has, not
+what its repositories ask of it. A step's `ANDROID_HOME` from a runner's env is read by doctor and
+setup and not by the agent's probe, which looks where an SDK usually is: a machine whose SDK lives
+elsewhere reports none in the app, and builds.
