@@ -28,6 +28,7 @@ type setupFlags struct {
 	noService        bool
 	noDocker         bool
 	noBrowser        bool
+	json, plain      bool
 }
 
 func newSetupCommand() *cobra.Command {
@@ -48,11 +49,16 @@ done — each step looks at what is there and does only what is missing:
                    with none configured, asks which — and checks each one's
                    workflows, read without a checkout, offering the label
                    aliases and allowed actions they need (A57).
-  3. toolchains    says what the jobs this machine takes need that it lacks —
-                   with no repository, asks what it will build — and, on a
-                   terminal, offers each install a command can do, one at a
-                   time (A60). It never runs sudo: what needs a password, a
-                   licence or the App Store is said, for you to do.
+  3. toolchains    shows what this machine builds, kind by kind, whichever
+                   machine its repositories' jobs ask for today, and what is
+                   in the way of each (A69). On a terminal this is a screen:
+                   it finds what is installed, sets the paths a step needs,
+                   runs the installs a command can do once you say yes, opens
+                   a shell for the ones that are yours, and turns a kind on
+                   with a label once a check of it passes. It never runs
+                   sudo: what needs a password, a licence or the App Store is
+                   said, for you to do. Off a terminal it prints the plan and
+                   goes on; --plain asks one question at a time instead.
   4. register      approves this machine in the browser (` + "`latem register`" + `),
                    unless it is already registered or --no-register keeps it
                    local.
@@ -63,6 +69,9 @@ done — each step looks at what is there and does only what is missing:
 Registering before the service starts, rather than after, is deliberate: the
 control plane connection is read only when the agent starts, so the other
 order would start the agent twice.
+
+--json prints what the screen shows and touches nothing: every kind, what is
+in the way of it, and what would close each thing.
 
 Then:
   latem repo add <owner/name>         allow another repository
@@ -87,9 +96,13 @@ Exit codes:
 				f.repos[i] = slug
 			}
 			f.url = url
+			if f.json {
+				return runSetupPlan(cmd, newSetupDeps())
+			}
 			return runSetup(cmd, f, newSetupDeps())
 		},
 	}
+	cmd.AddCommand(newSetupAndroidSDKCommand())
 	cmd.Flags().StringVar(&f.url, "url", registerURL, "control plane agent endpoint to register with")
 	cmd.Flags().StringVar(&f.name, "name", "", "machine name (default: this host's name)")
 	cmd.Flags().StringSliceVar(&f.repos, "repo", nil, "a GitHub repository this machine builds, as owner/name (repeatable)")
@@ -98,6 +111,8 @@ Exit codes:
 	cmd.Flags().BoolVar(&f.noService, "no-service", false, "do not install or restart the agent service")
 	cmd.Flags().BoolVar(&f.noDocker, "no-docker", false, "on a Mac, do not add a docker runner even if Docker answers")
 	cmd.Flags().BoolVar(&f.noBrowser, "no-browser", false, "print the approval link without opening a browser")
+	cmd.Flags().BoolVar(&f.json, "json", false, "print what this machine builds and what is in the way, and change nothing")
+	cmd.Flags().BoolVar(&f.plain, "plain", false, "ask one question at a time instead of opening a screen")
 	return cmd
 }
 
@@ -199,7 +214,12 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 
 	// 3 — toolchains.
 	step("3/6 toolchains")
-	wrote, err := setupToolchains(cmd, p, deps.toolchains)
+	var wrote bool
+	if !f.plain && canDrawScreen(cmd) {
+		wrote, err = runSetupScreen(cmd, deps.toolchains)
+	} else {
+		wrote, err = setupToolchains(cmd, p, deps.toolchains)
+	}
 	if err != nil {
 		return err
 	}

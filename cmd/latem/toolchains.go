@@ -48,6 +48,10 @@ type toolchainDeps struct {
 	// brewOwner names who owns the Homebrew that brew, a path, belongs to,
 	// and whether this account can install into it.
 	brewOwner func(brew string) (owner string, mine bool)
+	// host is the machine's operating system.
+	host func() system.Host
+	// stores are where this machine's secrets are, read for their names.
+	stores func(config.Paths) (secretStores, error)
 }
 
 func realToolchainDeps() toolchainDeps {
@@ -58,9 +62,18 @@ func realToolchainDeps() toolchainDeps {
 			_, err := sys.Exec(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", "--", ref)
 			return err == nil
 		},
-		install:   runInstall,
-		lookPath:  func(name string) (string, error) { return lookPathOr(name, servicePath(sys)) },
+		install: runInstall,
+		lookPath: func(name string) (string, error) {
+			// A fix that is latem's own runs this binary, which need be on
+			// no PATH: a machine set up by hand has it wherever it was put.
+			if name == "latem" {
+				return os.Executable()
+			}
+			return lookPathOr(name, servicePath(sys))
+		},
 		brewOwner: brewOwner,
+		host:      sys.Host,
+		stores:    func(p config.Paths) (secretStores, error) { return newSecretStores(p) },
 	}
 }
 
@@ -222,7 +235,7 @@ func setupToolchains(cmd *cobra.Command, p *prompter, deps toolchainDeps) (bool,
 				}
 			}
 		}
-		for _, m := range next.gap.Manual {
+		for _, m := range append(next.gap.YourLines(), next.gap.Manual...) {
 			printf(out, "    by hand: %s\n", m)
 		}
 		if installed {
@@ -241,6 +254,16 @@ func setupToolchains(cmd *cobra.Command, p *prompter, deps toolchainDeps) (bool,
 		printf(out, "\n  nothing the jobs here need is missing now\n")
 	default:
 		printf(out, "\n  %d still missing; `latem doctor` lists %s\n", left, map[bool]string{true: "it", false: "them"}[left == 1])
+	}
+	m, err := openMachineView(ctx, cfg, deps)
+	if err != nil {
+		return changed, err
+	}
+	defer m.close()
+	if plan, err := m.plan(ctx); err == nil {
+		printPlan(out, plan)
+	} else {
+		printf(out, "  %v\n", err)
 	}
 	return changed, nil
 }

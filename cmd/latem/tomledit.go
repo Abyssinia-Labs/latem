@@ -376,6 +376,27 @@ func setRunnerKey(body string, cfg *config.Config, name string, sub []string, ke
 	return "", fmt.Errorf("config.toml has %d [[runner]] tables; runner %q is number %d", seen+1, name, n+1)
 }
 
+// setRunnerLabels replaces the labels of the [[runner]] named name, which sit
+// in the [[runner]] table itself and not one under it. Found by position, as
+// setRunnerKey finds it.
+func setRunnerLabels(body string, cfg *config.Config, name string, labels []string) (string, error) {
+	n := slices.IndexFunc(cfg.Runners, func(r *config.Runner) bool { return r.Name == name })
+	if n < 0 {
+		return "", fmt.Errorf("config.toml has no runner %q", name)
+	}
+	lines := splitLines(body)
+	seen := -1
+	for _, b := range tomlBlocks(lines) {
+		if !b.array || !samePath(b.path, []string{"runner"}) {
+			continue
+		}
+		if seen++; seen == n {
+			return setBlockKey(lines, b, "labels", tomlStringList(labels))
+		}
+	}
+	return "", fmt.Errorf("config.toml has %d [[runner]] tables; runner %q is number %d", seen+1, name, n+1)
+}
+
 // removeTableKey deletes key from the table at path, and the table with it
 // when nothing is left in it. It reports whether the key was there.
 func removeTableKey(body string, path []string, key string) (string, bool, error) {
