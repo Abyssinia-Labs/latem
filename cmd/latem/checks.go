@@ -20,6 +20,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
+	"github.com/Abyssinia-Labs/latem/internal/needs"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/internal/source"
@@ -1296,12 +1297,17 @@ func (d *doctor) installCommand(tool string) string {
 		}
 		return "brew install " + tool
 	}
-	switch tool {
-	case "docker":
+	host := d.sys.Host()
+	if tool == "docker" {
+		if line := needs.InstallLine(host, needs.DockerDaemon, ""); line != "" {
+			return line
+		}
 		return "curl -fsSL https://get.docker.com | sh"
-	default:
-		return "sudo apt-get install -y " + tool + "   # or your distribution's equivalent"
 	}
+	if host.Family != "" {
+		return needs.PackageLine(host.Family, tool)
+	}
+	return "sudo apt-get install -y " + tool + "   # or your distribution's equivalent"
 }
 
 func (d *doctor) startDockerCommand() string {
@@ -1565,8 +1571,7 @@ func (d *doctor) checkRuby(ctx context.Context) (check, string) {
 
 	switch {
 	case !rb.Found && kegPath == "":
-		return warn("ruby.version", "ruby", "not on PATH",
-			"brew install ruby").
+		return warn("ruby.version", "ruby", "not on PATH", d.installRuby()).
 			withNotes("Only needed for fastlane — the iOS and Android release jobs. " +
 				"A runner that builds neither does not need it."), ""
 
@@ -1591,7 +1596,7 @@ func (d *doctor) checkRuby(ctx context.Context) (check, string) {
 	default:
 		return warn("ruby.version", "ruby",
 			rb.Banner+" — too old; fastlane needs "+fmt.Sprintf("%d.%d+", rubyMinimum[0], rubyMinimum[1]),
-			"brew install ruby"), ""
+			d.installRuby()), ""
 	}
 }
 
@@ -1637,6 +1642,13 @@ func (d *doctor) checkBundler(ctx context.Context, rubyBin string) check {
 
 func (d *doctor) checkJDK(ctx context.Context) check {
 	java := d.sys.Tool(ctx, "java", "-version")
+	// A runner that says which JDK its steps get has settled the question,
+	// whatever java is on this shell's PATH: on Linux a second JDK is reached
+	// no other way (A69).
+	if home := d.nativeRunnerEnv("JAVA_HOME"); home != "" {
+		java = d.sys.ToolAt(ctx, filepath.Join(home, "bin", "java"), "-version")
+	}
+	install := d.installJDK()
 
 	// macOS ships a stub at /usr/bin/java that prints "Unable to locate a Java
 	// Runtime" and exits non-zero. It is on PATH and it is not a JDK, so
@@ -1644,13 +1656,12 @@ func (d *doctor) checkJDK(ctx context.Context) check {
 	if java.Found && java.Version.IsZero() {
 		return warn("java.version", "JDK",
 			"java is on PATH but reports no version — on macOS that is Apple's stub, not a JDK",
-			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
+			install).
 			withNotes("Only needed for Android. openjdk is keg-only like ruby, so " +
 				"JAVA_HOME must be set explicitly; Gradle otherwise picks whatever java resolves to.")
 	}
 	if !java.Found {
-		return warn("java.version", "JDK", "not on PATH",
-			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
+		return warn("java.version", "JDK", "not on PATH", install).
 			withNotes("Only needed for Android release jobs.")
 	}
 	// BOTH bounds. The first version of this check tested only `> 17` and
@@ -1662,14 +1673,14 @@ func (d *doctor) checkJDK(ctx context.Context) check {
 	case maj > 0 && maj < jdkForAndroid:
 		return warn("java.version", "JDK",
 			fmt.Sprintf("%s — too old; AGP 9 needs %d", java.Banner, jdkForAndroid),
-			fmt.Sprintf("brew install openjdk@%d", jdkForAndroid)).
+			install).
 			withNotes("Gradle fails with a message about an unsupported class file version, " +
 				"which names a number rather than a JDK. openjdk is keg-only, so installing it " +
 				"is not enough — JAVA_HOME must point at it, and the examples' ci/lib/env.sh does that.")
 	case maj > jdkForAndroid:
 		return warn("java.version", "JDK",
 			fmt.Sprintf("%s — AGP 9 wants %d; a newer JDK is rejected, not tolerated", java.Banner, jdkForAndroid),
-			fmt.Sprintf("brew install openjdk@%d, then set JAVA_HOME to it", jdkForAndroid)).
+			install+", then set JAVA_HOME to it (`latem setup` does)").
 			withNotes("`brew install gradle` pulls in the current JDK as a dependency and Gradle " +
 				"selects it as the daemon JVM, so installing Gradle can break a working Android build.")
 	}
@@ -1681,9 +1692,15 @@ func (d *doctor) checkJDK(ctx context.Context) check {
 // install that fails much later.
 var androidSDKs = []string{
 	"Library/Android/sdk",
+	"Android/Sdk",
 }
 
 func (d *doctor) checkAndroidSDK() check {
+	if home := d.nativeRunnerEnv("ANDROID_HOME"); home != "" {
+		if _, err := os.Stat(filepath.Join(home, "platform-tools")); err == nil {
+			return pass("android.sdk", "Android SDK", home+" (the runner's ANDROID_HOME)")
+		}
+	}
 	if env := d.sys.Getenv("ANDROID_HOME"); env != "" {
 		if _, err := os.Stat(filepath.Join(env, "platform-tools")); err == nil {
 			return pass("android.sdk", "Android SDK", env+" (ANDROID_HOME)")
@@ -1702,10 +1719,42 @@ func (d *doctor) checkAndroidSDK() check {
 					"generated per run. The environment variable is the reproducible form.")
 		}
 	}
-	return warn("android.sdk", "Android SDK", "not found",
-		"brew install --cask android-commandlinetools").
+	install := "brew install --cask android-commandlinetools"
+	if d.sys.IsLinux() {
+		install = "latem setup android-sdk"
+	}
+	return warn("android.sdk", "Android SDK", "not found", install).
 		withManual("or install the SDK through Android Studio").
 		withNotes("Only needed for Android jobs.")
+}
+
+// nativeRunnerEnv is what a native runner's env says of name, or "".
+func (d *doctor) nativeRunnerEnv(name string) string {
+	if d.cfg == nil {
+		return ""
+	}
+	for _, r := range d.cfg.Runners {
+		if v := r.NativeEnv()[name]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// installRuby is the line that installs Ruby here.
+func (d *doctor) installRuby() string {
+	if line := needs.InstallLine(d.sys.Host(), needs.Ruby, ""); line != "" {
+		return line
+	}
+	return "install Ruby with your distribution's package manager"
+}
+
+// installJDK is the line that installs the JDK Android wants, here.
+func (d *doctor) installJDK() string {
+	if line := needs.InstallLine(d.sys.Host(), needs.JDK, strconv.Itoa(jdkForAndroid)); line != "" {
+		return line
+	}
+	return fmt.Sprintf("install JDK %d with your distribution's package manager", jdkForAndroid)
 }
 
 // checkSimulatorRuntime is the Mobile toolchain section's macOS-only member.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,13 +20,28 @@ import (
 // It reports; it judges nothing. Which of it a job needs is
 // internal/needs's to say.
 type Toolchains struct {
+	// Host is the machine these are on, which says how to install the rest.
+	Host        Host
 	Xcodes      []XcodeInstall
 	SimRuntimes []SimRuntime
 	JDKs        []int // majors
+	// JDKHomes is where each JDK is, which is rarely on a step's PATH: a
+	// second JDK on Linux, SDKMAN's, Android Studio's own (A69).
+	JDKHomes []JDKInstall
+	// StepJDK is the major of the java a step's PATH finds, or 0 when it
+	// finds none, or macOS's stub.
+	StepJDK int
 	// AndroidSDK is the SDK's root, or "".
 	AndroidSDK       string
 	AndroidPlatforms []int // android-36 → 36
 	AndroidEmulator  bool
+	// SDKManager is the SDK's own sdkmanager, which is on no PATH unless
+	// someone put it there, or "".
+	SDKManager string
+	// AndroidPlatformTools reports adb, and AndroidLicensed that someone has
+	// accepted the SDK's licence: without it, every install in it is refused.
+	AndroidPlatformTools bool
+	AndroidLicensed      bool
 	// Tools is each probed command, and whether a step's PATH finds it.
 	Tools map[string]bool
 	// PasswordlessSudo reports whether `sudo -n true` succeeds.
@@ -36,6 +52,12 @@ type Toolchains struct {
 type XcodeInstall struct {
 	Path    string
 	Version Version
+}
+
+// JDKInstall is one JDK, and the JAVA_HOME that names it.
+type JDKInstall struct {
+	Major int
+	Home  string
 }
 
 // HasXcode reports whether an Xcode of major is installed; major "" asks for
@@ -78,6 +100,29 @@ func (t Toolchains) HasJDK(major int) bool {
 	return false
 }
 
+// JDKHome is where a JDK of major is installed, or "".
+func (t Toolchains) JDKHome(major int) string {
+	for _, j := range t.JDKHomes {
+		if j.Major == major {
+			return j.Home
+		}
+	}
+	return ""
+}
+
+// JDKAtLeast is the home of a JDK of major or newer, nearest first: what
+// sdkmanager wants to run on, or "".
+func (t Toolchains) JDKAtLeast(major int) string {
+	best := 0
+	home := ""
+	for _, j := range t.JDKHomes {
+		if j.Major >= major && (best == 0 || j.Major < best) {
+			best, home = j.Major, j.Home
+		}
+	}
+	return home
+}
+
 // toolchainTools are the commands whose presence a job's needs ask about.
 var toolchainTools = []string{
 	"xcodebuild", "xcodegen", "pod", "fastlane", "bundle", "ruby", "brew", "python3", "node", "bun",
@@ -88,7 +133,7 @@ var toolchainTools = []string{
 // service's, not this shell's, since a command typed here inherits a login
 // profile the agent never reads.
 func (s *System) Toolchains(ctx context.Context, stepPath string) Toolchains {
-	t := Toolchains{Tools: map[string]bool{}}
+	t := Toolchains{Host: s.Host(), Tools: map[string]bool{}}
 	// Where the tools that install themselves for one user put their
 	// binaries. A job's own script commonly puts these on its PATH, as
 	// GitHub's images do: a tool there is installed, if not on the
@@ -106,12 +151,23 @@ func (s *System) Toolchains(ctx context.Context, stepPath string) Toolchains {
 			t.SimRuntimes = rts
 		}
 	}
-	t.JDKs = s.jdks(ctx)
+	t.JDKHomes = s.jdks(ctx)
+	for _, j := range t.JDKHomes {
+		if !slices.Contains(t.JDKs, j.Major) {
+			t.JDKs = append(t.JDKs, j.Major)
+		}
+	}
+	t.StepJDK = stepJDK(stepPath)
 	t.AndroidSDK = s.androidSDK()
 	if t.AndroidSDK != "" {
 		t.AndroidPlatforms = androidPlatforms(t.AndroidSDK)
 		_, err := os.Stat(filepath.Join(t.AndroidSDK, "emulator", "emulator"))
 		t.AndroidEmulator = err == nil
+		t.SDKManager = sdkManager(t.AndroidSDK)
+		_, err = os.Stat(filepath.Join(t.AndroidSDK, "platform-tools", "adb"))
+		t.AndroidPlatformTools = err == nil
+		_, err = os.Stat(filepath.Join(t.AndroidSDK, "licenses", "android-sdk-license"))
+		t.AndroidLicensed = err == nil
 	}
 	_, err := s.Exec(ctx, "sudo", "-n", "true")
 	t.PasswordlessSudo = err == nil
@@ -147,10 +203,26 @@ func (s *System) xcodeInstalls(ctx context.Context) []XcodeInstall {
 
 var jdkMajor = regexp.MustCompile(`(?:openjdk@|jdk-?|java-|^)([0-9]+)(?:[.\-_]|$)`)
 
-// jdks lists the installed JDKs' majors: java_home's list on macOS,
-// Homebrew's keg-only openjdk@N, and /usr/lib/jvm on Linux.
-func (s *System) jdks(ctx context.Context) []int {
-	seen := map[int]bool{}
+// jdks lists the JDKs installed: java_home's list and Homebrew's keg-only
+// openjdk@N on macOS, /usr/lib/jvm and the like on Linux, and on either the
+// places a person's tools put one (A69). Lowest major first, and one entry
+// per home however many links reach it: /usr/lib/jvm/default is a link.
+func (s *System) jdks(ctx context.Context) []JDKInstall {
+	var out []JDKInstall
+	seen := map[string]bool{}
+	add := func(major int, home string) {
+		if major <= 0 {
+			return
+		}
+		key := home
+		if real, err := filepath.EvalSymlinks(home); err == nil {
+			key = real
+		}
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, JDKInstall{Major: major, Home: home})
+		}
+	}
 	if s.IsMacOS() {
 		// java_home -V lists to stderr; the output is read either way.
 		b, err := s.Exec(ctx, "/usr/libexec/java_home", "-V")
@@ -163,33 +235,97 @@ func (s *System) jdks(ctx context.Context) []int {
 				continue
 			}
 			if f := strings.Fields(line); len(f) > 0 {
-				if n := javaMajor(f[0]); n > 0 {
-					seen[n] = true
-				}
+				add(javaMajor(f[0]), f[len(f)-1])
 			}
 		}
 		for _, prefix := range []string{"/opt/homebrew/opt", "/usr/local/opt"} {
 			matches, _ := filepath.Glob(filepath.Join(s.sysPath(prefix), "openjdk@*"))
 			for _, m := range matches {
-				if n := majorIn(filepath.Base(m)); n > 0 {
-					seen[n] = true
-				}
-			}
-		}
-	} else {
-		dirs, _ := os.ReadDir(s.sysPath("/usr/lib/jvm"))
-		for _, d := range dirs {
-			if n := majorIn(d.Name()); n > 0 {
-				seen[n] = true
+				add(majorIn(filepath.Base(m)), filepath.Join(m, "libexec", "openjdk.jdk", "Contents", "Home"))
 			}
 		}
 	}
-	var out []int
-	for n := range seen {
-		out = append(out, n)
+	for _, dir := range s.jdkDirs() {
+		if home, major := jdkAt(dir); home != "" {
+			add(major, home)
+		}
 	}
-	sort.Ints(out)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Major < out[j].Major })
 	return out
+}
+
+// jdkDirs are the folders a JDK might be, by what puts one there: the
+// distribution's packages, SDKMAN, mise, asdf, IntelliJ, Gradle's toolchains,
+// and the runtime Android Studio ships.
+func (s *System) jdkDirs() []string {
+	var dirs []string
+	for _, pattern := range []string{
+		filepath.Join(s.home, ".sdkman", "candidates", "java", "*"),
+		filepath.Join(s.home, ".local", "share", "mise", "installs", "java", "*"),
+		filepath.Join(s.home, ".asdf", "installs", "java", "*"),
+		filepath.Join(s.home, ".jdks", "*"),
+		filepath.Join(s.home, ".gradle", "jdks", "*"),
+	} {
+		matches, _ := filepath.Glob(pattern)
+		dirs = append(dirs, matches...)
+	}
+	if s.IsMacOS() {
+		return append(dirs, s.sysPath("/Applications/Android Studio.app/Contents/jbr"))
+	}
+	for _, pattern := range []string{"/usr/lib/jvm/*", "/usr/java/*", "/opt/*jdk*"} {
+		matches, _ := filepath.Glob(s.sysPath(pattern))
+		dirs = append(dirs, matches...)
+	}
+	return append(dirs, s.sysPath("/opt/android-studio/jbr"), filepath.Join(s.home, "android-studio", "jbr"))
+}
+
+// jdkAt reads the JDK at dir, or in the Contents/Home a Mac bundle keeps one
+// in: its home and major, or "" when it holds none. javac is what makes it a
+// JDK: Arch's jre17-openjdk fills the same folder without one, and Gradle
+// cannot compile on it.
+func jdkAt(dir string) (string, int) {
+	for _, home := range []string{dir, filepath.Join(dir, "Contents", "Home")} {
+		if lookIn("javac", filepath.Join(home, "bin")) == "" {
+			continue
+		}
+		if n := releaseMajor(home); n > 0 {
+			return home, n
+		}
+		return home, majorIn(filepath.Base(dir))
+	}
+	return "", 0
+}
+
+// releaseMajor reads the release file every JDK has at its root, which says
+// what the folder's name only sometimes does: temurin-17-jdk-amd64 and
+// zulu17-ca-amd64 are 17 too.
+func releaseMajor(home string) int {
+	// #nosec G304 -- a JDK's own file, at a home found on this machine.
+	data, err := os.ReadFile(filepath.Join(home, "release"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if v, ok := strings.CutPrefix(line, "JAVA_VERSION="); ok {
+			return javaMajor(strings.Trim(strings.TrimSpace(v), `"`))
+		}
+	}
+	return 0
+}
+
+// stepJDK is the major of the java on stepPath, read from the release file
+// beside it through whatever links lead there: Arch's /usr/bin/java is a link
+// to /usr/lib/jvm/default/bin/java, which is another.
+func stepJDK(stepPath string) int {
+	java := lookIn("java", stepPath)
+	if java == "" {
+		return 0
+	}
+	real, err := filepath.EvalSymlinks(java)
+	if err != nil {
+		return 0
+	}
+	return releaseMajor(filepath.Dir(filepath.Dir(real)))
 }
 
 // javaMajor is a Java version's major: 11 for 11.0.20, and 8 for 1.8.0_292,
@@ -222,13 +358,27 @@ func (s *System) androidSDK() string {
 		candidates = append(candidates, filepath.Join(s.home, "Library", "Android", "sdk"),
 			s.sysPath("/opt/homebrew/share/android-commandlinetools"))
 	} else {
-		candidates = append(candidates, filepath.Join(s.home, "Android", "Sdk"), s.sysPath("/opt/android-sdk"))
+		candidates = append(candidates, filepath.Join(s.home, "Android", "Sdk"), s.sysPath("/opt/android-sdk"),
+			s.sysPath("/usr/lib/android-sdk"))
 	}
 	for _, c := range candidates {
 		if c == "" {
 			continue
 		}
 		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// sdkManager finds the SDK's own sdkmanager: the version `latest` when it is
+// there, as Android Studio and Google's instructions arrange it, or any other.
+func sdkManager(sdk string) string {
+	candidates := []string{filepath.Join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager")}
+	versions, _ := filepath.Glob(filepath.Join(sdk, "cmdline-tools", "*", "bin", "sdkmanager"))
+	for _, c := range append(candidates, versions...) {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return c
 		}
 	}

@@ -83,7 +83,7 @@ func TestToolchains_AMac(t *testing.T) {
 
 func TestToolchains_ALinuxBox(t *testing.T) {
 	root, home := t.TempDir(), t.TempDir()
-	mkTree(t, root, "usr/lib/jvm/java-17-openjdk-amd64/", "usr/lib/jvm/java-21-openjdk-amd64/", "usr/lib/jvm/default-java/")
+	mkTree(t, root, "x:usr/lib/jvm/java-17-openjdk-amd64/bin/javac", "x:usr/lib/jvm/java-21-openjdk-amd64/bin/javac", "usr/lib/jvm/default-java/")
 	mkTree(t, home, "Android/Sdk/platforms/android-34/", "x:Android/Sdk/emulator/emulator")
 	s := New(Options{GOOS: "linux", Home: home, Root: root, Run: newFakeRunner(map[string]fakeCmd{"sudo -n true": {}}).run,
 		Getenv: func(string) string { return "" }})
@@ -169,5 +169,95 @@ func TestXcodeFingerprint(t *testing.T) {
 	}
 	if New(Options{GOOS: "linux", Home: home, Root: root}).XcodeFingerprint() != "" {
 		t.Error("a fingerprint off macOS")
+	}
+}
+
+func writeRelease(t *testing.T, home, version string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(home, "release"), []byte("IMPLEMENTOR=\"x\"\nJAVA_VERSION=\""+version+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The desktop this was written against: Arch's current JDK as the default
+// through its two links, 17 beside it where only JAVA_HOME finds it, a JRE
+// that is no JDK, and a distribution's folder name that says nothing of its
+// version. Each is what a person with a JDK installed would expect found.
+func TestToolchains_FindsEveryJDKAndWhereItIs(t *testing.T) {
+	root, home, bin := t.TempDir(), t.TempDir(), t.TempDir()
+	mkTree(t, root,
+		"x:usr/lib/jvm/java-27-openjdk/bin/java", "x:usr/lib/jvm/java-27-openjdk/bin/javac",
+		"x:usr/lib/jvm/java-17-openjdk/bin/javac",
+		"x:usr/lib/jvm/java-21-openjdk/bin/java",
+		"x:usr/lib/jvm/temurin-11-jdk-amd64/bin/javac",
+	)
+	mkTree(t, home, "x:.sdkman/candidates/java/21.0.5-tem/bin/javac", "x:android-studio/jbr/bin/javac")
+	jvm := filepath.Join(root, "usr/lib/jvm")
+	writeRelease(t, filepath.Join(jvm, "java-27-openjdk"), "27.0.1")
+	writeRelease(t, filepath.Join(jvm, "java-17-openjdk"), "17.0.21")
+	writeRelease(t, filepath.Join(jvm, "temurin-11-jdk-amd64"), "11.0.25")
+	writeRelease(t, filepath.Join(home, ".sdkman/candidates/java/21.0.5-tem"), "21.0.5")
+	writeRelease(t, filepath.Join(home, "android-studio/jbr"), "21.0.3")
+	for _, link := range [][2]string{
+		{"java-27-openjdk", filepath.Join(jvm, "default")},
+		{filepath.Join(jvm, "default", "bin", "java"), filepath.Join(bin, "java")},
+	} {
+		if err := os.Symlink(link[0], link[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New(Options{GOOS: "linux", Home: home, Root: root, Run: newFakeRunner(map[string]fakeCmd{"sudo -n true": {}}).run,
+		Getenv: func(string) string { return "" }})
+	tc := s.Toolchains(t.Context(), bin)
+	if !slices.Equal(tc.JDKs, []int{11, 17, 21, 27}) {
+		t.Errorf("jdks = %v", tc.JDKs)
+	}
+	if got, want := tc.JDKHome(17), filepath.Join(jvm, "java-17-openjdk"); got != want {
+		t.Errorf("JDK 17 is at %q, not %q", got, want)
+	}
+	if tc.StepJDK != 27 {
+		t.Errorf("a step's java = %d", tc.StepJDK)
+	}
+	if got, want := tc.JDKAtLeast(18), filepath.Join(home, ".sdkman/candidates/java/21.0.5-tem"); got != want && got != filepath.Join(home, "android-studio/jbr") {
+		t.Errorf("JDKAtLeast(18) = %q, want %q", got, want)
+	}
+	if tc.Host.OS != "Linux" {
+		t.Errorf("host = %+v", tc.Host)
+	}
+}
+
+func TestToolchains_AnAndroidSDKsParts(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	mkTree(t, home, "x:Android/Sdk/cmdline-tools/latest/bin/sdkmanager", "x:Android/Sdk/platform-tools/adb",
+		"Android/Sdk/licenses/android-sdk-license")
+	s := New(Options{GOOS: "linux", Home: home, Root: root, Run: newFakeRunner(map[string]fakeCmd{"sudo -n true": {}}).run,
+		Getenv: func(string) string { return "" }})
+	tc := s.Toolchains(t.Context(), "")
+	if tc.SDKManager != filepath.Join(home, "Android/Sdk/cmdline-tools/latest/bin/sdkmanager") ||
+		!tc.AndroidPlatformTools || !tc.AndroidLicensed {
+		t.Errorf("toolchains = %+v", tc)
+	}
+}
+
+func TestHost(t *testing.T) {
+	for _, c := range []struct{ release, name, family string }{
+		{"NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\n", "Arch Linux", FamilyArch},
+		{"PRETTY_NAME=\"EndeavourOS\"\nID=\"endeavouros\"\nID_LIKE=\"arch\"\n", "EndeavourOS", FamilyArch},
+		{"PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\nID_LIKE=debian\n", "Ubuntu 24.04.1 LTS", FamilyDebian},
+		{"PRETTY_NAME=\"Rocky Linux 9\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n", "Rocky Linux 9", FamilyFedora},
+		{"PRETTY_NAME=\"Alpine Linux\"\nID=alpine\n", "Alpine Linux", ""},
+	} {
+		root := t.TempDir()
+		mkTree(t, root, "etc/")
+		if err := os.WriteFile(filepath.Join(root, "etc/os-release"), []byte(c.release), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := New(Options{GOOS: "linux", GOARCH: "amd64", Root: root}).Host()
+		if h.Name != c.name || h.Family != c.family || !h.Linux() {
+			t.Errorf("%q: %+v", c.release, h)
+		}
+	}
+	if h := New(Options{GOOS: "darwin", GOARCH: "arm64"}).Host(); !h.Mac() || h.Family != "" {
+		t.Errorf("mac: %+v", h)
 	}
 }
