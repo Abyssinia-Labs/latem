@@ -136,10 +136,10 @@ jobs:
   # host with a Docker daemon, Go and gcc. There is no setup-go, because a
   # remote action on a native runner needs allow_unisolated.
   #
-  # Only the machine with that runner sets vars.LATEM_HOST_RUNNER. runs-on is
-  # decided by the machine that plans the job and if: by the one that takes it,
-  # so when that machine is off, another plans this for an ordinary runner,
-  # which skips it. A plain runs-on: docker-host would wait for it instead.
+  # Every machine with this repository sets vars.LATEM_HOST_RUNNER, so they
+  # agree and A68 keeps none of them off the job. Only the desktop has the
+  # runner, so while it is off this waits for it, and runs when it is back.
+  # GitHub has no such variable, and skips the job.
   integration-host:
     runs-on: ${{ vars.LATEM_HOST_RUNNER == 'true' && 'docker-host' || 'blacksmith-4vcpu-ubuntu-2404' }}
     if: github.event_name == 'push' && vars.LATEM_HOST_RUNNER == 'true'
