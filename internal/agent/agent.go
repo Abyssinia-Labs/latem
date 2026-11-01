@@ -318,9 +318,9 @@ type Agent struct {
 	toolchains      atomic.Pointer[system.Toolchains]
 	toolchainsEvery time.Duration
 	// readiness is what Options.Readiness last said (A70).
-	readiness atomic.Pointer[protocol.Readiness]
-	reprobe         chan struct{}
-	watchEvery      time.Duration
+	readiness  atomic.Pointer[protocol.Readiness]
+	reprobe    chan struct{}
+	watchEvery time.Duration
 	// machine is what MeasureMachine last found (A63).
 	machine atomic.Pointer[capacity.Machine]
 

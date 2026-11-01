@@ -68,7 +68,7 @@ func TestGaps_AndroidOnLinux(t *testing.T) {
 	if got := strings.Join(gapKeys(gs), " "); got != "jdk android-sdk android-emulator" {
 		t.Fatalf("gaps = %s", got)
 	}
-	if gs[0].Have != "JDK [21]" || gs[1].Fixes()[0] != `sdkmanager "platforms;android-36"` {
+	if gs[0].Have != "JDK 21" || gs[1].Fixes()[0] != `sdkmanager "platforms;android-36"` {
 		t.Errorf("gaps = %+v", gs)
 	}
 	if gs := Gaps(r, box, ExecutorTart); len(gs) != 0 {
@@ -97,7 +97,7 @@ func TestGaps_SpeakTheHostsPackageManager(t *testing.T) {
 		if len(gs) != 4 {
 			t.Fatalf("%s: gaps = %v", c.host.Family, gapKeys(gs))
 		}
-		if gs[0].Missing != "JDK 17" || gs[0].Have != "JDK [27]" || len(gs[0].Fix) != 0 || gs[0].YourLines()[0] != c.jdk {
+		if gs[0].Missing != "JDK 17" || gs[0].Have != "JDK 27" || len(gs[0].Fix) != 0 || gs[0].YourLines()[0] != c.jdk {
 			t.Errorf("%s: jdk gap = %+v", c.host.Family, gs[0])
 		}
 		if gs[1].YourLines()[0] != c.node {

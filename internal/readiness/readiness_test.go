@@ -101,7 +101,7 @@ func TestBuild_TheDesktop(t *testing.T) {
 		t.Errorf("android items = %q", got)
 	}
 	jdk := item(t, a, "JDK 17")
-	if jdk.Have != "JDK [27]" || needs.CommandLine(jdk.Yours[0]) != "sudo pacman -S --needed jdk17-openjdk" {
+	if jdk.Have != "JDK 27" || needs.CommandLine(jdk.Yours[0]) != "sudo pacman -S --needed jdk17-openjdk" {
 		t.Errorf("jdk = %+v", jdk)
 	}
 	if !strings.Contains(item(t, a, "unisolated").Warning, "as you") {

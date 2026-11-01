@@ -70,7 +70,7 @@ type ReadinessKind struct {
 // ReadinessItem is one thing in the way.
 type ReadinessItem struct {
 	Title string `json:"title"`
-	// Have is what the machine has instead: "JDK [27]".
+	// Have is what the machine has instead: "JDK 27".
 	Have string `json:"have,omitempty"`
 	// Soft is worth saying and not worth failing for: a job already running
 	// here has got by without it.

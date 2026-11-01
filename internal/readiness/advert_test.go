@@ -75,7 +75,7 @@ func TestAdvert_TheDesktop(t *testing.T) {
 	if !slices.Contains(said, "JDK 17") || !slices.Contains(said, "tsedal's secrets set here") {
 		t.Errorf("items = %q", said)
 	}
-	if i := slices.IndexFunc(android.Items, func(it protocol.ReadinessItem) bool { return it.Title == "JDK 17" }); android.Items[i].Have != "JDK [27]" {
+	if i := slices.IndexFunc(android.Items, func(it protocol.ReadinessItem) bool { return it.Title == "JDK 17" }); android.Items[i].Have != "JDK 27" {
 		t.Errorf("JDK 17's have = %q", android.Items[i].Have)
 	}
 	if ios := advertKindOf(t, a, needs.KindIOS); ios.State != string(Impossible) || ios.Why != "needs a Mac" {

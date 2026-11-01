@@ -769,7 +769,7 @@ and as often, from its own mirrors.
 "readiness": {
   "kinds": [
     { "kind": "android", "title": "Android", "state": "off", "runner": "host", "repos": ["tsedal"], "jobs": 2, "elsewhere": 2,
-      "items": [{ "title": "JDK 17", "have": "JDK [27]" }, { "title": "tsedal's secrets set here", "have": "5 not set" }] },
+      "items": [{ "title": "JDK 17", "have": "JDK 27" }, { "title": "tsedal's secrets set here", "have": "5 not set" }] },
     { "kind": "ios", "title": "iOS", "state": "impossible", "why": "needs a Mac" }
   ],
   "unread": 1

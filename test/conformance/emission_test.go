@@ -129,7 +129,7 @@ func TestConformance_AgentEmissions(t *testing.T) {
 					Kind: "android", Title: "Android", State: "off", Runner: "host",
 					Repos: []string{"myapp"}, Jobs: 2, Elsewhere: 2,
 					Items: []protocol.ReadinessItem{
-						{Title: "JDK 17", Have: "JDK [27]"},
+						{Title: "JDK 17", Have: "JDK 27"},
 						{Title: "ANDROID_HOME set", Soft: true},
 					},
 					More: 1,
