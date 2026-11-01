@@ -134,10 +134,14 @@ type PlannedJob struct {
 	// by it.
 	Name  string   `json:"name"`
 	Needs []string `json:"needs,omitempty"`
-	// Labels are runs-on after the machine's aliases and GitHub's hosted
-	// labels (A50); a runner whose labels cover them can take the job.
-	Labels      []string `json:"labels,omitempty"`
-	Environment string   `json:"environment,omitempty"`
+	// Labels are runs-on after the planning machine's aliases and GitHub's
+	// hosted labels (A50): what a runner must cover where a control plane has
+	// nothing better. RunsOn is what one says 2.4 goes by.
+	Labels []string `json:"labels,omitempty"`
+	// RunsOn is the job's runs-on before any machine's aliases (A68, 2.4), for
+	// a control plane to answer on each machine with that machine's own.
+	RunsOn      []RunsOnLabel `json:"runs_on,omitempty"`
+	Environment string        `json:"environment,omitempty"`
 	// Permissions scope the job's token, in the workflow's vocabulary
 	// (pull-requests, id-token) with levels read or write. A scope it does not
 	// name has none.
@@ -161,6 +165,22 @@ type PlannedJob struct {
 	// provides (A61, 2.2), sent only to a control plane that says 2.2. It
 	// explains; nothing routes on it.
 	Requires []Requirement `json:"requires,omitempty"`
+	// ReadsVars names the variables that decide whether the job runs, where,
+	// and as what (A68, 2.4): everything of it but its steps. Names as the
+	// file writes them, or [AllVars]. Never a value.
+	ReadsVars []string `json:"reads_vars,omitempty"`
+}
+
+// AllVars in [PlannedJob.ReadsVars] says the job reads vars in a way no list
+// of names can describe: a key worked out at run time, or the context whole.
+const AllVars = "*"
+
+// RunsOnLabel is one label of a job's runs-on (A68): as written, lowercased,
+// without self-hosted, and what it stands for on a machine with no alias for
+// it. Hosted is empty for a label that stands for itself.
+type RunsOnLabel struct {
+	Label  string   `json:"label"`
+	Hosted []string `json:"hosted,omitempty"`
 }
 
 // Requirement is one thing a job needs of a machine (A61): a key from

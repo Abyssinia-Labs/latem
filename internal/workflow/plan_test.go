@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -364,6 +365,118 @@ jobs:
 	}
 	if fine.Error != "" || !fine.IfChecksStatus || !fine.ContinueOnError || !slices.Equal(fine.Labels, []string{"macos"}) {
 		t.Errorf("fine: %+v", fine)
+	}
+}
+
+// What a plan says of a job's place is the commit's (A68): two machines that
+// share no config say the same, and only Labels, which a control plane on 2.4
+// does not place by, is the planner's.
+func TestPlan_AJobsPlaceIsNoMachinesConfig(t *testing.T) {
+	files := map[string]string{"preview.yml": `
+on: push
+jobs:
+  ios:
+    if: vars.LATEM == 'true'
+    runs-on: [self-hosted, macos-latest, blacksmith-6vcpu-macos-26, XCODE, xcode]
+    steps:
+      - run: echo "${{ vars.ONLY_A_STEP }}"
+`}
+	ev := protocol.Event{Name: EventPush, Ref: "refs/heads/main"}
+	mini := mustPlan(t, files, ev, PlanOptions{
+		LabelAliases: map[string][]string{"blacksmith-6vcpu-macos-26": {"macos"}},
+		Vars:         map[string]string{"LATEM": "true"},
+	})[0].Jobs[0]
+	desktop := mustPlan(t, files, ev, PlanOptions{})[0].Jobs[0]
+
+	want := []protocol.RunsOnLabel{
+		{Label: "macos-latest", Hosted: []string{"macos"}},
+		{Label: "blacksmith-6vcpu-macos-26"},
+		{Label: "xcode"},
+	}
+	for name, j := range map[string]protocol.PlannedJob{"mini": mini, "desktop": desktop} {
+		if !reflect.DeepEqual(j.RunsOn, want) {
+			t.Errorf("%s: runs_on %+v, want %+v", name, j.RunsOn, want)
+		}
+		if !slices.Equal(j.ReadsVars, []string{"LATEM"}) {
+			t.Errorf("%s: reads_vars %v: a step's reads are not about where the job goes", name, j.ReadsVars)
+		}
+	}
+	if !slices.Equal(mini.Labels, []string{"macos", "xcode"}) ||
+		!slices.Equal(desktop.Labels, []string{"macos", "blacksmith-6vcpu-macos-26", "xcode"}) {
+		t.Errorf("labels are still each planner's own: mini %v, desktop %v", mini.Labels, desktop.Labels)
+	}
+}
+
+// Everything the machine that takes a job answers again is read, and the plan
+// says when no list of names can describe what is.
+func TestPlan_ReadsVars(t *testing.T) {
+	jobs := mustPlan(t, map[string]string{"ci.yml": `
+on: push
+jobs:
+  labels:
+    runs-on: ${{ vars.RUNNER }}
+    steps: [{run: make}]
+  environment:
+    runs-on: ubuntu-latest
+    environment: {name: "${{ vars.STAGE }}"}
+    steps: [{run: make}]
+  strategy:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: ${{ vars.MAX }}
+      matrix:
+        os: ${{ fromJSON(vars.OSES) }}
+    steps: [{run: make}]
+  named:
+    name: Build ${{ vars.FLAVOUR }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ vars.LENIENT == 'true' }}
+    concurrency: {group: "deploy-${{ vars.LANE }}"}
+    steps: [{run: make}]
+  computed:
+    if: vars[github.actor] == 'true'
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+  whole:
+    if: toJSON(vars) != '{}'
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+  neither:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+`}, protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{
+		Vars: map[string]string{"RUNNER": "linux", "STAGE": "staging", "MAX": "1", "OSES": `["a"]`},
+	})[0].Jobs
+
+	got := map[string][]string{}
+	for _, j := range jobs {
+		got[j.Key] = j.ReadsVars
+	}
+	want := map[string][]string{
+		"labels": {"RUNNER"}, "environment": {"STAGE"}, "strategy": {"MAX", "OSES"},
+		"named":    {"FLAVOUR", "LANE", "LENIENT"},
+		"computed": {protocol.AllVars}, "whole": {protocol.AllVars},
+	}
+	for key, names := range want {
+		if !slices.Equal(got[key], names) {
+			t.Errorf("%s reads %v, want %v", key, got[key], names)
+		}
+	}
+	if len(got["neither"]) != 0 {
+		t.Errorf("neither reads %v", got["neither"])
+	}
+
+	grouped := mustPlan(t, map[string]string{"ci.yml": `
+on: push
+concurrency: ci-${{ vars.LANE }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+`}, protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{})[0]
+	if !slices.Equal(grouped.Jobs[0].ReadsVars, []string{"LANE"}) {
+		t.Errorf("a workflow's concurrency is each of its jobs': %v", grouped.Jobs[0].ReadsVars)
 	}
 }
 

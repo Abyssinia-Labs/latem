@@ -352,10 +352,14 @@ func (p *planner) job(
 			"uses: calls the reusable workflow %s, and reusable workflows are not planned yet (A52)", j.Uses))
 		return pj
 	}
+	pj.ReadsVars = placeVarReads(w, j)
 	if labels, err := compileLabels(j.RunsOn, w.Path, key, p.opts.LabelAliases, sc); err != nil {
 		problems = append(problems, err.Error())
 	} else {
 		pj.Labels = labels
+		// compileLabels answered the same expressions, so this cannot fail.
+		written, _ := answeredRunsOn(j.RunsOn, w.Path, key, sc)
+		pj.RunsOn = plannedRunsOn(written)
 	}
 	if name, err := environmentField(j.Environment); err != nil {
 		fail("environment", err)
@@ -393,6 +397,70 @@ func (p *planner) job(
 		}
 	}
 	return pj
+}
+
+// maxVarReads is as many names as a planned job carries. More than that is
+// as good as all of them, and a plan is not refused for it.
+const maxVarReads = 64
+
+// placeVarReads names the variables that decide whether a job runs, where, and
+// as what (A68): its if:, runs-on, environment and strategy, which the machine
+// that takes it answers again for itself, and its name, concurrency and
+// continue-on-error and its workflow's concurrency, which only a plan answers.
+// Read from the file, so the list is the commit's and no machine's. A step's
+// reads are not here: they change what a job does, not whether it does it.
+func placeVarReads(w *Workflow, j *Job) []string {
+	names := map[string]bool{}
+	note := func(prog *expr.Program) {
+		keys, computed := prog.ContextKeys("vars")
+		contexts, _ := prog.References()
+		if computed || (len(keys) == 0 && slices.Contains(contexts, "vars")) {
+			names[protocol.AllVars] = true
+		}
+		for _, k := range keys {
+			names[k] = true
+		}
+	}
+	var visit func(v any)
+	visit = func(v any) {
+		switch t := v.(type) {
+		case string:
+			if spans, err := expr.Spans(t); err == nil {
+				for _, sp := range spans {
+					note(sp.Prog)
+				}
+			}
+		case []any:
+			for _, e := range t {
+				visit(e)
+			}
+		case map[string]any:
+			for _, e := range t {
+				visit(e)
+			}
+		}
+	}
+	if j.If != "" {
+		if prog, err := conditionProgram(j.If); err == nil {
+			note(prog)
+		}
+	}
+	visit(j.Name)
+	for _, label := range j.RunsOn {
+		visit(label)
+	}
+	for _, raw := range []json.RawMessage{
+		j.Environment, j.Strategy, j.Concurrency, j.ContinueOnError, w.Concurrency,
+	} {
+		var v any
+		if len(raw) > 0 && json.Unmarshal(raw, &v) == nil {
+			visit(v)
+		}
+	}
+	if len(names) > maxVarReads {
+		return []string{protocol.AllVars}
+	}
+	return slices.Sorted(maps.Keys(names))
 }
 
 func uniqueNeeds(needs StringList) []string {

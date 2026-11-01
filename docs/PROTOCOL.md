@@ -67,7 +67,7 @@ Alongside it, and doing more work than it does:
 GET /agent HTTP/1.1
 Upgrade: websocket
 Authorization: Bearer <machine-token>
-Latem-Protocol-Version: 2.3
+Latem-Protocol-Version: 2.4
 ```
 
 `Latem-Protocol-Version` is set by `Broker.authHeader` and by `remote.Verify`.
@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.3"`.
+in both directions carries it**. The current value is `"2.4"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -253,6 +253,15 @@ size and the concurrency latem recommends for each runner. It explains, like
 `toolchains`; the config decides. The agent sends it only to a control plane
 whose `hello` said 2.3 or later, because a 2.2 control plane decodes a
 heartbeat strictly. A control plane answers a 2.3 agent's hello with 2.3.
+
+**2.4 (amendment A68)** added a planned job's `runs_on` and `reads_vars` (§4.8),
+and a heartbeat's `label_aliases` and each repository's `vars` (§4.5). These are
+the first of the additive fields that route: a control plane places a job with
+them. The agent sends them only to a control plane whose `hello` said 2.4 or
+later, because a 2.3 one decodes plans and heartbeats strictly, so the control
+plane is upgraded first. A job from an older planner, or a machine on an older
+agent, is placed by `labels` as before. A control plane answers a 2.4 agent's
+hello with 2.4.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -306,10 +315,10 @@ assigned to it. `latem register` writes it into `[machine] id`.
 ```json
 {
   "kind": "hello",
-  "protocol_version": "2.3",
+  "protocol_version": "2.4",
   "hello": {
     "machine_id": "mac-mini-01",
-    "protocol_version": "2.3",
+    "protocol_version": "2.4",
     "message": "connected as build-01"
   }
 }
@@ -336,7 +345,7 @@ report nothing.
 {
   "kind": "command",
   "id": "j57abc",
-  "protocol_version": "2.3",
+  "protocol_version": "2.4",
   "command": {
     "kind": "run",
     "run": {
@@ -480,7 +489,7 @@ answer does not come, ask again, here or of another machine with the repository.
 ### 3.3 `ack` (server → agent)
 
 ```json
-{ "kind": "ack", "id": "7", "protocol_version": "2.3", "ack": { "ok": true, "run_id": "r7k9…" } }
+{ "kind": "ack", "id": "7", "protocol_version": "2.4", "ack": { "ok": true, "run_id": "r7k9…" } }
 ```
 
 | Field | Type | Required | Notes |
@@ -521,7 +530,7 @@ empty `id` is discarded.
 ```json
 {
   "kind": "resume",
-  "protocol_version": "2.3",
+  "protocol_version": "2.4",
   "resume": {
     "machine_id": "mac-mini-01",
     "runs": [{ "run_id": "r-alpha", "state": "running", "last_acked_seq": 4200 }]
@@ -577,7 +586,7 @@ and reports that through its own replay.
 {
   "kind": "update",
   "id": "9",
-  "protocol_version": "2.3",
+  "protocol_version": "2.4",
   "update": { "run_id": "r-alpha", "update": { "state": "running", "started_at": "…" } }
 }
 ```
@@ -631,7 +640,7 @@ Two further properties this server implements and recommends:
 {
   "kind": "logs",
   "id": "15",
-  "protocol_version": "2.3",
+  "protocol_version": "2.4",
   "logs": [
     { "run_id": "r-alpha", "seq": 1, "stream": "agent", "at": "2026-08-08T09:15:00Z", "line": "[latem] preparing" }
   ]
@@ -689,12 +698,16 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 ```json
 {
   "kind": "heartbeat",
-  "protocol_version": "2.3",
+  "protocol_version": "2.4",
   "heartbeat": {
     "machine_id": "mac-mini-01", "agent_version": "0.4.1", "os": "darwin", "arch": "arm64",
     "runners": [{ "name": "ios", "executor": "tart", "labels": ["ios"], "concurrency": 1, "active": 1, "available": true }],
     "disk_free_gb": 412.5, "draining": false,
-    "repos": [{ "key": "myapp", "github": "Abyssinia-Labs/myapp" }, { "key": "scratch" }]
+    "repos": [
+      { "key": "myapp", "github": "Abyssinia-Labs/myapp", "vars": { "LATEM": "b5bea41b6c623f7c" } },
+      { "key": "scratch" }
+    ],
+    "label_aliases": { "blacksmith-4vcpu-ubuntu-2404": ["linux"] }
   }
 }
 ```
@@ -703,6 +716,18 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 it: an installation's repository `owner/name` matched against `repos[].github`,
 and `repos[].key` sent back as `plan.repo` and `run.repo`. A repository that is
 not on GitHub has a key and no `github`. Absent on a machine with no repositories.
+
+`repos[].vars` (2.4, A68) is a digest of each of the repository's variables, by
+name as `[repos.<key>.vars]` writes it: the first 8 bytes of the value's SHA-256,
+in hex. An unset variable is an absent name; an environment's are not sent. It
+tells two machines' answers apart and carries no value. Sent only to a control
+plane that said 2.4, which keeps a machine out of a job it would answer
+differently from the machine that stands for the repository.
+
+`label_aliases` (2.4, A68) is the machine's `[label_aliases]`, which is how it
+will compile a job's `runs-on`. Absent on a machine with none, which a control
+plane must read as none: a 2.4 agent's silence is an answer, as an older one's is
+not. Sent only to a control plane that said 2.4.
 
 `toolchains` (2.2, A61) is what the machine has for builds, as a step on its
 native runners would find it: `xcode` (versions, `"26.0.1"`), `ios_simulator`,
@@ -755,7 +780,7 @@ returns.
 ### 4.6 `claim`
 
 ```json
-{ "kind": "claim", "id": "7", "protocol_version": "2.3", "claim": { "run_id": "r-alpha" } }
+{ "kind": "claim", "id": "7", "protocol_version": "2.4", "claim": { "run_id": "r-alpha" } }
 ```
 
 An identifier and nothing else: "the control plane already knows everything about
@@ -776,7 +801,7 @@ Same payload shape as §3.3.
 ### 4.8 `plan` (2.0, A52)
 
 ```json
-{ "kind": "plan", "id": "12", "protocol_version": "2.3", "plan": {
+{ "kind": "plan", "id": "12", "protocol_version": "2.4", "plan": {
     "id": "p7k9m2p4",
     "workflows": [{
       "file": ".github/workflows/checks.yml", "name": "Checks",
@@ -804,7 +829,9 @@ The answer to a `plan` command, correlated by `plan.id`, and acked like an
 | `jobs[]` | array | Ordered so each job comes after every job it needs. |
 | `jobs[].key`, `.name` | string | The id under `jobs:` (send it as `run.job`), and the display name a check run is named by. |
 | `jobs[].needs` | array | Keys of jobs in the same workflow. |
-| `jobs[].labels` | array | `runs-on` after the machine's aliases and GitHub's hosted labels. Dispatch to a runner whose labels cover these. |
+| `jobs[].labels` | array | `runs-on` after the **planning** machine's aliases and GitHub's hosted labels. Dispatch to a runner whose labels cover these only when `runs_on` is absent or the machine is too old to report its aliases. |
+| `jobs[].runs_on` | `[{label, hosted?}]` | 2.4, A68. `runs-on` before any machine's aliases: each `label` lowercased, without `self-hosted`, and `hosted`, what it stands for on a machine with no alias for it when that is not itself. **Read it per machine**: the machine's alias for `label`, else `hosted`, else `label` itself, which is how that machine will compile the job. Sent only to a control plane that said 2.4. |
+| `jobs[].reads_vars` | array | 2.4, A68. The variables that decide whether the job runs, where, and as what: everything of it but its steps. Names as the file writes them, read without case, or `"*"` when no list can say. Never a value. **Do not send the job to a machine whose `repos[].vars` differ on these from the machine that stands for the repository.** Sent only to a control plane that said 2.4. |
 | `jobs[].environment` | string | The environment's name. |
 | `jobs[].permissions` | object | The token's scopes in the workflow's vocabulary (`pull-requests`, not `pull_requests`), `read` or `write`; a scope absent has none. Always present: the job's, else the workflow's, else GitHub's restricted default (`contents` and `packages` read). |
 | `jobs[].concurrency` | object | Job-level, evaluated, enforced like the workflow's. |

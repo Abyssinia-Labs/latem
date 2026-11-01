@@ -710,14 +710,18 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	}
 	// A52: the repositories this machine builds, by key and by owner/name,
 	// which is how an event on GitHub finds the machines that can plan it.
-	repos := a.current().Repos
+	cfg := a.current()
+	repos := cfg.Repos
 	for _, key := range slices.Sorted(maps.Keys(repos)) {
-		info := protocol.RepoInfo{Key: key}
+		info := protocol.RepoInfo{Key: key, Vars: varDigests(repos[key].VarsFor(""))}
 		if slug, ok := repos[key].GitHubRepository(); ok {
 			info.GitHub = slug
 		}
 		h.Repos = append(h.Repos, info)
 	}
+	// A68: what this machine's config says of a job. The remote broker sends
+	// it, and each repository's digests, only to a control plane that says 2.4.
+	h.LabelAliases = cfg.LabelAliases
 	if a.caches != nil {
 		if free, err := a.caches.FreeGB(ctx); err == nil {
 			h.DiskFreeGB = free

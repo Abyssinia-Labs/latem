@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -107,6 +109,20 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, requires
 	}
 	res.Workflows = workflows
 	return res
+}
+
+// varDigests is what a heartbeat says of a repository's variables (A68): a
+// value's digest, which tells two machines' answers apart and is all that
+// comparing them needs. Variables are not secrets, but they are this machine's
+// config, and the control plane has no use for the values. Only those outside
+// any environment: nothing that decides a job's place reads an environment's.
+func varDigests(vars map[string]string) map[string]string {
+	out := make(map[string]string, len(vars))
+	for name, value := range vars {
+		sum := sha256.Sum256([]byte(value))
+		out[name] = hex.EncodeToString(sum[:8])
+	}
+	return out
 }
 
 func codeOr(code, fallback protocol.ErrorCode) protocol.ErrorCode {
