@@ -699,6 +699,16 @@ func (r *reader) follow(p, wd string, ev Evidence, depth int) {
 		return
 	}
 	data, err := readCapped(r.fsys, full)
+	// A script that cds first names the next one from where it went, which
+	// this does not track: ci/prebuild.sh, from packages/app/ci/android/,
+	// after a cd to packages/app. So the folders above the script are tried.
+	for dir := wd; err != nil && dir != "." && dir != ""; dir = path.Dir(dir) {
+		if up := path.Clean(path.Join(path.Dir(dir), p)); fs.ValidPath(up) {
+			if b, e := readCapped(r.fsys, up); e == nil {
+				data, full, err = b, up, nil
+			}
+		}
+	}
 	if err != nil {
 		r.c.unknown = append(r.c.unknown, Evidence{File: ev.File, Line: ev.Line, Where: ev.Where,
 			Snippet: ev.Snippet + " — " + full + " is not in the repository"})
