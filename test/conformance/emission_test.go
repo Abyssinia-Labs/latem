@@ -39,8 +39,9 @@ func TestConformance_AgentEmissions(t *testing.T) {
 	dir := shortTemp(t)
 	db := openStore(t, dir)
 	rec := newRecorder(t, "tok-conformance")
-	// A61, A68: a control plane that says 2.4 is sent a plan's requires,
-	// runs_on and reads_vars, and a heartbeat's toolchains and label_aliases.
+	// A61, A68, A70: a control plane that says 2.5 is sent a plan's requires,
+	// runs_on and reads_vars, and a heartbeat's toolchains, label_aliases and
+	// readiness.
 	rec.hello = []byte(`{"kind":"hello","hello":{"protocol_version":"` + protocol.Version + `"}}`)
 
 	ctx := context.Background()
@@ -120,6 +121,23 @@ func TestConformance_AgentEmissions(t *testing.T) {
 				{Name: "ios", Recommended: 1, Why: "this Mac has 16 GB: a macOS VM takes about 8 GB and the host keeps 8, and Apple's licence allows 2 VMs"},
 				{Name: "linux", Recommended: 1, Why: "Docker has 6 CPUs and 7.7 GB, and a job takes about 2 CPUs and 4 GB"},
 			},
+		},
+		// A70: what `latem setup` says of the machine, in words and counts.
+		Readiness: &protocol.Readiness{
+			Kinds: []protocol.ReadinessKind{
+				{
+					Kind: "android", Title: "Android", State: "off", Runner: "host",
+					Repos: []string{"myapp"}, Jobs: 2, Elsewhere: 2,
+					Items: []protocol.ReadinessItem{
+						{Title: "JDK 17", Have: "JDK [27]"},
+						{Title: "ANDROID_HOME set", Soft: true},
+					},
+					More: 1,
+				},
+				{Kind: "linux", Title: "Linux", State: "ready", Runner: "linux"},
+				{Kind: "ios", Title: "iOS", State: "impossible", Why: "needs a Mac"},
+			},
+			Unread: 1, Unclassified: 3,
 		},
 	}); err != nil {
 		t.Fatalf("heartbeat: %v", err)

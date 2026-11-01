@@ -527,6 +527,38 @@ func TestCapacity_OnlyToAControlPlaneThatSays23(t *testing.T) {
 	}
 }
 
+// A heartbeat's readiness (A70) goes only to a control plane that says 2.5: a
+// 2.4 one decodes heartbeats strictly, and would refuse the whole beat.
+func TestReadiness_OnlyToAControlPlaneThatSays25(t *testing.T) {
+	health := protocol.MachineHealth{MachineID: "m", Capacity: &protocol.Capacity{CPUs: 8, MemoryGB: 8},
+		Readiness: &protocol.Readiness{Kinds: []protocol.ReadinessKind{{Kind: "android", Title: "Android", State: "off"}}}}
+
+	for _, c := range []struct {
+		version   string
+		readiness bool
+	}{{"2.3", false}, {"2.4", false}, {"2.5", true}, {"2.10", true}} {
+		h := newHarness(t, nil)
+		h.CP.SetHello(&helloFrame{Version: c.version})
+		h.CP.Partition()
+		h.CP.Await(t, "the partition", func() bool { return !h.Connected() })
+		h.CP.Heal()
+		h.AwaitConnected(t)
+		h.CP.Await(t, "the hello", func() bool { return h.speaksReadiness() == c.readiness && h.speaksCapacity() })
+
+		if err := h.Heartbeat(t.Context(), health); err != nil {
+			t.Fatalf("%q: Heartbeat: %v", c.version, err)
+		}
+		h.CP.Await(t, "the beat", func() bool { return len(h.CP.Heartbeats()) > 0 })
+		beats := h.CP.Heartbeats()
+		if last := beats[len(beats)-1]; (last.Readiness != nil) != c.readiness {
+			t.Errorf("hello %q: readiness sent %v, want %v", c.version, last.Readiness != nil, c.readiness)
+		}
+	}
+	if health.Readiness == nil {
+		t.Error("stripping for an old control plane wrote the caller's heartbeat")
+	}
+}
+
 // TestReport_RefusalIsNotReplayed.
 //
 // A refusal is the control plane's answer, not a delivery failure. Replaying

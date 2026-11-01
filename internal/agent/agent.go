@@ -206,6 +206,9 @@ type Options struct {
 	// toolchain probe at once instead of waiting for their tickers. Nil
 	// watches nothing.
 	HostFingerprint func() string
+	// Readiness says what `latem setup` would of this machine (A70), for the
+	// heartbeat, beside each toolchain probe. Nil sends none.
+	Readiness func(ctx context.Context, cfg *config.Config) (*protocol.Readiness, error)
 
 	// Intervals. Zero takes the corresponding Default above.
 	HeartbeatInterval   time.Duration
@@ -314,6 +317,8 @@ type Agent struct {
 	// toolchainsEvery or sooner when reprobe rings.
 	toolchains      atomic.Pointer[system.Toolchains]
 	toolchainsEvery time.Duration
+	// readiness is what Options.Readiness last said (A70).
+	readiness atomic.Pointer[protocol.Readiness]
 	reprobe         chan struct{}
 	watchEvery      time.Duration
 	// machine is what MeasureMachine last found (A63).
@@ -722,6 +727,9 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	// A68: what this machine's config says of a job. The remote broker sends
 	// it, and each repository's digests, only to a control plane that says 2.4.
 	h.LabelAliases = cfg.LabelAliases
+	// A70: what `latem setup` would say of it, once it has been worked out.
+	// Sent only to a control plane that says 2.5.
+	h.Readiness = a.readiness.Load()
 	if a.caches != nil {
 		if free, err := a.caches.FreeGB(ctx); err == nil {
 			h.DiskFreeGB = free

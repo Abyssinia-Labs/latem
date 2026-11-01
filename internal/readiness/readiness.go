@@ -163,6 +163,13 @@ type Item struct {
 	Warning string `json:"warning,omitempty"`
 }
 
+// Item IDs that Advert treats apart, the first and last followed by a name.
+const (
+	itemAllowed    = "allowed-"
+	itemMovingRefs = "moving-refs"
+	itemImage      = "image-"
+)
+
 // Change is one edit to config.toml.
 type Change struct {
 	// What is one of the Change* values.
@@ -477,11 +484,11 @@ func settings(jobs []Job, executor string) []Item {
 		allowed = merge(allowed, j.NotAllowed)
 	}
 	for _, a := range allowed {
-		out = append(out, Item{ID: "allowed-" + a, Title: "the action " + a + " allowed",
+		out = append(out, Item{ID: itemAllowed + a, Title: "the action " + a + " allowed",
 			Config: []Change{{What: ChangeAllowed, Value: a, Line: fmt.Sprintf("[actions] allowed += %q", a)}}})
 	}
 	if len(moving) > 0 {
-		out = append(out, Item{ID: "moving-refs", Title: "actions named by a tag accepted", Have: strings.Join(refs, ", "), Jobs: moving,
+		out = append(out, Item{ID: itemMovingRefs, Title: "actions named by a tag accepted", Have: strings.Join(refs, ", "), Jobs: moving,
 			Warning: "A tag can be moved to other code after you have read it. The other way is to pin each action to a commit in the workflow.",
 			Config:  []Change{{What: ChangeMovingRefs, Line: "[actions] require_pinned = false"}}})
 	}
@@ -539,7 +546,7 @@ func imageItems(d definition, r *Runner, images []Image) []Item {
 	var out []Item
 	for _, img := range images {
 		if img.Runner == r.Name && !img.Present {
-			out = append(out, Item{ID: "image-" + img.Ref, Title: "its image, " + img.Ref, Soft: true,
+			out = append(out, Item{ID: itemImage + img.Ref, Title: "its image, " + img.Ref, Soft: true,
 				Run: [][]string{{"docker", "pull", "--", img.Ref}}})
 		}
 	}

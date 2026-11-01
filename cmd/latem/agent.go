@@ -14,6 +14,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/capacity"
+	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -113,6 +114,10 @@ to do it.`,
 				},
 				// An App Store update to Xcode, noticed in half a minute (A64).
 				HostFingerprint: system.New(system.Options{}).XcodeFingerprint,
+				// What the app shows of what this machine can build (A70).
+				Readiness: func(ctx context.Context, cfg *config.Config) (*protocol.Readiness, error) {
+					return machineReadiness(ctx, cfg, realToolchainDeps())
+				},
 			})
 			if err != nil {
 				return err

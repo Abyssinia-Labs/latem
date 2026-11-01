@@ -746,6 +746,14 @@ func (b *Broker) speaksPlacement() bool {
 	return versionAtLeast(b.peerVersion, 2, 4)
 }
 
+// speaksReadiness reports whether the control plane said 2.5, so takes a
+// heartbeat's readiness (A70).
+func (b *Broker) speaksReadiness() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return versionAtLeast(b.peerVersion, 2, 5)
+}
+
 // healthForPeer is h without 2.2's toolchains, for a control plane that has
 // not said 2.2.
 func (b *Broker) healthForPeer(h protocol.MachineHealth) protocol.MachineHealth {
@@ -764,6 +772,11 @@ func (b *Broker) healthForPeer(h protocol.MachineHealth) protocol.MachineHealth 
 		for i := range h.Repos {
 			h.Repos[i].Vars = nil
 		}
+	}
+	// And 2.5's readiness, which a 2.4 control plane would refuse the whole
+	// heartbeat over.
+	if !b.speaksReadiness() {
+		h.Readiness = nil
 	}
 	return h
 }

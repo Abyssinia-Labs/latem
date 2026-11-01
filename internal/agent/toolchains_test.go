@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/capacity"
+	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/system"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // xcodeProbe is a machine whose Xcode the test changes under the agent, and
@@ -107,6 +109,47 @@ func TestCapacity_InTheHeartbeat(t *testing.T) {
 
 // An update to Xcode moves the fingerprint, and the agent checks its runners
 // at once rather than at the next five-minute preflight (A64).
+// What the app shows of a machine (A70) is worked out beside the probe, and
+// looked at again when the probe is. One that fails leaves the last answer: it
+// only explains, and it must not stop the machine.
+func TestReadiness_InTheHeartbeat(t *testing.T) {
+	var fail atomic.Bool
+	var title atomic.Pointer[string]
+	first, second := "Android", "Android, again"
+	title.Store(&first)
+	ta := newTestAgent(t, newConfigDir(t, configOptions{}), func(o *Options) {
+		o.ProbeToolchains = newXcodeProbe("27.2").probe
+		o.ToolchainsInterval = 20 * time.Millisecond
+		o.Readiness = func(context.Context, *config.Config) (*protocol.Readiness, error) {
+			if fail.Load() {
+				return nil, errors.New("a repository could not be read")
+			}
+			return &protocol.Readiness{Kinds: []protocol.ReadinessKind{{Kind: "android", Title: *title.Load(), State: "off"}}}, nil
+		}
+	})
+	beatTitle := func() string {
+		if r := ta.health(context.Background()).Readiness; r != nil {
+			return r.Kinds[0].Title
+		}
+		return ""
+	}
+	if got := beatTitle(); got != "" {
+		t.Errorf("a heartbeat before the first look says %q", got)
+	}
+	ta.run(t)
+	waitFor(t, "the first look", 10*time.Second, func() bool { return beatTitle() == first })
+
+	fail.Store(true)
+	title.Store(&second)
+	time.Sleep(100 * time.Millisecond)
+	if got := beatTitle(); got != first {
+		t.Errorf("after a look that failed the heartbeat says %q", got)
+	}
+
+	fail.Store(false)
+	waitFor(t, "the next look", 10*time.Second, func() bool { return beatTitle() == second })
+}
+
 func TestWatch_PreflightsWhenXcodeChanges(t *testing.T) {
 	var fp atomic.Value
 	fp.Store("27.2")

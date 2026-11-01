@@ -28,6 +28,53 @@ type MachineHealth struct {
 	// a control plane that says 2.4: how a job's runs_on reads on this
 	// machine, which is how it will compile here.
 	LabelAliases map[string][]string `json:"label_aliases,omitempty"`
+	// Readiness is what `latem setup` says of this machine (A70, 2.5), sent
+	// only to a control plane that says 2.5. Like Toolchains it explains:
+	// nothing routes on it, and nothing on the far side can act on it.
+	Readiness *Readiness `json:"readiness,omitempty"`
+}
+
+// Readiness is each kind of build in a machine's repositories, where it
+// stands here, and what is in the way, in a person's words. It carries no
+// path, no action, no secret's name and nothing of a job's steps.
+type Readiness struct {
+	Kinds []ReadinessKind `json:"kinds"`
+	// Unread counts the repositories this machine could not read, and
+	// Unclassified the jobs whose kind could not be read from them.
+	Unread       int `json:"unread,omitempty"`
+	Unclassified int `json:"unclassified,omitempty"`
+}
+
+// ReadinessKind is one kind of build on one machine.
+type ReadinessKind struct {
+	Kind  string `json:"kind"`  // "android"
+	Title string `json:"title"` // "Android"
+	// State is ready, missing, off or impossible.
+	State string `json:"state"`
+	// Why says what is not obvious from State: "needs a Mac".
+	Why string `json:"why,omitempty"`
+	// Runner is the runner that takes it, or would.
+	Runner string `json:"runner,omitempty"`
+	// Repos are the keys of the repositories with jobs of this kind, and
+	// Jobs how many jobs that is.
+	Repos []string `json:"repos,omitempty"`
+	Jobs  int      `json:"jobs,omitempty"`
+	// Elsewhere counts the jobs a label here would still not bring, because
+	// their workflows ask for another machine's labels.
+	Elsewhere int             `json:"elsewhere,omitempty"`
+	Items     []ReadinessItem `json:"items,omitempty"`
+	// More counts what is in the way and not in Items.
+	More int `json:"more,omitempty"`
+}
+
+// ReadinessItem is one thing in the way.
+type ReadinessItem struct {
+	Title string `json:"title"`
+	// Have is what the machine has instead: "JDK [27]".
+	Have string `json:"have,omitempty"`
+	// Soft is worth saying and not worth failing for: a job already running
+	// here has got by without it.
+	Soft bool `json:"soft,omitempty"`
 }
 
 // Capacity is a machine's size and the concurrency latem recommends for each
