@@ -3194,7 +3194,41 @@ read to steal a key from a shell the terminal has been handed to. All of it but 
 model tested without a terminal: a key changes a cursor or calls a hook, and a view is drawn from
 what is true now.
 
-**What was not done.** The app does not show this yet: a heartbeat carries what a machine has, not
-what its repositories ask of it. A step's `ANDROID_HOME` from a runner's env is read by doctor and
+**What was not done.** The app did not show this: a heartbeat carried what a machine has, not what
+its repositories ask of it. A70 adds that. A step's `ANDROID_HOME` from a runner's env is read by doctor and
 setup and not by the agent's probe, which looks where an SDK usually is: a machine whose SDK lives
 elsewhere reports none in the app, and builds.
+
+| A70 | §7, §20, INV-2, INV-5, A61, A63, A69 | **Protocol 2.5. A heartbeat says what `latem setup` says of the machine, so the app can show what each machine can build and what is in the way, with no way to act on it.** |
+
+**What is sent.** `readiness.Advert` copies a plan field by field into a heartbeat's `readiness`:
+each kind, where it stands, its runner, its repositories' keys, how many jobs it has and how many
+of those ask for another machine's labels, and the short names of what is in the way, with what the
+machine has instead. It is a copy and not a filter because most of a plan belongs to the machine:
+an item's commands and config edits, a JDK's home, an SDK's root.
+
+**What is not, and why each.** Commands and config edits, so the far side holds nothing it could
+ask for: `latem setup` on the machine stays the only thing that closes an item (A69), and latem
+works with no account. Paths, as `toolchains` has none (A61). Which actions a job uses and what its
+image is, because the control plane is never told a job's steps (INV-5): an action not allowed is
+counted, and tag-named actions are said without their names. Secrets' names, which INV-2 would
+allow and a page has no use for: the item says how many are not set. A job's name is a count too.
+
+**The last check.** An item's words are fixed phrases and a version, which a workflow can write any
+way it likes, so a word with `/` or `\` in it, or over 120 characters, or not on one line, is
+counted in `more` and not sent. The control plane refuses the same on decoding, and the whole of
+`readiness` with it; the rest of the beat is written, as for `capacity`.
+
+**When.** Beside the toolchain probe, every 15 minutes and whenever that probe is asked for: a
+reload, SIGUSR2 and an Xcode that changed. It probes again and reads every repository, which no
+heartbeat should. It has two minutes, so a Docker daemon that does not answer costs the next probe
+no more than that. A look that fails, or panics on a repository's files, is logged and keeps the
+last answer: this only explains, and nothing it does may stop a build.
+
+**From where.** Only the agent's own mirrors, `HEAD`, never fetched and never cloned. A repository
+with no mirror yet is `unread`, and a mirror is as new as its last plan or run, so the page can be
+behind a push by as long as the machine has been idle.
+
+**To whom.** Only a control plane whose hello says 2.5. A 2.4 one decodes a heartbeat strictly and
+would refuse the beat, so the control plane is upgraded first. It explains: nothing routes on it,
+and the agent's silence means an agent that has not looked or predates this.

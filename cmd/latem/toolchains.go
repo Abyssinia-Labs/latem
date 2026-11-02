@@ -255,7 +255,7 @@ func setupToolchains(cmd *cobra.Command, p *prompter, deps toolchainDeps) (bool,
 	default:
 		printf(out, "\n  %d still missing; `latem doctor` lists %s\n", left, map[bool]string{true: "it", false: "them"}[left == 1])
 	}
-	m, err := openMachineView(ctx, cfg, deps)
+	m, err := openMachineView(ctx, cfg, deps, fromMirrorThenRemote)
 	if err != nil {
 		return changed, err
 	}

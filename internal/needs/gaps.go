@@ -1,7 +1,6 @@
 package needs
 
 import (
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -166,6 +165,15 @@ func WantedJDK(r Report, q Requirement) int {
 	return 0
 }
 
+// joinInts is versions as a person lists them: "17, 21".
+func joinInts(ns []int) string {
+	out := make([]string, len(ns))
+	for i, n := range ns {
+		out[i] = strconv.Itoa(n)
+	}
+	return strings.Join(out, ", ")
+}
+
 // Gaps compares what a job needs with what the machine has, for a job that
 // would run on a runner of executor. Only a native runner's needs are the
 // host's: a docker runner's are its image's, which this does not open, save
@@ -212,7 +220,7 @@ func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 			if !t.HasJDK(want) {
 				have := ""
 				if len(t.JDKs) > 0 {
-					have = fmt.Sprintf("JDK %v", t.JDKs)
+					have = "JDK " + joinInts(t.JDKs)
 				}
 				v := strconv.Itoa(want)
 				if want == 0 {
@@ -310,13 +318,13 @@ func androidGaps(q Requirement, t system.Toolchains, linux bool) []Gap {
 			return add(Gap{Missing: "Android platform-tools", Fix: [][]string{sdkmanager("platform-tools")}})
 		}
 		if q.Version != "" && !hasInt(t.AndroidPlatforms, q.Version) {
-			return add(Gap{Missing: "Android platform " + q.Version, Have: fmt.Sprintf("platforms %v", t.AndroidPlatforms),
+			return add(Gap{Missing: "Android platform " + q.Version, Have: "platforms " + joinInts(t.AndroidPlatforms),
 				Fix: [][]string{sdkmanager("platforms;android-" + q.Version)}})
 		}
 		return nil
 	}
 	if q.Version != "" && !hasInt(t.AndroidPlatforms, q.Version) {
-		return add(Gap{Missing: "Android platform " + q.Version, Have: fmt.Sprintf("platforms %v", t.AndroidPlatforms),
+		return add(Gap{Missing: "Android platform " + q.Version, Have: "platforms " + joinInts(t.AndroidPlatforms),
 			Fix:    [][]string{{"sdkmanager", "platforms;android-" + q.Version}},
 			Manual: []string{licences}})
 	}

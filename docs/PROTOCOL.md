@@ -67,7 +67,7 @@ Alongside it, and doing more work than it does:
 GET /agent HTTP/1.1
 Upgrade: websocket
 Authorization: Bearer <machine-token>
-Latem-Protocol-Version: 2.4
+Latem-Protocol-Version: 2.5
 ```
 
 `Latem-Protocol-Version` is set by `Broker.authHeader` and by `remote.Verify`.
@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.4"`.
+in both directions carries it**. The current value is `"2.5"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -262,6 +262,12 @@ later, because a 2.3 one decodes plans and heartbeats strictly, so the control
 plane is upgraded first. A job from an older planner, or a machine on an older
 agent, is placed by `labels` as before. A control plane answers a 2.4 agent's
 hello with 2.4.
+
+**2.5 (amendment A70)** added a heartbeat's `readiness` (§4.5): what `latem setup`
+says of the machine. It explains, as `toolchains` does, and nothing routes on it.
+The agent sends it only to a control plane whose `hello` said 2.5 or later,
+because a 2.4 one decodes a heartbeat strictly. A control plane answers a 2.5
+agent's hello with 2.5.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -315,10 +321,10 @@ assigned to it. `latem register` writes it into `[machine] id`.
 ```json
 {
   "kind": "hello",
-  "protocol_version": "2.4",
+  "protocol_version": "2.5",
   "hello": {
     "machine_id": "mac-mini-01",
-    "protocol_version": "2.4",
+    "protocol_version": "2.5",
     "message": "connected as build-01"
   }
 }
@@ -345,7 +351,7 @@ report nothing.
 {
   "kind": "command",
   "id": "j57abc",
-  "protocol_version": "2.4",
+  "protocol_version": "2.5",
   "command": {
     "kind": "run",
     "run": {
@@ -489,7 +495,7 @@ answer does not come, ask again, here or of another machine with the repository.
 ### 3.3 `ack` (server → agent)
 
 ```json
-{ "kind": "ack", "id": "7", "protocol_version": "2.4", "ack": { "ok": true, "run_id": "r7k9…" } }
+{ "kind": "ack", "id": "7", "protocol_version": "2.5", "ack": { "ok": true, "run_id": "r7k9…" } }
 ```
 
 | Field | Type | Required | Notes |
@@ -530,7 +536,7 @@ empty `id` is discarded.
 ```json
 {
   "kind": "resume",
-  "protocol_version": "2.4",
+  "protocol_version": "2.5",
   "resume": {
     "machine_id": "mac-mini-01",
     "runs": [{ "run_id": "r-alpha", "state": "running", "last_acked_seq": 4200 }]
@@ -586,7 +592,7 @@ and reports that through its own replay.
 {
   "kind": "update",
   "id": "9",
-  "protocol_version": "2.4",
+  "protocol_version": "2.5",
   "update": { "run_id": "r-alpha", "update": { "state": "running", "started_at": "…" } }
 }
 ```
@@ -640,7 +646,7 @@ Two further properties this server implements and recommends:
 {
   "kind": "logs",
   "id": "15",
-  "protocol_version": "2.4",
+  "protocol_version": "2.5",
   "logs": [
     { "run_id": "r-alpha", "seq": 1, "stream": "agent", "at": "2026-08-08T09:15:00Z", "line": "[latem] preparing" }
   ]
@@ -698,7 +704,7 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 ```json
 {
   "kind": "heartbeat",
-  "protocol_version": "2.4",
+  "protocol_version": "2.5",
   "heartbeat": {
     "machine_id": "mac-mini-01", "agent_version": "0.4.1", "os": "darwin", "arch": "arm64",
     "runners": [{ "name": "ios", "executor": "tart", "labels": ["ios"], "concurrency": 1, "active": 1, "available": true }],
@@ -745,6 +751,31 @@ CPUs and 4 GB of what Docker has, shared between docker runners; a tart runner a
 many macOS VMs as fit in memory, at most two. Sent only to a control plane that
 said 2.3, measured beside the toolchains and as often.
 
+`readiness` (2.5, A70) is each kind of build in the machine's repositories, where
+it stands here, and what is in the way, in a person's words. `kinds` is at most
+16: `kind` (`android`), `title` (`Android`), `state` (`ready`, `missing`, `off` or
+`impossible`), and when they have something to say `why`, `runner`, `repos` (keys,
+at most 64), `jobs`, `elsewhere` (jobs whose workflows still ask for another
+machine's labels), `items` (at most 32: `title`, `have`, `soft`) and `more` (what is
+in the way and not in `items`). `unread` counts the repositories it could not read
+and `unclassified` the jobs whose kind it could not tell. Words are at most 120
+characters on one line, with no `/` or `\`. There are no commands in it and no
+config edits, so nothing on the far side can act on it, and no path, action,
+image or secret's name: those are counted. Sent only to a control plane that said
+2.5, and absent until the agent has looked, which it does beside the toolchains
+and as often, from its own mirrors.
+
+```json
+"readiness": {
+  "kinds": [
+    { "kind": "android", "title": "Android", "state": "off", "runner": "host", "repos": ["tsedal"], "jobs": 2, "elsewhere": 2,
+      "items": [{ "title": "JDK 17", "have": "JDK 27" }, { "title": "tsedal's secrets set here", "have": "5 not set" }] },
+    { "kind": "ios", "title": "iOS", "state": "impossible", "why": "needs a Mac" }
+  ],
+  "unread": 1
+}
+```
+
 ```json
 "capacity": {
   "cpus": 8, "memory_gb": 8,
@@ -780,7 +811,7 @@ returns.
 ### 4.6 `claim`
 
 ```json
-{ "kind": "claim", "id": "7", "protocol_version": "2.4", "claim": { "run_id": "r-alpha" } }
+{ "kind": "claim", "id": "7", "protocol_version": "2.5", "claim": { "run_id": "r-alpha" } }
 ```
 
 An identifier and nothing else: "the control plane already knows everything about
@@ -801,7 +832,7 @@ Same payload shape as §3.3.
 ### 4.8 `plan` (2.0, A52)
 
 ```json
-{ "kind": "plan", "id": "12", "protocol_version": "2.4", "plan": {
+{ "kind": "plan", "id": "12", "protocol_version": "2.5", "plan": {
     "id": "p7k9m2p4",
     "workflows": [{
       "file": ".github/workflows/checks.yml", "name": "Checks",

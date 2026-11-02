@@ -19,6 +19,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // machineView is this machine, read for readiness (A69): each repository's
@@ -32,17 +33,16 @@ type machineView struct {
 	workspace string
 }
 
-// openMachineView reads every configured repository, from the agent's mirror
-// or else a temporary clone. One that cannot be read is said, and the rest
-// still count.
-func openMachineView(ctx context.Context, cfg *config.Config, deps toolchainDeps) (*machineView, error) {
+// openMachineView reads every configured repository from where from says. One
+// that cannot be read is said, and the rest still count.
+func openMachineView(ctx context.Context, cfg *config.Config, deps toolchainDeps, from treeSource) (*machineView, error) {
 	workspace, err := os.MkdirTemp("", "latem-setup-workspace-")
 	if err != nil {
 		return nil, err
 	}
 	m := &machineView{deps: deps, sys: system.New(system.Options{}), files: map[string]*repoFiles{}, workspace: workspace}
 	for _, key := range sortedStrings(cfg.Repos) {
-		files, err := readRepo(ctx, cfg, key, fromMirrorThenRemote)
+		files, err := readRepo(ctx, cfg, key, from)
 		if err != nil {
 			m.unread = append(m.unread, fmt.Sprintf("%s: %v", key, err))
 			continue
@@ -59,12 +59,17 @@ func (m *machineView) close() {
 	_ = os.RemoveAll(m.workspace)
 }
 
-// plan is what is true of the machine now.
+// plan is what is true of the machine now, as config.toml says now: setup
+// edits it between looks.
 func (m *machineView) plan(ctx context.Context) (readiness.Plan, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return readiness.Plan{}, err
 	}
+	return m.planFor(ctx, cfg)
+}
+
+func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readiness.Plan, error) {
 	stores, err := m.deps.stores(cfg.Paths)
 	if err != nil {
 		return readiness.Plan{}, err
@@ -128,7 +133,7 @@ func runSetupPlan(cmd *cobra.Command, deps setupDeps) error {
 		return err
 	}
 	ctx := cmd.Context()
-	m, err := openMachineView(ctx, cfg, deps.toolchains)
+	m, err := openMachineView(ctx, cfg, deps.toolchains, fromMirrorThenRemote)
 	if err != nil {
 		return err
 	}
@@ -141,6 +146,29 @@ func runSetupPlan(cmd *cobra.Command, deps setupDeps) error {
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 	return enc.Encode(plan)
+}
+
+// machineReadiness is the plan as the agent's heartbeat says it (A70). It reads
+// only the agent's own mirrors, which the agent fetches when it has something
+// to fetch for: a machine's first look finds none, and says so as unread. An
+// explanation that panics on a repository's files must not take the machine's
+// builds down with it, so a panic here is an answer it could not give.
+func machineReadiness(ctx context.Context, cfg *config.Config, deps toolchainDeps) (out *protocol.Readiness, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, fmt.Errorf("panic: %v", r)
+		}
+	}()
+	m, err := openMachineView(ctx, cfg, deps, fromMirror)
+	if err != nil {
+		return nil, err
+	}
+	defer m.close()
+	plan, err := m.planFor(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return readiness.Advert(plan), nil
 }
 
 // printPlan is the plan for a log, a script, and the scrollback a closed
@@ -190,7 +218,7 @@ func runSetupScreen(cmd *cobra.Command, deps toolchainDeps) (bool, error) {
 		return false, err
 	}
 	printf(out, "  reading this machine's repositories…\n")
-	m, err := openMachineView(ctx, cfg, deps)
+	m, err := openMachineView(ctx, cfg, deps, fromMirrorThenRemote)
 	if err != nil {
 		return false, err
 	}

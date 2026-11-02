@@ -59,7 +59,7 @@ func desktopPlan() readiness.Plan {
 		{Name: needs.KindAndroid, Title: "Android", State: readiness.Off, Runner: "host", Label: readiness.LabelAndroid, Repos: []string{"tsedal"},
 			Notes: []string{"tsedal preview.yml android asks for macos, xcode; it comes here once its workflow says runs-on: [android]"},
 			Items: []readiness.Item{
-				{ID: "JDK 17", Title: "JDK 17", Have: "JDK [27]", Yours: [][]string{{"sudo", "pacman", "-S", "--needed", "jdk17-openjdk"}}},
+				{ID: "JDK 17", Title: "JDK 17", Have: "JDK 27", Yours: [][]string{{"sudo", "pacman", "-S", "--needed", "jdk17-openjdk"}}},
 				{ID: "tools", Title: "the Android command-line tools", Run: [][]string{{"latem", "setup", "android-sdk"}}},
 				{ID: "unisolated", Title: "remote actions allowed on this machine", Warning: "They run as you.",
 					Config: []readiness.Change{{What: readiness.ChangeUnisolated, Line: "[actions] allow_unisolated = true"}}},
@@ -104,7 +104,7 @@ func TestScreen_ShowsWhatTheMachineBuilds(t *testing.T) {
 		"[x] Linux", "ready",
 		"[ ] iOS", "needs a Mac",
 		"Android, on the host runner",
-		"✗ JDK 17", "JDK [27]", "~ ANDROID_HOME set",
+		"✗ JDK 17", "JDK 27", "~ ANDROID_HOME set",
 		"it comes here once its workflow says runs-on: [android]",
 		"q done",
 	} {

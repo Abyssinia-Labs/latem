@@ -3,9 +3,11 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha1" //nolint:gosec // the manifest's own checksum
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // A Linux machine as `latem init` writes it, with a repository beside it.
@@ -221,6 +224,76 @@ func serveSDK(t *testing.T, archive []byte, sum string) {
 	prev := androidRepository
 	androidRepository = srv.URL + "/"
 	t.Cleanup(func() { androidRepository = prev })
+}
+
+// The agent's look at its own machine reads the mirrors it already has. A
+// clone from there would run on every toolchain beat, with the service's
+// credentials, for a page.
+func TestMachineReadiness_ReadsOnlyTheMirror(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{".github/workflows/apple.yml": {Data: []byte(`on: push
+jobs:
+  apple:
+    runs-on: macos-latest
+    steps:
+      - run: xcodegen generate
+`)}})
+	rec.machine.dirs["xcodegen"] = "/nowhere"
+	cfg := loadConfigIn(t, dir)
+
+	var from []treeSource
+	prev := readRepo
+	readRepo = func(ctx context.Context, cfg *config.Config, key string, f treeSource) (*repoFiles, error) {
+		from = append(from, f)
+		return prev(ctx, cfg, key, f)
+	}
+	t.Cleanup(func() { readRepo = prev })
+
+	got, err := machineReadiness(t.Context(), cfg, rec.machine.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(from) == 0 || slices.ContainsFunc(from, func(f treeSource) bool { return f != fromMirror }) {
+		t.Errorf("read from %v", from)
+	}
+	i := slices.IndexFunc(got.Kinds, func(k protocol.ReadinessKind) bool { return k.Kind == needs.KindXcode })
+	if i < 0 || got.Kinds[i].State != string(readiness.Missing) || got.Kinds[i].Items[0].Title != "XcodeGen" {
+		t.Errorf("kinds = %+v", got.Kinds)
+	}
+}
+
+// A repository with no mirror yet is one the machine could not read. The
+// others still count, and a page says so.
+func TestMachineReadiness_ARepositoryWithNoMirror(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{})
+	prev := readRepo
+	readRepo = func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
+		return nil, errors.New("the agent has no mirror yet")
+	}
+	t.Cleanup(func() { readRepo = prev })
+
+	got, err := machineReadiness(t.Context(), loadConfigIn(t, dir), rec.machine.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Unread != 1 {
+		t.Errorf("unread = %d", got.Unread)
+	}
+}
+
+// The heartbeat's explanation runs in the agent, on repositories' files, on a
+// timer. A panic in it must not stop the machine's builds.
+func TestMachineReadiness_APanicIsAnError(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{})
+	prev := readRepo
+	readRepo = func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
+		panic("a workflow nobody expected")
+	}
+	t.Cleanup(func() { readRepo = prev })
+
+	got, err := machineReadiness(t.Context(), loadConfigIn(t, dir), rec.machine.deps())
+	if err == nil || got != nil {
+		t.Errorf("got %v, %v", got, err)
+	}
 }
 
 func TestInstallCmdlineTools(t *testing.T) {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
 	"time"
@@ -10,6 +11,11 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
+
+// readinessTimeout bounds one look at what the machine can build, so that a
+// Docker daemon that does not answer holds up the next toolchain probe by no
+// more than this.
+const readinessTimeout = 2 * time.Minute
 
 // toolchainsLoop keeps what the agent says it has for builds current: what a
 // run's note compares a job's needs against (A59), and what the heartbeat
@@ -46,6 +52,7 @@ func (a *Agent) toolchainsLoop(ctx context.Context) {
 			}
 			a.machine.Store(&m)
 		}
+		a.reportReadiness(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -53,6 +60,26 @@ func (a *Agent) toolchainsLoop(ctx context.Context) {
 		case <-a.reprobe:
 		}
 	}
+}
+
+// reportReadiness works out what the heartbeat says of what this machine can
+// build (A70). It reads every repository and probes again, so it runs on this
+// beat and never a heartbeat's. One that fails keeps the last answer, which
+// only explains, and is logged: nothing else depends on it.
+func (a *Agent) reportReadiness(ctx context.Context) {
+	if a.opts.Readiness == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, readinessTimeout)
+	defer cancel()
+	r, err := a.opts.Readiness(ctx, a.current())
+	if err != nil {
+		if ctx.Err() == nil || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			a.log.Warn("could not work out what this machine can build", "err", err)
+		}
+		return
+	}
+	a.readiness.Store(r)
 }
 
 // reprobeToolchains asks toolchainsLoop to probe now. A probe already asked
