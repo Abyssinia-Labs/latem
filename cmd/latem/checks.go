@@ -56,6 +56,7 @@ const (
 // deliberately violates §13.1.
 type dockerProbe interface {
 	Preflight(ctx context.Context) error
+	DaemonID(ctx context.Context) (string, error)
 	CheckImage(ctx context.Context, ref string) (docker.ImageReport, error)
 	Close() error
 }
@@ -270,6 +271,7 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 			out = append(out, level("docker.daemon", "docker daemon", firstLineOf(err.Error()), d.startDockerCommand()))
 		} else {
 			out = append(out, pass("docker.daemon", "docker daemon", "reachable"))
+			out = append(out, d.checkDockerContext(ctx, probe)...)
 		}
 	}
 
@@ -294,6 +296,40 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 		}
 	}
 	return out
+}
+
+// checkDockerContext asks whether a `docker` command reaches the daemon the
+// agent does.
+//
+// The agent reads DOCKER_HOST or the system socket and nothing else. The CLI
+// follows `docker context`, which installing Docker Desktop moves. So a step
+// that asks `docker` about a container its job's agent started can be asking
+// another daemon, and both answer healthily. Daemon ids rather than socket
+// paths, because on a Mac two paths are routinely one daemon.
+//
+// No verdict means nothing to report, not a pass: whichever end did not answer
+// is docker.daemon's to say.
+func (d *doctor) checkDockerContext(ctx context.Context, probe dockerProbe) []check {
+	agent, err := probe.DaemonID(ctx)
+	if err != nil || agent == "" {
+		return nil
+	}
+	out, err := d.sys.Exec(ctx, "docker", "info", "--format", "{{.ID}}")
+	cli := strings.TrimSpace(string(out))
+	if err != nil || cli == "" {
+		return nil
+	}
+	if cli == agent {
+		return []check{pass("docker.context", "docker command", "reaches the same daemon as the agent")}
+	}
+	return []check{warn("docker.context", "docker command",
+		"a `docker` command reaches a different daemon from the agent",
+		"docker context use default").
+		withNotes("The agent uses DOCKER_HOST or the system socket and ignores `docker context`. "+
+			"A `docker` command follows the context, so a step that looks for something the "+
+			"agent's daemon holds finds nothing, with no error from either.",
+			"Docker Desktop is the usual reason: installing it switches the context to its own "+
+				"daemon. A job can also pin itself with DOCKER_CONTEXT=default in its env.")}
 }
 
 // serviceGroupsNote is why a group added to the account does not reach the

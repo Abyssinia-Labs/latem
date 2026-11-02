@@ -397,6 +397,60 @@ func TestDoctorDisk_AnUnreadableFilesystemIsNotHealthy(t *testing.T) {
 	}
 }
 
+// Docker Desktop moves the CLI's context and leaves the system daemon running,
+// so a job's `docker ps` asks a different daemon from the one its agent started
+// the container on. Both answer, so nothing else here sees it: the desktop's
+// integration test failed on exactly this, and only on the boots where Docker
+// Desktop was up.
+func TestDoctorDockerContext(t *testing.T) {
+	const idProbe = "docker info --format {{.ID}}"
+	run := func(t *testing.T, agentID string, cli *fakeCmd) (check, bool) {
+		t.Helper()
+		dir := privateDir(t)
+		cmds := healthyRunner("linux")
+		if cli != nil {
+			cmds[idProbe] = *cli
+		}
+		d := newTestDoctor("linux", dir, cmds, gpuRunnerConfig(dir), nil)
+		d.newDocker = (&fakeDocker{daemonID: agentID}).factory()
+		for _, c := range d.checkDocker(t.Context()) {
+			if c.ID == "docker.context" {
+				return c, true
+			}
+		}
+		return check{}, false
+	}
+
+	t.Run("one daemon", func(t *testing.T) {
+		got, ok := run(t, "SYSTEM", &fakeCmd{out: "SYSTEM\n"})
+		if !ok || got.Level != levelPass {
+			t.Fatalf("got %+v, want a pass", got)
+		}
+	})
+
+	t.Run("two daemons", func(t *testing.T) {
+		got, ok := run(t, "SYSTEM", &fakeCmd{out: "DESKTOP\n"})
+		if !ok || got.Level != levelWarn {
+			t.Fatalf("got %+v, want a warning", got)
+		}
+		if len(got.Fix) != 1 || got.Fix[0] != "docker context use default" {
+			t.Errorf("fix = %q", got.Fix)
+		}
+	})
+
+	t.Run("a CLI that cannot answer is not a verdict", func(t *testing.T) {
+		if got, ok := run(t, "SYSTEM", &fakeCmd{exit: 1}); ok {
+			t.Fatalf("got %+v, want nothing", got)
+		}
+	})
+
+	t.Run("an agent that cannot answer is not a verdict", func(t *testing.T) {
+		if got, ok := run(t, "", &fakeCmd{out: "DESKTOP\n"}); ok {
+			t.Fatalf("got %+v, want nothing", got)
+		}
+	})
+}
+
 // The agent runs under the user manager and doctor runs in a shell, and the two
 // can disagree: a machine that installed Docker, added its account to the group,
 // enabled linger and logged back in passes every shell check with a docker

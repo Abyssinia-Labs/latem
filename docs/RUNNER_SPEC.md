@@ -1309,6 +1309,7 @@ latem version
 
 - git, docker, tart availability and versions
 - Docker daemon reachable; current user in the `docker` group
+- **`docker` and the agent reach one daemon**, compared by daemon id: the agent uses `DOCKER_HOST` or the system socket and ignores `docker context`, which Docker Desktop moves, so a step's `docker` command can be asking another daemon. A warning, because a job that does not call `docker` is unaffected
 - Docker base image satisfies the §13.1 contract — runs the image once and checks uid 1000 exists, `$HOME` is writable, and `bash`/`git` are present
 - NVIDIA toolkit functional when `gpu = true`; `/dev/kvm` present and readable when an emulator job is configured
 - macOS: LaunchAgent vs LaunchDaemon context, auto-login enabled, **FileVault status** (§23), keychain unlockable, Xcode selected, licence accepted

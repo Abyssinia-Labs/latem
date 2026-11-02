@@ -678,6 +678,17 @@ func (e *Executor) Preflight(ctx context.Context) error {
 	return nil
 }
 
+// DaemonID names the daemon this executor reaches. It is how doctor tells two
+// daemons apart when two paths might be one: the CLI follows `docker context`,
+// and the SDK here does not.
+func (e *Executor) DaemonID(ctx context.Context) (string, error) {
+	info, err := e.api.Info(ctx)
+	if err != nil {
+		return "", wrapErr(protocol.ErrExecutor, err, "docker daemon unreachable")
+	}
+	return info.ID, nil
+}
+
 func (e *Executor) preflightGPU(ctx context.Context) error {
 	res, err := e.runProbe(ctx, probeSpec{
 		image: e.gpuProbeImage,

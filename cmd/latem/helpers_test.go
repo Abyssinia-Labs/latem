@@ -113,12 +113,16 @@ func fakePath(names ...string) func(string) (string, error) {
 type fakeDocker struct {
 	newErr       error
 	preflightErr error
+	daemonID     string
 	report       docker.ImageReport
 	reportErr    error
 	closed       bool
 }
 
 func (f *fakeDocker) Preflight(context.Context) error { return f.preflightErr }
+func (f *fakeDocker) DaemonID(context.Context) (string, error) {
+	return f.daemonID, nil
+}
 func (f *fakeDocker) CheckImage(context.Context, string) (docker.ImageReport, error) {
 	return f.report, f.reportErr
 }
