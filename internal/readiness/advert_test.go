@@ -143,3 +143,24 @@ func TestAdvert_StaysInsideTheControlPlanesBounds(t *testing.T) {
 		t.Errorf("unread %d, unclassified %d", a.Unread, a.Unclassified)
 	}
 }
+
+// A kind is flagged over one job, so an item says how many it holds up. The
+// mini's Linux is 48 jobs and four deploys short of a secret.
+func TestAdvert_SaysHowManyJobsAnItemHoldsUp(t *testing.T) {
+	k := Kind{Name: "linux", Title: "Linux", State: Missing, Jobs: []string{"a", "b", "c", "d"}, Items: []Item{
+		{ID: "secrets-tsedal", Title: "tsedal's secrets set here", Have: "3 not set", Jobs: []string{"a"}},
+		{ID: "moving-refs", Title: "actions named by a tag accepted", Have: "oven-sh/setup-bun@v2", Jobs: []string{"a", "b"}},
+		{ID: "node", Title: "Node", Jobs: []string{"a", "b", "c", "d"}},
+		{ID: "java-home", Title: "JAVA_HOME set"},
+	}}
+	got := Advert(Plan{Kinds: []Kind{k}}).Kinds[0].Items
+	want := []protocol.ReadinessItem{
+		{Title: "tsedal's secrets set here", Have: "3 not set, 1 of 4 jobs"},
+		{Title: "actions named by a tag accepted", Have: "2 of 4 jobs"},
+		{Title: "Node"},
+		{Title: "JAVA_HOME set"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("items = %+v", got)
+	}
+}

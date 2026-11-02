@@ -3232,3 +3232,26 @@ behind a push by as long as the machine has been idle.
 **To whom.** Only a control plane whose hello says 2.5. A 2.4 one decodes a heartbeat strictly and
 would refuse the beat, so the control plane is upgraded first. It explains: nothing routes on it,
 and the agent's silence means an agent that has not looked or predates this.
+
+| A71 | A59, A69, A70 | **A kind of build is read job by job, on the runner each job goes to, and leaves out what a machine's variables stop.** |
+
+The desktop's card said Linux with Docker wanted a Docker daemon while `integration-host` passed on
+its native runner. A kind was read on one runner, the first job's, and that job was `integration`,
+which goes to the docker runner and which `if: vars.LATEM != 'true'` skips there every time.
+
+**A kind's runner** is one of its jobs' that suits it: native for what runs on the host, docker for
+what runs in a container. With none, it is the first of its jobs', and with no jobs what could take
+it, as before.
+
+**Each job is read on its own runner.** One that a label sends elsewhere is compared with that
+runner, and an item it raises says which: `a Docker daemon`, on the linux runner. That is true of
+`images.yml`, whose jobs a machine's aliases can send to a container.
+
+**A job this machine's variables stop is not counted**, in the plan or in doctor: its `if:` reads
+`vars` and is false on every event the file was planned for. An `if:` that reads no variable may be
+true on an event no check tries, so it counts. So does one that reads a variable and is false only
+for that reason: a line too many costs less than the job a person would miss.
+
+**An item says how many jobs it holds up** when it is some of a kind's and not all, in the words a
+heartbeat already carries: `3 not set, 1 of 17 jobs`. A kind is flagged over one job, and a page
+should say so. No field is added, so the protocol stays 2.5.

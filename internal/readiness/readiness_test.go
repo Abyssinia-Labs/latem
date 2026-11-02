@@ -241,3 +241,45 @@ func TestSettings_NamesWhatIsNotAllowed(t *testing.T) {
 		t.Errorf("items = %+v", items)
 	}
 }
+
+// The desktop's integration job went to its native runner and passed, while
+// images.yml's went to its docker runner, which gives a step no daemon. Reading
+// the kind on the first job's runner said the machine had no Docker at all.
+func TestBuild_AKindOnTwoRunnersIsReadJobByJob(t *testing.T) {
+	docker := func(ref, runner string) Job {
+		return Job{Ref: "latem " + ref, Repo: "latem", Labels: []string{"linux"}, Runner: runner,
+			Report: needs.Report{Platform: "Linux", Kind: needs.KindLinuxDocker, Requires: []needs.Requirement{req(needs.DockerDaemon)}}}
+	}
+	in := desktop()
+	in.Runners[1].Toolchains.Tools = map[string]bool{"docker": true}
+	in.Jobs = []Job{docker("images.yml build", "linux"), docker("ci.yml integration-host", "host"), docker("images.yml publish", "linux")}
+
+	k := kind(t, Build(in), needs.KindLinuxDocker)
+	if k.Runner != "host" || !k.On {
+		t.Errorf("runner %q, on %v: the kind is on the runner that suits it", k.Runner, k.On)
+	}
+	it := item(t, k, "a Docker daemon")
+	if it.Have != "on the linux runner" || len(it.Jobs) != 2 {
+		t.Errorf("item = %+v: it is true of the two jobs on the container runner", it)
+	}
+
+	in.Jobs = in.Jobs[1:2]
+	if k := kind(t, Build(in), needs.KindLinuxDocker); k.State != Ready || len(k.Items) != 0 {
+		t.Errorf("with its one job on host: %+v", k)
+	}
+}
+
+// A kind whose jobs reach only a runner that does not suit it is still read
+// on that one: it is where they go.
+func TestBuild_AKindOnlyOnARunnerThatDoesNotSuitIt(t *testing.T) {
+	in := desktop()
+	in.Jobs = []Job{{Ref: "latem ci.yml integration", Repo: "latem", Labels: []string{"linux"}, Runner: "linux",
+		Report: needs.Report{Platform: "Linux", Kind: needs.KindLinuxDocker, Requires: []needs.Requirement{req(needs.DockerDaemon)}}}}
+	k := kind(t, Build(in), needs.KindLinuxDocker)
+	if k.Runner != "linux" || k.State != Missing {
+		t.Errorf("kind = %+v", k)
+	}
+	if it := item(t, k, "a Docker daemon"); it.Have != "" {
+		t.Errorf("have = %q: it is the kind's own runner", it.Have)
+	}
+}

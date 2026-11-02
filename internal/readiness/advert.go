@@ -49,7 +49,7 @@ func advertKind(k Kind) protocol.ReadinessKind {
 			actions++
 			continue
 		}
-		out = withItem(out, advertItem(it))
+		out = withItem(out, advertItem(it, len(k.Jobs)))
 	}
 	if actions > 0 {
 		out = withItem(out, protocol.ReadinessItem{Title: fmt.Sprintf("%d action%s allowed on this machine", actions, pluralS(actions))})
@@ -58,15 +58,24 @@ func advertKind(k Kind) protocol.ReadinessKind {
 }
 
 // advertItem is an item in words fit to leave the machine. What has a name of
-// its own says only what it is.
-func advertItem(it Item) protocol.ReadinessItem {
+// its own says only what it is. An item that holds up some of a kind's jobs and
+// not the rest says how many, because the kind is flagged over one.
+func advertItem(it Item, jobs int) protocol.ReadinessItem {
+	out := protocol.ReadinessItem{Title: wireText(it.Title), Have: wireText(it.Have), Soft: it.Soft}
 	switch {
 	case strings.HasPrefix(it.ID, itemImage):
-		return protocol.ReadinessItem{Title: "its image", Soft: it.Soft}
+		out.Title, out.Have = "its image", ""
 	case it.ID == itemMovingRefs:
-		return protocol.ReadinessItem{Title: it.Title, Soft: it.Soft}
+		out.Have = ""
 	}
-	return protocol.ReadinessItem{Title: wireText(it.Title), Have: wireText(it.Have), Soft: it.Soft}
+	if n := len(it.Jobs); n > 0 && n < jobs {
+		count := fmt.Sprintf("%d of %d jobs", n, jobs)
+		if out.Have != "" {
+			count = out.Have + ", " + count
+		}
+		out.Have = wireText(count)
+	}
+	return out
 }
 
 // withItem adds it, or counts it when there is no room or it has no words

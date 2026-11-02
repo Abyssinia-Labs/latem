@@ -162,3 +162,34 @@ func TestResolveWorkflowJob(t *testing.T) {
 		t.Error("a path outside .github/workflows resolved")
 	}
 }
+
+func TestVarsStopJob(t *testing.T) {
+	w := parse(t, `on: push
+jobs:
+  stopped:
+    if: vars.LATEM != 'true'
+    runs-on: linux
+    steps: [{run: "true"}]
+  running:
+    if: vars.LATEM == 'true'
+    runs-on: linux
+    steps: [{run: "true"}]
+  on-an-event:
+    if: github.event_name == 'release'
+    runs-on: linux
+    steps: [{run: "true"}]
+  plain:
+    runs-on: linux
+    steps: [{run: "true"}]
+`)
+	sc := runScope(nil, nil)
+	vars := func(string) map[string]string { return map[string]string{"LATEM": "true"} }
+	for job, want := range map[string]bool{"stopped": true, "running": false, "on-an-event": false, "plain": false, "absent": false} {
+		if got := VarsStopJob(w, job, sc, vars); got != want {
+			t.Errorf("%s: got %v, want %v", job, got, want)
+		}
+	}
+	if VarsStopJob(w, "stopped", sc, nil) {
+		t.Error("with no variables LATEM is not 'true', so its if: is true")
+	}
+}

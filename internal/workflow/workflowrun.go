@@ -101,6 +101,32 @@ var jobContexts = map[string]bool{"github": true, "needs": true, "vars": true, "
 // cancelled. A condition that calls none of them is `success() && (…)`, as on
 // GitHub — the control plane has already skipped such a job after a failed
 // need, and this keeps the machine's answer the same if it did not.
+// VarsStopJob reports whether a job's if: reads the vars context and is false
+// against sc, with the repository's variables in it: a job this machine's
+// variables keep off it, whatever else it needs. An if: that cannot be read
+// stops nothing here, because the compile that reaches it will say why.
+func VarsStopJob(w *Workflow, jobName string, sc expr.Scope, vars func(string) map[string]string) bool {
+	declared, ok := w.Jobs[jobName]
+	if !ok || strings.TrimSpace(declared.If) == "" {
+		return false
+	}
+	prog, err := conditionProgram(declared.If)
+	if err != nil {
+		return false
+	}
+	if contexts, _ := prog.References(); !slices.Contains(contexts, "vars") {
+		return false
+	}
+	if vars != nil {
+		sc = withContext(sc, "vars", stringsToAny(vars("")))
+	}
+	if sc, err = typedInputs(w, sc); err != nil {
+		return false
+	}
+	run, err := jobCondition(declared.If, sc)
+	return err == nil && !run
+}
+
 func jobCondition(cond string, sc expr.Scope) (bool, error) {
 	status := needsStatus(sc)
 	if strings.TrimSpace(cond) == "" {
