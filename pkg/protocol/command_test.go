@@ -273,6 +273,15 @@ func TestCommandUnmarshal_WorkflowRun(t *testing.T) {
 	if c.Run.Token != "ghs_abc" || c.Run.Needs["lint"].Outputs["v"] != "1" || c.Run.RunNumber != 3 {
 		t.Fatalf("%+v", c.Run)
 	}
+	if err := json.Unmarshal([]byte(run(full+`,"fetch_token":"ghs_def"`)), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Run.FetchToken != "ghs_def" {
+		t.Fatalf("%+v", c.Run)
+	}
+	if err := json.Unmarshal([]byte(run(full+`,"fetch_token":"two words"`)), &c); err == nil {
+		t.Fatal("a fetch token that is not one word was accepted")
+	}
 	if err := json.Unmarshal([]byte(run("")), &c); err != nil {
 		t.Fatalf("a 1.0 run is still a run: %v", err)
 	}

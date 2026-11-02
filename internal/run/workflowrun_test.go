@@ -73,6 +73,57 @@ func terminalUpdate(t *testing.T, h *harness, runID string) protocol.Update {
 	return u
 }
 
+// The token a job fetches with reaches gate 6 and no step (A72), and a repository
+// that is not on GitHub never sends it.
+func TestExecute_FetchToken(t *testing.T) {
+	const fetchToken = "ghs_fetchFETCHfetch0123456789"
+	run := func(t *testing.T, url string) (string, *harness, string) {
+		t.Helper()
+		h := newHarness(t)
+		h.source.registry = ""
+		h.cfg.Repos["app"].GitHub = "acme/app"
+		h.cfg.Repos["app"].URL = url
+		h.env.exec = func(_ context.Context, step executor.Step, stdout, _ io.Writer) (int, error) {
+			for k, v := range step.Env {
+				if strings.Contains(v, fetchToken) {
+					t.Errorf("a step's %s holds the fetch token", k)
+				}
+			}
+			_, _ = io.WriteString(stdout, "fetched with "+fetchToken+"\n")
+			return 0, nil
+		}
+		o := h.build()
+		req := workflowRequest(h, "web")
+		req.FetchToken = fetchToken
+		r := h.admitAndClaim(o, req)
+		h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", runWorkflowFile)
+		res, err := o.Execute(t.Context(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.State != protocol.StateSucceeded {
+			t.Fatalf("got %s/%s: %s", res.State, res.ErrorCode, res.ErrorMsg)
+		}
+		return h.source.fetched[0].Token, h, req.ID
+	}
+
+	t.Run("a GitHub repository fetches with it", func(t *testing.T) {
+		got, h, id := run(t, "https://github.com/acme/app.git")
+		if got != fetchToken {
+			t.Errorf("gate 6 fetched with %q", got)
+		}
+		if strings.Contains(h.logContents(id), fetchToken) {
+			t.Error("the fetch token reached the log")
+		}
+	})
+
+	t.Run("a repository elsewhere does not", func(t *testing.T) {
+		if got, _, _ := run(t, "https://git.example.com/acme/app.git"); got != "" {
+			t.Errorf("gate 6 fetched with %q", got)
+		}
+	})
+}
+
 // A workflow run's job reads its needs and its event, gets its token as
 // GITHUB_TOKEN and nowhere else, and reports its outputs as it ends (A52).
 func TestExecute_WorkflowRunJob(t *testing.T) {

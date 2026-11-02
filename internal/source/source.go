@@ -49,6 +49,7 @@ package source
 
 import (
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -84,11 +85,17 @@ type Config struct {
 	// Env is appended to the environment of every git invocation.
 	//
 	// Production leaves this empty: RUNNER_SPEC §12 says credentials are the
-	// machine's own — SSH agent or a credential helper — so git must see the
-	// ambient environment and the machine's own gitconfig. It exists so tests
+	// machine's own — SSH agent or a credential helper — apart from a token
+	// the work brought ([Repo.Token]), so git must see the ambient environment
+	// and the machine's own gitconfig. It exists so tests
 	// can pin identity and disable ambient config without a global mutation
 	// that would race every other test in the package.
 	Env []string
+
+	// Logger says which credential a fetch used, and is how anyone finds out
+	// that a token stopped working on a machine whose own login hides it.
+	// Nil logs nothing.
+	Logger *slog.Logger
 }
 
 // Repo is one entry from the config allowlist: the map key from `[repos.<key>]`
@@ -100,6 +107,11 @@ type Config struct {
 type Repo struct {
 	Key string
 	URL string
+	// Token is a credential the work came with, for this repository (A72): a
+	// read-only GitHub token the control plane minted for the job or the plan.
+	// It is not config, and it reaches git through one process's environment,
+	// so no file or argv ever holds it. Empty means the machine's own.
+	Token string
 }
 
 // repoKeyPattern bounds what may become a directory name under MirrorDir.

@@ -75,6 +75,7 @@ func (o *Orchestrator) Admit(ctx context.Context, req protocol.RunRequest, prior
 	if r.State == protocol.StateQueued {
 		// Held before the run is queued, so no runner claims it first (A52).
 		o.store.HoldToken(r.ID, req.Token)
+		o.store.HoldFetchToken(r.ID, req.FetchToken)
 		if err := o.store.Enqueue(ctx, r.ID, priority); err != nil {
 			return store.Run{}, fmt.Errorf("run: admit %s: enqueue: %w", req.ID, err)
 		}

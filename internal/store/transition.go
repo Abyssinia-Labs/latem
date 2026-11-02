@@ -149,6 +149,7 @@ func (d *DB) Transition(ctx context.Context, runID string, to protocol.RunState,
 	})
 	if err == nil && to.IsTerminal() {
 		d.tokens.Delete(runID)
+		d.fetchTokens.Delete(runID)
 	}
 	return err
 }

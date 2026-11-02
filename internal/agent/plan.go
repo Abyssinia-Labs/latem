@@ -71,7 +71,7 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, requires
 	a.noteActive(planID, req.Repo)
 	defer a.forgetActive(planID)
 
-	mirror, err := a.src.Fetch(ctx, source.Repo{Key: req.Repo, URL: repoCfg.URL})
+	mirror, err := a.src.Fetch(ctx, source.Repo{Key: req.Repo, URL: repoCfg.URL, Token: repoCfg.FetchToken(req.FetchToken)})
 	if err != nil {
 		return fail(codeOr(source.CodeOf(err), protocol.ErrSource), err)
 	}

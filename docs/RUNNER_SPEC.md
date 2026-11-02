@@ -882,7 +882,7 @@ Three requirements make the hardlinking safe and keep it fast:
 - Submodules: `git submodule update --init --recursive --depth 1` inside the workspace, only when `.gitmodules` exists.
 - LFS: `git lfs fetch --all` in the mirror, `git lfs checkout` in the workspace, only when `.gitattributes` mentions LFS.
 - A per-repo mutex serialises fetches into one mirror; concurrent `fetch` into a bare repo is not reliably safe. Clones out of the mirror are reads and need no lock, so parallel runs on the same repo do not queue behind each other.
-- Credentials are the machine's own — SSH agent or a credential helper. The agent never receives, stores, or forwards git credentials, with one exception: a workflow run's job token (A52), which a checkout step makes the workspace's credential for that job, from a file outside the workspace (A53).
+- Credentials are the machine's own — SSH agent or a credential helper. The agent never stores or forwards git credentials, and receives two kinds, both held in memory only: a workflow run's job token (A52), which a checkout step makes the workspace's credential for that job, from a file outside the workspace (A53); and a read-only fetch token that comes with a plan or a job (A72), which the agent's own fetches into the mirror authenticate with, through one git process's environment.
 - The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, `LATEM_JOB`, and `LATEM_BUILD_NUMBER` (§22's run counter, amendment A36) into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
 - Startup reconciliation deletes `work/<run-id>` for any run id not in a non-terminal state. With clones there is no worktree administrative state in the mirror, so there is nothing to prune and nothing to leak — one of the smaller reasons this model is easier to make crash-safe.
 - **An Xcode scheme must be committed, and `latem doctor` checks it** (amendment A34). This section guarantees a fresh clone for every run, which turns an uncommitted scheme from a machine quirk into a certainty: `xcodebuild -scheme X` fails with "does not contain a scheme named X" because Xcode auto-creates schemes into `xcuserdata/`, which nobody commits. It must be under `<project>.xcodeproj/xcshareddata/xcschemes/`. `doctor` reads it from the repo's own bare mirror rather than from a checkout, since between runs that is the only copy this machine has; before the first fetch it reports that it has nothing to read yet rather than passing.
@@ -1315,7 +1315,8 @@ latem version
 - macOS: LaunchAgent vs LaunchDaemon context, auto-login enabled, **FileVault status** (§23), keychain unlockable, Xcode selected, licence accepted
 - Tart base image exists, and its actual on-disk size versus `min_free_gb`
 - **Mirrors and `work_dir` are on the same filesystem** — if not, §12's clones silently stop hardlinking and every run gets slower for no visible reason
-- Every configured repo reachable with current credentials
+- Every configured repo reachable with current credentials. One this machine's login cannot read is a warning rather than a failure when it is an https GitHub repository and a control plane is configured, because jobs bring a token for it (A72)
+- **A GitHub login the agent cannot reach at boot**, on Linux (A72): `gh` keeps its login in a desktop keyring, which stays locked until someone logs in, and the agent starts before that. doctor runs in the session with the keyring open, so the repo check above passes on the machine this is about
 - Every declared secret resolvable (names only), with a warning for any resolving shorter than 6 characters (§16)
 - **App Store Connect credential *agreement*, not presence** (amendment A35). Under `--secrets`, and only when all three of `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and `APP_STORE_CONNECT_KEY_P8` resolve: the key id's shape, the issuer id being a UUID rather than a key id pasted into the wrong field, the `.p8` parsing as EC P-256, whether the key material fingerprints to an `AuthKey_*.p8` on this machine whose name *disagrees* with the key id, and finally a read-only `GET /v1/apps` with both token forms so Apple can say which kind of key this is. Every one of those failures is the same 401 from `fastlane pilot upload`, two minutes into an upload, after a full build. Diagnostics print key ids, fingerprints and bundle ids and never key material (INV-4)
 - **The locale a step's shell resolves to**, on macOS runners (amendment A33), probed through the same `bash -lc` a step gets
@@ -3256,3 +3257,39 @@ for that reason: a line too many costs less than the job a person would miss.
 **An item says how many jobs it holds up** when it is some of a kind's and not all, in the words a
 heartbeat already carries: `3 not set, 1 of 17 jobs`. A kind is flagged over one job, and a page
 should say so. No field is added, so the protocol stays 2.5.
+
+### Amendment from a desktop that rebooted before anyone logged in
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A72 | §5 G5, §12, §19, A52 | **A plan and a job bring a read-only token, and the agent's own fetches use it, so a machine needs no GitHub login to build its repositories. Protocol 2.6.** | The Arch desktop's agent starts at boot, as §23 asks, and its login was in a keyring that opens at login. Two jobs reached it 44 seconds after boot and failed in 650ms with `could not read Username`, and the guide's own `gh auth login` had put it there. The alternative is a whole-account token in a plain file that every native job can read |
+
+**The token.** Minted by the control plane when it sends a `plan` or a `run`, in `fetch_token`, for
+one repository with `contents: read`, and gone after that frame, as a job's token is. Not the job's
+own: that is cut down to the job's `permissions`, which may not include reading the code, and a plan
+has no job.
+
+**How it is used.** An http header for the remote's host, in the environment of one git process: not
+on a command line, which any process can read, and not in a file. The mirror's config never holds it.
+Gate 6, a checkout's second fetch, a plan's fetch, a commit fetched by name and `git lfs fetch` use
+it. It reaches no step and is registered with the redactor, and a run holds it as it holds its job
+token, so a restart loses it.
+
+**Only to GitHub.** It goes only to a repository whose configured URL is on github.com. A `github =`
+key that names a repository on GitHub does not send it to a URL somewhere else, and an ssh remote
+takes no header.
+
+**The machine's credential stays the fallback.** With no token, or a token that fails, git runs as it
+always has, so a token that expires under a long job, a control plane with no GitHub App and a
+repository elsewhere all behave as before. When both fail, the token's error is the one reported.
+The agent's log says which it used, and warns of a token that failed, because a working login would
+otherwise hide a broken token until the next reboot.
+
+**G5 is narrowed once more, and not far.** §12 already let the agent receive a token for a job. A
+hostile control plane gains nothing here: the URL comes from config, the commit is still checked, and
+the token is one it could have sent in `run.token`.
+
+**What still needs a login.** A token covers one repository. Private submodules, private actions from
+another repository and `latem run` use the machine's credential, so doctor keeps asking about it: a
+repository it cannot reach is a warning when jobs bring their own way in, and a failure otherwise.
+

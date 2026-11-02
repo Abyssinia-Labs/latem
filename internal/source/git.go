@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -64,20 +66,20 @@ func lookGit(bin string) (string, error) {
 // value — but only because of an implementation detail of the standard
 // library. Removing the shadowed entries makes the result correct by
 // construction and readable in a process listing.
-func (m *Manager) env() []string {
-	drop := make(map[string]struct{}, len(gitStateEnv)+len(m.cfg.Env)+1)
+func (m *Manager) env(extra ...string) []string {
+	drop := make(map[string]struct{}, len(gitStateEnv)+len(m.cfg.Env)+len(extra)+1)
 	for _, name := range gitStateEnv {
 		drop[name] = struct{}{}
 	}
 	drop["GIT_TERMINAL_PROMPT"] = struct{}{}
-	for _, kv := range m.cfg.Env {
+	for _, kv := range slices.Concat(m.cfg.Env, extra) {
 		if name, _, ok := strings.Cut(kv, "="); ok {
 			drop[name] = struct{}{}
 		}
 	}
 
 	base := os.Environ()
-	out := make([]string, 0, len(base)+len(m.cfg.Env)+1)
+	out := make([]string, 0, len(base)+len(m.cfg.Env)+len(extra)+1)
 	for _, kv := range base {
 		name, _, ok := strings.Cut(kv, "=")
 		if ok {
@@ -93,7 +95,31 @@ func (m *Manager) env() []string {
 	// `preparing` until someone notices.
 	out = append(out, "GIT_TERMINAL_PROMPT=0")
 
-	return append(out, m.cfg.Env...)
+	return slices.Concat(out, m.cfg.Env, extra)
+}
+
+// tokenEnv is repo's token as git config in the environment, scoped to its
+// remote's host, in the form [CredentialConfig] writes to a file. The
+// environment rather than `-c`, because argv is readable by every process on
+// the machine, and rather than a file, because nothing here needs one to
+// outlive this git. It reports false for a remote that takes no such header:
+// an ssh URL is the machine's own credential however the work arrived.
+//
+// GIT_CONFIG_COUNT is git 2.31's. An older git ignores it and falls back to the
+// machine's credential, which is what it did before there were tokens.
+func tokenEnv(repo Repo) ([]string, bool) {
+	if repo.Token == "" {
+		return nil, false
+	}
+	base, err := remoteBase(repo.URL)
+	if err != nil {
+		return nil, false
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http." + base + ".extraheader",
+		"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + basicAuth(repo.Token),
+	}, true
 }
 
 // command builds one git invocation.
@@ -133,7 +159,55 @@ func (m *Manager) command(ctx context.Context, dir string, args []string) *exec.
 
 // run executes git and returns its trimmed stdout.
 func (m *Manager) run(ctx context.Context, dir string, args ...string) (string, error) {
+	return capture(m.command(ctx, dir, args), args)
+}
+
+// runRemote is [Manager.run] for a git that talks to repo's remote, which
+// authenticates with repo's token when it has one.
+//
+// A token that does not work is not the end of it: one can expire under a long
+// job, and the machine's own login may reach what it cannot. So the machine's
+// credential gets a turn, and git's first complaint is the one reported, since
+// the second is usually only that there is no login here to try.
+func (m *Manager) runRemote(ctx context.Context, repo Repo, dir string, args ...string) (string, error) {
+	env, ok := tokenEnv(repo)
+	if !ok {
+		return m.run(ctx, dir, args...)
+	}
 	cmd := m.command(ctx, dir, args)
+	cmd.Env = m.env(env...)
+	out, err := capture(cmd, args)
+	if err == nil {
+		m.note(slog.LevelInfo, "fetched with the token the work brought", repo, nil)
+		return out, nil
+	}
+	if ctx.Err() != nil {
+		return "", err
+	}
+	// Loudly, because the machine's login succeeding here hides a token path
+	// that is broken, and the next reboot is when that comes out.
+	m.note(slog.LevelWarn, "the token the work brought did not work; trying this machine's credential", repo, err)
+	if out, ownErr := m.run(ctx, dir, args...); ownErr == nil {
+		return out, nil
+	}
+	return "", err
+}
+
+// note logs what a fetch authenticated with. Never the token: tokenEnv's value
+// reaches git's environment and nothing else.
+func (m *Manager) note(level slog.Level, msg string, repo Repo, err error) {
+	if m.cfg.Logger == nil {
+		return
+	}
+	attrs := []slog.Attr{slog.String("repo", repo.Key)}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+	}
+	m.cfg.Logger.LogAttrs(context.Background(), level, msg, attrs...)
+}
+
+// capture runs cmd, which args built, and returns its trimmed stdout.
+func capture(cmd *exec.Cmd, args []string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

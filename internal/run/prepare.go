@@ -12,6 +12,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
+	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -31,6 +32,11 @@ func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
 	// (A52, INV-4).
 	if x.req.Token != "" && x.red != nil {
 		x.red.Register([]byte(x.req.Token))
+	}
+	if x.req.FetchToken != "" && x.red != nil {
+		for _, form := range source.CredentialSecrets(x.req.FetchToken) {
+			x.red.Register([]byte(form))
+		}
 	}
 	names := x.resolved.Secrets
 	if len(names) == 0 {

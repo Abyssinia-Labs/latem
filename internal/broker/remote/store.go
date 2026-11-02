@@ -48,6 +48,8 @@ type Store interface {
 	Get(ctx context.Context, runID string) (store.Run, error)
 	// HoldToken keeps a workflow job's GitHub token in memory (A52).
 	HoldToken(runID, token string)
+	// HoldFetchToken keeps the token its fetches use in memory (A72).
+	HoldFetchToken(runID, token string)
 	Enqueue(ctx context.Context, runID string, priority int) error
 	SetExpiry(ctx context.Context, runID string, at time.Time) error
 

@@ -881,10 +881,60 @@ func (d *doctor) checkRepos(ctx context.Context) []check {
 
 	out := make([]check, 0, len(d.cfg.Repos))
 	for _, name := range sortedStrings(d.cfg.Repos) {
-		out = append(out, d.checkRemote(ctx, "repo."+name, "repo / "+name, name, d.cfg.Repos[name].URL))
+		out = append(out, d.withFetchToken(name, d.checkRemote(ctx, "repo."+name, "repo / "+name, name, d.cfg.Repos[name].URL)))
 	}
+	out = append(out, d.checkKeyringLogin(ctx)...)
 	// A34, per repo and from the mirror rather than the remote.
 	return append(out, d.checkSchemes(ctx)...)
+}
+
+// withFetchToken softens a repository this machine's own login cannot read,
+// when the control plane's jobs bring their own way in (A72). It stays a
+// warning rather than a pass, because plenty still needs the login.
+func (d *doctor) withFetchToken(name string, c check) check {
+	repo := d.cfg.Repos[name]
+	if c.Level != levelFail || !d.cfg.Broker.Remote.Enabled ||
+		!strings.HasPrefix(repo.URL, "https://") || repo.FetchToken("t") == "" {
+		return c
+	}
+	soft := warn(c.ID, c.Title, c.Detail, c.Fix...).withNotes(fetchTokenNote)
+	return soft.withNotes(c.Notes...)
+}
+
+// fetchTokenNote is what a machine with no login of its own can and cannot do.
+const fetchTokenNote = "Jobs from the control plane bring a read-only token for their own " +
+	"repository, so they fetch without this machine's login. Private submodules, private " +
+	"actions from another repository and `latem run` still need it."
+
+// checkKeyringLogin warns of a GitHub login the agent cannot reach until
+// someone logs in. systemd starts the agent at boot and a desktop keyring opens
+// at login, so git finds no credential and says so in the words it uses for a
+// machine with no login at all. doctor runs in the session, with the keyring
+// open, so checkRemote cannot see this: it passes on the machine this is about.
+func (d *doctor) checkKeyringLogin(ctx context.Context) []check {
+	if !d.sys.IsLinux() {
+		return nil
+	}
+	helpers, err := d.sys.Exec(ctx, "git", "config", "--get-regexp", `^credential\.`)
+	if err != nil || !strings.Contains(string(helpers), "gh auth git-credential") {
+		return nil
+	}
+	status, _ := d.sys.Exec(ctx, "gh", "auth", "status", "--hostname", "github.com")
+	if !strings.Contains(string(status), "(keyring)") {
+		return nil
+	}
+	reach := "With no control plane, every fetch the agent makes uses this login."
+	if d.cfg != nil && d.cfg.Broker.Remote.Enabled {
+		reach = fetchTokenNote
+	}
+	return []check{warn("git.keyring", "GitHub login",
+		"gh keeps its login in a keyring, which stays locked until someone logs in").
+		withManual("gh auth login --insecure-storage   # only if something below needs it before a login").
+		withNotes(reach,
+			"So after a reboot, what needs this login fails until someone logs in to this machine. "+
+				"--insecure-storage moves it to a plain file the agent can read at boot, where "+
+				"anything running as this user can read it too, and it reaches every repository "+
+				"the account does.")}
 }
 
 // checkRemote asks whether a process on this machine can read url. name is

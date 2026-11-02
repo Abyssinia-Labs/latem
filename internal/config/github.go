@@ -21,6 +21,16 @@ func (r Repo) GitHubRepository() (string, bool) {
 	return githubSlugFromURL(r.URL)
 }
 
+// FetchToken is what a fetch of r may send of the token its work came with
+// (A72). An installation token is GitHub's, so a URL anywhere else gets none
+// and keeps the machine's own credential, whatever `github` says it stands for.
+func (r Repo) FetchToken(token string) string {
+	if _, ok := githubSlugFromURL(r.URL); !ok {
+		return ""
+	}
+	return token
+}
+
 // githubSlugFromURL reads owner/name from the URL forms git accepts for
 // github.com: https://github.com/o/n(.git), ssh://git@github.com/o/n(.git) and
 // the scp-like git@github.com:o/n(.git).

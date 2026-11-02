@@ -112,6 +112,7 @@ func (o *Orchestrator) Execute(ctx context.Context, r store.Run) (Result, error)
 	req := requestOf(r)
 	// The job's GitHub token, from memory: it was never written down (A52).
 	req.Token = o.store.Token(r.ID)
+	req.FetchToken = o.store.FetchToken(r.ID)
 	x := &execution{o: o, req: req, run: r, h: h, started: o.now()}
 	return x.drive(runCtx), nil
 }
@@ -240,7 +241,7 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 
 	// Gate 6 — mirror fetch, under internal/source's per-repo mutex.
 	x.note("fetching %s", x.req.Repo)
-	mirror, err := x.o.src.Fetch(ctx, source.Repo{Key: x.req.Repo, URL: repoCfg.URL})
+	mirror, err := x.o.src.Fetch(ctx, source.Repo{Key: x.req.Repo, URL: repoCfg.URL, Token: repoCfg.FetchToken(x.req.FetchToken)})
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}

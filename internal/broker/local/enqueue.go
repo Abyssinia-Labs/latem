@@ -82,6 +82,7 @@ func enqueueRun(ctx context.Context, st Store, req protocol.RunRequest, priority
 	// The token is held before the run is queued, so no runner can claim it
 	// first and start without one. A replayed request may carry a fresh one.
 	st.HoldToken(req.ID, req.Token)
+	st.HoldFetchToken(req.ID, req.FetchToken)
 
 	if err := st.Enqueue(ctx, req.ID, priority); err != nil {
 		return err

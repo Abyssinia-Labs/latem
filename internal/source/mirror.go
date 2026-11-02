@@ -83,7 +83,7 @@ func (m *Manager) Fetch(ctx context.Context, repo Repo) (*Mirror, error) {
 		return nil, gitErr(err, "pointing mirror %s at %s", path, repo.URL)
 	}
 
-	if _, err := m.run(ctx, path, "fetch", "--prune", "--tags", "--", "origin"); err != nil {
+	if _, err := m.runRemote(ctx, repo, path, "fetch", "--prune", "--tags", "--", "origin"); err != nil {
 		return nil, gitErr(err, "fetching %s", repo.Key)
 	}
 
@@ -107,7 +107,7 @@ func (m *Manager) createMirror(ctx context.Context, repo Repo, path string) erro
 	staging := filepath.Join(tmp, "mirror"+mirrorSuffix)
 	defer func() { _ = os.RemoveAll(tmp) }()
 
-	if _, err := m.run(ctx, "", "clone", "--mirror", "--", repo.URL, staging); err != nil {
+	if _, err := m.runRemote(ctx, repo, "", "clone", "--mirror", "--", repo.URL, staging); err != nil {
 		return gitErr(err, "mirroring %s", repo.Key)
 	}
 	if err := m.disableAutoGC(ctx, staging); err != nil {
@@ -211,7 +211,7 @@ func (mi *Mirror) FetchCommit(ctx context.Context, sha string) error {
 	lock := mi.mgr.repoLock(mi.repo.Key)
 	lock.Lock()
 	defer lock.Unlock()
-	if _, err := mi.mgr.run(ctx, mi.path, "fetch", "--no-tags", "--", "origin", sha); err != nil {
+	if _, err := mi.mgr.runRemote(ctx, mi.repo, mi.path, "fetch", "--no-tags", "--", "origin", sha); err != nil {
 		return gitErr(err, "fetching commit %s of %s", sha, mi.repo.Key)
 	}
 	return nil
