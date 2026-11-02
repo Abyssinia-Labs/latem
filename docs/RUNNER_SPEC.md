@@ -3282,6 +3282,8 @@ takes no header.
 **The machine's credential stays the fallback.** With no token, or a token that fails, git runs as it
 always has, so a token that expires under a long job, a control plane with no GitHub App and a
 repository elsewhere all behave as before. When both fail, the token's error is the one reported.
+The agent's log says which it used, and warns of a token that failed, because a working login would
+otherwise hide a broken token until the next reboot.
 
 **G5 is narrowed once more, and not far.** §12 already let the agent receive a token for a job. A
 hostile control plane gains nothing here: the URL comes from config, the commit is still checked, and

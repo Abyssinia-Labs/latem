@@ -49,6 +49,7 @@ package source
 
 import (
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -90,6 +91,11 @@ type Config struct {
 	// can pin identity and disable ambient config without a global mutation
 	// that would race every other test in the package.
 	Env []string
+
+	// Logger says which credential a fetch used, and is how anyone finds out
+	// that a token stopped working on a machine whose own login hides it.
+	// Nil logs nothing.
+	Logger *slog.Logger
 }
 
 // Repo is one entry from the config allowlist: the map key from `[repos.<key>]`

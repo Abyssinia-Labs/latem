@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"slices"
@@ -176,13 +177,33 @@ func (m *Manager) runRemote(ctx context.Context, repo Repo, dir string, args ...
 	cmd := m.command(ctx, dir, args)
 	cmd.Env = m.env(env...)
 	out, err := capture(cmd, args)
-	if err == nil || ctx.Err() != nil {
-		return out, err
+	if err == nil {
+		m.note(slog.LevelInfo, "fetched with the token the work brought", repo, nil)
+		return out, nil
 	}
+	if ctx.Err() != nil {
+		return "", err
+	}
+	// Loudly, because the machine's login succeeding here hides a token path
+	// that is broken, and the next reboot is when that comes out.
+	m.note(slog.LevelWarn, "the token the work brought did not work; trying this machine's credential", repo, err)
 	if out, ownErr := m.run(ctx, dir, args...); ownErr == nil {
 		return out, nil
 	}
 	return "", err
+}
+
+// note logs what a fetch authenticated with. Never the token: tokenEnv's value
+// reaches git's environment and nothing else.
+func (m *Manager) note(level slog.Level, msg string, repo Repo, err error) {
+	if m.cfg.Logger == nil {
+		return
+	}
+	attrs := []slog.Attr{slog.String("repo", repo.Key)}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+	}
+	m.cfg.Logger.LogAttrs(context.Background(), level, msg, attrs...)
 }
 
 // capture runs cmd, which args built, and returns its trimmed stdout.

@@ -1,7 +1,9 @@
 package source
 
 import (
+	"bytes"
 	"encoding/base64"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,6 +35,8 @@ func TestFetchWithTheTokenTheWorkBrought(t *testing.T) {
 
 	var argv [][]string
 	f.mgr.onGit = func(a []string) { argv = append(argv, slices.Clone(a)) }
+	var logged bytes.Buffer
+	f.mgr.cfg.Logger = slog.New(slog.NewTextHandler(&logged, nil))
 
 	ctx := t.Context()
 	if _, err := f.mgr.Fetch(ctx, repo); err != nil {
@@ -53,6 +57,9 @@ func TestFetchWithTheTokenTheWorkBrought(t *testing.T) {
 	}
 	if srv.authed.Load() == 0 {
 		t.Fatal("no request reached the repository with the token")
+	}
+	if !strings.Contains(logged.String(), "fetched with the token") {
+		t.Errorf("the log does not say what the fetch used:\n%s", logged.String())
 	}
 
 	header := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
@@ -89,10 +96,12 @@ func TestFetchFallsBackToTheMachinesLogin(t *testing.T) {
 	if err := os.WriteFile(global, []byte("[credential]\n\thelper = \""+helper+"\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	var logged bytes.Buffer
 	mgr, err := New(Config{
 		MirrorDir: filepath.Join(f.root, "machine", "mirrors"),
 		WorkDir:   filepath.Join(f.root, "machine", "work"),
 		Env:       append(hermeticGitEnv(), "GIT_CONFIG_GLOBAL="+global),
+		Logger:    slog.New(slog.NewTextHandler(&logged, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +116,13 @@ func TestFetchFallsBackToTheMachinesLogin(t *testing.T) {
 	}
 	if srv.refused.Load() == 0 {
 		t.Error("the token was never tried")
+	}
+	// The fetch succeeded, so this line is all that says the token is broken.
+	if !strings.Contains(logged.String(), "did not work") {
+		t.Errorf("the fallback was silent:\n%s", logged.String())
+	}
+	if strings.Contains(logged.String(), "ghs_expired") {
+		t.Errorf("a token reached the log:\n%s", logged.String())
 	}
 }
 
