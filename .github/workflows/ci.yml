@@ -143,6 +143,11 @@ jobs:
   integration-host:
     runs-on: ${{ vars.LATEM_HOST_RUNNER == 'true' && 'docker-host' || 'blacksmith-4vcpu-ubuntu-2404' }}
     if: github.event_name == 'push' && vars.LATEM_HOST_RUNNER == 'true'
+    # The tests' `docker` commands follow the CLI's context and the code under
+    # test does not, so with Docker Desktop's context selected they ask a
+    # different daemon about a container the SDK started on the system one.
+    env:
+      DOCKER_CONTEXT: default
     steps:
       - uses: actions/checkout@v5
       # As above: a skipped suite and a passing one look the same.

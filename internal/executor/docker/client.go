@@ -7,6 +7,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 
@@ -27,6 +28,7 @@ import (
 // [sdkClient] adapts the real SDK client to it.
 type APIClient interface {
 	Ping(ctx context.Context) (types.Ping, error)
+	Info(ctx context.Context) (system.Info, error)
 
 	ImageInspect(ctx context.Context, ref string) (image.InspectResponse, error)
 	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)

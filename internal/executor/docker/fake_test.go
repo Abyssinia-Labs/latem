@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -68,6 +69,10 @@ type fakeAPI struct {
 type copiedFile struct {
 	dst     string
 	entries map[string]string
+}
+
+func (f *fakeAPI) Info(context.Context) (system.Info, error) {
+	return system.Info{ID: "FAKE"}, nil
 }
 
 func (f *fakeAPI) Ping(context.Context) (types.Ping, error) {
