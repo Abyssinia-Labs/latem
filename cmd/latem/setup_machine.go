@@ -109,7 +109,7 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 		}
 		for _, wr := range rep.workflows {
 			for _, j := range wr.jobs {
-				if j.needs == nil {
+				if j.needs == nil || j.stopped {
 					continue
 				}
 				in.Jobs = append(in.Jobs, readiness.Job{

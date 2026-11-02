@@ -297,7 +297,7 @@ func repoJobNeeds(ctx context.Context, out io.Writer, cfg *config.Config) []jobN
 		// (setup's repositories step says how), so its needs count.
 		for _, wr := range rep.workflows {
 			for _, j := range wr.jobs {
-				if j.needs != nil && j.carrier != "" {
+				if j.needs != nil && j.carrier != "" && !j.stopped {
 					jobs = append(jobs, jobNeed{ref: fmt.Sprintf("%s %s %s", key, path.Base(wr.file), j.name),
 						runner: j.carrier, report: *j.needs})
 				}

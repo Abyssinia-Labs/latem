@@ -160,7 +160,7 @@ func (d *doctor) needsCheck(id, title, key string, rep checkReport, tcFor func(*
 	for _, wr := range rep.workflows {
 		mineWR := workflowReport{file: wr.file}
 		for _, j := range wr.jobs {
-			if j.needs == nil {
+			if j.needs == nil || j.stopped {
 				continue
 			}
 			runner, ok := d.cfg.Runner(j.carrier)

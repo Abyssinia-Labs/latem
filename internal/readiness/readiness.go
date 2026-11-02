@@ -292,7 +292,7 @@ func kindOn(d definition, jobs []Job, in Input) Kind {
 	if len(jobs) == 0 {
 		reports = []needs.Report{{Kind: d.name, Requires: d.requires}}
 	}
-	k.Items = append(k.Items, gapItems(jobs, reports, tc, executor)...)
+	k.Items = append(k.Items, gapItems(jobs, readingsOf(reports, jobs, in, r, tc, executor))...)
 	if executor == needs.ExecutorNative {
 		k.Items = append(k.Items, wiring(k, reports, tc, r)...)
 	}
@@ -323,17 +323,31 @@ func whyNot(d definition) string {
 	return "needs Linux"
 }
 
-// runnerFor is the runner a kind goes to: the one its jobs' labels reach, or
-// the one that could take it.
+// runnerFor is the runner a kind goes to: one of its jobs' that suits it, the
+// first of its jobs' if none does, or else the one that could take it. A kind
+// can be on two runners, and it is the one that suits it that says what the
+// kind is here: Docker's jobs are native, and one that a label sends to a
+// container says something about that job.
 func runnerFor(d definition, jobs []Job, in Input) *Runner {
-	for _, j := range jobs {
-		if i := slices.IndexFunc(in.Runners, func(r Runner) bool { return r.Name == j.Runner }); j.Runner != "" && i >= 0 {
-			return &in.Runners[i]
-		}
-	}
 	want := needs.ExecutorDocker
 	if d.native {
 		want = needs.ExecutorNative
+	}
+	var first *Runner
+	for _, j := range jobs {
+		i := runnerAt(in, j.Runner)
+		if i < 0 {
+			continue
+		}
+		if in.Runners[i].Executor == want {
+			return &in.Runners[i]
+		}
+		if first == nil {
+			first = &in.Runners[i]
+		}
+	}
+	if first != nil {
+		return first
 	}
 	for i := range in.Runners {
 		if r := &in.Runners[i]; r.Executor == want {
@@ -341,6 +355,13 @@ func runnerFor(d definition, jobs []Job, in Input) *Runner {
 		}
 	}
 	return nil
+}
+
+func runnerAt(in Input, name string) int {
+	if name == "" {
+		return -1
+	}
+	return slices.IndexFunc(in.Runners, func(r Runner) bool { return r.Name == name })
 }
 
 // takes reports whether a runner here takes the kind: a job's labels reach
@@ -381,18 +402,49 @@ func hostWord(h system.Host) string {
 	return "machine"
 }
 
+// reading is what one job needs, against the runner it goes to.
+type reading struct {
+	report   needs.Report
+	tc       system.Toolchains
+	executor string
+	// other names that runner when it is not the kind's.
+	other string
+}
+
+// readingsOf puts each report beside the runner its job goes to: the kind's,
+// unless a label sends the job somewhere else. Reports with no job, which a
+// kind has before anything asks for it, are read against the kind's.
+func readingsOf(reports []needs.Report, jobs []Job, in Input, r *Runner, tc system.Toolchains, executor string) []reading {
+	out := make([]reading, 0, len(reports))
+	for n, rep := range reports {
+		one := reading{report: rep, tc: tc, executor: executor}
+		if n < len(jobs) {
+			if i := runnerAt(in, jobs[n].Runner); i >= 0 && (r == nil || in.Runners[i].Name != r.Name) {
+				one.tc, one.executor, one.other = in.Runners[i].Toolchains, in.Runners[i].Executor, in.Runners[i].Name
+			}
+		}
+		out = append(out, one)
+	}
+	return out
+}
+
 // gapItems is needs.Gaps over the kind's jobs, one item per thing missing,
-// the JDK before what runs on it.
-func gapItems(jobs []Job, reports []needs.Report, tc system.Toolchains, executor string) []Item {
+// the JDK before what runs on it. A gap on a runner that is not the kind's
+// says which, because the kind's own may have it.
+func gapItems(jobs []Job, readings []reading) []Item {
 	var out []Item
 	at := map[string]int{}
-	for i, rep := range reports {
-		for _, g := range needs.Gaps(rep, tc, executor) {
+	for i, rd := range readings {
+		for _, g := range needs.Gaps(rd.report, rd.tc, rd.executor) {
 			n, seen := at[g.Missing]
 			if !seen {
 				n = len(out)
 				at[g.Missing] = n
-				out = append(out, Item{ID: g.Missing, Title: titleOf(g.Missing), Have: g.Have, Run: g.Fix, Yours: g.Yours, Manual: g.Manual})
+				have := g.Have
+				if have == "" && rd.other != "" {
+					have = "on the " + rd.other + " runner"
+				}
+				out = append(out, Item{ID: g.Missing, Title: titleOf(g.Missing), Have: have, Run: g.Fix, Yours: g.Yours, Manual: g.Manual})
 			}
 			if i < len(jobs) && !slices.Contains(out[n].Jobs, jobs[i].Ref) {
 				out[n].Jobs = append(out[n].Jobs, jobs[i].Ref)

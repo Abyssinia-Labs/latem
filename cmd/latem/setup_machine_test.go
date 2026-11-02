@@ -261,6 +261,52 @@ jobs:
 	}
 }
 
+// The desktop's card said it had no Docker daemon, over a job that its own
+// LATEM variable keeps off it every time. A variable decides that for good; an
+// event a check never tries does not, so a job stopped only by that still counts.
+func TestMachineReadiness_AJobTheMachinesVariablesStop(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{".github/workflows/apple.yml": {Data: []byte(`on: push
+jobs:
+  github-only:
+    if: vars.LATEM != 'true'
+    runs-on: macos-latest
+    steps:
+      - run: xcodegen generate
+  on-a-release:
+    if: github.event_name == 'release'
+    runs-on: macos-latest
+    steps:
+      - run: xcodegen generate
+`)}})
+	rec.machine.dirs["xcodegen"] = "/nowhere"
+	jobs := func() int {
+		got, err := machineReadiness(t.Context(), loadConfigIn(t, dir), rec.machine.deps())
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := slices.IndexFunc(got.Kinds, func(k protocol.ReadinessKind) bool { return k.Kind == needs.KindXcode })
+		if i < 0 {
+			t.Fatalf("kinds = %+v", got.Kinds)
+		}
+		return got.Kinds[i].Jobs
+	}
+	if n := jobs(); n != 2 {
+		t.Errorf("with LATEM unset, %d jobs: its if: is true", n)
+	}
+
+	path := filepath.Join(dir, "config.toml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(body, "\n[repos.app.vars]\nLATEM = \"true\"\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n := jobs(); n != 1 {
+		t.Errorf("with LATEM set, %d jobs: the variable stops one and not the other", n)
+	}
+}
+
 // A repository with no mirror yet is one the machine could not read. The
 // others still count, and a page says so.
 func TestMachineReadiness_ARepositoryWithNoMirror(t *testing.T) {

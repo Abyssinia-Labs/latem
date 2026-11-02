@@ -368,6 +368,9 @@ type jobReport struct {
 	unisolated         bool
 	moving, notAllowed []string
 	secrets            []string
+	// stopped: this machine's variables keep the job from running here, on
+	// every event it was checked against, so nothing it needs is in the way.
+	stopped bool
 }
 
 func (j jobReport) level() level {
@@ -476,6 +479,7 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 				p = &plannedFile{pw: pw, ev: ev}
 				planned[pw.File] = p
 			}
+			p.all = append(p.all, ev)
 			p.events = append(p.events, eventLabel(ev, t.branch))
 		}
 	}
@@ -589,6 +593,7 @@ func checkRegistryRunner(cfg *config.Config, job *registry.Job, fail func(string
 type plannedFile struct {
 	pw          protocol.PlannedWorkflow
 	ev          protocol.Event // the first event that planned it
+	all         []protocol.Event
 	events      []string
 	dispatchErr string
 }
@@ -793,15 +798,16 @@ func checkJob(
 		fail("refused: " + err.Error())
 		return jr
 	}
+	var vars func(string) map[string]string
+	if t.repo != nil {
+		vars = t.repo.VarsFor
+	}
+	jr.stopped = stoppedHere(t, pf, pj, w, vars)
 	declared := w.Jobs[pj.Key]
 	copied := *declared
 	copied.If = ""
 	w.Jobs[pj.Key] = &copied
 
-	var vars func(string) map[string]string
-	if t.repo != nil {
-		vars = t.repo.VarsFor
-	}
 	fetcher.reset()
 	job, err := workflow.CompileWith(ctx, w, pj.Key, checkScope(t, pf, pj, w), workflow.Options{
 		Actions: fsActions{fsys: fsys},
@@ -827,6 +833,25 @@ func checkJob(
 	jr.runner, jr.carrier = checkRunner(cfg, job, rep, fail)
 	checkSecrets(t, inv, job, &jr)
 	return jr
+}
+
+// stoppedHere reports whether the repository's variables keep this job from
+// running, on every event the file was planned for. An if: can be false for
+// an event no check tries, so one that reads no variable is never taken as
+// this, and that one job still counts: the job a person would miss is worse
+// than a line too many.
+func stoppedHere(t checkTarget, pf *plannedFile, pj protocol.PlannedJob, w *workflow.Workflow, vars func(string) map[string]string) bool {
+	if len(pf.all) == 0 {
+		return false
+	}
+	for _, ev := range pf.all {
+		one := *pf
+		one.ev = ev
+		if !workflow.VarsStopJob(w, pj.Key, checkScope(t, &one, pj, w), vars) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkScope is what the job is compiled against: what a run of it would be
