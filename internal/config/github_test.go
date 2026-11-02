@@ -34,6 +34,26 @@ func TestGitHubRepository(t *testing.T) {
 	}
 }
 
+// An installation token goes to github.com and nowhere else: a repository that
+// stands for one on GitHub and fetches from somewhere else does not send it.
+func TestFetchToken(t *testing.T) {
+	cases := []struct {
+		repo Repo
+		want string
+	}{
+		{Repo{URL: "https://github.com/acme/app.git"}, "ghs_abc"},
+		{Repo{URL: "git@github.com:acme/app.git"}, "ghs_abc"},
+		{Repo{URL: "https://gitlab.com/acme/app.git"}, ""},
+		{Repo{URL: "/Users/me/src/app", GitHub: "acme/app"}, ""},
+		{Repo{URL: "https://mirror.example.com/app.git", GitHub: "acme/app"}, ""},
+	}
+	for _, c := range cases {
+		if got := c.repo.FetchToken("ghs_abc"); got != c.want {
+			t.Errorf("%+v: got %q, want %q", c.repo, got, c.want)
+		}
+	}
+}
+
 func TestGitHubSlugIsValidated(t *testing.T) {
 	for slug, valid := range map[string]bool{
 		"Abyssinia-Labs/latem": true,

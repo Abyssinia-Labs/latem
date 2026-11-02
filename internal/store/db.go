@@ -78,6 +78,8 @@ type DB struct {
 	// tokens holds workflow jobs' GitHub tokens, run id → token, in memory
 	// only (A52). See [DB.HoldToken].
 	tokens sync.Map
+	// fetchTokens holds the tokens a job's fetches use, the same way (A72).
+	fetchTokens sync.Map
 }
 
 var _ Store = (*DB)(nil)

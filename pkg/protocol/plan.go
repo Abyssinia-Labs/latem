@@ -91,6 +91,10 @@ type PlanRequest struct {
 	ID    string `json:"id"`
 	Repo  string `json:"repo"` // must exist in local config
 	Event Event  `json:"event"`
+	// FetchToken is what the plan's fetch authenticates with (A72, 2.6), as
+	// [RunRequest.FetchToken] is for a job's. Without one the fetch uses the
+	// machine's own credential.
+	FetchToken string `json:"fetch_token,omitempty"`
 }
 
 // PlanResult is the machine's answer to a [PlanRequest]: one entry per
@@ -240,13 +244,18 @@ var jobKeyPattern = regexp.MustCompile(`^[_A-Za-z][A-Za-z0-9_-]*$`)
 // one opaque word, and anything else in its place is not one.
 var tokenPattern = regexp.MustCompile(`^[!-~]+$`)
 
-// maxTokenBytes bounds [RunRequest.Token]. GitHub's are under a hundred.
+// maxTokenBytes bounds a token. GitHub's are under a hundred.
 const maxTokenBytes = 1024
+
+// validToken reports a token the agent will hold: one printable word.
+func validToken(t string) bool {
+	return len(t) <= maxTokenBytes && tokenPattern.MatchString(t)
+}
 
 // validateWorkflowRun checks the fields a workflow run's job carries (A52).
 func (r RunRequest) validateWorkflowRun() error {
 	set := r.SHA != "" || r.Event != nil || len(r.Needs) > 0 || r.WorkflowRunID != "" ||
-		r.RunNumber != 0 || r.RunAttempt != 0 || r.Token != "" || len(r.Matrix) > 0
+		r.RunNumber != 0 || r.RunAttempt != 0 || r.Token != "" || r.FetchToken != "" || len(r.Matrix) > 0
 	if r.Workflow == "" {
 		if set {
 			return fmt.Errorf("protocol: run %s carries a workflow run's fields and names no workflow", r.ID)
@@ -284,8 +293,11 @@ func (r RunRequest) validateWorkflowRun() error {
 			return fmt.Errorf("protocol: needs.%s.result %q is not success, failure, cancelled or skipped", key, n.Result)
 		}
 	}
-	if r.Token != "" && (len(r.Token) > maxTokenBytes || !tokenPattern.MatchString(r.Token)) {
+	if r.Token != "" && !validToken(r.Token) {
 		return fmt.Errorf("protocol: run token is not one printable word")
+	}
+	if r.FetchToken != "" && !validToken(r.FetchToken) {
+		return fmt.Errorf("protocol: run fetch_token is not one printable word")
 	}
 	if len(r.Matrix) > 0 {
 		if len(r.Matrix) > MaxMatrixBytes {

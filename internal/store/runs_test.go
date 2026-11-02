@@ -401,7 +401,7 @@ func TestCreate_WorkflowRunAndToken(t *testing.T) {
 			Payload: []byte(`{"head_commit":{"message":"hi"}}`)},
 		Needs:         map[string]protocol.NeedResult{"lint": {Result: "success", Outputs: map[string]string{"v": "1"}}},
 		WorkflowRunID: "wr1", RunNumber: 7, RunAttempt: 1,
-		Token: "ghs_secret",
+		Token: "ghs_secret", FetchToken: "ghs_fetch",
 	}
 	run := Run{ID: req.ID, Repo: req.Repo, Job: req.Job, Ref: req.Ref, State: protocol.StateQueued,
 		OriginKind: "webhook", Workflow: WorkflowRunOf(req)}
@@ -409,6 +409,7 @@ func TestCreate_WorkflowRunAndToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.HoldToken(req.ID, req.Token)
+	d.HoldFetchToken(req.ID, req.FetchToken)
 
 	got, err := d.Get(ctx, req.ID)
 	if err != nil {
@@ -424,18 +425,18 @@ func TestCreate_WorkflowRunAndToken(t *testing.T) {
 	if err := d.db.QueryRowContext(ctx, `SELECT workflow_json FROM runs WHERE id = ?`, req.ID).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(raw, "ghs_secret") {
-		t.Fatal("the token reached the database")
+	if strings.Contains(raw, "ghs_secret") || strings.Contains(raw, "ghs_fetch") {
+		t.Fatal("a token reached the database")
 	}
-	if d.Token(req.ID) != "ghs_secret" {
-		t.Fatal("the token is not held in memory")
+	if d.Token(req.ID) != "ghs_secret" || d.FetchToken(req.ID) != "ghs_fetch" {
+		t.Fatal("a token is not held in memory")
 	}
 	for _, to := range []protocol.RunState{protocol.StateClaimed, protocol.StatePreparing, protocol.StateSkipped} {
 		if err := d.Transition(ctx, req.ID, to, protocol.Update{State: to}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if d.Token(req.ID) != "" {
-		t.Error("the token outlived the run")
+	if d.Token(req.ID) != "" || d.FetchToken(req.ID) != "" {
+		t.Error("a token outlived the run")
 	}
 }

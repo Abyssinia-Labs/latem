@@ -67,7 +67,7 @@ Alongside it, and doing more work than it does:
 GET /agent HTTP/1.1
 Upgrade: websocket
 Authorization: Bearer <machine-token>
-Latem-Protocol-Version: 2.5
+Latem-Protocol-Version: 2.6
 ```
 
 `Latem-Protocol-Version` is set by `Broker.authHeader` and by `remote.Verify`.
@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.5"`.
+in both directions carries it**. The current value is `"2.6"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -268,6 +268,14 @@ says of the machine. It explains, as `toolchains` does, and nothing routes on it
 The agent sends it only to a control plane whose `hello` said 2.5 or later,
 because a 2.4 one decodes a heartbeat strictly. A control plane answers a 2.5
 agent's hello with 2.5.
+
+**2.6 (amendment A72)** added `fetch_token` to `run` (§3.1) and `plan` (§3.2): a
+read-only GitHub token for the agent's own fetches, so a machine needs no login of
+its own to build its repositories. A control plane sends it only to an agent that
+said 2.6 or later, because an older one decodes inbound commands strictly and would
+refuse the frame. Nothing about it is required: without one the agent fetches with
+the machine's credential, as before. A control plane answers a 2.6 agent's hello
+with 2.6.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -321,10 +329,10 @@ assigned to it. `latem register` writes it into `[machine] id`.
 ```json
 {
   "kind": "hello",
-  "protocol_version": "2.5",
+  "protocol_version": "2.6",
   "hello": {
     "machine_id": "mac-mini-01",
-    "protocol_version": "2.5",
+    "protocol_version": "2.6",
     "message": "connected as build-01"
   }
 }
@@ -351,7 +359,7 @@ report nothing.
 {
   "kind": "command",
   "id": "j57abc",
-  "protocol_version": "2.5",
+  "protocol_version": "2.6",
   "command": {
     "kind": "run",
     "run": {
@@ -420,6 +428,7 @@ files three different jobs.
 | WorkflowRunID | `workflow_run_id` | string | The workflow run's id, shared by its jobs: `github.run_id`. Same pattern as `id`. |
 | RunNumber, RunAttempt | `run_number`, `run_attempt` | number | GitHub's per-workflow numbers. `$LATEM_BUILD_NUMBER` stays the machine's own (A36). |
 | Token | `token` | string | A GitHub installation token for this job alone, scoped by its `permissions`. One printable word, at most 1024 bytes. **Held in memory only**: stripped before the run is made durable, registered with the redactor before the first step, dropped when the run is terminal. An agent that restarts with the job queued builds it without one. |
+| FetchToken | `fetch_token` | string | 2.6, A72. A read-only GitHub token for this repository, for the agent's own fetches, and never given to a step. `token` is no use for that: it is cut down to the job's `permissions`, which may not include reading the code. One printable word, at most 1024 bytes. **Held in memory only**, as `token` is. Optional: without it the agent fetches with the machine's credential. |
 | Matrix | `matrix` | object | 2.1, A55. A matrix leg's values, exactly as the plan's `jobs[].matrix` gave them; absent for a job without a matrix. At most 16 KB. The agent expands the job's matrix itself from the pinned commit and builds the leg **only if these values are exactly one of its legs** — `14` is not `"14"`, and a key too many is a different leg — else the run fails `E_BAD_REGISTRY`. A matrix job run without one fails the same way. |
 
 #### `plan` — `protocol.PlanRequest` (2.0, A52)
@@ -431,6 +440,9 @@ files three different jobs.
     "before": "1111111111111111111111111111111111111111",
     "actor": "octocat", "payload": { "ref": "refs/heads/main", "head_commit": { "message": "fix" } } } } }
 ```
+
+`fetch_token` (2.6, A72) is optional, and is what the plan's fetch authenticates
+with, as on a `run`. It is not in the example because it is never stored or logged.
 
 Which workflow runs does this event start at this commit? The control plane holds
 no workflow definitions and parses none (INV-5); the machine fetches, reads
@@ -495,7 +507,7 @@ answer does not come, ask again, here or of another machine with the repository.
 ### 3.3 `ack` (server → agent)
 
 ```json
-{ "kind": "ack", "id": "7", "protocol_version": "2.5", "ack": { "ok": true, "run_id": "r7k9…" } }
+{ "kind": "ack", "id": "7", "protocol_version": "2.6", "ack": { "ok": true, "run_id": "r7k9…" } }
 ```
 
 | Field | Type | Required | Notes |
@@ -536,7 +548,7 @@ empty `id` is discarded.
 ```json
 {
   "kind": "resume",
-  "protocol_version": "2.5",
+  "protocol_version": "2.6",
   "resume": {
     "machine_id": "mac-mini-01",
     "runs": [{ "run_id": "r-alpha", "state": "running", "last_acked_seq": 4200 }]
@@ -592,7 +604,7 @@ and reports that through its own replay.
 {
   "kind": "update",
   "id": "9",
-  "protocol_version": "2.5",
+  "protocol_version": "2.6",
   "update": { "run_id": "r-alpha", "update": { "state": "running", "started_at": "…" } }
 }
 ```
@@ -646,7 +658,7 @@ Two further properties this server implements and recommends:
 {
   "kind": "logs",
   "id": "15",
-  "protocol_version": "2.5",
+  "protocol_version": "2.6",
   "logs": [
     { "run_id": "r-alpha", "seq": 1, "stream": "agent", "at": "2026-08-08T09:15:00Z", "line": "[latem] preparing" }
   ]
@@ -704,7 +716,7 @@ that could carry one and no table in `convex/schema.ts` that could store one.
 ```json
 {
   "kind": "heartbeat",
-  "protocol_version": "2.5",
+  "protocol_version": "2.6",
   "heartbeat": {
     "machine_id": "mac-mini-01", "agent_version": "0.4.1", "os": "darwin", "arch": "arm64",
     "runners": [{ "name": "ios", "executor": "tart", "labels": ["ios"], "concurrency": 1, "active": 1, "available": true }],
@@ -811,7 +823,7 @@ returns.
 ### 4.6 `claim`
 
 ```json
-{ "kind": "claim", "id": "7", "protocol_version": "2.5", "claim": { "run_id": "r-alpha" } }
+{ "kind": "claim", "id": "7", "protocol_version": "2.6", "claim": { "run_id": "r-alpha" } }
 ```
 
 An identifier and nothing else: "the control plane already knows everything about
@@ -832,7 +844,7 @@ Same payload shape as §3.3.
 ### 4.8 `plan` (2.0, A52)
 
 ```json
-{ "kind": "plan", "id": "12", "protocol_version": "2.5", "plan": {
+{ "kind": "plan", "id": "12", "protocol_version": "2.6", "plan": {
     "id": "p7k9m2p4",
     "workflows": [{
       "file": ".github/workflows/checks.yml", "name": "Checks",

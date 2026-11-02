@@ -198,7 +198,7 @@ func (m *Manager) fetchLFS(ctx context.Context, mi *Mirror, path string) error {
 	lock.Lock()
 	fetchErr := func() error {
 		defer lock.Unlock()
-		if _, err := m.run(ctx, mi.path, "lfs", "fetch", "--all"); err != nil {
+		if _, err := m.runRemote(ctx, mi.repo, mi.path, "lfs", "fetch", "--all"); err != nil {
 			return gitErr(err, "fetching LFS objects for %s", mi.repo.Key)
 		}
 		return nil

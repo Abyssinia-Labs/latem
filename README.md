@@ -415,6 +415,13 @@ have already done it, either add the key to the login keychain
 `AddKeysToAgent yes` in `~/.ssh/config`), or generate a passphraseless deploy
 key as above.
 
+**With a control plane, a job does not need either of these for its own
+repository.** A plan and a job bring a read-only token for it, so a machine with no
+GitHub login at all can build. A login is still what fetches private submodules and
+private actions from another repository, and what `latem run` uses. On Linux, `gh`
+usually keeps it in a desktop keyring, which stays locked after a reboot until
+someone logs in, so those wait for a login too. `latem doctor` says so.
+
 **`known_hosts` matters for the same reason.** On a fresh account it does not
 exist, so the first ssh connection wants to ask you to accept a host key — and a
 service has nobody to ask. `ssh-keyscan` above does it in advance.

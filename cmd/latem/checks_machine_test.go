@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -449,6 +450,103 @@ func TestDoctorDockerContext(t *testing.T) {
 			t.Fatalf("got %+v, want nothing", got)
 		}
 	})
+}
+
+// A repository this machine's own login cannot read used to mean no job could
+// build it. A job from a control plane now brings a token (A72), so it is worth
+// saying and is not a failure, and everything else still reads it the old way.
+func TestDoctorRepoWithAFetchToken(t *testing.T) {
+	run := func(t *testing.T, url string, remote bool) check {
+		t.Helper()
+		dir := privateDir(t)
+		probe := "git ls-remote --heads --end-of-options " + url
+		refused := fakeCmd{out: "fatal: could not read Username for 'https://github.com': terminal prompts disabled", exit: 128}
+		cmds := healthyRunner("linux")
+		cmds[probe] = refused
+		cmds["env -u SSH_AUTH_SOCK "+probe] = refused
+		cfg := testConfig(dir)
+		cfg.Repos["app"].URL = url
+		cfg.Broker.Remote.Enabled = remote
+		d := newTestDoctor("linux", dir, cmds, cfg, nil)
+		for _, c := range d.checkRepos(t.Context()) {
+			if c.ID == "repo.app" {
+				return c
+			}
+		}
+		t.Fatal("no check for the repository")
+		return check{}
+	}
+
+	t.Run("a job brings its own way in", func(t *testing.T) {
+		got := run(t, "https://github.com/acme/app.git", true)
+		if got.Level != levelWarn {
+			t.Fatalf("got %+v, want a warning", got)
+		}
+		if !strings.Contains(strings.Join(got.Notes, " "), "read-only token") {
+			t.Errorf("notes do not say why: %q", got.Notes)
+		}
+	})
+
+	for name, c := range map[string]struct {
+		url    string
+		remote bool
+	}{
+		"no control plane":    {"https://github.com/acme/app.git", false},
+		"not on GitHub":       {"https://gitlab.com/acme/app.git", true},
+		"ssh takes no header": {"git@github.com:acme/app.git", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := run(t, c.url, c.remote); got.Level != levelFail {
+				t.Fatalf("got %+v, want a failure", got)
+			}
+		})
+	}
+}
+
+// The desktop passed every check here and failed its first jobs after a reboot:
+// doctor ran in the session, where the keyring was open, and the agent had
+// started before anyone logged in.
+func TestDoctorKeyringLogin(t *testing.T) {
+	const (
+		helpers  = `git config --get-regexp ^credential\.`
+		status   = "gh auth status --hostname github.com"
+		ghHelper = "credential.https://github.com.helper !/usr/bin/gh auth git-credential\n"
+	)
+	run := func(t *testing.T, goos string, set map[string]fakeCmd) []check {
+		t.Helper()
+		dir := privateDir(t)
+		cmds := healthyRunner(goos)
+		maps.Copy(cmds, set)
+		return newTestDoctor(goos, dir, cmds, testConfig(dir), nil).checkKeyringLogin(t.Context())
+	}
+	keyring := fakeCmd{out: "github.com\n  ✓ Logged in to github.com account octocat (keyring)\n"}
+
+	t.Run("gh's helper and a keyring", func(t *testing.T) {
+		got := run(t, "linux", map[string]fakeCmd{helpers: {out: ghHelper}, status: keyring})
+		if len(got) != 1 || got[0].ID != "git.keyring" || got[0].Level != levelWarn {
+			t.Fatalf("got %+v", got)
+		}
+		if !strings.Contains(strings.Join(got[0].Notes, " "), "every fetch") {
+			t.Errorf("with no control plane, the notes promise a token: %q", got[0].Notes)
+		}
+	})
+
+	for name, c := range map[string]struct {
+		goos string
+		set  map[string]fakeCmd
+	}{
+		"a login in a file": {"linux", map[string]fakeCmd{helpers: {out: ghHelper},
+			status: {out: "  ✓ Logged in to github.com account octocat (/home/me/.config/gh/hosts.yml)\n"}}},
+		"another helper": {"linux", map[string]fakeCmd{helpers: {out: "credential.helper store\n"}, status: keyring}},
+		"no helper":      {"linux", map[string]fakeCmd{status: keyring}},
+		"a Mac":          {"darwin", map[string]fakeCmd{helpers: {out: ghHelper}, status: keyring}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := run(t, c.goos, c.set); len(got) != 0 {
+				t.Fatalf("got %+v, want nothing", got)
+			}
+		})
+	}
 }
 
 // The agent runs under the user manager and doctor runs in a shell, and the two

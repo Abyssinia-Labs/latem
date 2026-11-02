@@ -116,6 +116,11 @@ type RunRequest struct {
 	// before the request is made durable — and registers it with the
 	// redactor before the first step (A52, §12 as narrowed).
 	Token string `json:"token,omitempty"`
+	// FetchToken is a read-only GitHub token for this repository, minted for
+	// the agent's own fetches and never given to a step (A72, 2.6). Token is no
+	// use for that: it is cut down to the job's permissions, which may not
+	// include reading the code. Held in memory only, as Token is.
+	FetchToken string `json:"fetch_token,omitempty"`
 	// Matrix is a matrix leg's values, a JSON object, as the plan reported
 	// them (A55, 2.1). Data: the machine builds the leg only if it is one its
 	// own expansion of the pinned commit's matrix yields.
@@ -231,6 +236,9 @@ func (c Command) Validate() error {
 		}
 		if c.Plan.Repo == "" {
 			return fmt.Errorf("protocol: plan %s names no repo", c.Plan.ID)
+		}
+		if c.Plan.FetchToken != "" && !validToken(c.Plan.FetchToken) {
+			return fmt.Errorf("protocol: plan fetch_token is not one printable word")
 		}
 		return c.Plan.Event.validate()
 

@@ -167,6 +167,9 @@ type Store interface {
 	// on disk, until the run is terminal (A52).
 	HoldToken(runID, token string)
 	Token(runID string) string
+	// HoldFetchToken and FetchToken do the same for its fetches' token (A72).
+	HoldFetchToken(runID, token string)
+	FetchToken(runID string) string
 
 	Create(ctx context.Context, r Run) error
 	Get(ctx context.Context, runID string) (Run, error)
@@ -281,8 +284,10 @@ func unsupported(method string) error {
 
 // HoldToken keeps nothing, and Token has nothing: there is no store to hold
 // a token for a run in.
-func (NotImplemented) HoldToken(string, string) {}
-func (NotImplemented) Token(string) string      { return "" }
+func (NotImplemented) HoldToken(string, string)      {}
+func (NotImplemented) Token(string) string           { return "" }
+func (NotImplemented) HoldFetchToken(string, string) {}
+func (NotImplemented) FetchToken(string) string      { return "" }
 
 func (NotImplemented) Migrate(context.Context) error     { return unsupported("Migrate") }
 func (NotImplemented) Create(context.Context, Run) error { return unsupported("Create") }

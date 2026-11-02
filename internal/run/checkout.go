@@ -122,7 +122,7 @@ func (x *execution) checkoutTarget(ctx context.Context, written string) (checkou
 	}
 	// Fetched again, not reused from gate 6: `ref: main` exists to see a
 	// commit an earlier job of this run pushed after this one was admitted.
-	mirror, err := x.o.src.Fetch(ctx, source.Repo{Key: x.req.Repo, URL: repoCfg.URL})
+	mirror, err := x.o.src.Fetch(ctx, source.Repo{Key: x.req.Repo, URL: repoCfg.URL, Token: repoCfg.FetchToken(x.req.FetchToken)})
 	if err != nil {
 		return checkoutTarget{}, err
 	}
