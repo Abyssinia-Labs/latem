@@ -84,6 +84,8 @@ func (s *FileStore) Set(_ context.Context, name string, value Value) error {
 	if e, ok := entries[name]; ok {
 		zero(lines[e.line-1])
 		lines[e.line-1] = line
+		// Setting a name defined twice is how one says which value is meant.
+		lines = deleteLines(lines, e.also)
 	} else {
 		if n := len(lines); n > 0 && len(lines[n-1]) == 0 {
 			// The file's trailing newline produced an empty last element; the
@@ -110,9 +112,19 @@ func (s *FileStore) Remove(_ context.Context, name string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	zero(lines[e.line-1])
-	lines = slices.Delete(lines, e.line-1, e.line)
+	lines = deleteLines(lines, append([]int{e.line}, e.also...))
 	return true, s.write(lines)
+}
+
+// deleteLines zeroes and removes the 1-based line numbers nums, which are in
+// ascending order.
+func deleteLines(lines [][]byte, nums []int) [][]byte {
+	for i := len(nums) - 1; i >= 0; i-- {
+		n := nums[i]
+		zero(lines[n-1])
+		lines = slices.Delete(lines, n-1, n)
+	}
+	return lines
 }
 
 // load reads and parses the file. Every parsed value is zeroed before it

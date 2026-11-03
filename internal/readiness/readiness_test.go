@@ -111,8 +111,25 @@ func TestBuild_TheDesktop(t *testing.T) {
 	if s.Have != "2 not set" || needs.CommandLine(s.Yours[0]) != "latem secrets set --repo tsedal ANDROID_KEYSTORE_B64" {
 		t.Errorf("secrets = %+v", s)
 	}
+	if !slices.Equal(s.Secrets, []string{"ANDROID_KEYSTORE_B64", "PLAY_SERVICE_ACCOUNT_JSON"}) {
+		t.Errorf("secrets = %q", s.Secrets)
+	}
 	if len(a.Notes) != 1 || !strings.Contains(a.Notes[0], "runs-on: [android]") {
 		t.Errorf("notes = %q", a.Notes)
+	}
+}
+
+// A job in an environment reads the environment's value first, so that is
+// the one the command sets.
+func TestBuild_ASecretInAnEnvironment(t *testing.T) {
+	in := desktop()
+	in.Jobs[0].Env = "staging"
+	s := item(t, kind(t, Build(in), needs.KindAndroid), "secrets-tsedal")
+	if got := needs.CommandLine(s.Yours[0]); got != "latem secrets set --repo tsedal --env staging ANDROID_KEYSTORE_B64" {
+		t.Errorf("command = %q", got)
+	}
+	if s.Secrets[0] != "ANDROID_KEYSTORE_B64 (staging)" {
+		t.Errorf("secrets = %q", s.Secrets)
 	}
 }
 

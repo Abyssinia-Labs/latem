@@ -42,7 +42,7 @@ echo, and ` + "`list`" + ` prints names and never values.`,
 		Args: noArgs,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
-	cmd.AddCommand(newSecretsSetCommand(), newSecretsListCommand(), newSecretsRmCommand())
+	cmd.AddCommand(newSecretsSetCommand(), newSecretsListCommand(), newSecretsRmCommand(), newSecretsCopyCommand())
 	return cmd
 }
 
@@ -290,7 +290,36 @@ func readSecretValue(ctx context.Context, in io.Reader, prompt io.Writer, name s
 		return nil, fmt.Errorf("no value arrived for %s; an empty secret is GitHub's unset one — "+
 			"`latem secrets rm` removes a value instead", name)
 	}
+	if err := checkControl(name, value); err != nil {
+		secrets.Value(value).Zero()
+		return nil, fmt.Errorf("%w; nothing was stored. Type it again without moving the cursor, or pipe it in; "+
+			"a binary file goes in base64-encoded, as GitHub would need it", err)
+	}
 	return secrets.Value(value), nil
+}
+
+// checkControl refuses a value with a control character in it other than tab
+// and the line endings a PEM has. None belongs in a token, and the one that
+// gets in is the escape an arrow key types at a prompt that does not echo:
+// the token stored with it was refused by Cloudflare, a run later, with
+// nothing to say why. The error names the character and never the value.
+func checkControl(name string, value []byte) error {
+	for i, b := range value {
+		if (b >= 0x20 && b != 0x7f) || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		what, why := fmt.Sprintf("control character 0x%02x", b), ""
+		switch b {
+		case 0x1b:
+			what, why = "an escape character", " (an arrow key types one, and so do a terminal's paste markers)"
+		case 0x00:
+			what = "a NUL byte"
+		case 0x7f:
+			what = "a DEL character"
+		}
+		return fmt.Errorf("the value for %s has %s at byte %d of %d%s", name, what, i+1, len(value), why)
+	}
+	return nil
 }
 
 // trimPipedValue drops the newline `echo` and `pbpaste` end a one-line value

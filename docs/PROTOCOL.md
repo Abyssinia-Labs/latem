@@ -772,8 +772,10 @@ machine's labels), `items` (at most 32: `title`, `have`, `soft`) and `more` (wha
 in the way and not in `items`). `unread` counts the repositories it could not read
 and `unclassified` the jobs whose kind it could not tell. Words are at most 120
 characters on one line, with no `/` or `\`. There are no commands in it and no
-config edits, so nothing on the far side can act on it, and no path, action,
-image or secret's name: those are counted. Sent only to a control plane that said
+config edits, so nothing on the far side can act on it, and no path, action
+or image: those are counted. A secret's name is said, never its value (A73):
+a secrets item's `have` is `A, B (staging) not set`, ending `and N more` when
+they do not fit. Sent only to a control plane that said
 2.5, and absent until the agent has looked, which it does beside the toolchains
 and as often, from its own mirrors.
 
@@ -781,7 +783,7 @@ and as often, from its own mirrors.
 "readiness": {
   "kinds": [
     { "kind": "android", "title": "Android", "state": "off", "runner": "host", "repos": ["tsedal"], "jobs": 2, "elsewhere": 2,
-      "items": [{ "title": "JDK 17", "have": "JDK 27" }, { "title": "tsedal's secrets set here", "have": "5 not set" }] },
+      "items": [{ "title": "JDK 17", "have": "JDK 27" }, { "title": "tsedal's secrets set here", "have": "ANDROID_KEYSTORE_B64 (preview), PLAY_SERVICE_ACCOUNT_JSON (preview) not set" }] },
     { "kind": "ios", "title": "iOS", "state": "impossible", "why": "needs a Mac" }
   ],
   "unread": 1

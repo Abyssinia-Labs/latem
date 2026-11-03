@@ -677,6 +677,18 @@ afresh, so nothing needs a reload.
 the name that lookup builds. A value with neither flag is for every job on
 the machine.
 
+**`latem secrets copy` moves a value to another machine** that builds the
+same repository, over ssh, on its stdin — never in an argument there either:
+
+```console
+$ latem secrets copy --to mini --repo tsedal --env staging CLOUDFLARE_API_TOKEN CONVEX_DEPLOY_KEY
+```
+
+It reads each value from secrets.env or the Keychain here, under exactly that
+scope, and runs `latem secrets set` on the other machine with the same scope.
+A value with a control character in it — the escape an arrow key types at a
+prompt that does not echo — is refused by `set`, and so by `copy`.
+
 Behind the command, the lookup order is fixed, and the first that answers
 wins:
 
@@ -929,6 +941,7 @@ latem approve <run-id>               Local only; pins that run's commit (INV-5)
 latem register [--url U] [--token-file F]   no token: approve this machine in the browser
 latem repo add <owner/name> | list | remove <name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
+latem secrets copy --to HOST [--repo R] [--env E] NAME... to another machine, on ssh's stdin
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]
 latem workflows check [path | --repo R] [--offline] [--json] [--fix]  which workflow jobs this machine can run, and the fix for the rest
 latem store check [path | --repo R] [--platform ios|android] [--json]  whether a preview would reach testers from this machine; read-only

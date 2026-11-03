@@ -179,7 +179,6 @@ func TestFileProvider_MalformedLines(t *testing.T) {
 		{"key is not an identifier", "not-an-identifier=hunter2\n", "hunter2"},
 		{"key with a leading dash", "-w=hunter2\n", "hunter2"},
 		{"exported form", "export A=hunter2\n", "hunter2"},
-		{"duplicate key", "A=hunter2\nA=hunter3\n", "hunter3"},
 		{"unterminated double quote", "A=\"hunter2\n", "hunter2"},
 		{"unterminated single quote", "A='hunter2\n", "hunter2"},
 		{"unknown escape", `A="hunter\q2"` + "\n", "hunter"},
@@ -209,17 +208,33 @@ func TestFileProvider_MalformedLines(t *testing.T) {
 }
 
 // Last-wins is the dotenv convention and it is the wrong one here: a shadowed
-// credential is a build that signs with the key nobody meant.
-func TestFileProvider_DuplicateKeyNamesBothLines(t *testing.T) {
-	p := NewFileProvider(writeSecretsFile(t, "A=one\nB=two\nA=three\n", 0o600))
+// credential is a build that signs with the key nobody meant. A name defined
+// twice has no value, and every other name in the file still has its own.
+func TestFileProvider_DuplicateKeyRefusesThatNameOnly(t *testing.T) {
+	p := NewFileProvider(writeSecretsFile(t, "A=hunter2\nB=two\nA=hunter3\n", 0o600))
 	_, err := p.Resolve(t.Context(), "A")
 	if err == nil {
 		t.Fatal("a duplicate key was accepted")
 	}
-	for _, want := range []string{"line 3", "line 1", "A"} {
+	if errors.Is(err, ErrNotFound) {
+		t.Error("a duplicate fell through to the next provider")
+	}
+	for _, want := range []string{"lines 1 and 3", " A "} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %q, missing %q", err, want)
 		}
+	}
+	for _, leaked := range []string{"hunter2", "hunter3"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Errorf("err = %q quotes a value", err)
+		}
+	}
+	if v, err := p.Resolve(t.Context(), "B"); err != nil || string(v) != "two" {
+		t.Errorf("B = %q, %v; one name typed twice took the rest of the file with it", v, err)
+	}
+	names, err := p.Names()
+	if err != nil || !slices.Equal(names, []string{"A", "B"}) {
+		t.Errorf("Names() = %v, %v; want A once and B", names, err)
 	}
 }
 

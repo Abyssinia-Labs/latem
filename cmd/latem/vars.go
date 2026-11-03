@@ -79,6 +79,9 @@ func newVarsSetCommand() *cobra.Command {
 			if err := checkVarName(name); err != nil {
 				return err
 			}
+			if err := checkControl("vars."+name, []byte(value)); err != nil {
+				return usageErrorf("%v", err)
+			}
 			paths := config.DerivePaths(configDir())
 			warning, err := editConfig(paths, func(body string) (string, error) {
 				return setTableKey(body, varsTable(sc), []string{"repos", sc.repo}, name, tomlString(value))

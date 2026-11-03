@@ -48,7 +48,7 @@ func TestAdvert_NothingThatIsTheMachinesOwn(t *testing.T) {
 		t.Errorf("a slash left the machine: %s", text)
 	}
 	for _, leak := range []string{
-		"setup-bun", "setup-ruby", "ANDROID_KEYSTORE", "PLAY_SERVICE", "registry.example.com",
+		"setup-bun", "setup-ruby", "registry.example.com",
 		"sudo", "sdkmanager", "pacman", "preview.yml", "latem setup",
 	} {
 		if strings.Contains(text, leak) {
@@ -83,13 +83,36 @@ func TestAdvert_TheDesktop(t *testing.T) {
 	}
 }
 
-// A secret's name is the repository's, but how many are missing is what a
-// person reading the page needs, and the only part of it they get.
-func TestAdvert_SecretsAreCounted(t *testing.T) {
-	android := advertKindOf(t, Advert(Build(desktop())), needs.KindAndroid)
+// A secret's name is what a person needs to set it, or to copy it from the
+// machine that has it (A73). The value never was anywhere near a plan.
+func TestAdvert_SecretsAreNamed(t *testing.T) {
+	in := desktop()
+	in.Jobs[0].Env = "staging"
+	android := advertKindOf(t, Advert(Build(in)), needs.KindAndroid)
 	i := slices.IndexFunc(android.Items, func(it protocol.ReadinessItem) bool { return it.Title == "tsedal's secrets set here" })
-	if i < 0 || android.Items[i].Have != "2 not set" {
-		t.Errorf("items = %+v", android.Items)
+	if want := "ANDROID_KEYSTORE_B64 (staging), PLAY_SERVICE_ACCOUNT_JSON (staging) not set"; i < 0 || android.Items[i].Have != want {
+		t.Errorf("items = %+v, want %q", android.Items, want)
+	}
+}
+
+func TestSecretNames_FitWhatTheControlPlaneTakes(t *testing.T) {
+	long := strings.Repeat("N", 50)
+	cases := []struct {
+		names  []string
+		budget int
+		want   string
+	}{
+		{[]string{"A"}, advertText, "A not set"},
+		{[]string{"A", "B (staging)"}, advertText, "A, B (staging) not set"},
+		{[]string{long + "1", long + "2", long + "3"}, advertText, long + "1 and 2 more not set"},
+		{[]string{long + "1", long + "2"}, 20, ""},
+		{[]string{"A", "B (a/b)"}, advertText, ""},
+	}
+	for _, tc := range cases {
+		got := secretNames(tc.names, tc.budget)
+		if got != tc.want || len([]rune(got)) > tc.budget {
+			t.Errorf("secretNames(%q, %d) = %q, want %q", tc.names, tc.budget, got, tc.want)
+		}
 	}
 }
 
@@ -148,14 +171,15 @@ func TestAdvert_StaysInsideTheControlPlanesBounds(t *testing.T) {
 // mini's Linux is 48 jobs and four deploys short of a secret.
 func TestAdvert_SaysHowManyJobsAnItemHoldsUp(t *testing.T) {
 	k := Kind{Name: "linux", Title: "Linux", State: Missing, Jobs: []string{"a", "b", "c", "d"}, Items: []Item{
-		{ID: "secrets-tsedal", Title: "tsedal's secrets set here", Have: "3 not set", Jobs: []string{"a"}},
+		{ID: "secrets-tsedal", Title: "tsedal's secrets set here", Have: "3 not set", Jobs: []string{"a"},
+			Secrets: []string{"A", "B", "C (staging)"}},
 		{ID: "moving-refs", Title: "actions named by a tag accepted", Have: "oven-sh/setup-bun@v2", Jobs: []string{"a", "b"}},
 		{ID: "node", Title: "Node", Jobs: []string{"a", "b", "c", "d"}},
 		{ID: "java-home", Title: "JAVA_HOME set"},
 	}}
 	got := Advert(Plan{Kinds: []Kind{k}}).Kinds[0].Items
 	want := []protocol.ReadinessItem{
-		{Title: "tsedal's secrets set here", Have: "3 not set, 1 of 4 jobs"},
+		{Title: "tsedal's secrets set here", Have: "A, B, C (staging) not set, 1 of 4 jobs"},
 		{Title: "actions named by a tag accepted", Have: "2 of 4 jobs"},
 		{Title: "Node"},
 		{Title: "JAVA_HOME set"},
