@@ -1123,7 +1123,9 @@ Rules:
 - Never written to sqlite, never included in `Update.ErrorMsg`, never sent to a broker (INV-4).
 - A declared secret that resolves empty is `E_MISSING_SECRET` at admission, not a runtime surprise 40 minutes in.
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
-- `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value.
+- `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value. A value with a control character in it other than tab and a line ending is refused, and so is a variable's (A73).
+- `latem secrets copy --to HOST [--repo R] [--env E] NAME...` reads each value from secrets.env or the Keychain here, under exactly that scope, and hands it to `latem secrets set` on HOST over ssh, on its stdin (A73).
+- A name secrets.env defines twice has no value, and the error names its lines; every other name in the file still resolves. `secrets set --store file` keeps one line and `secrets rm --store file` removes them all (A73).
 
 ---
 
@@ -1296,6 +1298,7 @@ latem register [--url U] [--token-file F]   Write config + machine token, verify
 latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
+latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   To another machine's `secrets set`, on ssh's stdin (A73)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
@@ -3293,3 +3296,32 @@ the token is one it could have sent in `run.token`.
 another repository and `latem run` use the machine's credential, so doctor keeps asking about it: a
 repository it cannot reach is a warning when jobs bring their own way in, and a failure otherwise.
 
+### Amendment from a deploy that moved to a second machine
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A73 | §15, §17, A54, A70 | **Secrets across machines. A value with a control character is refused; a name secrets.env defines twice refuses that name and not the file; `latem secrets copy` moves a value to another machine on ssh's stdin; and a heartbeat names the secrets a machine is missing.** | tsedal's staging deploy moved to a second machine and failed twice. The Cloudflare token had an arrow key's escape in it, typed at a prompt that does not echo, and Cloudflare refused it a run later with nothing to say why. The values had to be typed again on each machine because nothing could move one. And the app could say "2 not set" but not which two, so the only way to learn was a shell on the machine |
+
+**Control characters.** `secrets set` and `vars set` refuse a value with a byte below 0x20 or 0x7f in
+it, other than tab, carriage return and newline, which a PEM has. The error names the character and
+its position and never the value. A binary file is stored base64-encoded, which is also the only way
+GitHub takes one.
+
+**A name defined twice.** Last-wins stays refused, for §15's reason. What changes is how much it
+refuses: the name has no value, its lookup fails without falling through to the Keychain, and the
+error names every line it is on. Before this, the whole file failed to parse and every job on the
+machine lost every secret.
+
+**Copying.** The value is read from the two places `secrets set` writes, never from a
+`LATEM_SECRET_*` in the shell or a `[secrets.commands]` entry, which are not values stored here. It
+goes to `ssh HOST -- 'PATH="$HOME/.local/bin:$PATH" latem secrets set ...'` on stdin, so it is in no
+argv on either machine. The remote command is built from validated names and the repository's
+`owner/name`, quoted, since the other machine may know it by another key. The first name that does
+not copy stops the rest.
+
+**Names leave the machine.** A70 counted a machine's missing secrets because "a page has no use for"
+their names. Copying is the use. A secrets item's `have` now names them, with the environment of a
+job that runs in one: `CLOUDFLARE_API_TOKEN (staging) not set`, cut to fit `have`'s 120 characters
+with "and N more". INV-2 is about values and is unchanged. No protocol change: `have` is free text
+within the same bounds. The command a person is shown sets the environment's value when the job has
+an environment, which is the one its run reads first.

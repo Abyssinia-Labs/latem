@@ -368,6 +368,7 @@ type jobReport struct {
 	unisolated         bool
 	moving, notAllowed []string
 	secrets            []string
+	environment        string
 	// stopped: this machine's variables keep the job from running here, on
 	// every event it was checked against, so nothing it needs is in the way.
 	stopped bool
@@ -1097,7 +1098,7 @@ func checkSecrets(t checkTarget, inv inventory, job *registry.Job, jr *jobReport
 			missing = append(missing, name)
 		}
 	}
-	jr.secrets = missing
+	jr.secrets, jr.environment = missing, job.Environment
 	if len(missing) == 0 {
 		return
 	}

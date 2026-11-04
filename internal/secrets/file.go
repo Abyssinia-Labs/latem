@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 )
 
 // FileName is the secrets file inside the config directory (§15).
@@ -115,6 +117,13 @@ func (p *FileProvider) Resolve(_ context.Context, name string) (Value, error) {
 	if !ok {
 		return nil, fmt.Errorf("file: %s holds no %s: %w", p.path, name, ErrNotFound)
 	}
+	if len(e.also) > 0 {
+		// Not ErrNotFound: falling through to the Keychain would sign with a
+		// third value nobody chose.
+		return nil, fmt.Errorf("file: %s defines %s on lines %s, so neither is used; "+
+			"`latem secrets set --store file %s` keeps one, and `latem secrets rm --store file %s` removes them all",
+			p.path, name, lineList(e), name, name)
+	}
 	return append(Value(nil), e.value...), nil
 }
 
@@ -179,6 +188,19 @@ func (p *FileProvider) read() ([]byte, error) {
 type fileEntry struct {
 	value []byte
 	line  int
+	// also are the later lines that define the name again. The name then has
+	// no value: which one was meant is the operator's to say.
+	also []int
+}
+
+// lineList is "3 and 7", or "3, 7 and 9".
+func lineList(e fileEntry) string {
+	nums := make([]string, 0, 1+len(e.also))
+	for _, n := range append([]int{e.line}, e.also...) {
+		nums = append(nums, strconv.Itoa(n))
+	}
+	last := len(nums) - 1
+	return strings.Join(nums[:last], ", ") + " and " + nums[last]
 }
 
 // parseSecretsFile reads the KEY=value form of §15.
@@ -219,8 +241,13 @@ func parseSecretsFile(buf []byte) (map[string]fileEntry, error) {
 		if prev, dup := out[key]; dup {
 			// Last-wins is the dotenv convention and it is the wrong one here:
 			// a shadowed credential is a build that signs with the key nobody
-			// meant, and the failure appears at the App Store, not at load.
-			return out, fmt.Errorf("line %d: %s is already defined on line %d", lineNo, key, prev.line)
+			// meant, and the failure appears at the App Store, not at load. So
+			// the name has no value. Every other name in the file still does:
+			// refusing them all for one name typed twice stopped every job on
+			// the machine.
+			prev.also = append(prev.also, lineNo)
+			out[key] = prev
+			continue
 		}
 
 		value, err := parseSecretValue(bytes.TrimLeft(rawValue, " \t"), lineNo)

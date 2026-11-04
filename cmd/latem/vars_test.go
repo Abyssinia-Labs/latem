@@ -68,6 +68,7 @@ func TestVars_Refusals(t *testing.T) {
 		{[]string{"vars", "set", "NAME", "v"}, "--repo is required"},
 		{[]string{"vars", "set", "--repo", "app", "GITHUB_SHA", "v"}, "GitHub's own"},
 		{[]string{"vars", "set", "--repo", "app", "1BAD", "v"}, "not a variable name"},
+		{[]string{"vars", "set", "--repo", "app", "ACCOUNT", "4dbe\x1b[D2f"}, "escape character"},
 	} {
 		if _, err := latemIn(t, dir, "", tc.args...); exitCode(err) != ExitUsage || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%v: %v, want usage mentioning %q", tc.args, err, tc.want)

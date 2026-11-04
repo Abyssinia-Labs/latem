@@ -120,7 +120,7 @@ func TestSecretsSet_WarnsWhenSecretsEnvShadowsTheKeychain(t *testing.T) {
 
 func TestSecretsSet_Refusals(t *testing.T) {
 	dir := configDirWith(t, secretsConfig)
-	fakeStores(t, true)
+	kc := fakeStores(t, true)
 	cases := []struct {
 		args  []string
 		stdin string
@@ -133,12 +133,20 @@ func TestSecretsSet_Refusals(t *testing.T) {
 		{[]string{"secrets", "set", "BAD-NAME"}, "v", ExitUsage, "must match"},
 		{[]string{"secrets", "set", "TOKEN"}, "", ExitFailure, "no value arrived"},
 		{[]string{"secrets", "set", "--store", "vault", "TOKEN"}, "v", ExitUsage, "one of keychain, file"},
+		{[]string{"secrets", "set", "TOKEN"}, "cf-token\x1b[Dvalue\n", ExitFailure, "escape character at byte 9 of 16 (an arrow key"},
+		{[]string{"secrets", "set", "TOKEN"}, "binary\x00file", ExitFailure, "NUL byte"},
 	}
 	for _, tc := range cases {
 		_, err := latemIn(t, dir, tc.stdin, tc.args...)
 		if exitCode(err) != tc.code || err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%v: exit %d, %v; want exit %d mentioning %q", tc.args, exitCode(err), err, tc.code, tc.want)
 		}
+		if err != nil && strings.Contains(err.Error(), "cf-token") {
+			t.Errorf("%v: the refusal quotes the value: %v", tc.args, err)
+		}
+	}
+	if len(kc.items) != 0 {
+		t.Errorf("a refused value was stored: %v", slices.Collect(maps.Keys(kc.items)))
 	}
 }
 

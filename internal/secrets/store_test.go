@@ -113,6 +113,34 @@ func TestFileStore_RefusesAFileItCannotRead(t *testing.T) {
 	}
 }
 
+// A name defined twice is mended by setting it, which keeps one line, or by
+// removing it, which takes them all; the names around it are left alone.
+func TestFileStore_SetAndRemoveMendADuplicate(t *testing.T) {
+	ctx := context.Background()
+	s := newFileStore(t, "A=one\nB=two\nA=three\n# note\nA=four\n")
+	if err := s.Set(ctx, "B", Value("2")); err != nil {
+		t.Fatalf("setting another name in a file with a duplicate: %v", err)
+	}
+	if err := s.Set(ctx, "A", Value("chosen")); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(s.Path())
+	if want := "A=\"chosen\"\nB=\"2\"\n# note\n"; string(got) != want {
+		t.Errorf("after set:\n%q\nwant\n%q", got, want)
+	}
+	if v, err := NewFileProvider(s.Path()).Resolve(ctx, "A"); err != nil || string(v) != "chosen" {
+		t.Errorf("A = %q, %v", v, err)
+	}
+
+	s = newFileStore(t, "A=one\nB=two\nA=three\n")
+	if ok, err := s.Remove(ctx, "A"); !ok || err != nil {
+		t.Fatalf("remove = %v, %v", ok, err)
+	}
+	if got, _ := os.ReadFile(s.Path()); string(got) != "B=two\n" {
+		t.Errorf("after remove: %q", got)
+	}
+}
+
 func TestFileStore_NamesOfAMissingFileAreNone(t *testing.T) {
 	names, err := newFileStore(t, "").Names(context.Background())
 	if err != nil || len(names) != 0 {

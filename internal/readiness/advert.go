@@ -23,8 +23,9 @@ const (
 // the machine. The commands and config edits that close an item are not here,
 // which is why the far side cannot act on one. Nor are paths, which a JDK's
 // home and an SDK's root are full of, or what a job's steps use: the control
-// plane is never told which actions a job names (INV-5) or what a secret is
-// called, so those are counted.
+// plane is never told which actions a job names (INV-5), so those are
+// counted. A secret's name is said, never its value (A73): it is what a
+// person has to know to set it here or copy it from another machine.
 func Advert(p Plan) *protocol.Readiness {
 	out := &protocol.Readiness{Kinds: []protocol.ReadinessKind{}, Unread: len(p.Unread), Unclassified: len(p.Unclassified)}
 	for _, k := range p.Kinds {
@@ -68,14 +69,48 @@ func advertItem(it Item, jobs int) protocol.ReadinessItem {
 	case it.ID == itemMovingRefs:
 		out.Have = ""
 	}
+	count := ""
 	if n := len(it.Jobs); n > 0 && n < jobs {
-		count := fmt.Sprintf("%d of %d jobs", n, jobs)
+		count = fmt.Sprintf("%d of %d jobs", n, jobs)
+	}
+	if strings.HasPrefix(it.ID, itemSecrets) && len(it.Secrets) > 0 {
+		budget := advertText
+		if count != "" {
+			budget -= len(", ") + len(count)
+		}
+		if names := secretNames(it.Secrets, budget); names != "" {
+			out.Have = names
+		}
+	}
+	if count != "" {
 		if out.Have != "" {
 			count = out.Have + ", " + count
 		}
 		out.Have = wireText(count)
 	}
 	return out
+}
+
+// secretNames is "A, B (staging) not set" in at most budget characters,
+// ending "and N more" when they do not all fit, or "" when not even one does
+// or a name is not fit to send.
+func secretNames(names []string, budget int) string {
+	for _, n := range names {
+		if wireText(n) == "" {
+			return ""
+		}
+	}
+	for shown := len(names); shown > 0; shown-- {
+		s := strings.Join(names[:shown], ", ")
+		if rest := len(names) - shown; rest > 0 {
+			s += fmt.Sprintf(" and %d more", rest)
+		}
+		s += " not set"
+		if len([]rune(s)) <= budget {
+			return s
+		}
+	}
+	return ""
 }
 
 // withItem adds it, or counts it when there is no room or it has no words

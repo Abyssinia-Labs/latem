@@ -115,7 +115,7 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 				in.Jobs = append(in.Jobs, readiness.Job{
 					Ref: fmt.Sprintf("%s %s %s", key, path.Base(wr.file), j.name), Repo: key,
 					Labels: j.labels, Report: *j.needs, Runner: j.carrier, Unisolated: j.unisolated,
-					Moving: j.moving, NotAllowed: j.notAllowed, Secrets: j.secrets,
+					Moving: j.moving, NotAllowed: j.notAllowed, Secrets: j.secrets, Env: j.environment,
 				})
 			}
 		}

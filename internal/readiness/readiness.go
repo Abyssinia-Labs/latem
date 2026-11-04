@@ -84,8 +84,10 @@ type Job struct {
 	// Moving are the actions it names by a tag or branch, on a machine that
 	// wants a commit; NotAllowed those [actions] allowed leaves out.
 	Moving, NotAllowed []string
-	// Secrets are the names it reads that have no value here.
+	// Secrets are the names it reads that have no value here, and Env the
+	// GitHub environment it runs in, which scopes them.
 	Secrets []string
+	Env     string
 }
 
 // Image is a docker runner's image.
@@ -161,6 +163,9 @@ type Item struct {
 	Manual []string   `json:"manual,omitempty"`
 	// Warning is said before a change that gives something up.
 	Warning string `json:"warning,omitempty"`
+	// Secrets are the names a secrets item's Yours set, each with its
+	// environment when it has one: "TOKEN (staging)".
+	Secrets []string `json:"secrets,omitempty"`
 }
 
 // Item IDs that Advert treats apart, the first and last followed by a name.
@@ -168,6 +173,7 @@ const (
 	itemAllowed    = "allowed-"
 	itemMovingRefs = "moving-refs"
 	itemImage      = "image-"
+	itemSecrets    = "secrets-"
 )
 
 // Change is one edit to config.toml.
@@ -569,7 +575,7 @@ func secretItems(jobs []Job) []Item {
 		if len(j.Secrets) == 0 {
 			continue
 		}
-		id := "secrets-" + j.Repo
+		id := itemSecrets + j.Repo
 		i := slices.IndexFunc(out, func(it Item) bool { return it.ID == id })
 		if i < 0 {
 			out = append(out, Item{ID: id, Title: j.Repo + "'s secrets set here"})
@@ -577,8 +583,16 @@ func secretItems(jobs []Job) []Item {
 		}
 		for _, name := range j.Secrets {
 			argv := []string{"latem", "secrets", "set", "--repo", j.Repo, name}
-			if !slices.ContainsFunc(out[i].Yours, func(a []string) bool { return slices.Equal(a, argv) }) {
+			label := name
+			if j.Env != "" {
+				// A job in an environment reads the environment's value
+				// first, and that is the one to set.
+				argv = []string{"latem", "secrets", "set", "--repo", j.Repo, "--env", j.Env, name}
+				label = name + " (" + j.Env + ")"
+			}
+			if !slices.Contains(out[i].Secrets, label) {
 				out[i].Yours = append(out[i].Yours, argv)
+				out[i].Secrets = append(out[i].Secrets, label)
 			}
 		}
 		if !slices.Contains(out[i].Jobs, j.Ref) {
