@@ -22,26 +22,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
-      # This job also runs on latem's own machines (latem-ci). Their macOS
-      # runner is native, and a native runner runs no remote action unless the
-      # operator gives up isolation (A47), so on macOS the job uses the Go the
-      # machine has. go.mod's version is fetched from there if it is newer
-      # (GOTOOLCHAIN=auto, Go's default). Keyed on runner.os, never a label.
       - uses: actions/setup-go@v6
-        if: runner.os == 'Linux'
         with:
           go-version-file: go.mod
           cache: true
-      - name: go (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          command -v go >/dev/null || brew install go
-          go version
 
       # install.sh verifies a release signature when minisign is present, and
       # test/scripts exercises that path against a real keypair — but only when
@@ -71,7 +60,7 @@ jobs:
         run: go test -race -count=1 ./...
 
   lint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -91,7 +80,7 @@ jobs:
   # go.mod has one owner (docs/PLAN.md, rule 2). This job makes a stray `go get`
   # visible in review rather than in someone else's rebase.
   tidy:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -104,13 +93,13 @@ jobs:
           git diff --exit-code go.mod go.sum
 
   # Integration tests need a Docker daemon, so they run separately from the
-  # gate. Not required to merge a leaf workstream; required before M3 closes.
+  # gate, on every pull request as well as on main: a public repository's
+  # runners cost nothing, and a regression found after merging is found late.
   #
-  # latem's docker runner gives a step no daemon, so this copy is GitHub's.
-  # vars.LATEM is set only on latem's machines, which skip it.
+  # latem's own CI runs here and never on latem's machines: a public
+  # repository's pull requests are anyone's code.
   integration:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.event_name == 'push' && vars.LATEM != 'true'
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -130,32 +119,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
-
-  # The same tests on latem: a native runner with this label to itself, on a
-  # host with a Docker daemon, Go and gcc. There is no setup-go, because a
-  # remote action on a native runner needs allow_unisolated.
-  #
-  # Every machine with this repository sets vars.LATEM_HOST_RUNNER, so they
-  # agree and A68 keeps none of them off the job. Only the desktop has the
-  # runner, so while it is off this waits for it, and runs when it is back.
-  # GitHub has no such variable, and skips the job.
-  integration-host:
-    runs-on: ${{ vars.LATEM_HOST_RUNNER == 'true' && 'docker-host' || 'blacksmith-4vcpu-ubuntu-2404' }}
-    if: github.event_name == 'push' && vars.LATEM_HOST_RUNNER == 'true'
-    # The tests' `docker` commands follow the CLI's context and the code under
-    # test does not, so with Docker Desktop's context selected they ask a
-    # different daemon about a container the SDK started on the system one.
-    env:
-      DOCKER_CONTEXT: default
-    steps:
-      - uses: actions/checkout@v5
-      # As above: a skipped suite and a passing one look the same.
-      - name: require a Docker daemon
-        run: docker info >/dev/null
-      - name: integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          go version
           go test -race -count=1 -p 1 -tags=integration ./... 2>&1 | tee /dev/stderr
