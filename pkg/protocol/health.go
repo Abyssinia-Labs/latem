@@ -160,4 +160,11 @@ type RunResume struct {
 	// accepted. The agent resumes from LastAckedSeq+1. It is persisted, so the
 	// resume point survives an agent restart and not merely a reconnect.
 	LastAckedSeq uint64 `json:"last_acked_seq"`
+	// NeedsTokens: a workflow job that arrived before this agent restarted,
+	// still queued or just claimed, and holding neither of the tokens it came
+	// with, which were never written down (A52, A72). The control plane
+	// answers by sending its `run` again, which brings fresh ones (A75, 2.7).
+	// Sent to any control plane: resume goes before the hello that says what
+	// one speaks, and an older one reads the fields it knows.
+	NeedsTokens bool `json:"needs_tokens,omitempty"`
 }

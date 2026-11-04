@@ -231,7 +231,10 @@ type Orchestrator struct {
 	cancelGrace     time.Duration
 	teardownTimeout time.Duration
 	now             func() time.Time
-	toolchains      func() *system.Toolchains
+	// startedAt is when this process's orchestrator began: a run created
+	// before it came through a restart, and holds no tokens (A75).
+	startedAt  time.Time
+	toolchains func() *system.Toolchains
 
 	reporter *reporter
 	groups   *groups
@@ -288,6 +291,7 @@ func New(opts Options) (*Orchestrator, error) {
 	if o.now == nil {
 		o.now = time.Now
 	}
+	o.startedAt = o.now()
 	o.reporter = newReporter(brks, opts.ReportAttempts, opts.ReportBackoff)
 	return o, nil
 }

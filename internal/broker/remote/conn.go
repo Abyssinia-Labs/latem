@@ -267,9 +267,29 @@ func (b *Broker) sendResume(ctx context.Context) error {
 			RunID:        run.ID,
 			State:        run.State,
 			LastAckedSeq: seq,
+			// Not held back from an older control plane: resume goes before
+			// its hello says what it speaks, and an older one reads the
+			// fields it knows and leaves the rest.
+			NeedsTokens: b.lostTokens(run),
 		})
 	}
 	return b.send(ctx, frame{Kind: kindResume, Resume: &r})
+}
+
+// lostTokens reports a workflow job from a control plane that holds neither
+// of the tokens it came with: one that arrived before this process started,
+// since tokens live in memory only (A52, A72). Queued or just claimed, so that
+// the `run` sent again in answer only hands it fresh ones (A75): a job past
+// claimed has fetched already, and asking for it again would be asking to
+// start it twice, which the control plane would rightly refuse.
+func (b *Broker) lostTokens(run store.Run) bool {
+	if run.Workflow == nil || run.OriginKind == "cli" {
+		return false
+	}
+	if run.State != protocol.StateQueued && run.State != protocol.StateClaimed {
+		return false
+	}
+	return b.st.Token(run.ID) == "" && b.st.FetchToken(run.ID) == ""
 }
 
 // replayReports re-sends the transitions this transport failed to deliver.

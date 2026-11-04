@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -120,6 +121,72 @@ func TestExecute_FetchToken(t *testing.T) {
 	t.Run("a repository elsewhere does not", func(t *testing.T) {
 		if got, _, _ := run(t, "https://git.example.com/acme/app.git"); got != "" {
 			t.Errorf("gate 6 fetched with %q", got)
+		}
+	})
+}
+
+// A job that came through a restart lost its tokens, which live in memory
+// only. It waits for the control plane to send them again, and says in its
+// log what came of it (A75). A job this process received does not wait.
+func TestExecute_ARestoredJobWaitsForItsTokens(t *testing.T) {
+	const fetchToken = "ghs_fetchFETCHfetch0123456789"
+	prev := tokenWait
+	t.Cleanup(func() { tokenWait = prev })
+
+	run := func(t *testing.T, restored bool, arrive bool) (*harness, string, time.Duration) {
+		t.Helper()
+		h := newHarness(t)
+		h.source.registry = ""
+		h.cfg.Repos["app"].GitHub = "acme/app"
+		h.cfg.Repos["app"].URL = "https://github.com/acme/app.git"
+		o := h.build()
+		req := workflowRequest(h, "web")
+		req.Token, req.Origin.Kind = "", "webhook"
+		r := h.admitAndClaim(o, req)
+		if restored {
+			o.startedAt = r.CreatedAt.Add(time.Second)
+		}
+		if arrive {
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				h.db.HoldFetchToken(req.ID, fetchToken)
+			}()
+		}
+		h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", runWorkflowFile)
+		start := time.Now()
+		if _, err := o.Execute(t.Context(), r); err != nil {
+			t.Fatal(err)
+		}
+		return h, req.ID, time.Since(start)
+	}
+
+	t.Run("they come", func(t *testing.T) {
+		tokenWait = 10 * time.Second
+		h, id, _ := run(t, true, true)
+		if got := h.source.fetched[0].Token; got != fetchToken {
+			t.Errorf("gate 6 fetched with %q, want the token sent again", got)
+		}
+		if !strings.Contains(h.logContents(id), "sent its tokens again") {
+			t.Errorf("the log does not say the tokens came again:\n%s", h.logContents(id))
+		}
+	})
+
+	t.Run("they do not", func(t *testing.T) {
+		tokenWait = 300 * time.Millisecond
+		h, id, _ := run(t, true, false)
+		if got := h.source.fetched[0].Token; got != "" {
+			t.Errorf("gate 6 fetched with %q", got)
+		}
+		if !strings.Contains(h.logContents(id), "no fresh tokens came within") {
+			t.Errorf("the log does not say it went on without them:\n%s", h.logContents(id))
+		}
+	})
+
+	t.Run("a job this process received does not wait", func(t *testing.T) {
+		tokenWait = 10 * time.Second
+		h, id, took := run(t, false, false)
+		if log := h.logContents(id); took > 5*time.Second || strings.Contains(log, "no fresh tokens") || strings.Contains(log, "tokens again") {
+			t.Errorf("took %s; log:\n%s", took, h.logContents(id))
 		}
 	})
 }

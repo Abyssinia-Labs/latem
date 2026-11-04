@@ -84,6 +84,14 @@ func enqueueRun(ctx context.Context, st Store, req protocol.RunRequest, priority
 		if existing.State.IsTerminal() {
 			return fmt.Errorf("remote: run %s already finished as %s", req.ID, existing.State)
 		}
+		if existing.State != protocol.StateQueued {
+			// Sent again for its tokens (A75): a run a runner has already
+			// claimed takes them and stays where it is. Queueing it again
+			// would put a claimed run back in the queue.
+			st.HoldToken(req.ID, req.Token)
+			st.HoldFetchToken(req.ID, req.FetchToken)
+			return nil
+		}
 	default:
 		return err
 	}

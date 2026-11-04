@@ -292,3 +292,62 @@ func TestStoreRun_FieldsTheReplayNeeds(t *testing.T) {
 		t.Error("finished_at did not survive")
 	}
 }
+
+// A run sent again for its tokens after a runner has claimed it takes them and
+// stays claimed: queued again, it would be a claimed run in the queue (A75).
+func TestEnqueueRun_AReplayOfAClaimedRunOnlyBringsTokens(t *testing.T) {
+	db := newStore(t)
+	seedRun(t, db, "r_claimed", protocol.StateClaimed)
+	req := protocol.RunRequest{ID: "r_claimed", Repo: "myapp", Job: "build", Ref: "main",
+		Token: "ghs_jobJOBjob0123456789", FetchToken: "ghs_fetchFETCH0123456789"}
+	if err := enqueueRun(t.Context(), db, req, 0, time.Time{}); err != nil {
+		t.Fatalf("enqueueRun: %v", err)
+	}
+	if db.Token("r_claimed") != req.Token || db.FetchToken("r_claimed") != req.FetchToken {
+		t.Error("the tokens a replay brought were not held")
+	}
+	r, err := db.Get(t.Context(), "r_claimed")
+	if err != nil || r.State != protocol.StateClaimed {
+		t.Errorf("state = %s, %v; want it left claimed", r.State, err)
+	}
+}
+
+// A workflow job that came through a restart says so in the resume, and the
+// control plane sends it again with fresh tokens (A75). One that still holds
+// its tokens, one a person ran with `latem run`, and one already running do
+// not.
+func TestResume_SaysWhichJobsLostTheirTokens(t *testing.T) {
+	db := newStore(t)
+	workflowRun := func(id string, state protocol.RunState, origin string) {
+		t.Helper()
+		err := db.Create(t.Context(), store.Run{ID: id, Repo: "myapp", Job: "build", Ref: "main", State: state,
+			OriginKind: origin, Workflow: &store.WorkflowRun{Workflow: ".github/workflows/ci.yml", SHA: strings.Repeat("a", 40),
+				WorkflowRunID: "wr_1"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	workflowRun("r_lost", protocol.StateQueued, "webhook")
+	workflowRun("r_claimed", protocol.StateClaimed, "webhook")
+	workflowRun("r_held", protocol.StateQueued, "webhook")
+	db.HoldFetchToken("r_held", "ghs_fetchFETCH0123456789")
+	workflowRun("r_cli", protocol.StateQueued, "cli")
+	workflowRun("r_running", protocol.StateRunning, "webhook")
+	seedRun(t, db, "r_registry", protocol.StateQueued)
+
+	h := newHarnessOn(t, db, nil)
+	h.AwaitConnected(t)
+	h.AwaitResumes(t, 1)
+	resumes := h.CP.Resumes()
+	got := map[string]bool{}
+	for _, r := range resumes[len(resumes)-1].Runs {
+		got[r.RunID] = r.NeedsTokens
+	}
+	want := map[string]bool{"r_lost": true, "r_claimed": true, "r_held": false, "r_cli": false,
+		"r_running": false, "r_registry": false}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s: needs_tokens = %v, want %v", id, got[id], w)
+		}
+	}
+}
