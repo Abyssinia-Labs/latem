@@ -58,7 +58,8 @@ did not apply. A file that does not load is refused and the agent keeps the
 config it had.
 
 SIGUSR2 — sent by ` + "`latem update`" + ` after it replaces the binary — moves the agent
-onto the binary at its own path if that is a different version. It stops
+onto the binary at its own path if that is a different version, or restarts
+it in place when the last reload read changes only a restart applies. It stops
 taking runs, waits up to agent.shutdown_grace for the ones in flight, and
 re-executes in place, keeping its pid. If runs are still going it takes work
 again and moves at the first moment nothing is running. It never cancels a run

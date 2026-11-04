@@ -150,7 +150,10 @@ func jdkPackage(family, major string) string {
 }
 
 // AndroidJDK is the JDK an Android job gets when it does not name one, which
-// few do: AGP 9 takes it, and a newer one is refused rather than tolerated.
+// few do. 17 is AGP 9's minimum and its default, not its maximum. What turns
+// a newer JDK away is Gradle: each release runs on the Javas it lists, and
+// Java 27 needs Gradle 9.8.0, where Expo's generated android/ has 9.4.1. So
+// 17 is the one every project here builds with, and what the mini uses.
 const AndroidJDK = 17
 
 // WantedJDK is the major a job's JDK requirement comes to: the one it names,
@@ -311,11 +314,23 @@ func androidGaps(q Requirement, t system.Toolchains, linux bool) []Gap {
 		if t.JDKAtLeast(AndroidJDK) == "" {
 			return nil // the JDK's own gap comes first
 		}
-		if !t.AndroidLicensed {
-			return add(Gap{Missing: "the Android SDK's licences accepted", Yours: [][]string{sdkmanager("--licenses")}})
-		}
-		if !t.AndroidPlatformTools {
+		// platform-tools before the licences. sdkmanager is now a wrapper
+		// over Google's Android CLI, whose --licenses says it is "no longer
+		// needed" and writes nothing, and whose first install writes
+		// licenses/android-sdk-license itself. Asking for the licences first
+		// asked for something that command could not do, and held
+		// platform-tools behind it for good. With no licence on file, the
+		// install is the person's to type: an older sdkmanager asks them to
+		// accept one first, and latem never answers that for them.
+		switch {
+		case !t.AndroidPlatformTools && !t.AndroidLicensed:
+			return add(Gap{Missing: "Android platform-tools", Yours: [][]string{sdkmanager("platform-tools")}})
+		case !t.AndroidPlatformTools:
 			return add(Gap{Missing: "Android platform-tools", Fix: [][]string{sdkmanager("platform-tools")}})
+		case !t.AndroidLicensed:
+			// platform-tools from somewhere else, a distribution's package:
+			// Gradle still reads the licence before it downloads a platform.
+			return add(Gap{Missing: "the Android SDK's licences accepted", Yours: [][]string{sdkmanager("--licenses")}})
 		}
 		if q.Version != "" && !hasInt(t.AndroidPlatforms, q.Version) {
 			return add(Gap{Missing: "Android platform " + q.Version, Have: "platforms " + joinInts(t.AndroidPlatforms),

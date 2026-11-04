@@ -3163,7 +3163,8 @@ version is the `release` file's, because a folder's name is not always a version
 `temurin-17-jdk-amd64` and `zulu17-ca-amd64` are 17 too. A JDK on the machine and not what a step
 finds is a setting, not an install: `JAVA_HOME` on the runner. That is an item only where it can
 matter: where jobs already run here it is shown and not counted, because their scripts found the
-JDK themselves. An Android job that names no JDK wants 17, which is what AGP 9 takes.
+JDK themselves. An Android job that names no JDK wants 17, AGP 9's minimum and default. What turns
+a newer JDK away is the project's Gradle, not AGP: Java 27 needs Gradle 9.8.0 (corrected in A74).
 
 **What a machine is told to do.** `/etc/os-release` gives the Linux family: Arch, Debian or Fedora,
 through `ID_LIKE` for a derivative. Each has its own package names, and each line wants `sudo`, so
@@ -3325,3 +3326,41 @@ job that runs in one: `CLOUDFLARE_API_TOKEN (staging) not set`, cut to fit `have
 with "and N more". INV-2 is about values and is unchanged. No protocol change: `have` is free text
 within the same bounds. The command a person is shown sets the environment's value when the job has
 an environment, which is the one its run reads first.
+
+### Amendment from a setup screen that turned Android on and sent it nothing
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A74 | §8, §20, A54, A56, A60, A69 | **What `latem setup` writes reaches the running agent while setup is still up. SIGUSR2 restarts an agent in place, at its next idle moment, when its last reload read changes only a restart applies. Platform-tools comes before the Android licence.** | On the desktop the setup screen wrote `android` into a runner's labels, said so, and the agent kept the labels it had: nothing told it, and §8 reads a runner's labels once, at start. `latem service reload` was what moved it, and only because it was asked for by hand. The same screen then could not finish Android on a fresh SDK: it asked for `sdkmanager --licenses`, which today's sdkmanager answers with "no longer needed" and writes nothing, and it held platform-tools behind that |
+
+**Telling the agent.** After the screen writes config.toml it reloads the agent, as `vars`, `repo`
+and `workflows check --fix` already did. What setup writes is mostly a runner's labels or env, which
+a reload reads and leaves for a restart, so when the reload says so, setup sends SIGUSR2. The
+screen's status line says, in one line, what came of it: the agent has it, restarted with it, will
+once N runs finish, or the command that applies it.
+
+**A restart that waits.** A56's SIGUSR2 moved an agent onto a different binary and answered
+`current` for the same one. Now the same binary is moved onto too when the last reload deferred
+something: the agent stops taking work, waits for runs as a move does, and re-executes in place,
+which reads config.toml afresh. It never cancels a run. Just before re-executing it reloads once
+more: a file that no longer loads is `failed` with the reason and the agent keeps running, since a
+service manager would otherwise be left starting an agent that exits; a file whose restart-only
+change was undone is `current`. `SignalSwitch` asks an agent already running the wanted version
+when its status lists deferred changes, so `latem update` applies them too.
+
+**Licences after platform-tools.** sdkmanager is now a wrapper over Google's Android CLI, and its
+first install writes `licenses/android-sdk-license` itself. So a fresh SDK is asked for
+platform-tools first, as a command for the person to type while no licence is on file (an older
+sdkmanager asks them to accept one, and latem never answers that for them), and as one latem runs
+once a licence is there. The licence is asked for only of an SDK that has platform-tools from
+somewhere else, because Gradle still reads it before it downloads a platform.
+
+**The JDK.** A69 said an Android job with no JDK named wants 17 "which is what AGP 9 takes". 17 is
+AGP 9's minimum and default, not a maximum; what turns a newer JDK away is the project's Gradle,
+each release running on the Javas it lists. Java 27 needs Gradle 9.8.0, and Expo's generated
+`android/` has 9.4.1. The default stays 17.
+
+**Versions.** The Makefile's `git describe` matches `v*` tags only: `desktop-preview` is a tag, and
+a build that called itself `desktop-preview-35-g8c6c3eb` had no version A56 could compare with a
+release.
+

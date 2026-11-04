@@ -3,7 +3,9 @@
 GO      ?= go
 PKGS    := ./...
 BIN     := bin/latem
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Release tags only: desktop-preview is a tag too, and a build that called
+# itself desktop-preview-35-g8c6c3eb had no version to compare with a release.
+VERSION ?= $(shell git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo dev)
 
 # The golangci-lint CI pins, read from the file the workflows also read. One
 # copy, because two drifted: this target used to run whatever was on PATH while

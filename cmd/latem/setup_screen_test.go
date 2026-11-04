@@ -36,12 +36,12 @@ func (w *screenWorld) hooks() screenHooks {
 			w.ran = append(w.ran, commandLines(it.Run)...)
 			return nil
 		},
-		apply: func(c []readiness.Change) error {
+		apply: func(c []readiness.Change) (string, error) {
 			if w.applyEr != nil {
-				return w.applyEr
+				return "", w.applyEr
 			}
 			w.applied = append(w.applied, c...)
-			return nil
+			return "The agent has it.", nil
 		},
 		shell: func(_ string, lines []string) error {
 			w.shells = append(w.shells, lines)
@@ -178,6 +178,9 @@ func TestScreen_AChangeSaysWhatItGivesUp(t *testing.T) {
 	press(s, yes)
 	if len(w.applied) != 1 || w.applied[0].What != readiness.ChangeUnisolated {
 		t.Errorf("applied %+v", w.applied)
+	}
+	if !strings.Contains(s.status, "Written to config.toml. The agent has it.") {
+		t.Errorf("status = %q, which does not say whether the agent has it", s.status)
 	}
 
 	w.applyEr = errors.New("would not load")

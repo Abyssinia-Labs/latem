@@ -22,8 +22,9 @@ type screenHooks struct {
 	// refresh looks at the machine again.
 	refresh func() (readiness.Plan, error)
 	// run runs an item's commands, and apply writes config.toml.
-	run   func(kind readiness.Kind, it readiness.Item) error
-	apply func(changes []readiness.Change) error
+	run func(kind readiness.Kind, it readiness.Item) error
+	// apply's string says, in a line, whether the running agent has it.
+	apply func(changes []readiness.Change) (string, error)
 	// shell gives the person a terminal, with lines to type in it.
 	shell func(title string, lines []string) error
 	// prove runs a kind's proof in a step's environment.
@@ -170,9 +171,13 @@ func (s *setupScreen) act(k readiness.Kind, it readiness.Item) {
 }
 
 func (s *setupScreen) change(changes []readiness.Change, done string) {
-	if err := s.hooks.apply(changes); err != nil {
+	took, err := s.hooks.apply(changes)
+	if err != nil {
 		s.status = "config.toml was left as it was: " + err.Error()
 		return
+	}
+	if took != "" {
+		done += " " + took
 	}
 	s.reload(done)
 }

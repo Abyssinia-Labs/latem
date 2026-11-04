@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 )
 
 // baseConfig is a config.toml with one repo and one runner, the smallest file
@@ -47,6 +49,15 @@ func init() {
 	}
 	newSecretStores = func(config.Paths) (secretStores, error) {
 		panic("a test reached the real secret stores; use fakeStores")
+	}
+	newSecretReader = func(config.Paths) (secrets.Provider, error) {
+		panic("a test reached the real secret stores; use fakeCopy")
+	}
+	runSSH = func(context.Context, []string, io.Reader, io.Writer, io.Writer) error {
+		panic("a test reached a real ssh; use fakeCopy")
+	}
+	signalSwitch = func(config.Paths, string, time.Duration) (agent.ReloadStatus, error) {
+		panic("a test reached the real agent.SignalSwitch; use fakeSwitch")
 	}
 	originURL = func(context.Context, string) string {
 		panic("a test reached a real git remote get-url; use fakeOrigin")

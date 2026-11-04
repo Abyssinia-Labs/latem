@@ -156,15 +156,24 @@ func TestGaps_AnAndroidSDKOneStepAtATime(t *testing.T) {
 	if got := gaps(noJDK); got != "" {
 		t.Errorf("sdkmanager runs on a JDK, so that gap comes first: %s", got)
 	}
+	// A fresh SDK: platform-tools first, typed by the person, because the
+	// install is what writes the licence now and an older sdkmanager asks
+	// for one. Asking for --licenses first was a gate nothing opened.
 	tc := tools()
-	if got := gaps(tc); got != "the Android SDK's licences accepted | env JAVA_HOME=/jvm/17 /sdk/sdkmanager --licenses" {
-		t.Errorf("no licences: %s", got)
+	gs := Gaps(r, tc, ExecutorNative)
+	if got := gaps(tc); got != "Android platform-tools | env JAVA_HOME=/jvm/17 /sdk/sdkmanager platform-tools" || len(gs[0].Fix) != 0 {
+		t.Errorf("fresh: %s, fix %v", got, gs[0].Fix)
 	}
 	tc.AndroidLicensed = true
-	if got := gaps(tc); got != "Android platform-tools | env JAVA_HOME=/jvm/17 /sdk/sdkmanager platform-tools" {
-		t.Errorf("no platform-tools: %s", got)
+	gs = Gaps(r, tc, ExecutorNative)
+	if got := gaps(tc); got != "Android platform-tools | env JAVA_HOME=/jvm/17 /sdk/sdkmanager platform-tools" || len(gs[0].Fix) != 1 {
+		t.Errorf("licensed, no platform-tools: %s, latem should run it: %v", got, gs[0].Fix)
 	}
-	tc.AndroidPlatformTools = true
+	tc.AndroidLicensed, tc.AndroidPlatformTools = false, true
+	if got := gaps(tc); got != "the Android SDK's licences accepted | env JAVA_HOME=/jvm/17 /sdk/sdkmanager --licenses" {
+		t.Errorf("platform-tools from elsewhere, no licences: %s", got)
+	}
+	tc.AndroidLicensed = true
 	if got := gaps(tc); got != `Android platform 36 | env JAVA_HOME=/jvm/17 /sdk/sdkmanager "platforms;android-36"` {
 		t.Errorf("no platform: %s", got)
 	}

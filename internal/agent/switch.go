@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
@@ -18,6 +19,11 @@ import (
 // is running. So a stray signal is a question with the answer "current", and
 // the thing that decides what runs next is the file on disk, exactly as it is
 // for a restart.
+//
+// The same binary is moved onto too when the last reload read changes to
+// config.toml that only a restart applies — a runner's labels or env (A74).
+// That is a restart that never cancels a run, which is what `latem setup`
+// asks for after it writes one.
 //
 // The move is §20's, arranged rather than observed: stop claiming, wait for
 // what is in flight, re-exec in place. Two things differ from the daily
@@ -94,33 +100,50 @@ func (a *Agent) Switch(ctx context.Context) {
 		a.answerSwitch(SwitchFailed, "", 0, fmt.Errorf("asking %s its version: %w", target, err))
 		return
 	}
+	restart := false
 	if to == a.version {
-		// Nothing to move onto, and still a nudge from someone who may have
-		// changed the machine under it — installed an Xcode, accepted a
-		// licence — so it looks again at what it has (A59).
-		a.log.Info("SIGUSR2: the binary on disk is the one running; probing toolchains again",
-			"version", to, "path", target)
-		a.answerSwitch(SwitchCurrent, to, 0, nil)
-		a.reprobeToolchains()
-		return
+		pending := a.pendingRestart()
+		if len(pending) == 0 {
+			// Nothing to move onto, and still a nudge from someone who may
+			// have changed the machine under it — installed an Xcode, accepted
+			// a licence — so it looks again at what it has (A59).
+			a.log.Info("SIGUSR2: the binary on disk is the one running; probing toolchains again",
+				"version", to, "path", target)
+			a.answerSwitch(SwitchCurrent, to, 0, nil)
+			a.reprobeToolchains()
+			return
+		}
+		// The last reload read changes only a restart applies (A74): the same
+		// binary, re-executed, starts on the file as it is.
+		restart = true
+		a.log.Info("SIGUSR2: restarting in place once nothing is running, for what the last reload did not apply",
+			"version", to, "not_applied", pending)
 	}
 	if a.switching.Swap(true) {
 		// A second request while the first waits is the same request.
 		a.answerSwitch(SwitchWaiting, to, a.activeRuns(), nil)
 		return
 	}
-	go a.switchWhenIdle(ctx, target, to)
+	go a.switchWhenIdle(ctx, target, to, restart)
+}
+
+// pendingRestart is what the last reload read and did not apply.
+func (a *Agent) pendingRestart() []string {
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
+	return slices.Clone(a.deferred)
 }
 
 // switchWhenIdle waits for idleness and re-execs. It returns only if the
-// re-exec failed or the agent is shutting down.
-func (a *Agent) switchWhenIdle(ctx context.Context, target, to string) {
+// re-exec failed or the agent is shutting down. restart is a re-exec of the
+// same binary for config.toml's sake.
+func (a *Agent) switchWhenIdle(ctx context.Context, target, to string, restart bool) {
 	defer a.switching.Store(false)
 	a.log.Info("moving onto the binary on disk once nothing is running",
 		"running", a.version, "to", to, "path", target, "runs", a.activeRuns())
 
 	if a.quiesce(ctx, a.shutdownGrace, to) {
-		a.reexecInto(target, to)
+		a.moveInto(target, to, restart)
 		return
 	}
 	a.resumeClaims()
@@ -140,7 +163,7 @@ func (a *Agent) switchWhenIdle(ctx context.Context, target, to string) {
 			continue
 		}
 		if a.quiesce(ctx, 0, to) {
-			a.reexecInto(target, to)
+			a.moveInto(target, to, restart)
 			return
 		}
 		a.resumeClaims()
@@ -161,6 +184,27 @@ func (a *Agent) quiesce(ctx context.Context, bound time.Duration, to string) boo
 		a.answerSwitch(SwitchWaiting, to, n, nil)
 	}
 	return a.awaitIdle(ctx, bound)
+}
+
+// moveInto re-execs into target. A restart for config.toml reads the file
+// once more first: one that no longer loads would leave a service manager
+// starting an agent that exits, so the agent keeps running instead, and one
+// whose restart-only changes were undone has nothing left to restart for.
+func (a *Agent) moveInto(target, to string, restart bool) {
+	if restart {
+		deferred, err := a.Reload()
+		switch {
+		case err != nil:
+			a.answerSwitch(SwitchFailed, to, 0, fmt.Errorf("config.toml no longer loads, so the agent did not restart: %w", err))
+			a.resumeClaims()
+			return
+		case len(deferred) == 0:
+			a.answerSwitch(SwitchCurrent, to, 0, nil)
+			a.resumeClaims()
+			return
+		}
+	}
+	a.reexecInto(target, to)
 }
 
 // reexecInto replaces this process with target. On success it does not
@@ -214,7 +258,9 @@ var ErrCannotSwitch = errors.New("the running agent does not move onto a new bin
 const DefaultSwitchWait = 30 * time.Second
 
 // SignalSwitch asks the agent holding paths.Lock to move onto the binary at its
-// own path, and returns its answer (A56). It returns once the agent reports
+// own path, and returns its answer (A56). An agent already running want is
+// asked anyway when its last reload left something for a restart (A74), and
+// re-executes the same binary. It returns once the agent reports
 // running want, or waiting, current, or failed — whichever comes first.
 //
 // It signals only an agent that has said it handles SIGUSR2, by writing a
@@ -232,7 +278,7 @@ func SignalSwitch(paths config.Paths, want string, wait time.Duration) (ReloadSt
 	if err != nil || pid == 0 || before.PID != pid || before.Version == "" {
 		return before, fmt.Errorf("%w (pid %d)", ErrCannotSwitch, pid)
 	}
-	if before.Version == want {
+	if before.Version == want && len(before.Deferred) == 0 {
 		return before, nil
 	}
 	asked := 0
