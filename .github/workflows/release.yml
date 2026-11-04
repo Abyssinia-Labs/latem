@@ -264,10 +264,15 @@ jobs:
             exit 1
           fi
 
+  # The signing key is the release environment's, which only a v* tag can
+  # use and which waits for a maintainer to approve: a workflow changed on a
+  # branch cannot reach it, and a tag pushed by mistake signs nothing until a
+  # person says so.
   sign:
     needs: [build, smoke]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    environment: release
     steps:
       - uses: actions/checkout@v5
         with:
