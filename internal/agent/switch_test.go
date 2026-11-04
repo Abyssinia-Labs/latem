@@ -127,6 +127,82 @@ func TestSwitch_TheSameVersionIsCurrent(t *testing.T) {
 	}
 }
 
+// A runner's labels are read once, at start (§8). After a reload that
+// deferred one, the same binary re-executed is the restart that applies it,
+// and it waits for runs the way a move does (A74).
+func TestSwitch_RestartsInPlaceForWhatAReloadDeferred(t *testing.T) {
+	execed := make(chan string, 2)
+	cfg := newConfigDir(t, configOptions{})
+	ta := newTestAgent(t, cfg, func(o *Options) {
+		o.BinaryVersion = func(context.Context, string) (string, error) { return "test", nil }
+		o.Exec = func(path string, _, _ []string) error { execed <- path; return nil }
+	})
+	ta.run(t)
+
+	// Nothing deferred: the same version is current, as before.
+	ta.Switch(context.Background())
+	time.Sleep(claimSettle + 200*time.Millisecond)
+	if len(execed) != 0 {
+		t.Fatal("an agent with nothing deferred restarted")
+	}
+
+	appendConfig(t, cfg, `
+[[runner]]
+name     = "second"
+executor = "docker"
+labels   = ["second"]
+
+  [runner.docker]
+  default_image = "alpine:3"
+`)
+	if deferred, err := ta.Reload(); err != nil || len(deferred) == 0 {
+		t.Fatalf("reload = %v, %v; want the new runner deferred", deferred, err)
+	}
+	ta.Switch(context.Background())
+	select {
+	case <-execed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent did not restart for the runner its reload deferred")
+	}
+	st, err := ReadReloadStatus(cfg.Paths.ReloadStatus)
+	if err != nil || st.Switch == nil || st.Switch.State != SwitchNow {
+		t.Errorf("status = %+v, %v; want switching", st.Switch, err)
+	}
+}
+
+// A file broken between the reload and the restart would leave a service
+// manager starting an agent that exits. The agent keeps running instead.
+func TestSwitch_ARestartForAFileThatNoLongerLoadsFails(t *testing.T) {
+	execed := make(chan string, 2)
+	cfg := newConfigDir(t, configOptions{})
+	ta := newTestAgent(t, cfg, func(o *Options) {
+		o.BinaryVersion = func(context.Context, string) (string, error) { return "test", nil }
+		o.Exec = func(path string, _, _ []string) error { execed <- path; return nil }
+	})
+	ta.run(t)
+	appendConfig(t, cfg, "\n[[runner]]\nname = \"second\"\nexecutor = \"docker\"\nlabels = [\"second\"]\n\n  [runner.docker]\n  default_image = \"alpine:3\"\n")
+	if _, err := ta.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	appendConfig(t, cfg, "\nthis is not toml\n")
+	ta.Switch(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ := ReadReloadStatus(cfg.Paths.ReloadStatus)
+		if st.Switch != nil && st.Switch.State == SwitchFailed {
+			if len(execed) != 0 {
+				t.Error("the agent re-execed onto a config that does not load")
+			}
+			if ta.paused.Load() {
+				t.Error("the agent stopped taking work after a restart it did not do")
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the agent did not say why it did not restart")
+}
+
 func TestSwitch_ABinaryThatWillNotSayItsVersionFails(t *testing.T) {
 	f := newSwitchFixture(t, "", time.Minute)
 	f.failTo = errors.New("exec format error")
@@ -208,7 +284,7 @@ func TestSignalSwitch(t *testing.T) {
 		t.Helper()
 		st.PID = os.Getpid()
 		a := &Agent{cfg: &config.Config{Paths: config.Paths{ReloadStatus: path}}, log: testLogger(t),
-			now: time.Now, startedAt: st.Started, version: st.Version, switchState: st.Switch}
+			now: time.Now, startedAt: st.Started, version: st.Version, switchState: st.Switch, deferred: st.Deferred}
 		a.writeStatus()
 	}
 	locked := func(t *testing.T, p config.Paths) {
@@ -243,6 +319,24 @@ func TestSignalSwitch(t *testing.T) {
 			t.Errorf("got %v, want ErrCannotSwitch", err)
 		}
 		noSignal(t)
+	})
+
+	t.Run("an agent running it with a restart pending", func(t *testing.T) {
+		p := newPaths(t)
+		locked(t, p)
+		write(t, p.ReloadStatus, ReloadStatus{Started: time.Now(), Version: "v0.4.0",
+			Deferred: []string{`runner "macos" was changed`}})
+		go func() {
+			select {
+			case <-usr2:
+				write(t, p.ReloadStatus, ReloadStatus{Started: time.Now().Add(time.Second), Version: "v0.4.0"})
+			case <-time.After(5 * time.Second):
+			}
+		}()
+		got, err := SignalSwitch(p, "v0.4.0", 5*time.Second)
+		if err != nil || len(got.Deferred) != 0 {
+			t.Errorf("got %+v, %v; want the agent restarted with nothing deferred", got, err)
+		}
 	})
 
 	t.Run("an agent already running it", func(t *testing.T) {

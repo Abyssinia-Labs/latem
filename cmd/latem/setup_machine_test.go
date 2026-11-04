@@ -18,7 +18,9 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
@@ -401,6 +403,72 @@ func TestInstallCmdlineTools_RefusesABadArchive(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(filepath.Dir(dest), "evil")); err == nil {
 				t.Error("wrote outside the destination")
+			}
+		})
+	}
+}
+
+// fakeSwitch replaces the SIGUSR2 path for one test and records what it was
+// asked to run.
+func fakeSwitch(t *testing.T, answer func(want string) (agent.ReloadStatus, error)) *[]string {
+	t.Helper()
+	var asked []string
+	prev := signalSwitch
+	signalSwitch = func(_ config.Paths, want string, _ time.Duration) (agent.ReloadStatus, error) {
+		asked = append(asked, want)
+		return answer(want)
+	}
+	t.Cleanup(func() { signalSwitch = prev })
+	return &asked
+}
+
+// What setup writes reaches the agent while setup's screen is still up: a
+// reload for what one applies, and a restart that waits for runs for a
+// runner's labels, which only a restart reads (A74).
+func TestTakeConfig(t *testing.T) {
+	paths := config.DerivePaths(t.TempDir())
+	deferred := []string{`runner "host" was changed`}
+	cases := []struct {
+		name   string
+		reload func(config.Paths) (agent.ReloadStatus, error)
+		sw     func(string) (agent.ReloadStatus, error)
+		asked  int
+		want   string
+	}{
+		{"no agent", func(config.Paths) (agent.ReloadStatus, error) { return agent.ReloadStatus{}, agent.ErrNoAgent },
+			nil, 0, "No agent is running"},
+		{"reloaded", func(config.Paths) (agent.ReloadStatus, error) { return agent.ReloadStatus{Version: "v1"}, nil },
+			nil, 0, "The agent has it."},
+		{"refused", func(config.Paths) (agent.ReloadStatus, error) {
+			return agent.ReloadStatus{Version: "v1", Error: "line 3: bad"}, nil
+		}, nil, 0, "kept the config it had: line 3: bad"},
+		{"restarted", func(config.Paths) (agent.ReloadStatus, error) {
+			return agent.ReloadStatus{Version: "v1", Deferred: deferred}, nil
+		}, func(string) (agent.ReloadStatus, error) { return agent.ReloadStatus{Version: "v1"}, nil }, 1, "restarted with it"},
+		{"busy", func(config.Paths) (agent.ReloadStatus, error) {
+			return agent.ReloadStatus{Version: "v1", Deferred: deferred}, nil
+		}, func(string) (agent.ReloadStatus, error) {
+			return agent.ReloadStatus{Switch: &agent.SwitchState{State: agent.SwitchWaiting, Runs: 2}}, nil
+		}, 1, "once 2 runs finish"},
+		{"too old to restart itself", func(config.Paths) (agent.ReloadStatus, error) {
+			return agent.ReloadStatus{Version: "v1", Deferred: deferred}, nil
+		}, func(string) (agent.ReloadStatus, error) { return agent.ReloadStatus{}, agent.ErrCannotSwitch }, 1, "latem service restart"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeReload(t, tc.reload)
+			asked := fakeSwitch(t, func(want string) (agent.ReloadStatus, error) {
+				if tc.sw == nil {
+					t.Fatal("asked the agent to restart with nothing deferred")
+				}
+				return tc.sw(want)
+			})
+			got := takeConfig(paths)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("takeConfig = %q, want it to say %q", got, tc.want)
+			}
+			if len(*asked) != tc.asked || (tc.asked > 0 && (*asked)[0] != "v1") {
+				t.Errorf("asked to switch %v, want %d time(s) to the version it runs", *asked, tc.asked)
 			}
 		})
 	}

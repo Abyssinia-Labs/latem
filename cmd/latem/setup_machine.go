@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/system"
@@ -248,12 +249,12 @@ func runSetupScreen(cmd *cobra.Command, deps toolchainDeps) (bool, error) {
 				return err
 			})
 		},
-		apply: func(changes []readiness.Change) error {
+		apply: func(changes []readiness.Change) (string, error) {
 			if err := applyChanges(changes); err != nil {
-				return err
+				return "", err
 			}
 			changed = true
-			return nil
+			return takeConfig(config.DerivePaths(configDir())), nil
 		},
 		shell: func(title string, lines []string) error {
 			return t.suspend(func() error { return openShell(ctx, in, stdout, title, lines) })
@@ -358,8 +359,8 @@ func textError(s string) error {
 }
 
 // applyChanges writes changes to config.toml, one edit at a time so each
-// reads the file as the one before left it, and tells a running agent. An
-// edit that would make the config unloadable is refused by editConfig.
+// reads the file as the one before left it. An edit that would make the
+// config unloadable is refused by editConfig. takeConfig tells the agent.
 func applyChanges(changes []readiness.Change) error {
 	paths := config.DerivePaths(configDir())
 	for _, c := range changes {
@@ -372,6 +373,46 @@ func applyChanges(changes []readiness.Change) error {
 		}
 	}
 	return nil
+}
+
+// switchWait bounds how long setup's screen waits for the agent to restart
+// for a change: an idle one has done it in a few seconds, and a busy one says
+// so as soon as it has stopped taking work.
+var switchWait = 15 * time.Second
+
+// takeConfig tells a running agent what setup just wrote to config.toml, and
+// says in a line what came of it, for a screen that cannot print. Most of
+// what setup writes is a runner's labels or env, which a reload reads and
+// leaves for a restart, so the agent is asked to restart in place once
+// nothing is running (A74). Setup used to leave that to its service step,
+// and a setup left before it was a machine whose screen said Android was on
+// and whose agent never sent it an Android job.
+func takeConfig(paths config.Paths) string {
+	st, err := signalReload(paths, agent.DefaultReloadWait)
+	switch {
+	case errors.Is(err, agent.ErrNoAgent):
+		return "No agent is running; the next to start reads it."
+	case errors.Is(err, agent.ErrCannotReload):
+		return "The running agent cannot reload; `latem service restart` applies it."
+	case err != nil:
+		return fmt.Sprintf("The agent was not told (%v); `latem service restart` applies it.", err)
+	case st.Error != "":
+		return "The agent refused it and kept the config it had: " + st.Error
+	case len(st.Deferred) == 0:
+		return "The agent has it."
+	}
+	sw, err := signalSwitch(paths, st.Version, switchWait)
+	switch {
+	case errors.Is(err, agent.ErrCannotSwitch):
+		return "The running agent cannot restart itself; `latem service restart` applies it."
+	case err != nil:
+		return "The agent was asked to restart for it once nothing is running."
+	case sw.Switch != nil && sw.Switch.State == agent.SwitchWaiting:
+		return fmt.Sprintf("The agent restarts for it once %d run%s finish.", sw.Switch.Runs, plural(sw.Switch.Runs))
+	case sw.Switch != nil && sw.Switch.State == agent.SwitchFailed:
+		return "The agent did not restart for it: " + sw.Switch.Error
+	}
+	return "The agent restarted with it."
 }
 
 func applyChange(body string, cfg *config.Config, c readiness.Change) (string, error) {
