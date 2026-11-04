@@ -3364,3 +3364,27 @@ each release running on the Javas it lists. Java 27 needs Gradle 9.8.0, and Expo
 a build that called itself `desktop-preview-35-g8c6c3eb` had no version A56 could compare with a
 release.
 
+### Amendment from a job queued across a reboot
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A75 | §6, §7.4, A52, A72 | **A workflow job that came through an agent restart asks for its tokens again, in its `resume` entry, and waits up to 90 seconds for them before it runs. Protocol 2.7.** | A52 and A72 keep a job's GitHub token and its fetch token in memory, never in the database, so a job queued across a restart ran with neither: GITHUB_TOKEN became the machine's own secret of that name, if it had one, and the job fetched with the machine's credential. On the desktop, which reboots to its login screen and keeps its GitHub login in a keyring that opens at login, that is a fetch that fails in under a second with `could not read Username` |
+
+**Asking.** `resume.runs[].needs_tokens` is true for a run that is a workflow job from a control
+plane (not `latem run`), `queued` or `claimed`, and holds neither token. It goes to any control
+plane: `resume` is sent before `hello` says what the other side speaks, and the control plane's
+decoder of `resume` reads the fields it knows. No token is written down to make this work; A52's
+reason stands.
+
+**Answering.** The control plane replays the job's `run` command, through the same delivery as
+every replay, and that delivery mints both tokens as it does for any `run`. It does so only for a
+run that is non-terminal on its side. A replayed `run` for a run the agent has already claimed hands
+over the tokens and leaves the run where it is: queued again, it would be a claimed run in the
+queue.
+
+**Waiting.** A run created before this process started, from a control plane, with no tokens,
+waits up to 90 seconds before it begins, and says in its log what came of it: the tokens came after
+N seconds, or none came and it fetches with the machine's credential. That is the behaviour it had
+before, reached a minute and a half later. A job this process received never waits, nor does one
+that still holds a token.
+

@@ -52,6 +52,16 @@ func TestConformance_AgentEmissions(t *testing.T) {
 	// and is docs/PROTOCOL.md §5.1's first trap.
 	seed(t, db, "r-alpha", protocol.StateRunning)
 	seed(t, db, "r-beta", protocol.StateQueued)
+	// A workflow job that came through a restart with neither of its tokens,
+	// so the corpus carries needs_tokens (A75).
+	if err := db.Create(ctx, store.Run{
+		ID: "r-gamma", Repo: "myapp", Job: "web", Ref: "refs/heads/main",
+		State: protocol.StateQueued, OriginKind: "webhook", CreatedAt: time.Now(),
+		Workflow: &store.WorkflowRun{Workflow: ".github/workflows/checks.yml",
+			SHA: "3bf12613f4a2a8f9d24a5e0c1b7d9e3a5c8f0b21", WorkflowRunID: "wr-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// A non-zero resume point, so the corpus carries a uint64 on the wire
 	// somewhere other than a log sequence. docs/PROTOCOL.md §5.8 records that

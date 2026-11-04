@@ -114,7 +114,53 @@ func (o *Orchestrator) Execute(ctx context.Context, r store.Run) (Result, error)
 	req.Token = o.store.Token(r.ID)
 	req.FetchToken = o.store.FetchToken(r.ID)
 	x := &execution{o: o, req: req, run: r, h: h, started: o.now()}
+	if req.Token == "" && req.FetchToken == "" && o.restored(r) {
+		x.awaitTokens(runCtx)
+	}
 	return x.drive(runCtx), nil
+}
+
+// tokenWait bounds how long a job that came through a restart waits for the
+// control plane to send it fresh tokens (A75). The resume that asks for them
+// is the first frame of the connection, so they come within seconds of the
+// machine reaching the network; this is for a machine that reached it late.
+var tokenWait = 90 * time.Second
+
+// restored reports a workflow job from a control plane that this process did
+// not receive: it came through a restart, and its tokens, held in memory
+// only, did not. A `latem run` job never had any.
+func (o *Orchestrator) restored(r store.Run) bool {
+	return r.Workflow != nil && r.OriginKind != "cli" && r.CreatedAt.Before(o.startedAt)
+}
+
+// awaitTokens waits for the tokens the resume asked for (A75) and says in the
+// job's log what came of it. Without them it goes on as before: GITHUB_TOKEN
+// is the machine's, and its fetches use the machine's credential, which a
+// machine still at its login screen may not have.
+func (x *execution) awaitTokens(ctx context.Context) {
+	start := x.o.now()
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	deadline := time.NewTimer(tokenWait)
+	defer deadline.Stop()
+	for {
+		token, fetch := x.o.store.Token(x.run.ID), x.o.store.FetchToken(x.run.ID)
+		if token != "" || fetch != "" {
+			x.req.Token, x.req.FetchToken = token, fetch
+			x.emitLater("the agent restarted after this job arrived; the control plane sent its tokens again after %s",
+				x.o.now().Sub(start).Round(time.Second))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			x.emitLater("the agent restarted after this job arrived, and no fresh tokens came within %s; "+
+				"it fetches with this machine's own credential", tokenWait)
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // drive is the §11 state machine for one run.

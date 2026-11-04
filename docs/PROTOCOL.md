@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.6"`.
+in both directions carries it**. The current value is `"2.7"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -276,6 +276,14 @@ said 2.6 or later, because an older one decodes inbound commands strictly and wo
 refuse the frame. Nothing about it is required: without one the agent fetches with
 the machine's credential, as before. A control plane answers a 2.6 agent's hello
 with 2.6.
+
+**2.7 (amendment A75)** added `resume.runs[].needs_tokens` (§4.1): a workflow job
+that came through an agent restart, still `queued` or just `claimed`, holding
+neither its job token nor its fetch token, which live in the agent's memory only.
+The control plane answers by sending the job's `run` command again, which brings
+fresh ones. The agent sends it to any control plane: `resume` goes before `hello`
+says what one speaks, and a decoder of `resume` reads the fields it knows. A
+control plane answers a 2.7 agent's hello with 2.7.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -548,7 +556,7 @@ empty `id` is discarded.
 ```json
 {
   "kind": "resume",
-  "protocol_version": "2.6",
+  "protocol_version": "2.7",
   "resume": {
     "machine_id": "mac-mini-01",
     "runs": [{ "run_id": "r-alpha", "state": "running", "last_acked_seq": 4200 }]
@@ -567,6 +575,7 @@ No `id`; **no ack is expected or wanted**.
 | `runs[].run_id` | string | |
 | `runs[].state` | string | One of §11's thirteen (2.0 added `skipped`). |
 | `runs[].last_acked_seq` | number (uint64) | **This transport's own** position, never the machine's. |
+| `runs[].needs_tokens` | boolean, omitted when false | A workflow job, `queued` or `claimed`, that lost its tokens to a restart (2.7, A75). |
 
 The server owes two things in reply:
 
@@ -589,6 +598,7 @@ sends it when it cannot read the real value: the server re-sends from 1 and its
 | `queued`, unclaimed | no | Replay the `run` command. |
 | past `queued` | no | **Do not replay.** Mark unaccounted and wait. |
 | any non-terminal | yes | Adopt the agent's state; replay a pending `cancel`; resume logs at `last_acked_seq + 1`. |
+| non-terminal, and the agent says `needs_tokens` | yes, `queued` or `claimed` | Replay the `run` command: its delivery mints fresh tokens. A run the agent has claimed takes them and stays claimed (A75). |
 | terminal | either | Nothing. |
 | unknown to this server | yes | Report it; do not adopt. Nothing here can invent an intent. |
 

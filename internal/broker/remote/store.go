@@ -50,6 +50,10 @@ type Store interface {
 	HoldToken(runID, token string)
 	// HoldFetchToken keeps the token its fetches use in memory (A72).
 	HoldFetchToken(runID, token string)
+	// Token and FetchToken say whether a run still holds its tokens, for
+	// the resume frame (A75).
+	Token(runID string) string
+	FetchToken(runID string) string
 	Enqueue(ctx context.Context, runID string, priority int) error
 	SetExpiry(ctx context.Context, runID string, at time.Time) error
 
