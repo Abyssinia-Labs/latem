@@ -165,9 +165,9 @@ func TestPlanThisRepositorysCheckMatrix(t *testing.T) {
 	if err != nil {
 		t.Skip("no workflows checked out")
 	}
-	aliases := map[string][]string{"blacksmith-4vcpu-ubuntu-2404": {"linux"}, "blacksmith-6vcpu-macos-15": {"macos"}}
+	// GitHub-hosted labels, which latem reads as linux and macos with no alias.
 	plan := mustPlan(t, map[string]string{"ci.yml": string(data)},
-		protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{LabelAliases: aliases})
+		protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{})
 	var checks []protocol.PlannedJob
 	for _, j := range plan[0].Jobs {
 		if j.Key == "check" {
@@ -178,7 +178,7 @@ func TestPlanThisRepositorysCheckMatrix(t *testing.T) {
 		t.Fatalf("check planned as %d jobs, want one per platform", len(checks))
 	}
 	for i, want := range []struct{ name, label string }{
-		{"check (blacksmith-4vcpu-ubuntu-2404)", "linux"}, {"check (blacksmith-6vcpu-macos-15)", "macos"},
+		{"check (ubuntu-24.04)", "linux"}, {"check (macos-15)", "macos"},
 	} {
 		if c := checks[i]; c.Error != "" || c.Name != want.name || !slices.Equal(c.Labels, []string{want.label}) ||
 			c.Strategy == nil || c.Strategy.FailFast {
