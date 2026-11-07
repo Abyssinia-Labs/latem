@@ -1183,6 +1183,7 @@ Retention: `agent.log_retention` (default 14d), enforced by the daily ticker. Lo
 - Copied to `~/.latem/artifacts/<run-id>/`, preserving relative paths.
 - Retention per declaration, enforced daily.
 - Only `ArtifactRef{name, size, sha256}` is reported to a broker. Content never crosses the boundary (§5).
+- `latem artifacts <run-id>` is how an operator finds a file: it prints each recorded artifact with its path under `artifacts/<run-id>/` on this machine, and copying it off is theirs to do. It stats each file and opens none, and a file retention has removed is shown as missing, because the record outlives it.
 - Large-artifact hygiene: `.ipa` and `.aab` files are 50–300 MB. Default total artifact budget 50 GB, evicted oldest-first, surfaced in `latem doctor`.
 
 ---
@@ -1292,6 +1293,7 @@ latem agent                          Run the daemon (foreground; service wrapper
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
+latem artifacts <run-id>             A run's recorded artifacts and their local paths; reads no content (§17)
 latem cancel <run-id>
 latem approve <run-id>               Local-only; pins the run's commit (INV-5)
 latem register [--url U] [--token-file F]   Write config + machine token, verify connectivity; no token: approve in the browser (A54)

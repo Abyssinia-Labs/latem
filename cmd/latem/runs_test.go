@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,36 @@ func TestListSaysSoWhenNothingMatches(t *testing.T) {
 	}
 }
 
+// On a terminal the state is the one coloured column, because somebody
+// scanning `latem list` is looking for the failed run. It used to be found by
+// position, so inserting # before it (A36) left every state plain, and no test
+// noticed: every other test here sees piped output, which has no colour.
+func TestListColoursTheStateOnATerminal(t *testing.T) {
+	var out bytes.Buffer
+	writeRuns(&out, styler{color: true}, []store.Run{{
+		ID: "r_one", Number: 7, State: protocol.StateFailed, Repo: "app", Job: "test", Ref: "main",
+	}})
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want a header and one row, got:\n%s", out.String())
+	}
+	if !strings.Contains(lines[1], ansiRed+"failed"+ansiReset) {
+		t.Errorf("the failed state is not coloured:\n%q", lines[1])
+	}
+	// Columns line up under their headers once the escapes are discounted.
+	header, row := lines[0], lines[1]
+	for _, col := range []struct{ name, cell string }{{"#", "7"}, {"STATE", "failed"}, {"REPO", "app"}} {
+		hi, ci := strings.Index(header, col.name), strings.Index(row, col.cell)
+		if hi < 0 || ci < 0 {
+			t.Fatalf("want %s over %q:\n%s\n%s", col.name, col.cell, header, row)
+		}
+		if h, c := visibleLen(header[:hi]), visibleLen(row[:ci]); h != c {
+			t.Errorf("%s starts at column %d in the header and %d in the row:\n%s\n%s", col.name, h, c, header, row)
+		}
+	}
+}
+
 // `latem logs` reads the file the pipeline wrote, and a run nobody has heard
 // of exits 1 rather than printing nothing and exiting 0.
 func TestLogsReadsTheFileAndTail(t *testing.T) {
@@ -495,6 +526,154 @@ func TestApproveMovesAParkedRunToQueued(t *testing.T) {
 	}
 	if _, _, err := execCommand(t, "approve", "r_nosuchrun"); exitCode(err) != ExitFailure {
 		t.Errorf("approving an unknown run = %v, want exit 1", err)
+	}
+}
+
+// `latem artifacts` is the only supported way to find a build's output, since
+// content never leaves the machine (§17). So the path it prints must be the
+// real one, and a file retention has taken must say so rather than hand
+// somebody a path that leads nowhere.
+func TestArtifacts(t *testing.T) {
+	const (
+		sumAPK = "1111111111111111111111111111111111111111111111111111111111111111"
+		sumMap = "2222222222222222222222222222222222222222222222222222222222222222"
+	)
+	expires := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	apk := protocol.ArtifactRef{Path: "android/app-release.apk", SizeBytes: 184 << 20, SHA256: sumAPK, ExpiresAt: &expires}
+	mapping := protocol.ArtifactRef{Path: "android/mapping.txt", SizeBytes: 2048, SHA256: sumMap}
+
+	tests := []struct {
+		name  string
+		args  []string
+		state protocol.RunState // the zero value seeds no run at all
+		refs  []protocol.ArtifactRef
+		files []string // declared paths that are still on disk
+
+		wantCode int
+		// wantRows are stdout's lines after the header, with @ standing for
+		// the run's directory under the artifact store.
+		wantRows   [][]string
+		wantStderr string
+		wantErr    string
+	}{
+		{
+			name:     "unknown run",
+			wantCode: ExitFailure,
+			wantErr:  "no run r_art on this machine",
+		},
+		{
+			name:     "a run id that is a path",
+			args:     []string{"artifacts", "../r_art"},
+			wantCode: ExitUsage,
+			wantErr:  "invalid run id",
+		},
+		{
+			name:       "finished with no artifacts",
+			state:      protocol.StateSucceeded,
+			wantStderr: "r_art recorded no artifacts",
+		},
+		{
+			name:       "still running",
+			state:      protocol.StateRunning,
+			wantStderr: "it is running, and they are recorded as it finishes",
+		},
+		{
+			name:  "every file present",
+			state: protocol.StateSucceeded,
+			refs:  []protocol.ArtifactRef{mapping, apk},
+			files: []string{apk.Path, mapping.Path},
+			wantRows: [][]string{
+				{apk.Path, "192937984", sumAPK, expires.Local().Format(time.RFC3339), "@/android/app-release.apk"},
+				{mapping.Path, "2048", sumMap, "-", "@/android/mapping.txt"},
+			},
+		},
+		{
+			name:  "one file pruned since it was recorded",
+			state: protocol.StateSucceeded,
+			refs:  []protocol.ArtifactRef{apk, mapping},
+			files: []string{mapping.Path},
+			wantRows: [][]string{
+				{apk.Path, "192937984", sumAPK, expires.Local().Format(time.RFC3339), artifactMissing},
+				{mapping.Path, "2048", sumMap, "-", "@/android/mapping.txt"},
+			},
+			wantStderr: "1 of 2 recorded files are no longer on this machine",
+		},
+		{
+			// The collector never records such a path. If one is in the store
+			// anyway, printing it would hand out a file outside the run.
+			name:     "a recorded path outside the run",
+			state:    protocol.StateSucceeded,
+			refs:     []protocol.ArtifactRef{{Path: "../../config.toml", SizeBytes: 1, SHA256: sumMap}},
+			wantCode: ExitFailure,
+			wantErr:  "refusing to resolve it",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newClientConfigDir(t)
+			db := clientStore(t, dir)
+			runDir := filepath.Join(dir, "artifacts", "r_art")
+			if tc.state != "" {
+				seedCLIRun(t, db, "r_art", tc.state)
+				if err := db.RecordArtifacts(context.Background(), "r_art", tc.refs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, rel := range tc.files {
+				path := filepath.Join(runDir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			args := tc.args
+			if args == nil {
+				args = []string{"artifacts", "r_art"}
+			}
+			stdout, stderr, err := execCommand(t, args...)
+
+			if tc.wantCode != 0 {
+				if got := exitCode(err); err == nil || got != tc.wantCode {
+					t.Fatalf("exit = %v (code %d), want code %d", err, got, tc.wantCode)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %v, want it to say %q", err, tc.wantErr)
+				}
+				if stdout != "" {
+					t.Errorf("a failure printed a listing:\n%s", stdout)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("exit = %v, want 0", err)
+			}
+			if !strings.Contains(stderr, tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to say %q", stderr, tc.wantStderr)
+			}
+
+			if tc.wantRows == nil {
+				// The note is on stderr, so a pipeline sees nothing at all.
+				if stdout != "" {
+					t.Errorf("stdout should be empty with no artifacts: %q", stdout)
+				}
+				return
+			}
+			want := []string{"PATH\tSIZE\tSHA256\tEXPIRES\tLOCAL PATH"}
+			for _, row := range tc.wantRows {
+				cells := append([]string(nil), row...)
+				if last := cells[len(cells)-1]; strings.HasPrefix(last, "@/") {
+					cells[len(cells)-1] = filepath.Join(runDir, filepath.FromSlash(last[2:]))
+				}
+				want = append(want, strings.Join(cells, "\t"))
+			}
+			if got := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n"); !slices.Equal(got, want) {
+				t.Errorf("stdout:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
 	}
 }
 
