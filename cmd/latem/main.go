@@ -135,6 +135,7 @@ func newRootCommand() *cobra.Command {
 		newRunCommand(),
 		newListCommand(),
 		newLogsCommand(),
+		newArtifactsCommand(),
 		newCancelCommand(),
 		newApproveCommand(),
 		newRegisterCommand(),

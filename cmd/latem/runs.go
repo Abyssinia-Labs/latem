@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -111,6 +113,43 @@ Exit codes:
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "stream new lines as they arrive")
 	cmd.Flags().IntVarP(&tail, "tail", "n", 0, "print only the last N lines before following")
+	return cmd
+}
+
+func newArtifactsCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "artifacts <run-id>",
+		Short: "List a run's artifacts and where they are on this machine",
+		Long: `List the artifacts a run collected, and where each one is on this machine.
+
+An artifact stays on the machine that built it. A broker is told its path,
+size and digest and never its content (§17), which is why a control plane can
+name an .apk but cannot hand it to you. The paths printed here are local ones:
+copy a file off with cp or scp. Nothing is read to print them — the size and
+sha256 are the ones recorded at collection.
+
+Output is one artifact per line, tab-separated, so it composes with cut and awk:
+
+  PATH    SIZE    SHA256    EXPIRES    LOCAL PATH
+
+LOCAL PATH is the last column, so cut -f5 gives the files to copy. Piped, SIZE
+is in bytes and SHA256 is whole; on a terminal both are shortened for reading.
+EXPIRES is when the declared retain runs out, and a dash means none.
+
+A record is not a promise that the file is still there. Retention deletes a
+file when its retain runs out and evicts whole runs, oldest first, to stay
+inside the artifact budget, and the record outlives both. A file that has gone
+shows as missing rather than as a path that leads nowhere.
+
+Exit codes:
+  0  the listing was printed (including a run with no artifacts)
+  1  no such run
+  2  usage`,
+		Args: runIDArg,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return listArtifacts(cmd, args[0])
+		},
+	}
 	return cmd
 }
 
@@ -412,6 +451,157 @@ func printLog(cmd *cobra.Command, st *state, runID string, tailLines int) error 
 	}
 	printf(cmd.OutOrStdout(), "%s", lastLines(string(data), tailLines))
 	return nil
+}
+
+// artifactMissing is what LOCAL PATH says for a recorded file that is no
+// longer on disk. A word rather than a dash: a dash says there is no value,
+// and this is one — the build's output was here, and something has taken it.
+const artifactMissing = "missing"
+
+// listArtifacts prints a run's recorded artifacts and their paths on this
+// machine (§17).
+func listArtifacts(cmd *cobra.Command, runID string) error {
+	ctx := cmd.Context()
+	st, closeState, err := openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+
+	// Artifacts answers an unknown run with nothing, the same answer it gives
+	// a run that declared none. Somebody who mistyped an id needs to be told,
+	// so the run is looked up first.
+	r, err := st.db.Get(ctx, runID)
+	if isNotFound(err) {
+		return noSuchRun(runID)
+	}
+	if err != nil {
+		return err
+	}
+
+	refs, err := st.db.Artifacts(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		// Not an error, and not silence either: an empty listing on its own
+		// cannot say whether the build is still going.
+		if r.State.IsTerminal() {
+			printf(cmd.ErrOrStderr(), "%s recorded no artifacts — its job declares none, or none matched\n", runID)
+		} else {
+			printf(cmd.ErrOrStderr(), "%s has no artifacts yet — it is %s, and they are recorded as it finishes\n",
+				runID, r.State)
+		}
+		return nil
+	}
+
+	out := cmd.OutOrStdout()
+	sty := newStyler(out)
+	header := []string{"PATH", "SIZE", "SHA256", "EXPIRES", "LOCAL PATH"}
+	rows := make([][]string, 0, len(refs))
+	missing := 0
+	for _, a := range refs {
+		local, err := localArtifactPath(st.cfg.Paths.Artifacts, runID, a.Path)
+		if err != nil {
+			return err
+		}
+		if local == "" {
+			local = artifactMissing
+			missing++
+		}
+		// Piped, the values are exact, because a script compares them. On a
+		// terminal they are for reading, and a 64-character digest in the
+		// middle of a row pushes the path anyone came for off the screen.
+		size, sum := strconv.FormatInt(a.SizeBytes, 10), a.SHA256
+		if sty.color {
+			size, sum = formatBytes(a.SizeBytes), shortSHA(a.SHA256)
+		}
+		rows = append(rows, []string{a.Path, size, sum, artifactExpiry(a.ExpiresAt), local})
+	}
+
+	if !sty.color {
+		printf(out, "%s\n", strings.Join(header, "\t"))
+		for _, row := range rows {
+			printf(out, "%s\n", strings.Join(row, "\t"))
+		}
+	} else {
+		widths := make([]int, len(header))
+		for i, h := range header {
+			widths[i] = len(h)
+		}
+		for _, row := range rows {
+			for i, cell := range row {
+				if n := visibleLen(cell); n > widths[i] {
+					widths[i] = n
+				}
+			}
+		}
+
+		var b strings.Builder
+		for i, h := range header {
+			b.WriteString(sty.column(sty.dim(h), widths[i]+2))
+		}
+		printf(out, "%s\n", strings.TrimRight(b.String(), " "))
+
+		for _, row := range rows {
+			b.Reset()
+			for i, cell := range row {
+				text := cell
+				if i == len(row)-1 && cell == artifactMissing {
+					text = sty.bad(cell)
+				}
+				b.WriteString(sty.column(text, widths[i]+2))
+			}
+			printf(out, "%s\n", strings.TrimRight(b.String(), " "))
+		}
+	}
+
+	if missing > 0 {
+		printf(cmd.ErrOrStderr(),
+			"%d of %d recorded files are no longer on this machine — retention removed them, or somebody did (§17)\n",
+			missing, len(refs))
+	}
+	return nil
+}
+
+// localArtifactPath resolves a recorded artifact to its file on this machine,
+// or "" when that file is no longer there.
+//
+// A stat and nothing more. The file is not opened, because nothing this
+// command prints comes from its content (§17).
+//
+// A recorded path that is not local is refused rather than resolved. The
+// collector never records one that escapes the workspace, so this is a row
+// nothing should have written — and what this function returns is a path
+// somebody copies off the machine. Outside the run's directory, it could be
+// any file on it.
+func localArtifactPath(root, runID, rel string) (string, error) {
+	p := filepath.FromSlash(rel)
+	if !filepath.IsLocal(p) {
+		return "", fmt.Errorf("%s records an artifact at %q, outside its own directory — refusing to resolve it", runID, rel)
+	}
+	abs := filepath.Join(root, runID, p)
+	fi, err := os.Lstat(abs)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", nil
+	case err != nil:
+		return "", err
+	case !fi.Mode().IsRegular():
+		// The store holds copies, never links or directories, so whatever is
+		// at this path now is not the file that was recorded.
+		return "", nil
+	}
+	return abs, nil
+}
+
+// artifactExpiry is when a declared retain runs out, or a dash for an artifact
+// kept until the budget evicts it.
+func artifactExpiry(t *time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	return t.Local().Format(time.RFC3339)
 }
 
 // cancelRun stops a run (§11).

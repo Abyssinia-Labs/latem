@@ -922,8 +922,10 @@ typo fails the run that introduced it instead of silently doing something else.
 defaults to `bash`.
 
 `artifacts` is a list of globs relative to the workspace root, each with an
-optional `retain`. Collected files land in `~/.latem/artifacts/<run-id>/`;
-there is no subcommand to fetch them yet.
+optional `retain`. Collected files land in `~/.latem/artifacts/<run-id>/`
+and stay on that machine: a control plane is told each one's path, size and
+digest, never its content. `latem artifacts <run-id>` prints where each file is,
+and you copy it off with `cp` or `scp`.
 
 ## Commands
 
@@ -936,6 +938,7 @@ latem agent                          Run the daemon (foreground; see `latem serv
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
 latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f]
+latem artifacts <run-id>             what a run collected, with each file's path on this machine; reads no content
 latem cancel <run-id> [--reason R]
 latem approve <run-id>               Local only; pins that run's commit (INV-5)
 latem register [--url U] [--token-file F]   no token: approve this machine in the browser
