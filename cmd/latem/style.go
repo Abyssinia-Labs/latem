@@ -134,6 +134,42 @@ func (s styler) column(text string, width int) string {
 	return text + strings.Repeat(" ", width-visible)
 }
 
+// printAligned writes a table for a terminal: each column padded to its widest
+// cell, the header dimmed, trailing space trimmed.
+//
+// paint styles a cell, and is told its column by header name rather than by
+// position. `latem list` once coloured its state by index, and when # was
+// inserted before it (amendment A36) the colour moved onto the build number,
+// which paintState passes through plain — so the state lost its colour and
+// nothing looked wrong.
+func printAligned(out io.Writer, s styler, header []string, rows [][]string, paint func(column, cell string) string) {
+	widths := make([]int, len(header))
+	for i, h := range header {
+		widths[i] = visibleLen(h)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if n := visibleLen(cell); n > widths[i] {
+				widths[i] = n
+			}
+		}
+	}
+
+	var b strings.Builder
+	for i, h := range header {
+		b.WriteString(s.column(s.dim(h), widths[i]+2))
+	}
+	printf(out, "%s\n", strings.TrimRight(b.String(), " "))
+
+	for _, row := range rows {
+		b.Reset()
+		for i, cell := range row {
+			b.WriteString(s.column(paint(header[i], cell), widths[i]+2))
+		}
+		printf(out, "%s\n", strings.TrimRight(b.String(), " "))
+	}
+}
+
 // visibleLen is the printed width of s, ignoring ANSI escape sequences.
 func visibleLen(s string) int {
 	n, inEscape := 0, false

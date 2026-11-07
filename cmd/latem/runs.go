@@ -251,11 +251,6 @@ func (f listFilter) states() []protocol.RunState {
 	}
 }
 
-// listRuns prints one run per line, tab separated.
-//
-// Raw tabs rather than an aligned table, because the help promises output that
-// composes with cut and awk and a tabwriter's padding would make every column
-// position depend on the longest value in it.
 // runNumber renders [store.Run.Number] for the list.
 //
 // A dash rather than 0 for a run created before migration 0004: zero is a
@@ -268,6 +263,7 @@ func runNumber(r store.Run) string {
 	return strconv.FormatInt(r.Number, 10)
 }
 
+// listRuns prints the runs f matches, one per line.
 func listRuns(cmd *cobra.Command, f listFilter) error {
 	ctx := cmd.Context()
 	st, closeState, err := openState(ctx)
@@ -292,7 +288,17 @@ func listRuns(cmd *cobra.Command, f listFilter) error {
 		printf(cmd.ErrOrStderr(), "no runs match — `latem list --all` includes finished ones\n")
 		return nil
 	}
+	writeRuns(out, newStyler(out), runs)
+	return nil
+}
 
+// writeRuns renders runs for one destination: raw tabs when piped, aligned
+// columns on a terminal.
+//
+// Raw tabs rather than an aligned table when piped, because the help promises
+// output that composes with cut and awk and a tabwriter's padding would make
+// every column position depend on the longest value in it.
+func writeRuns(out io.Writer, sty styler, runs []store.Run) {
 	rows := make([][]string, 0, len(runs))
 	for _, r := range runs {
 		started := "-"
@@ -305,8 +311,7 @@ func listRuns(cmd *cobra.Command, f listFilter) error {
 	}
 	header := []string{"RUN ID", "#", "STATE", "REPO", "JOB", "REF", "STARTED", "DURATION"}
 
-	st2 := newStyler(out)
-	if !st2.color {
+	if !sty.color {
 		// Piped, redirected, or NO_COLOR. Stay exactly as before: raw tabs, so
 		// the output still composes with cut and awk as the help promises. A
 		// tabwriter's padding would make every column position depend on the
@@ -315,43 +320,19 @@ func listRuns(cmd *cobra.Command, f listFilter) error {
 		for _, row := range rows {
 			printf(out, "%s\n", strings.Join(row, "\t"))
 		}
-		return nil
+		return
 	}
 
 	// A terminal. Align the columns and colour the state, because a human
 	// scanning twenty runs is looking for the failed one and nothing else.
 	// State keeps its word as well as its colour: colour is decoration here,
 	// never the only carrier of meaning.
-	widths := make([]int, len(header))
-	for i, h := range header {
-		widths[i] = len(h)
-	}
-	for _, row := range rows {
-		for i, cell := range row {
-			if n := len(cell); n > widths[i] {
-				widths[i] = n
-			}
+	printAligned(out, sty, header, rows, func(column, cell string) string {
+		if column == "STATE" {
+			return sty.paintState(protocol.RunState(cell))
 		}
-	}
-
-	var b strings.Builder
-	for i, h := range header {
-		b.WriteString(st2.column(st2.dim(h), widths[i]+2))
-	}
-	printf(out, "%s\n", strings.TrimRight(b.String(), " "))
-
-	for _, row := range rows {
-		b.Reset()
-		for i, cell := range row {
-			text := cell
-			if i == 1 {
-				text = st2.paintState(protocol.RunState(cell))
-			}
-			b.WriteString(st2.column(text, widths[i]+2))
-		}
-		printf(out, "%s\n", strings.TrimRight(b.String(), " "))
-	}
-	return nil
+		return cell
+	})
 }
 
 // refOf prefers the normalized ref, because that is what policy matched and
@@ -525,35 +506,12 @@ func listArtifacts(cmd *cobra.Command, runID string) error {
 			printf(out, "%s\n", strings.Join(row, "\t"))
 		}
 	} else {
-		widths := make([]int, len(header))
-		for i, h := range header {
-			widths[i] = len(h)
-		}
-		for _, row := range rows {
-			for i, cell := range row {
-				if n := visibleLen(cell); n > widths[i] {
-					widths[i] = n
-				}
+		printAligned(out, sty, header, rows, func(column, cell string) string {
+			if column == "LOCAL PATH" && cell == artifactMissing {
+				return sty.bad(cell)
 			}
-		}
-
-		var b strings.Builder
-		for i, h := range header {
-			b.WriteString(sty.column(sty.dim(h), widths[i]+2))
-		}
-		printf(out, "%s\n", strings.TrimRight(b.String(), " "))
-
-		for _, row := range rows {
-			b.Reset()
-			for i, cell := range row {
-				text := cell
-				if i == len(row)-1 && cell == artifactMissing {
-					text = sty.bad(cell)
-				}
-				b.WriteString(sty.column(text, widths[i]+2))
-			}
-			printf(out, "%s\n", strings.TrimRight(b.String(), " "))
-		}
+			return cell
+		})
 	}
 
 	if missing > 0 {

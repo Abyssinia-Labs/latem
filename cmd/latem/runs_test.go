@@ -273,6 +273,36 @@ func TestListSaysSoWhenNothingMatches(t *testing.T) {
 	}
 }
 
+// On a terminal the state is the one coloured column, because somebody
+// scanning `latem list` is looking for the failed run. It used to be found by
+// position, so inserting # before it (A36) left every state plain, and no test
+// noticed: every other test here sees piped output, which has no colour.
+func TestListColoursTheStateOnATerminal(t *testing.T) {
+	var out bytes.Buffer
+	writeRuns(&out, styler{color: true}, []store.Run{{
+		ID: "r_one", Number: 7, State: protocol.StateFailed, Repo: "app", Job: "test", Ref: "main",
+	}})
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want a header and one row, got:\n%s", out.String())
+	}
+	if !strings.Contains(lines[1], ansiRed+"failed"+ansiReset) {
+		t.Errorf("the failed state is not coloured:\n%q", lines[1])
+	}
+	// Columns line up under their headers once the escapes are discounted.
+	header, row := lines[0], lines[1]
+	for _, col := range []struct{ name, cell string }{{"#", "7"}, {"STATE", "failed"}, {"REPO", "app"}} {
+		hi, ci := strings.Index(header, col.name), strings.Index(row, col.cell)
+		if hi < 0 || ci < 0 {
+			t.Fatalf("want %s over %q:\n%s\n%s", col.name, col.cell, header, row)
+		}
+		if h, c := visibleLen(header[:hi]), visibleLen(row[:ci]); h != c {
+			t.Errorf("%s starts at column %d in the header and %d in the row:\n%s\n%s", col.name, h, c, header, row)
+		}
+	}
+}
+
 // `latem logs` reads the file the pipeline wrote, and a run nobody has heard
 // of exits 1 rather than printing nothing and exiting 0.
 func TestLogsReadsTheFileAndTail(t *testing.T) {
