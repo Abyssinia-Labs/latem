@@ -65,6 +65,15 @@ func (a *Agent) updateLoop(ctx context.Context) {
 	if !a.cfg.Agent.AutoUpdate {
 		return
 	}
+	if link, ok := a.homebrew(); ok {
+		// Homebrew's keg is Homebrew's to replace; [Agent.homebrewLoop]
+		// follows what it installs instead (A78). Said once, at start, and by
+		// doctor whenever it runs.
+		a.log.Warn("agent.auto_update is on, and this binary is Homebrew's, so it does not replace itself; "+
+			"`brew upgrade latem` updates it, and the agent moves onto what that installs",
+			"link", link)
+		return
+	}
 	src, err := a.releases()
 	if err != nil {
 		// The config loader refuses auto_update on a build with no trusted

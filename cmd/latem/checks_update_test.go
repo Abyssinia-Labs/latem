@@ -110,3 +110,22 @@ func TestDoctorSelfUpdate_NoConfig(t *testing.T) {
 		t.Fatalf("a failed config load gave %+v, want one skip", got)
 	}
 }
+
+// On a Homebrew install the agent never replaces itself, so auto_update
+// promises something this machine will not do. It is a warning rather than a
+// failure: the machine does stay current, through `brew upgrade` (A78).
+func TestDoctorSelfUpdate_OnAHomebrewInstallIsAWarning(t *testing.T) {
+	d := updateDoctor(t, true)
+	d.homebrew = func() (string, bool) { return "/opt/homebrew/opt/latem/bin/latem", true }
+	d.latestRelease = func(context.Context) (selfupdate.Release, error) {
+		t.Fatal("doctor asked the feed about a release the agent will not install")
+		return selfupdate.Release{}, nil
+	}
+	got := d.checkSelfUpdate(context.Background())
+	if len(got) != 1 || got[0].Level != levelWarn {
+		t.Fatalf("got %+v, want one warning", got)
+	}
+	if !strings.Contains(strings.Join(got[0].Fix, "\n"), "brew upgrade latem") {
+		t.Errorf("fix = %q, want `brew upgrade latem`", got[0].Fix)
+	}
+}

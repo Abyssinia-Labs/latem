@@ -1306,7 +1306,7 @@ latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem cache ls | prune | rm <name>
-latem update [--check]               Install the latest release; the agent moves onto it when idle (A56)
+latem update [--check]               Install the latest release; the agent moves onto it when idle (A56). Refused for a Homebrew install, which `brew upgrade latem` updates (A78)
 latem version
 ```
 
@@ -1353,6 +1353,8 @@ The five things that turn that sentence into something implementable, each recor
 **A build that trusts no signing key refuses `auto_update = true` at load.** The signing key is embedded at build time, so this is a property of the binary rather than of the machine: a `go build` from a tree whose `internal/selfupdate/trusted.pub` is still the placeholder can verify nothing, and would check a feed daily and decline every release into a log nobody reads. That is the same decision A27 made about an approval that recorded nothing and A38 made about a documented `~` no executor expanded — **a control that reads as a control and does nothing is worse than an absent one**, because it stops the operator looking. The refusal is narrow: it is keyed on the key, not on the calendar, so a release binary accepts the value and a hand-built one does not.
 
 **By hand, and the notice.** `latem update` is the same chain run once, on request, against the binary the command runs from; SIGUSR2 then moves the running agent onto it without cancelling a run. Every other command says once a day, on a terminal, when a newer release exists. A build from commits after a tag compares as newer than that tag. Amendment A56.
+
+**Homebrew's.** A binary in a Homebrew keg is Homebrew's to replace. `latem update` and `auto_update` write nothing into the keg, and the notice names `brew upgrade latem`; the agent moves onto what that installs by itself, at the first moment no run is in flight. Amendment A78.
 
 **Metrics.** INV-1 forbids binding a non-loopback listener; it does not forbid loopback. `metrics_addr` (default `127.0.0.1:9838`, empty to disable) serves counters and gauges — runs by terminal state, run duration, queue depth, cache volume sizes, disk free per runner, broker connection state, log frames dropped. The config loader rejects a non-loopback value, so the invariant is enforced where it cannot be forgotten. Anyone wanting these off-machine points a local Prometheus at it or tunnels; the agent does not grow a remote surface for observability.
 
@@ -1533,6 +1535,8 @@ Three things `latem doctor` must verify and explain, because getting any of them
 **Directory and file modes**, created by the installer and enforced at startup: `~/.latem` is `0700`; `config.toml`, `secrets.env`, and the token file are `0600`; `agent.sock` is `0600`. The agent refuses to start otherwise rather than warning, because a world-readable directory holding a machine token and every secret is the threat model failing silently.
 
 **Install script** `curl -fsSL … | sh`: detect OS/arch, download the matching binary, verify checksum, place in `~/.local/bin`, run `latem doctor`, print the next command. Never run as root.
+
+**Homebrew** `brew install abyssinia-labs/tap/latem` installs the same release archive. The service a Homebrew binary installs starts `<prefix>/opt/latem/bin/latem`, the link each `brew upgrade` moves, not the keg the next one deletes (A78).
 
 ---
 
@@ -3390,3 +3394,46 @@ N seconds, or none came and it fetches with the machine's credential. That is th
 before, reached a minute and a half later. A job this process received never waits, nor does one
 that still holds a token.
 
+### Amendment from Homebrew
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A78 | §19, §20, §23, A41, A56, A74 | **A latem in a Homebrew keg is Homebrew's to update. Its service starts Homebrew's opt link rather than the keg, `latem update` and `auto_update` write nothing into the keg, and the agent moves onto whatever the link leads to after `brew upgrade`, at the first moment no run is in flight.** | latem is to install with `brew install abyssinia-labs/tap/latem`. Three things resolve the running binary through symlinks. That is right for `~/.local/bin`, which is sometimes a link into a versioned directory, and wrong for a keg. A service pointing at `Cellar/latem/0.3.1/bin/latem` starts nothing once `brew upgrade` deletes that keg, which it does by default. A release renamed into the keg is a version Homebrew reports as another and then deletes. And SIGUSR2's "the binary at the agent's own path" is the keg the agent already runs |
+
+**Recognising one.** A binary is Homebrew's when its path, resolved, is
+`<prefix>/Cellar/latem/<version>/bin/latem` and `<prefix>/opt/latem/bin/latem` leads to a file. An
+unresolvable path is read as written, because Linux names a deleted executable by the path it had:
+an agent whose keg was just deleted still comes from that keg. A keg-shaped path with no opt link
+is not Homebrew's, since nothing would keep a service's path working.
+
+**The service.** `latem service install` and `latem setup` write the opt link as the binary to
+start. `--exec` still wins. Linking the opt path rather than resolving it is exactly what the rule
+in `serviceSpec` exists to prevent elsewhere, a service pointing at a link someone later moves, and
+it is right here because the agent follows the link.
+
+**Updating.** `latem update` refuses and names `brew upgrade latem`. `--check` changes nothing
+anywhere, so it still answers, and names the same command. So does the once-a-day notice. The
+loader still accepts `auto_update = true`: config.toml does not say how its binary was installed,
+and a machine moved from install.sh to Homebrew must still start. On a Homebrew binary the setting
+does nothing; the agent says so once at start, and `latem doctor` warns, because a setting that
+promises what the machine will not do is A27's control that reads as one.
+
+**Following an upgrade.** An agent in a keg reads the opt link once a minute and acts only when it
+leads somewhere new. It asks that binary its version, as SIGUSR2 does (A56), and moves onto a
+different one at the first moment no run is in flight. Unlike SIGUSR2, it never stops claiming to
+make that moment. `brew upgrade` is something the operator did to the machine, not a request to
+give up builds for it, so a machine that is never idle stays on the old version and says it is
+waiting. A keg of the same version (`brew reinstall`) is nothing to move for. A link that leads
+to a binary that will not say its version is logged once, and asked again only when the link moves
+again. SIGUSR2 sent to such an agent also asks the link rather than the keg. On an install that is
+not Homebrew's, nothing is watched.
+
+**Not `brew services`.** The formula has no `service` block. `latem service install` writes the
+service (§23), and a second LaunchAgent for the same config directory would contend for its lock
+(§6).
+
+**Trust.** Homebrew checks the sha256 each formula carries. The tap takes those from the release's
+checksums manifest only after verifying its minisign signature against a pinned copy of
+`internal/selfupdate/trusted.pub`. So a Homebrew install rests on the same signature as install.sh's,
+verified once by the tap rather than on each machine. A key rotation (docs/release.md §2) updates
+the tap's copy in the same release.
