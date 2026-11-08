@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Abyssinia-Labs/latem/internal/broker/local"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/store"
@@ -136,11 +139,13 @@ func execCommand(t *testing.T, args ...string) (string, string, error) {
 	return out.String(), errBuf.String(), err
 }
 
-// `latem run` with no agent listening queues the run and exits 0 (§7.3). The
-// run id goes to stdout alone so it can be captured; the "nothing will start
-// it" notice goes to stderr, where it cannot corrupt `id=$(latem run …)`.
+// `latem run` from a script, with no agent listening, queues the run and
+// exits 0 (§7.3). The run id goes to stdout alone so it can be captured; the
+// "nothing will start it" notice goes to stderr, where it cannot corrupt
+// `id=$(latem run …)`, whose stdout is not a terminal (A81).
 func TestRunQueuesWithNoAgentAndExitsZero(t *testing.T) {
 	dir := newClientConfigDir(t)
+	fakeTerminal(t, false)
 
 	stdout, stderr, err := execCommand(t, "run", "app", "test")
 	if err != nil {
@@ -202,6 +207,219 @@ func TestRunWaitWithNoAgentExitsThree(t *testing.T) {
 	if len(rows) != 0 {
 		t.Errorf("%d runs were queued by a command that reported E_AGENT_DOWN", len(rows))
 	}
+}
+
+// fakeTerminal says whether `latem run`'s stdout is a terminal (A81).
+func fakeTerminal(t *testing.T, is bool) {
+	t.Helper()
+	prev := stdoutIsTerminal
+	stdoutIsTerminal = func(*cobra.Command) bool { return is }
+	t.Cleanup(func() { stdoutIsTerminal = prev })
+}
+
+// fakeRunAgent listens on dir's socket as an agent's local broker does, and
+// takes each run it is handed to running, writes log, and then finishes it
+// as finish says. finish nil leaves it running. The log comes after running
+// so that a test which has seen the log knows the run is running.
+func fakeRunAgent(t *testing.T, dir string, db *store.DB, log string, finish *protocol.RunState) {
+	t.Helper()
+	b, err := local.Open(local.Options{Socket: filepath.Join(dir, "agent.sock"), Store: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmds, err := b.Commands(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); _ = b.Close(); <-done })
+	go func() {
+		defer close(done)
+		for c := range cmds {
+			if c.Run == nil {
+				continue
+			}
+			id := c.Run.ID
+			if err := db.Claim(ctx, id); err != nil {
+				t.Error(err)
+				return
+			}
+			for _, s := range []protocol.RunState{protocol.StatePreparing, protocol.StateRunning} {
+				if err := db.Transition(ctx, id, s, protocol.Update{}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := os.WriteFile(filepath.Join(dir, "logs", id+".log"), []byte(log), 0o600); err != nil {
+				t.Error(err)
+				return
+			}
+			if finish == nil {
+				continue
+			}
+			for _, s := range []protocol.RunState{protocol.StateCollecting, *finish} {
+				if err := db.Transition(ctx, id, s, protocol.Update{}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}
+	}()
+}
+
+// A person at a terminal gets the build, not "queued" and exit 0 (A81): a
+// bare `latem run` follows, as --follow does, and exits as the run did.
+func TestRunFollowsOnATerminal(t *testing.T) {
+	for _, tc := range []struct {
+		finish protocol.RunState
+		code   int
+	}{
+		{protocol.StateSucceeded, ExitOK},
+		{protocol.StateFailed, ExitFailure},
+	} {
+		t.Run(string(tc.finish), func(t *testing.T) {
+			dir := newClientConfigDir(t)
+			db := clientStore(t, dir)
+			fakeTerminal(t, true)
+			fakeRunAgent(t, dir, db, "step one\nstep two\n", &tc.finish)
+
+			stdout, _, err := execCommand(t, "run", "app", "test")
+			if got := exitCode(err); got != tc.code {
+				t.Fatalf("a %s run on a terminal exited %d (%v), want %d", tc.finish, got, err, tc.code)
+			}
+			id, log, _ := strings.Cut(stdout, "\n")
+			if err := protocol.ValidateID(id); err != nil {
+				t.Errorf("the first line should be the run id: %q", stdout)
+			}
+			if log != "step one\nstep two\n" {
+				t.Errorf("the run's log should follow the id on stdout, got %q", log)
+			}
+		})
+	}
+}
+
+// Following by default keeps --follow's exit 3 and queues nothing, so the
+// run does not start hours later unwatched; the error says how to queue it.
+func TestRunOnATerminalWithNoAgentExitsThree(t *testing.T) {
+	dir := newClientConfigDir(t)
+	fakeTerminal(t, true)
+
+	stdout, _, err := execCommand(t, "run", "app", "test")
+	if got := exitCode(err); got != ExitAgentDown {
+		t.Fatalf("exit code = %d (%v), want %d (E_AGENT_DOWN)", got, err, ExitAgentDown)
+	}
+	if !strings.Contains(err.Error(), string(protocol.ErrAgentDown)) || !strings.Contains(err.Error(), "--detach") {
+		t.Errorf("the error should name the code and the way to queue it anyway: %v", err)
+	}
+	if stdout != "" {
+		t.Errorf("nothing should reach stdout when nothing was queued: %q", stdout)
+	}
+	rows, err := clientStore(t, dir).List(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("%d runs were queued by a command that reported E_AGENT_DOWN", len(rows))
+	}
+}
+
+// --detach is a script's `latem run` at a terminal: the id alone on stdout,
+// queued with no agent, exit 0.
+func TestRunDetachQueuesOnATerminal(t *testing.T) {
+	dir := newClientConfigDir(t)
+	fakeTerminal(t, true)
+
+	stdout, stderr, err := execCommand(t, "run", "app", "test", "--detach")
+	if err != nil {
+		t.Fatalf("latem run --detach with no agent = %v, want exit 0", err)
+	}
+	id := strings.TrimSpace(stdout)
+	if err := protocol.ValidateID(id); err != nil {
+		t.Fatalf("stdout %q is not a bare run id: %v", stdout, err)
+	}
+	if !strings.Contains(stderr, "agent not running") {
+		t.Errorf("stderr should say nothing will start it yet:\n%s", stderr)
+	}
+	r, err := clientStore(t, dir).Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("the run was not durably queued: %v", err)
+	}
+	if r.State != protocol.StateQueued {
+		t.Errorf("state = %s, want queued", r.State)
+	}
+}
+
+// --detach exits at once, so it cannot also wait.
+func TestRunDetachRefusesWaitAndFollow(t *testing.T) {
+	newClientConfigDir(t)
+	for _, flag := range []string{"--wait", "--follow"} {
+		if _, _, err := execCommand(t, "run", "app", "test", "--detach", flag); exitCode(err) != ExitUsage {
+			t.Errorf("--detach %s exited %d (%v), want %d", flag, exitCode(err), err, ExitUsage)
+		}
+	}
+}
+
+// Ctrl-C while following stops the watching, not the run, and says so
+// rather than "context canceled".
+func TestRunInterruptedWhileFollowingLeavesTheRun(t *testing.T) {
+	dir := newClientConfigDir(t)
+	db := clientStore(t, dir)
+	fakeTerminal(t, true)
+	fakeRunAgent(t, dir, db, "step one\n", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root := newRootCommand()
+	var out lockedBuffer
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"run", "app", "test"})
+	result := make(chan error, 1)
+	go func() { result <- root.ExecuteContext(ctx) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(out.String(), "step one") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the log never arrived; stdout %q", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	err := <-result
+	if err == nil || !strings.Contains(err.Error(), "stopped watching") || !strings.Contains(err.Error(), "latem cancel") {
+		t.Fatalf("an interrupted follow = %v, want it to say the run goes on and how to stop it", err)
+	}
+	id, _, _ := strings.Cut(out.String(), "\n")
+	r, err := db.Get(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != protocol.StateRunning {
+		t.Errorf("state = %s; Ctrl-C should leave the run running", r.State)
+	}
+}
+
+// lockedBuffer is a bytes.Buffer one goroutine writes while another reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // `latem list` defaults to the runs something might still happen to, and the

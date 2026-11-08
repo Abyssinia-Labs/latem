@@ -28,7 +28,7 @@ The two registries share a shape worth stealing:
   a debug target and proves the machine and the toolchain before any signing
   identity is involved. It is the job to run first on a new runner.
 - **A release job that declares its secrets by name.** The values live on the
-  machine, resolved through the chain in the README, and never appear in the
+  machine, resolved through the chain in [`docs/secrets.md`](../docs/secrets.md), and never appear in the
   registry or in a log.
 - **Caches declared once at the top level** and referenced by name — CocoaPods
   and SPM for iOS, Gradle for Android — because the cost of a cold mobile build
@@ -41,5 +41,5 @@ into `config.toml`, and `latem doctor` lists them), point the `ci/` scripts at
 your project, and adjust the timeouts — the ones here are measured on a
 particular machine and are not a law.
 
-The README's [Writing a pipeline](../README.md#writing-a-pipeline) section is
+[Writing a pipeline](../docs/jobs.md#writing-a-pipeline) in `docs/jobs.md` is
 the shorter, non-mobile version of the same thing.

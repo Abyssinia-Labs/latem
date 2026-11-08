@@ -44,8 +44,8 @@ Stated plainly, because otherwise it wastes your time and ours.
 **The native executor has no isolation, by design.** A job on the native
 executor runs as the user the agent runs as, with that user's keychain and
 signing certificates, and can read and write anything that user can. This is
-documented in the README's first section and in RUNNER_SPEC §13.0, and it is why
-the choice of executor is described there as a question about *whose code runs
+documented in [docs/why.md](docs/why.md#1-your-machine-is-the-build-machine) and in
+RUNNER_SPEC §13.0, and it is why the choice of executor is described there as a question about *whose code runs
 on this machine* rather than about team size. A demonstration that a native job
 can reach the operator's files is the executor working as specified. Use the
 Docker executor, or Tart when it lands, for code you do not control.
