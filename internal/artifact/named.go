@@ -34,10 +34,25 @@ type Upload struct {
 	Include []string
 	Exclude []string
 	Retain  time.Duration
+	// Single is upload-artifact v7's `archive: false`: one file, kept as it
+	// is, and the artifact takes the file's name. Name is ignored (A77).
+	Single bool
 }
 
+// ErrNotSingle is an `archive: false` upload whose paths matched more than
+// one file, which upload-artifact refuses too.
+var ErrNotSingle = errors.New("artifact: archive: false uploads one file")
+
 // CollectNamed copies what Include matches, less what Exclude matches, into
-// <run>/<name>/ and reports each file as <name>/<path>.
+// <run>/<name>/ and reports each file as <name>/<path>. base is the directory
+// the patterns are relative to: the workspace, or the run's temporary
+// directory (A77).
+//
+// <path> is relative to the artifact's root, which is upload-artifact's own
+// rule (A77): the one directory the patterns search, or the deepest one all
+// of them share, or a lone file's own directory. `path: dist` stores
+// dist/app.bin as app.bin, as GitHub's zip has it, and a download puts it back
+// where GitHub's would.
 //
 // A literal that names a directory is taken as everything beneath it. That
 // looks like it contradicts A30, which refuses exactly that in a job's own
@@ -49,8 +64,8 @@ type Upload struct {
 // Every read goes through [Collector.Collect]'s path — Resolve for
 // containment, os.Root for the open — so this adds naming and subtraction and
 // nothing that touches the filesystem on its own terms.
-func (c *Collector) CollectNamed(ctx context.Context, runID, workspace string, up Upload) ([]protocol.ArtifactRef, error) {
-	if !ValidName(up.Name) {
+func (c *Collector) CollectNamed(ctx context.Context, runID, base string, up Upload) ([]protocol.ArtifactRef, error) {
+	if !up.Single && !ValidName(up.Name) {
 		return nil, registryErr("artifact name %q is not a plain name", up.Name)
 	}
 	runDir, err := c.Dir(runID)
@@ -58,15 +73,15 @@ func (c *Collector) CollectNamed(ctx context.Context, runID, workspace string, u
 		return nil, err
 	}
 
-	ws, err := os.OpenRoot(workspace)
+	ws, err := os.OpenRoot(base)
 	if err != nil {
-		return nil, artifactErr(unwrapPath(err), "opening the workspace")
+		return nil, artifactErr(unwrapPath(err), "opening %s", base)
 	}
 	defer func() { _ = ws.Close() }()
 
 	excluded := map[string]bool{}
 	for _, pat := range up.Exclude {
-		matches, err := Resolve(workspace, expandDir(ws, pat))
+		matches, err := Resolve(base, expandDir(ws, pat))
 		if err != nil {
 			return nil, err
 		}
@@ -77,8 +92,11 @@ func (c *Collector) CollectNamed(ctx context.Context, runID, workspace string, u
 
 	var order []string
 	seen := map[string]bool{}
+	searched := make([]string, 0, len(up.Include))
 	for _, pat := range up.Include {
-		matches, err := Resolve(workspace, expandDir(ws, pat))
+		expanded := expandDir(ws, pat)
+		searched = append(searched, expanded)
+		matches, err := Resolve(base, expanded)
 		if err != nil {
 			return nil, err
 		}
@@ -94,9 +112,21 @@ func (c *Collector) CollectNamed(ctx context.Context, runID, workspace string, u
 		return nil, nil
 	}
 
-	dir := filepath.Join(runDir, up.Name)
+	name, root := up.Name, artifactRoot(searched, order)
+	if up.Single {
+		if len(order) > 1 {
+			return nil, artifactErr(ErrNotSingle, "archive: false uploads one file, and %d matched", len(order))
+		}
+		// The file's own name, as GitHub names an unarchived artifact.
+		name = path.Base(order[0])
+		if !ValidName(name) {
+			return nil, artifactErr(nil, "archive: false names the artifact after the file, and %q is not a plain name", name)
+		}
+	}
+
+	dir := filepath.Join(runDir, name)
 	if !within(runDir, dir) {
-		return nil, artifactErr(nil, "artifact %q would be written outside %s", up.Name, runDir)
+		return nil, artifactErr(nil, "artifact %q would be written outside %s", name, runDir)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, artifactErr(err, "creating %s", dir)
@@ -110,9 +140,14 @@ func (c *Collector) CollectNamed(ctx context.Context, runID, workspace string, u
 	refs := make([]protocol.ArtifactRef, 0, len(order))
 	for _, rel := range order {
 		if err := ctx.Err(); err != nil {
-			return nil, artifactErr(err, "collecting artifact %q", up.Name)
+			return nil, artifactErr(err, "collecting artifact %q", name)
 		}
-		dst := filepath.Join(dir, filepath.FromSlash(rel))
+		stored := underRoot(root, rel)
+		if up.Single {
+			// The file is the artifact, wherever under the paths it was.
+			stored = name
+		}
+		dst := filepath.Join(dir, filepath.FromSlash(stored))
 		if !within(dir, dst) {
 			return nil, artifactErr(nil, "artifact %q would be written outside %s", rel, dir)
 		}
@@ -121,10 +156,84 @@ func (c *Collector) CollectNamed(ctx context.Context, runID, workspace string, u
 			return nil, err
 		}
 		refs = append(refs, protocol.ArtifactRef{
-			Path: up.Name + "/" + rel, SizeBytes: size, SHA256: sum, ExpiresAt: expires,
+			Path: name + "/" + stored, SizeBytes: size, SHA256: sum, ExpiresAt: expires,
 		})
 	}
 	return refs, nil
+}
+
+// artifactRoot is the directory an upload's files are stored relative to,
+// by upload-artifact's rule (its findFilesToUpload): each pattern searches
+// from its literal prefix, a search path inside another is dropped, two or
+// more keep their deepest common directory, and one that is itself the only
+// file matched gives way to that file's directory. "" is the base itself.
+//
+// patterns are as Resolve takes them and files as it returns them, both
+// relative to the same base, so the answer is a prefix of every file.
+func artifactRoot(patterns, files []string) string {
+	var searched []string
+	for _, p := range patterns {
+		p = path.Clean(strings.TrimSpace(p))
+		if p == "." {
+			p = ""
+		}
+		var lit []string
+		for _, seg := range strings.Split(p, "/") {
+			if strings.ContainsAny(seg, "*?[") {
+				break
+			}
+			lit = append(lit, seg)
+		}
+		searched = append(searched, strings.Join(lit, "/"))
+	}
+	var kept []string
+	for i, s := range searched {
+		inside := false
+		for j, other := range searched {
+			if i != j && contains(other, s) && (other != s || j < i) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			kept = append(kept, s)
+		}
+	}
+	switch {
+	case len(kept) == 0:
+		return ""
+	case len(kept) > 1:
+		common := strings.Split(kept[0], "/")
+		for _, s := range kept[1:] {
+			segs := strings.Split(s, "/")
+			n := 0
+			for n < len(common) && n < len(segs) && common[n] == segs[n] {
+				n++
+			}
+			common = common[:n]
+		}
+		return strings.Join(common, "/")
+	case len(files) == 1 && files[0] == kept[0]:
+		if d := path.Dir(files[0]); d != "." {
+			return d
+		}
+		return ""
+	}
+	return kept[0]
+}
+
+// contains reports whether dir is p or one of its ancestors; "" is the base,
+// which contains everything.
+func contains(dir, p string) bool {
+	return dir == "" || p == dir || strings.HasPrefix(p, dir+"/")
+}
+
+// underRoot is rel with the artifact's root taken off.
+func underRoot(root, rel string) string {
+	if root == "" || !strings.HasPrefix(rel, root+"/") {
+		return rel
+	}
+	return strings.TrimPrefix(rel, root+"/")
 }
 
 // expandDir turns a literal naming a directory into everything beneath it.
@@ -145,16 +254,17 @@ func expandDir(ws *os.Root, pattern string) string {
 // ErrNoSuchArtifact is a download of a name this run never uploaded.
 var ErrNoSuchArtifact = errors.New("artifact: no such artifact in this run")
 
-// Restore copies <run>/<name>/ back into the workspace at dest, which is what
-// `actions/download-artifact` means within one run (A49). An empty name
-// restores every artifact the run has, each under dest/<name>/, which is what
-// GitHub does with no name.
+// Restore copies <run>/<name>/ back into base at dest, which is what
+// `actions/download-artifact` means within one run (A49). base is the
+// workspace or the run's temporary directory (A77). An empty name restores
+// every artifact the run has, each under dest/<name>/, which is what GitHub
+// does with no name.
 //
-// Writes go through an os.Root scoped to the workspace, for the reason reads
-// do: the run's environment is alive and may have left a symlink where a
-// directory is about to be created, and the kernel refusing the traversal is
-// the only check that cannot lose that race.
-func (c *Collector) Restore(runID, workspace, name, dest string) (int, error) {
+// Writes go through an os.Root scoped to base, for the reason reads do: the
+// run's environment is alive and may have left a symlink where a directory is
+// about to be created, and the kernel refusing the traversal is the only
+// check that cannot lose that race.
+func (c *Collector) Restore(runID, base, name, dest string) (int, error) {
 	runDir, err := c.Dir(runID)
 	if err != nil {
 		return 0, err
@@ -189,9 +299,9 @@ func (c *Collector) Restore(runID, workspace, name, dest string) (int, error) {
 		return 0, registryErr("artifact name %q is not a plain name", name)
 	}
 
-	ws, err := os.OpenRoot(workspace)
+	ws, err := os.OpenRoot(base)
 	if err != nil {
-		return 0, artifactErr(unwrapPath(err), "opening the workspace")
+		return 0, artifactErr(unwrapPath(err), "opening %s", base)
 	}
 	defer func() { _ = ws.Close() }()
 

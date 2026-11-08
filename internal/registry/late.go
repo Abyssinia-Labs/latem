@@ -156,6 +156,19 @@ func validateLate(s Step, earlier map[string]bool) []error {
 			add("checkout token: %s", p)
 		}
 	}
+	if a := s.Artifact; a != nil && a.Late != nil {
+		for _, p := range refProblems(a.Late.Name, earlier) {
+			add("artifact name: %s", p)
+		}
+		for _, v := range append(append([]LateValue(nil), a.Late.Include...), a.Late.Exclude...) {
+			for _, p := range refProblems(v, earlier) {
+				add("artifact path: %s", p)
+			}
+		}
+		for _, p := range refProblems(a.Late.Path, earlier) {
+			add("artifact download path: %s", p)
+		}
+	}
 	return problems
 }
 

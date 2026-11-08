@@ -266,7 +266,9 @@ func TestExecute_UploadAndDownloadArtifactAtTheStep(t *testing.T) {
 		case "check":
 			// Read from inside the run, the way a later step would: the
 			// workspace is removed at teardown, so after Execute it is gone.
-			b, err := os.ReadFile(filepath.Join(h.source.root, runID, "restored", "out", "build.log"))
+			// `path: out` roots the artifact at out, as upload-artifact
+			// does, so the download puts build.log straight into restored.
+			b, err := os.ReadFile(filepath.Join(h.source.root, runID, "restored", "build.log"))
 			if err == nil {
 				restored = string(b)
 			}
@@ -294,7 +296,7 @@ jobs:
         with: {name: logs, path: restored}
       - name: check
         if: always()
-        run: cat restored/out/build.log
+        run: cat restored/build.log
 `)
 	h.writeWorkspaceFile(req.ID, "out/build.log", "it broke")
 	h.writeWorkspaceFile(req.ID, "out/.env", "SECRET=1")
@@ -311,7 +313,7 @@ jobs:
 	for _, a := range res.Artifacts {
 		paths = append(paths, a.Path)
 	}
-	if !slices.Equal(paths, []string{"logs/out/build.log"}) {
+	if !slices.Equal(paths, []string{"logs/build.log"}) {
 		t.Errorf("reported artifacts = %v, want only the log (the .env is hidden)", paths)
 	}
 	// Neither artifact step reached the executor: they are the run loop's.

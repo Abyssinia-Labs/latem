@@ -3394,6 +3394,52 @@ N seconds, or none came and it fetches with the machine's credential. That is th
 before, reached a minute and a half later. A job this process received never waits, nor does one
 that still holds a token.
 
+### Amendment from moving the release workflows
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A77 | §17, A49, A50, A52 | **An `upload-artifact` or `download-artifact` step's name and paths may read what is only known as it runs — a step's outputs, `runner.temp` — and are resolved then. A path may be in `runner.temp` as well as the workspace. upload-artifact v7's `archive: false` uploads one file, named after itself. An artifact's files are stored relative to the root upload-artifact gives them. A download that only another job's upload could satisfy is refused when the job is compiled** | `workflows check` refused nine release and deploy jobs in take-one and wake-cloud, each naming one of three forms: a name built from `steps.version.outputs.version`, a download into `${{ runner.temp }}/dmg`, and `archive: false`. The first refusal hid a second, because the shim stopped at the first input it could not take: the same steps' paths are `${{ runner.temp }}/export/*.ipa` and `${{ steps.dmg.outputs.path }}`. And the two Mac `publish` jobs, once their path was accepted, would have been admitted only to fail at the step, because what they download another job uploaded, on another machine |
+
+**At the step.** A name or path that reads `steps`, `runner` or `job` compiles into a late value,
+which the run loop resolves as the step is about to run, as it does an env value (A42). Once one
+`path:` line is late, every line is, so that the run loop places them together. A value that reads
+a secret or `github.token` is refused at compile time: names and paths are listed with the run's
+artifacts and reported to the control plane (§17). `archive:` decides what the step is, so it has
+to be known at admission. The outputs `artifact-id`, `artifact-url`, `artifact-digest` and
+`download-path` are folded at compile time when everything they depend on is known then, as A49
+had them, and are set by the run loop otherwise.
+
+**Where a path is.** A late path is the path as the step that wrote it sees it. A relative one is
+in the workspace. An absolute one is placed by prefix in the workspace or the run's temporary
+directory, spelled as the executor spells them (`Env.WorkspaceDir`, `Env.TempDir`) or as the host
+does, with or without its symlinks resolved; the longest match wins. Any other path, and `~`,
+fails the step with `E_ARTIFACT` and names the path. All of one upload's paths are in the same one
+of the two places. The agent reaches `runner.temp` only where it is a host directory
+(`executor.HostTemp`), which is native. Docker's is in the run's volume, inside Docker's VM on a
+Mac, so on docker such a step fails and says why. Reaching it through the archive API is possible
+later; no job that motivated this needs it. A path known at admission is still refused outside the
+workspace, as A49 had it, and the hidden-file default applies in either place.
+
+**`archive: false`.** One file, kept as it is. The artifact is named after the file, whatever
+`name:` says, and its digest is the file's. More than one match fails the step, as upload-artifact
+fails it. The file's name has to be a plain one, like every artifact name (§17).
+
+**The root.** A49 stored each file at its workspace path, so `path: dist` put dist/app.js at
+`<name>/dist/app.js`, and a download in the same job restored it to `<dest>/dist/app.js`. GitHub
+restores it to `<dest>/app.js`. Files are now stored relative to upload-artifact's root: the
+literal prefix of the one pattern, the deepest directory several patterns share, or a lone file's
+own directory. `latem artifacts` lists what GitHub's zip would hold. Artifacts stored before this
+change keep the layout they were stored with.
+
+**Across jobs.** A52 left artifacts across machines out, and a run is one job, so a download finds
+only what an earlier step of its own job uploaded. The compiler refuses a download that nothing
+earlier in the job could satisfy: no upload before it, or none under the name it asks for when
+both names are known at admission. The refusal names A52, so `workflows check` says it before a
+build instead of the step failing after one. On 2026-11-07 every `download-artifact` in the
+Abyssinia-Labs workflows was of this kind: take-one's and wake-cloud's Mac `publish`, antescript's
+`indexnow` and sokie's `publish`. They wait on artifacts crossing jobs, which means moving bytes
+between machines and is its own amendment.
+
 ### Amendment from Homebrew
 
 | # | Section | Change | Why |

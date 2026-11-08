@@ -221,6 +221,9 @@ type fakeEnv struct {
 	state      func(step executor.Step) map[string]string
 	actionsDir string
 	tempDir    string
+	// hostTemp, when set, makes tempDir a host directory the agent reaches
+	// as it is, as native's is (A77).
+	hostTemp bool
 	// puts is what PutTemp was handed, by name (A53).
 	puts map[string][]byte
 }
@@ -255,6 +258,15 @@ func (e *fakeEnv) EnvFile() string {
 func (e *fakeEnv) ActionsDir() string { return e.actionsDir }
 
 func (e *fakeEnv) TempDir() string { return e.tempDir }
+
+func (e *fakeEnv) HostTempDir() string {
+	if !e.hostTemp {
+		return ""
+	}
+	return e.tempDir
+}
+
+func (e *fakeEnv) WorkspaceDir() string { return e.spec.Workspace }
 
 func (e *fakeEnv) ToolCacheDir() string { return e.spec.ToolCache }
 

@@ -149,7 +149,12 @@ differently, and they follow from the model rather than from a shortcut:
 
 A path inside the workspace (`node_modules`) is refused, because a mount there
 would shadow the checkout — cache `~/.npm` instead. `upload-artifact` and
-`download-artifact` work too, collecting into §17's store when their step runs.
+`download-artifact` work too, collecting into §17's store when their step runs:
+from the workspace or `runner.temp` (native runners), with a name or path read
+from an earlier step's outputs, and v7's `archive: false`. A download finds what
+an earlier step of the same job uploaded; one of another job's artifacts is
+refused by name, because each job is its own run and its artifacts stay on the
+machine that ran it.
 
 **`uses: actions/checkout` is a step latem performs**, with no action fetched.
 Left bare, it checks out the run's commit — on a push, as the branch, with

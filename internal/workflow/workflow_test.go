@@ -479,14 +479,16 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 					if err == nil {
 						continue // a job with no uses: is allowed to compile
 					}
-					// Two honest refusals remain with no cache wired: an action
-					// that would have to be fetched, and this repository's own
-					// release.yml asking checkout for a different ref — which is
-					// `latem run --ref` here, and the shim says so.
+					// Three honest refusals remain with no cache wired: an
+					// action that would have to be fetched; this repository's
+					// own release.yml asking checkout for a different ref —
+					// which is `latem run --ref` here, and the shim says so; and
+					// its jobs that download what an earlier job built (A77).
 					msg := err.Error()
 					if !strings.Contains(msg, "no action cache") &&
 						!strings.Contains(msg, "latem has already checked this repository out") &&
-						!strings.Contains(msg, "latem does not implement yet") {
+						!strings.Contains(msg, "latem does not implement yet") &&
+						!strings.Contains(msg, "artifacts across jobs are not implemented") {
 						t.Errorf("job %q (leg %s) refused for an unexpected reason: %v", name, leg, err)
 					}
 				}
