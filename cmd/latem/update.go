@@ -176,8 +176,10 @@ func runUpdate(ctx context.Context, out io.Writer, checkOnly bool) error {
 
 // linkShortName puts ltm beside the binary at target, as a link to it, when
 // nothing of that name is there (A79): a machine installed before the short
-// name existed gets it from its next update. A file called ltm that is
-// anything else is somebody else's, and stays.
+// name existed gets it from its first update run by a binary that has this.
+// The run that installs that binary is still the old one's code, so from
+// v0.3.x it is the second. A file called ltm that is anything else is
+// somebody else's, and stays.
 func linkShortName(out io.Writer, target string) {
 	link := filepath.Join(filepath.Dir(target), shortName)
 	if _, err := os.Lstat(link); !errors.Is(err, fs.ErrNotExist) {
