@@ -42,6 +42,10 @@ type Source struct {
 	// is what GitHub reports as github.workflow and $GITHUB_WORKFLOW (A50).
 	// Empty for a jobs.yaml job.
 	Workflow string
+	// JobFile and Job are set for a job of a called workflow (A81): the file
+	// that declares it, and its id there, which is github.job and
+	// $GITHUB_JOB. Path stays the triggered workflow's.
+	JobFile, Job string
 }
 
 func (s Source) String() string { return s.Path }

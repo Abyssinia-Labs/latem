@@ -866,8 +866,9 @@ For each job it names what stands in the way and the fix: a `runs-on` label
 no runner carries, a remote action outside `[actions] allowed` or not pinned to
 a commit, secrets with no value in any scope the run would look in (names
 only), vars that would read as empty, and what latem refuses outright — a
-reusable workflow, `services:`, `container:`. A matrix job is checked leg by
-leg, each with its own `runs-on`. `--fix` writes the
+workflow of another repository, `services:`, `container:`. A matrix job is checked leg by
+leg, each with its own `runs-on`, and a job that calls a workflow of the
+repository as the called workflow's jobs, `release/pack`. `--fix` writes the
 `[label_aliases]` and `[actions]` entries it suggests and reloads the agent;
 pinning an action and storing a secret stay yours. It exits 1 while any job
 cannot run, so it also works as a gate.

@@ -329,7 +329,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: x}]
   called:
-    uses: ./.github/workflows/reusable.yml
+    uses: Abyssinia-Labs/templates/.github/workflows/reusable.yml@v1
   win:
     runs-on: windows-latest
     steps: [{run: x}]
@@ -355,7 +355,7 @@ jobs:
 	}
 	for key, want := range map[string]string{
 		"matrix": "a matrix computed by another job is not planned yet",
-		"called": "reusable workflows are not planned yet",
+		"called": "a workflow in another repository, which latem does not run",
 		"win":    "no latem runner can be Windows",
 		"late":   "reads needs, which is only known once the job runs",
 	} {

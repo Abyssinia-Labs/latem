@@ -3664,3 +3664,116 @@ one. The pass says which it was: the agent started after the last change, or re-
 **An older agent writes no `loaded`.** `doctor` then falls back to the process's start time as
 before, so the false warning goes only once the agent itself runs a release with this amendment.
 A status naming another pid still vouches for nothing.
+
+### Amendment from calling a workflow
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A81 | §5 INV-2 and INV-5, §7, A52, A55, A61, A68, A76 | **A job that calls a workflow of its own repository, `uses: ./.github/workflows/x.yml`, is planned as the called workflow's jobs, into the caller's workflow run. Each is keyed by a job path, the caller's id and its own joined by `/`, and named as GitHub names it, `caller / job`. It is compiled when it runs, from the run's commit, through the same calls. `with:` is typed against `on.workflow_call.inputs`; `secrets:` passes a secret by name, or `inherit`; a job that needs the caller reads the called workflow's `outputs`. Calls go three deep. A workflow of another repository is refused by name. `run.job` and `run.needs` may hold a job path. Protocol 2.8** | sokie, about half the organisation's Actions runs, calls `cli-package.yml` from its checks and `release-cli.yml` from both deploys, and `release-cli` calls `cli-package`: two calls deep. A52 refused every caller, so the migration's last wave could not start, and `workflows check` stopped at the caller, which hid what the called jobs would need |
+
+**The caller is not a job.** It has no steps and no runner, so no machine runs it. A52 said where
+its work goes: "a called workflow's jobs are planned into the caller's graph". Each is a planned
+job like any other. Its key is a job path, `release/package/pack`. GitHub's ids cannot hold a `/`, so
+a path never collides with a job's own id, and the machine splits one without guessing. The
+control plane does not need to know which part is which. A job of the call needs the caller's needs
+and its own, each under the call's prefix. A job that needs the caller needs every job of the call,
+so it waits for the whole call, as on GitHub. Every job of a call carries the caller's needs, though
+it waits for them anyway. The caller's `if:` and `with:` read them, and a run brings only the needs
+its job was planned with. Its check run is named by its name, `release / pack`, as GitHub names it.
+A call that cannot be planned is one job under the caller's own key. It carries why, fails alone,
+and the jobs that need it are skipped, as after any failure.
+
+**Who decides what.** The control plane schedules, skips, mints tokens and names checks as it does
+for every job. The only new thing it sees is a `/` in a key. The machine answers the rest when it
+runs a job of the call:
+
+- each caller's `if:`, against that caller's own needs. GitHub answers it once, before the called
+  workflow starts. Here no machine runs the caller, so every job of the call answers it, from the
+  same results, the same way.
+- each caller's `with:`, into the called workflow's inputs.
+- `needs.<caller>`, for a job that needs a call.
+
+Implicit `success()` holds at each level over that level's needs. A planned job is marked
+`if_checks_status` when an `if:` on the way down calls a status function, so the machine decides
+after a need that did not succeed. It is also marked when it needs a call of more than one job.
+On GitHub a call in which one job skipped and the rest succeeded has succeeded. The control plane,
+which skips after any need that did not, would skip what GitHub runs.
+
+**Inputs.** Each declared input has a type, `string`, `boolean` or `number`, as GitHub requires.
+Some `with:` values are refused: a name the called workflow does not declare, and a required one
+left out. An input not given takes its default, or its type's zero value (`false`, `0`, `""`). A
+literal must be of the input's type. An expression's value is converted to it, because
+`needs.<id>.outputs` are strings: `"true"` is a boolean and `"2"` a number, and anything else is
+refused. `with:` reads `github`, `needs`, `strategy`, `matrix`, `inputs` and `vars`, as on GitHub. A
+secret goes in `secrets:`.
+
+The plan answers what it can. A value that reads `needs`, or a caller's input that itself reads
+`needs`, is answered by the run. A field the plan fills — a called job's name, `runs-on`,
+`environment`, matrix or concurrency — that reads such an input is refused by name. It is not read
+as empty. A deploy whose environment silently became `""` would deploy without that environment's
+secrets or its protection rules.
+
+**Secrets.** `secrets: inherit` passes the caller's secrets on as they are. A map passes one each,
+written `${{ secrets.NAME }}`. No `secrets:` passes none. A literal is refused, because it would
+put a secret's value in the compiled job, which is stored. A computed value is refused too: it would
+be answered from secrets the job is not given. A name the called workflow does not declare is
+refused, and so is a required one left out. Names beginning `GITHUB_` cannot be declared, since
+GitHub keeps them. The compiled job carries, for each secret it reads, the name its callers pass it
+as from the top of the chain, never a value. A secret no caller passed reads as empty, and the log
+says so. A called job in an environment reads that environment's secrets as its own first, which is
+GitHub's rule: an environment cannot be passed to a call, so its secrets are the job's.
+`GITHUB_TOKEN` is never passed. Every job has its own (A52).
+
+**Permissions.** The caller's `permissions:`, else its workflow's, is the grant. A job of the call
+asks for its own, else its workflow's, else the grant. A job that asks for more than the grant is
+refused, as GitHub refuses it: a called workflow's token can only be narrower than its caller's. A
+nested caller's grant is held to the one above it.
+
+**Outputs.** A called workflow's `on.workflow_call.outputs` may read `jobs.<id>.outputs` and
+`jobs.<id>.result` of its own jobs, and nothing else. They are answered on the machine that runs a
+job needing the call, from the results that job carries. A nested call's outputs are answered first.
+`needs.<caller>.result` follows A55's rule for a matrix's legs: `failure` if a job of the call
+failed, else `cancelled` if one was, else `skipped` if every one was, else `success`.
+
+**Three calls deep.** A job path has at most four ids (`protocol.MaxCallDepth`, 3). A fourth call
+is refused by name, and so is a workflow that calls itself through any chain. GitHub allows deeper
+nesting. sokie needs two. Going deeper changes a constant at both ends, because the protocol's
+pattern bounds the segments.
+
+**INV-5.** The called file comes from the caller's `uses:` at the pinned commit, read from the
+mirror's tree when planning and from the run's workspace when running. No inbound field names it,
+and nothing is read from another commit. A remote `owner/repo/.github/workflows/x.yml@ref` would
+bring a definition from a repository and ref the run is not pinned to. It is refused by name, as an
+action from outside the policy is. A local call with an `@ref` is refused too: GitHub reads a local
+workflow at the caller's commit, and so does latem.
+
+**INV-2 in 2.8.** `run.job` is still a name. It is a job's id, or a job path of at most four ids,
+each matching GitHub's pattern. The agent finds each id in a file it reads at the pinned commit,
+through the `uses:` of the one above. Nothing builds a filesystem path from a job's name, and a path
+is matched as nothing more: a name a step can read as `$LATEM_JOB`, and a container label.
+`github.job` and `$GITHUB_JOB` are the called job's own id, `pack`, as on GitHub.
+
+**Protocol 2.8.** The control plane is upgraded first. It accepts a `/` in a plan's keys and needs,
+and in `run.job` and `run.needs`, from an agent that says 2.8. It sends a job whose key holds a `/`
+only to an agent that says 2.8, as it sends a matrix leg only to one that says 2.1. Until a control
+plane says 2.8, the agent plans a call as one job that fails and names 2.8. A 2.7 control plane would
+refuse a plan with a `/` in a key, and the whole plan with it. A 2.7 agent sent such a run refuses
+the frame, loudly.
+
+**`workflows check` and `latem try`.** Both plan calls whatever the control plane speaks. A called
+job is checked and tried by its job path, `latem try release/pack`. Trying the caller names the
+jobs of its call. A try takes each need as succeeded with no outputs, as A76 does, and answers no
+`if:` on the way down.
+
+**What it costs.** On the agent, a plan reads each called file once per call, from the tree it
+already read, capped at 1 MB as any workflow file is. A run of a called job reads its chain's files
+from its own workspace. No new frame, and no new command. On the control plane, a call is as many
+planned jobs as the called workflow has, instead of one refused job. sokie's deploys go from one job
+to three, which is the number of check runs GitHub shows for them. A job that needs a call carries
+each of the call's jobs' outputs in `run.needs`, rather than the call's.
+
+**Not in this amendment.** A workflow of another repository. A call with `strategy:` or
+`concurrency:`. `concurrency:` on a called workflow. Outputs that read anything but jobs. Behind the
+refusal this lifts, sokie's `release-cli` has two more. `plan`'s checkout asks for
+`sparse-checkout`, which A53's checkout does not take. `publish` downloads what `pack` uploaded on
+another machine, which is artifacts across jobs (A77).

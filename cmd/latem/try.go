@@ -49,7 +49,8 @@ would run it, on the runners, toolchains and secrets of this machine. The job
 is read from the commit, never from the working tree, so an edit made after
 this returns is not in the run, and the log names the commit.
 
-<job> is a job's id under jobs:. The workflow file is the one that has it, or
+<job> is a job's id under jobs:, or a called workflow's job by its job path,
+the caller's id and the called job's (release/pack). The workflow file is the one that has it, or
 --workflow (checks.yml, or .github/workflows/checks.yml) when more than one
 does. The checkout is -C, default the current directory, matched to a
 [repos.*] entry by its origin remote or by --repo.
@@ -367,7 +368,10 @@ func tryWorkflowFile(fsys fs.FS, flag, job string) (string, error) {
 			continue
 		}
 		byFile[f] = p.wf.JobNames()
-		if p.wf.Jobs[job] != nil {
+		// A job of a called workflow is named by its job path, which
+		// starts with its caller's id (A81).
+		first, _, _ := strings.Cut(job, "/")
+		if p.wf.Jobs[first] != nil {
 			has = append(has, f)
 		}
 	}
@@ -397,6 +401,18 @@ func tryLeg(pw protocol.PlannedWorkflow, job string, want map[string]string) (pr
 		}
 	}
 	if len(legs) == 0 {
+		// A job that calls a workflow runs as the called workflow's jobs, each
+		// named by its job path (A81).
+		var called []string
+		for _, pj := range pw.Jobs {
+			if strings.HasPrefix(pj.Key, job+"/") && !slices.Contains(called, pj.Key) {
+				called = append(called, pj.Key)
+			}
+		}
+		if len(called) > 0 {
+			return protocol.PlannedJob{}, usageErrorf("%s calls a workflow, whose jobs are tried one at a time: %s",
+				job, strings.Join(called, ", "))
+		}
 		return protocol.PlannedJob{}, fmt.Errorf("%s planned no job %q", pw.File, job)
 	}
 	if len(legs) == 1 && len(want) == 0 {

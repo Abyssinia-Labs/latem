@@ -233,9 +233,15 @@ func TestConformance_AgentEmissions(t *testing.T) {
 				Matrix:   json.RawMessage(`{"node":22,"os":"macos"}`),
 				Strategy: &protocol.Strategy{JobIndex: 1, JobTotal: 2, FailFast: true, MaxParallel: 1},
 			}, {
-				Key: "called", Name: "called", Permissions: map[string]string{"contents": "read"},
-				TimeoutMinutes: 360, Error: "uses: calls the reusable workflow ./.github/workflows/r.yml, and " +
-					"reusable workflows are not planned yet (A52)",
+				// A81: a called workflow's job, keyed by its job path, after
+				// its caller's needs.
+				Key: "release/pack", Name: "release / pack", Needs: []string{"lint"}, Labels: []string{"linux"},
+				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+			}, {
+				Key: "remote", Name: "remote", Permissions: map[string]string{"contents": "read"},
+				TimeoutMinutes: 360, Error: "uses: calls octo/tools/.github/workflows/r.yml@v1, a workflow in " +
+					"another repository, which latem does not run: what it runs would come from outside the " +
+					"commit this run is pinned to (A81, INV-5)",
 			}},
 		}, {
 			File: ".github/workflows/deploy-production.yml", Name: "Deploy production",

@@ -757,6 +757,16 @@ func (b *Broker) planForPeer(p protocol.PlanResult) protocol.PlanResult {
 	return p
 }
 
+// SpeaksCalls reports whether the control plane said 2.8, so schedules a
+// called workflow's jobs, keyed by job path, and sends them only to agents
+// that say 2.8 (A81). An older one refuses a plan with a "/" in a key, and the
+// whole plan with it.
+func (b *Broker) SpeaksCalls() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return versionAtLeast(b.peerVersion, 2, 8)
+}
+
 // speaksCapacity reports whether the control plane said 2.3, so takes a
 // heartbeat's capacity (A63).
 func (b *Broker) speaksCapacity() bool {

@@ -95,11 +95,8 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 				"sent — so GITHUB_TOKEN is this machine's secret of that name, if it has one")
 		}
 	}
-	scopes := [][]string{{x.req.Repo}, nil}
-	if env := x.resolved.Job.Environment; env != "" {
-		scopes = append([][]string{{x.req.Repo, env}}, scopes...)
-	}
-	set, missing, err := secrets.ResolveScoped(ctx, x.o.secrets, x.red, names, scopes)
+	lookup := x.secretLookup()
+	set, missing, err := secrets.ResolveAs(ctx, x.o.secrets, x.red, names, lookup)
 	if err != nil {
 		return secretOutcome(err), false
 	}
@@ -107,18 +104,45 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 	for _, w := range set.Warnings() {
 		x.note("secret %s", w)
 	}
+	from := x.resolved.Job.SecretsFrom
 	for _, name := range missing {
-		var tried []string
-		for _, scope := range scopes {
-			tried = append(tried, secrets.ScopedName(name, scope...))
+		tried := strings.Join(lookup(name), ", ")
+		switch {
+		case from != nil && from[strings.ToUpper(name)] == "" && tried == "":
+			x.note("secret %s is not passed to this job by the workflow calling it; it reads as empty, as on GitHub", name)
+		case from != nil && from[strings.ToUpper(name)] == "":
+			x.note("secret %s is not passed to this job by the workflow calling it, nor set for its environment "+
+				"(looked for %s); it reads as empty, as on GitHub", name, tried)
+		default:
+			x.note("secret %s is not set on this machine (looked for %s); it reads as empty, as on GitHub", name, tried)
 		}
-		x.note("secret %s is not set on this machine (looked for %s); it reads as empty, as on GitHub",
-			name, strings.Join(tried, ", "))
 	}
 	if set.Len() > 0 {
 		x.note("resolved %d secret(s): %v", set.Len(), set.Names())
 	}
 	return outcome{}, true
+}
+
+// secretLookup is the names a workflow job's secret is looked up as, most
+// specific first (A50): under its environment and repository, its repository,
+// then the machine's. A called workflow's job (A81) reads its own
+// environment's secrets as its own, as on GitHub, and every other one as the
+// name its callers passed it as, without the environment, which a caller never
+// has; one no caller passed is looked up as nothing.
+func (x *execution) secretLookup() func(name string) []string {
+	repo, env, from := x.req.Repo, x.resolved.Job.Environment, x.resolved.Job.SecretsFrom
+	return func(name string) []string {
+		var out []string
+		if env != "" {
+			out = append(out, secrets.ScopedName(name, repo, env))
+		}
+		if from != nil {
+			if name = from[strings.ToUpper(name)]; name == "" {
+				return out
+			}
+		}
+		return append(out, secrets.ScopedName(name, repo), name)
+	}
 }
 
 // checkDisk is gate 17: the selected runner's own floor.

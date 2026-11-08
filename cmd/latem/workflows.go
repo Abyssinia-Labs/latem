@@ -69,11 +69,13 @@ For every job it reports whether a runner here takes it, and if not why:
   - a remote action not in [actions] allowed, or not pinned to a commit
   - secrets with no value in any scope a run would look in (names only)
   - vars with no value, which a job reads as empty
-  - what latem refuses outright: a reusable workflow, services:, container:,
-    and anything else the compiler names
+  - what latem refuses outright: a workflow of another repository, services:,
+    container:, and anything else the compiler names
 
 A matrix job is checked leg by leg, as the plan expands it, and each leg's
-runs-on — which may read the matrix — is matched on its own (A55).
+runs-on — which may read the matrix — is matched on its own (A55). A job that
+calls a workflow of the repository is checked as the called workflow's jobs,
+each by its job path, release/pack (A81).
 
 Each job's needs are said too (A59): iOS, a macOS app, Android, Linux with a
 Docker daemon, and what of Xcode, the JDK, the Android SDK and the rest its
@@ -785,11 +787,14 @@ func checkJob(
 	// compile. What the job needs is read from it before anything refuses
 	// it: a job latem cannot run is exactly the one worth explaining.
 	w, err := workflow.Parse(pw.data, pw.file)
-	if err == nil && w.Jobs[pj.Key] != nil {
-		leg := needs.Leg{Labels: pj.Labels}
-		_ = json.Unmarshal(pj.Matrix, &leg.Matrix)
-		r := needs.Job(fsys, w, pj.Key, leg)
-		jr.needs = &r
+	if err == nil {
+		// A called workflow's job is read from its own file (A81).
+		if declaredIn, key, cerr := workflow.CalledJob(fsys, w, pj.Key); cerr == nil {
+			leg := needs.Leg{Labels: pj.Labels}
+			_ = json.Unmarshal(pj.Matrix, &leg.Matrix)
+			r := needs.Job(fsys, declaredIn, key, leg)
+			jr.needs = &r
+		}
 	}
 	if pj.Error != "" {
 		fail("refused: " + pj.Error)
@@ -804,13 +809,9 @@ func checkJob(
 		vars = t.repo.VarsFor
 	}
 	jr.stopped = stoppedHere(t, pf, pj, w, vars)
-	declared := w.Jobs[pj.Key]
-	copied := *declared
-	copied.If = ""
-	w.Jobs[pj.Key] = &copied
 
 	fetcher.reset()
-	job, err := workflow.CompileWith(ctx, w, pj.Key, checkScope(t, pf, pj, w), workflow.Options{
+	job, _, _, err := workflow.CompileJobPath(ctx, fsys, w, pj.Key, checkScope(t, pf, pj, w), workflow.Options{
 		Actions: fsActions{fsys: fsys},
 		// Every action is let through and recorded, and the machine's own
 		// policy applied to the record below — so one refused action does not
@@ -819,10 +820,12 @@ func checkJob(
 		Fetcher:      fetcher,
 		LabelAliases: cfg.LabelAliases,
 		Vars:         vars,
-		WorkflowRun:  true,
 		// A matrix job is compiled one leg at a time (A55): the leg the plan
 		// made, exactly what a run of it would be given as run.matrix.
 		Matrix: pj.Matrix,
+		// What runs the job is the question, not whether this event would:
+		// stoppedHere answers that, and the job's callers' if: too (A81).
+		IgnoreJobIf: true,
 	})
 	checkActions(cfg, fetcher.seen(), rep, &jr, fail)
 	if err != nil {
@@ -1088,15 +1091,33 @@ func aliasTarget(label string, have map[string]bool) []string {
 // checkSecrets names the secrets the job reads that no store here holds under
 // any scope its run would look in.
 func checkSecrets(t checkTarget, inv inventory, job *registry.Job, jr *jobReport) {
-	var missing []string
+	var missing, notPassed []string
 	for _, name := range job.Secrets {
 		// GITHUB_TOKEN is minted for the job by the control plane (A52).
 		if name == workflow.TokenSecret {
 			continue
 		}
-		if !inv.has(name, t.repoKey, job.Environment) {
-			missing = append(missing, name)
+		if job.SecretsFrom == nil {
+			if !inv.has(name, t.repoKey, job.Environment) {
+				missing = append(missing, name)
+			}
+			continue
 		}
+		// A called workflow's job (A81): its environment's own, else what
+		// its callers pass it as.
+		if inv.inEnvironment(name, t.repoKey, job.Environment) {
+			continue
+		}
+		switch from := job.SecretsFrom[strings.ToUpper(name)]; {
+		case from == "":
+			notPassed = append(notPassed, name)
+		case !inv.has(from, t.repoKey, ""):
+			missing = append(missing, from)
+		}
+	}
+	if len(notPassed) > 0 {
+		jr.findings = append(jr.findings, finding{level: levelWarn, text: "secrets the workflow calling this job " +
+			"does not pass, which read as empty: " + strings.Join(notPassed, ", ")})
 	}
 	jr.secrets, jr.environment = missing, job.Environment
 	if len(missing) == 0 {

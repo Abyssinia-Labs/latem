@@ -133,6 +133,10 @@ type PlannedWorkflow struct {
 // PlannedJob is one job of a planned workflow run.
 type PlannedJob struct {
 	// Key is the job's id under jobs:, which needs: and a run's job name.
+	// Since 2.8 (A81) a called workflow's job is planned into its caller's
+	// workflow run, and its key is a job path: the caller's id, then the
+	// called job's, joined by "/" — release/package/pack. GitHub's ids
+	// cannot hold a "/", so a path is never a job's own id.
 	Key string `json:"key"`
 	// Name is the job's name: evaluated, or its key. Its check run is named
 	// by it.
@@ -237,8 +241,21 @@ type NeedResult struct {
 	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
-// jobKeyPattern is GitHub's rule for a job's id.
-var jobKeyPattern = regexp.MustCompile(`^[_A-Za-z][A-Za-z0-9_-]*$`)
+// jobKey is GitHub's rule for a job's id.
+const jobKey = `[_A-Za-z][A-Za-z0-9_-]*`
+
+// MaxCallDepth is how many workflow calls deep a job may be planned (A81):
+// a job of a workflow that a workflow calls, which another workflow calls,
+// which the triggered workflow calls. GitHub allows deeper; a job path with
+// more segments than this allows is no job latem planned.
+const MaxCallDepth = 3
+
+// jobPathPattern is a run's job (2.8, A81): a job's id, or a job path of at
+// most MaxCallDepth calls.
+var jobPathPattern = regexp.MustCompile(`^` + jobKey + `(/` + jobKey + `){0,` + fmt.Sprint(MaxCallDepth) + `}$`)
+
+// IsJobPath reports whether s is a job's id or a job path a plan can make.
+func IsJobPath(s string) bool { return jobPathPattern.MatchString(s) }
 
 // tokenPattern is printable ASCII without spaces: an installation token is
 // one opaque word, and anything else in its place is not one.
@@ -265,8 +282,8 @@ func (r RunRequest) validateWorkflowRun() error {
 	if !workflowFilePattern.MatchString(r.Workflow) {
 		return fmt.Errorf("protocol: run workflow %q must match %s", r.Workflow, workflowFilePattern)
 	}
-	if !jobKeyPattern.MatchString(r.Job) {
-		return fmt.Errorf("protocol: run job %q is not a job id", r.Job)
+	if !jobPathPattern.MatchString(r.Job) {
+		return fmt.Errorf("protocol: run job %q is not a job id or a job path", r.Job)
 	}
 	if !shaPattern.MatchString(r.SHA) {
 		return fmt.Errorf("protocol: run sha %q is not a commit id", r.SHA)
@@ -284,8 +301,8 @@ func (r RunRequest) validateWorkflowRun() error {
 		return fmt.Errorf("protocol: run_number and run_attempt cannot be negative")
 	}
 	for key, n := range r.Needs {
-		if !jobKeyPattern.MatchString(key) {
-			return fmt.Errorf("protocol: needs %q is not a job id", key)
+		if !jobPathPattern.MatchString(key) {
+			return fmt.Errorf("protocol: needs %q is not a job id or a job path", key)
 		}
 		switch n.Result {
 		case NeedSuccess, NeedFailure, NeedCancelled, NeedSkipped:

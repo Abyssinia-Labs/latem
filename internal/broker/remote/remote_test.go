@@ -440,6 +440,24 @@ func TestRequires_OnlyToAControlPlaneThatSays22(t *testing.T) {
 	}
 }
 
+// A called workflow's jobs are planned, under job paths, only for a control
+// plane that says 2.8 (A81): an older one refuses a "/" in a plan's key, and
+// the whole plan with it.
+func TestCalls_OnlyForAControlPlaneThatSays28(t *testing.T) {
+	for _, c := range []struct {
+		version string
+		want    bool
+	}{{"2.7", false}, {"", false}, {"2.8", true}, {"2.10", true}, {"3.0", true}} {
+		h := newHarness(t, nil)
+		h.CP.SetHello(&helloFrame{Version: c.version})
+		h.CP.Partition()
+		h.CP.Await(t, "the partition", func() bool { return !h.Connected() })
+		h.CP.Heal()
+		h.AwaitConnected(t)
+		h.CP.Await(t, "the hello", func() bool { return h.SpeaksCalls() == c.want })
+	}
+}
+
 // A job's runs_on and reads_vars, and a heartbeat's aliases and digests (A68),
 // go only to a control plane that says 2.4: a 2.3 one decodes both strictly.
 func TestPlacement_OnlyToAControlPlaneThatSays24(t *testing.T) {

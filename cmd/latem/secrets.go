@@ -579,6 +579,12 @@ func secretInventory(ctx context.Context, cfg *config.Config, stores secretStore
 	return inv, nil
 }
 
+// inEnvironment reports whether name is stored for repo's environment env
+// itself, not wider.
+func (inv inventory) inEnvironment(name, repo, env string) bool {
+	return repo != "" && env != "" && len(inv.byName[secrets.ScopedName(name, repo, env)]) > 0
+}
+
 // has reports whether name resolves anywhere for a job of repo in env, the
 // way the run looks it up (internal/run's resolveWorkflowSecrets): repo and
 // environment, then repo, then the machine.
