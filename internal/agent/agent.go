@@ -145,6 +145,13 @@ type Options struct {
 	// before anything else in §6 has happened.
 	Config *config.Config
 
+	// ConfigLoaded is when Config was read from its file, taken just before
+	// the read. The status file carries it (A54, A80): it is the time an edit
+	// is compared with, and the kernel's start time for this pid stops being
+	// that at the first in-place switch, which keeps the pid (A56). Zero
+	// writes none.
+	ConfigLoaded time.Time
+
 	// Version is stamped into MachineHealth and the metrics build-info gauge.
 	Version string
 

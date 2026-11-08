@@ -477,10 +477,11 @@ func (d *doctor) checkConfiguration(ctx context.Context) []check {
 // before a run does, and this was drift in latem's own state, which `doctor` is
 // better placed to see than anything else on the machine.
 //
-// The comparison is the config's mtime against the agent process's start time,
-// because those are both knowable without asking the agent anything: the health
-// the agent reports over the socket carries runners, not repos, so it cannot
-// answer "is this the file you read?" today.
+// The comparison is the config's mtime against when the agent read it. The
+// agent's status file says when (A54, A80), and the agent process's start time
+// stands in for an agent too old to say: the health the agent reports over the
+// socket carries runners, not repos, so it cannot answer "is this the file you
+// read?" today.
 func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
 	const id, title = "config.loaded", "config reloaded"
 
@@ -507,7 +508,7 @@ func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
 	// A54: an agent that reloads says when it last read the file, and that is
 	// the time an edit has to be compared with. Its status names its pid, so a
 	// file left by an earlier process cannot vouch for this one.
-	fix, read := "latem service restart", started
+	fix, read, reloaded := "latem service restart", started, false
 	if rs, err := agent.ReadReloadStatus(config.DerivePaths(d.dir).ReloadStatus); err == nil && rs.PID == st.PID {
 		fix = "latem service reload"
 		if rs.Error != "" {
@@ -520,11 +521,17 @@ func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
 				"the agent reloaded config.toml and did not apply: "+strings.Join(rs.Deferred, "; "),
 				"latem service restart")
 		}
-		// Only a reload's time is a read of the file. The first status is
-		// written when the agent is ready, after a startup that can take
-		// minutes, and an edit made during it is in no config the agent has.
+		// An in-place switch keeps the pid, and with it the kernel's start
+		// time, while the binary it starts reads config.toml afresh (A56).
+		// So the agent says when it read the file (A80). Started is not
+		// that: the first status is written when the agent is ready, after
+		// a startup that can take minutes, and an edit made during it is in
+		// no config the agent has.
+		if rs.Loaded.After(read) {
+			read = rs.Loaded
+		}
 		if rs.Reloads > 0 && rs.At.After(read) {
-			read = rs.At
+			read, reloaded = rs.At, true
 		}
 	}
 	if info.ModTime().After(read) {
@@ -536,7 +543,7 @@ func (d *doctor) checkConfigLoadedByAgent(ctx context.Context) check {
 				"file, not from the agent. Until it re-reads it, a repo added here is still " +
 				"E_UNKNOWN_REPO to a run.")
 	}
-	if read.After(started) {
+	if reloaded {
 		return pass(id, title, "the agent re-read config.toml after its last change")
 	}
 	return pass(id, title, "the agent started after the last change to config.toml")

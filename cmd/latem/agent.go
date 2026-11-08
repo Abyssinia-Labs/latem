@@ -69,6 +69,9 @@ to do it.`,
 			// Step 1 of §6, and the reason it is here rather than inside
 			// internal/agent: a config that does not parse must fail before a
 			// lock is taken, a database is opened, or a socket is bound.
+			// Taken before the read, so an edit doctor compares with it
+			// is never one this config might lack (A80).
+			loaded := time.Now()
 			cfg, err := loadConfig()
 			if err != nil {
 				return err
@@ -99,11 +102,12 @@ to do it.`,
 			}
 
 			a, err := agent.New(agent.Options{
-				Config:     cfg,
-				Version:    version,
-				Logger:     agentLogger(cmd.ErrOrStderr()),
-				Once:       once,
-				DrainAfter: drain,
+				Config:       cfg,
+				ConfigLoaded: loaded,
+				Version:      version,
+				Logger:       agentLogger(cmd.ErrOrStderr()),
+				Once:         once,
+				DrainAfter:   drain,
 				// The agent's own PATH is the one its steps get (A59), behind
 				// the native runners' path_prepend (A60).
 				ProbeToolchains: func(ctx context.Context, stepPath string) system.Toolchains {
