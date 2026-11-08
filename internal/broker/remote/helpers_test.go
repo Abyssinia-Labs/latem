@@ -300,8 +300,17 @@ func (cp *controlPlane) push(conn *websocket.Conn, f frame) {
 
 // Command sends one command to every connected agent, as a control plane
 // replaying a backlog would.
+//
+// Sending to nobody fails the test rather than doing nothing. It means the test
+// did not wait for this end of the session, and a command that silently went
+// nowhere surfaces ten seconds later as a consumer that never heard of it.
 func (cp *controlPlane) Command(cmd protocol.Command) {
-	for _, c := range cp.liveConns() {
+	conns := cp.liveConns()
+	if len(conns) == 0 {
+		cp.t.Errorf("Command(%s) found no connection to send on; AwaitConnected waits for one", cmd.Kind)
+		return
+	}
+	for _, c := range conns {
 		cp.push(c, frame{Kind: kindCommand, ID: "srv-1", Command: &cmd})
 	}
 }
@@ -701,10 +710,21 @@ func newHarnessOn(t *testing.T, db *store.DB, mutate func(*harnessOptions)) *har
 	})
 }
 
-// AwaitConnected blocks until the broker has a live session.
+// AwaitConnected blocks until the session is live at both ends.
+//
+// The broker's end is not enough. It sees itself connected the moment the
+// handshake answers, which is before this control plane's handler has
+// registered the socket, and a [controlPlane.Command] sent in that gap finds no
+// connection to send on. A real control plane loses nothing there — a command
+// is a row that waits to be acknowledged and is offered again once the session
+// is up — but this one sends to whatever is registered at the time, so a test
+// that commands straight after connecting waited ten seconds for a run nobody
+// sent. The partition side of the same gap is closed in serve.
 func (h *harness) AwaitConnected(t *testing.T) {
 	t.Helper()
-	h.CP.Await(t, "the broker to connect", func() bool { return h.Connected() })
+	h.CP.Await(t, "the broker to connect", func() bool {
+		return h.Connected() && len(h.CP.liveConns()) > 0
+	})
 }
 
 // AwaitResumes blocks until the control plane has seen n resume frames.
