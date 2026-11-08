@@ -3637,8 +3637,10 @@ A41), and the link is made where the binary is installed.
 **Somebody else's `ltm` stays.** install.sh and `latem update` make the link only where nothing
 called `ltm` exists, and leave anything else alone. install.sh says it did; `latem update` says
 nothing, because it runs on every update and the answer does not change. A machine installed before
-the short name existed gets it from its next `latem update`. Homebrew's formula links it into the
-keg, and a formula conflict over the name is Homebrew's to report.
+the short name existed gets it from the first `latem update` that is itself v0.4.0 or later. The run
+that installs v0.4.0 is the older binary's code and adds nothing, so from v0.3.x it takes two.
+Homebrew's formula links it into the keg, and a formula conflict over the name is Homebrew's to
+report.
 
 **The name it was run by.** The root command's `Use` is `ltm` when `argv[0]`'s base name is `ltm`,
 and `latem` for any other name, a renamed file included, so a binary called `latem-dev` does not
