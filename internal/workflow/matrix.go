@@ -177,6 +177,13 @@ func expandMatrix(matrix map[string]any, order *matrixOrder) ([]matrixLeg, error
 		if len(values) == 0 {
 			return nil, fmt.Errorf("%s has no values", k)
 		}
+		// Refused before the round is built, not after: a list long enough to
+		// pass the cap on its own would otherwise be crossed with every leg so
+		// far first. Each factor is at most MaxMatrixLegs once past the first
+		// two tests, so the product cannot overflow.
+		if len(values) > MaxMatrixLegs || len(combos) > MaxMatrixLegs || len(combos)*len(values) > MaxMatrixLegs {
+			return nil, fmt.Errorf("it expands to more than %d jobs", MaxMatrixLegs)
+		}
 		next := make([]matrixLeg, 0, len(combos)*len(values))
 		for _, c := range combos {
 			for _, v := range values {
@@ -185,9 +192,7 @@ func expandMatrix(matrix map[string]any, order *matrixOrder) ([]matrixLeg, error
 				next = append(next, leg)
 			}
 		}
-		if combos = next; len(combos) > MaxMatrixLegs {
-			return nil, fmt.Errorf("it expands to more than %d jobs", MaxMatrixLegs)
-		}
+		combos = next
 	}
 	if len(dims) == 0 {
 		combos = nil

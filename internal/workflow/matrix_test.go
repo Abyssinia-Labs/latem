@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -97,6 +98,28 @@ func TestMatrixRefusals(t *testing.T) {
 				t.Fatalf("err = %v, want it to say %q", err, c.want)
 			}
 		})
+	}
+}
+
+// The cap holds before a round is built: one list past it is refused without
+// being crossed with anything, and exactly MaxMatrixLegs legs is a matrix.
+func TestMatrixCapIsCheckedBeforeExpanding(t *testing.T) {
+	list := func(n int) string {
+		vs := make([]string, n)
+		for i := range vs {
+			vs[i] = strconv.Itoa(i)
+		}
+		return "[" + strings.Join(vs, ", ") + "]"
+	}
+	if got := legsOf(t, "        a: "+list(16)+"\n        b: "+list(16)+"\n"); len(got) != MaxMatrixLegs {
+		t.Errorf("16 x 16 = %d legs, want %d", len(got), MaxMatrixLegs)
+	}
+
+	w := parse(t, "jobs:\n  b:\n    runs-on: [linux]\n    strategy:\n      matrix:\n"+
+		"        a: "+list(10000)+"\n        b: [x, y]\n    steps: [{run: x}]\n")
+	_, err := expandStrategy(w.Jobs["b"], testScope())
+	if err == nil || !strings.Contains(err.Error(), "more than 256") {
+		t.Fatalf("err = %v, want a list of 10000 refused", err)
 	}
 }
 
