@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -438,5 +439,43 @@ func TestCreate_WorkflowRunAndToken(t *testing.T) {
 	}
 	if d.Token(req.ID) != "" || d.FetchToken(req.ID) != "" {
 		t.Error("a token outlived the run")
+	}
+}
+
+// A run latem try made keeps its mark and its approval, and nothing a broker
+// sends can carry the mark (A76): a run request has no field for it, so a run
+// made from one is never local, and a frame naming one does not decode.
+func TestCreate_LocalRunIsMarkedOnlyByItsRow(t *testing.T) {
+	d := newTestDB(t)
+	ctx := t.Context()
+	sha := strings.Repeat("b", 40)
+	now := time.Now()
+	run := Run{ID: "r-try", Repo: "app", Job: "test", Ref: "refs/heads/feature/x", State: protocol.StateQueued,
+		OriginKind: "cli", ApprovedAt: &now, ApprovedSHA: sha,
+		Workflow: &WorkflowRun{Workflow: ".github/workflows/checks.yml", SHA: sha, WorkflowRunID: "r-try",
+			Event: protocol.Event{Name: "push", Ref: "refs/heads/feature/x", SHA: sha}, Local: true}}
+	if err := d.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Get(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsLocal() || got.ApprovedSHA != sha || got.ApprovedAt == nil {
+		t.Fatalf("a local run lost its mark or its approval: local=%v approved=%q", got.IsLocal(), got.ApprovedSHA)
+	}
+
+	req := protocol.RunRequest{ID: "r-wf", Repo: "app", Job: "test", Ref: "refs/heads/main",
+		Workflow: ".github/workflows/checks.yml", SHA: sha, WorkflowRunID: "wr",
+		Event: &protocol.Event{Name: "push", Ref: "refs/heads/main", SHA: sha}}
+	if w := WorkflowRunOf(req); w == nil || w.Local {
+		t.Fatalf("a run request made a local run: %+v", w)
+	}
+	frame := `{"kind":"run","run":{"id":"r1","repo":"app","job":"test","ref":"main","origin":{"kind":"cli","requested_at":"2026-11-07T00:00:00Z"},` +
+		`"workflow":".github/workflows/checks.yml","sha":"` + sha + `","workflow_run_id":"r1",` +
+		`"event":{"name":"push","ref":"refs/heads/main","sha":"` + sha + `"},"local":true}}`
+	var cmd protocol.Command
+	if err := json.Unmarshal([]byte(frame), &cmd); err == nil {
+		t.Fatal("a run command carrying local decoded")
 	}
 }

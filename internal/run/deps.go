@@ -56,6 +56,9 @@ type Source interface {
 	// Fetch is gate 6: make the mirror exist and make it fresh, under the
 	// per-repo mutex that serialises concurrent fetches into one bare repo.
 	Fetch(ctx context.Context, repo source.Repo) (Mirror, error)
+	// Open is the mirror as it is, unfetched, for a commit `latem try` has
+	// already put in it (A76). It wraps [source.ErrNoMirror] when there is none.
+	Open(repo source.Repo) (Mirror, error)
 }
 
 // Collector is the subset of [artifact.Collector] the collecting phase uses.
@@ -85,6 +88,14 @@ type managerAdapter struct{ m *source.Manager }
 
 func (a managerAdapter) Fetch(ctx context.Context, repo source.Repo) (Mirror, error) {
 	mi, err := a.m.Fetch(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	return mi, nil
+}
+
+func (a managerAdapter) Open(repo source.Repo) (Mirror, error) {
+	mi, err := a.m.Open(repo)
 	if err != nil {
 		return nil, err
 	}

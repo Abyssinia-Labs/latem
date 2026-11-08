@@ -132,7 +132,15 @@ type WorkflowRun struct {
 	RunAttempt    int64                          `json:"run_attempt,omitempty"`
 	// Matrix is a matrix leg's values (A55).
 	Matrix json.RawMessage `json:"matrix,omitempty"`
+	// Local marks a commit `latem try` made from a working tree, on no ref
+	// (A76): its Ref is a name for the github context, not one to resolve.
+	// Only that command sets it, writing the row itself. No RunRequest field
+	// carries it, so [WorkflowRunOf] never does and no broker can.
+	Local bool `json:"local,omitempty"`
 }
+
+// IsLocal reports a run `latem try` made (A76).
+func (r Run) IsLocal() bool { return r.Workflow != nil && r.Workflow.Local }
 
 // The broker keys of the broker_state table (amendment A28).
 //

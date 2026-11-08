@@ -527,3 +527,64 @@ jobs:
 		t.Errorf("group %q", got)
 	}
 }
+
+// PlanFile plans the one file it is given whatever its on: says, which is
+// what `latem try` runs a job from (A76): a push to a branch checks.yml's
+// branches filter leaves out, and a file only pull requests trigger, both plan.
+// A dispatch still needs the file's workflow_dispatch and valid inputs, and a
+// file that cannot be planned is an error.
+func TestPlanFile_IgnoresTheTrigger(t *testing.T) {
+	fsys := fleetFS(fleet)
+	push := protocol.Event{Name: EventPush, Ref: "refs/heads/feature/x", SHA: planSHA}
+	if got := mustPlan(t, fleet, push, PlanOptions{}); slices.ContainsFunc(got, func(w protocol.PlannedWorkflow) bool {
+		return w.File == Dir+"/checks.yml"
+	}) {
+		t.Fatal("the fixture's checks.yml must not plan for a push to feature/x, or this test proves nothing")
+	}
+	w, err := PlanFile(fsys, Dir+"/checks.yml", push, PlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, j := range w.Jobs {
+		keys = append(keys, j.Key)
+	}
+	if !slices.Equal(keys, []string{"lint", "test", "web"}) || w.Concurrency == nil ||
+		w.Concurrency.Group != "checks-refs/heads/feature/x" {
+		t.Fatalf("planned %v, concurrency %+v", keys, w.Concurrency)
+	}
+	if w, err := PlanFile(fsys, Dir+"/changelog.yml", push, PlanOptions{}); err != nil || len(w.Jobs) != 1 {
+		t.Fatalf("a file with no push trigger: %+v, %v", w, err)
+	}
+
+	dispatch := protocol.Event{Name: EventWorkflowDispatch, Ref: "refs/heads/main", SHA: planSHA,
+		Workflow: Dir + "/deploy-production.yml", Inputs: map[string]string{"ref": "v1"}}
+	if w, err := PlanFile(fsys, dispatch.Workflow, dispatch, PlanOptions{}); err != nil || w.Inputs["target"] != "web" {
+		t.Fatalf("dispatch: %+v, %v", w.Inputs, err)
+	}
+	for want, call := range map[string]func() error{
+		"no workflow_dispatch trigger": func() error {
+			ev := dispatch
+			ev.Workflow = Dir + "/checks.yml"
+			_, err := PlanFile(fsys, ev.Workflow, ev, PlanOptions{})
+			return err
+		},
+		`input "ref" is required`: func() error {
+			ev := withInputs(dispatch, nil)
+			_, err := PlanFile(fsys, ev.Workflow, ev, PlanOptions{})
+			return err
+		},
+		"not " + Dir + "/checks.yml": func() error {
+			_, err := PlanFile(fsys, Dir+"/checks.yml", dispatch, PlanOptions{})
+			return err
+		},
+		"jobs": func() error {
+			_, err := PlanFile(fleetFS(map[string]string{"bad.yml": "on: push\n"}), Dir+"/bad.yml", push, PlanOptions{})
+			return err
+		},
+	} {
+		if err := call(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want an error containing %q, got %v", want, err)
+		}
+	}
+}

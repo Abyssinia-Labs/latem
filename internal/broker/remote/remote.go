@@ -499,6 +499,15 @@ func (b *Broker) Report(ctx context.Context, runID string, u protocol.Update) er
 	if !u.State.Valid() {
 		return fmt.Errorf("remote: Report %s: unknown state %q", runID, u.State)
 	}
+	if b.isLocal(ctx, runID) {
+		// A control plane has never heard of a run latem try made, and would
+		// answer each update "unknown run" — a mutation for nothing (A76). Its
+		// state is recorded as delivered, since there is nothing to deliver,
+		// which is what keeps store.Unreported from handing it back at every
+		// reconnect.
+		b.markReported(ctx, runID, u.State)
+		return nil
+	}
 
 	// A terminal state decides what happens to an on_failure buffer, and it has
 	// to decide it whether or not the report reaches the far side: the run is
@@ -542,6 +551,22 @@ func (b *Broker) ReportPlan(ctx context.Context, p protocol.PlanResult) error {
 	return nil
 }
 
+// isLocal reports a run latem try made (A76), which this transport carries
+// none of. A run the store cannot find is not one: whatever the caller does
+// with it next says so.
+func (b *Broker) isLocal(ctx context.Context, runID string) bool {
+	run, err := b.st.Get(ctx, runID)
+	return err == nil && run.IsLocal()
+}
+
+// discardSink is a local run's log sink here: the frames are the log file's
+// and the local transport's, and a control plane would refuse every batch.
+type discardSink struct{}
+
+func (discardSink) Write(context.Context, []protocol.LogFrame) error { return nil }
+func (discardSink) Acked() uint64                                    { return 0 }
+func (discardSink) Close(context.Context) error                      { return nil }
+
 // markReported records a delivery in broker_state under this transport's key.
 //
 // Best effort on purpose. A failed write leaves the run in
@@ -570,6 +595,9 @@ func (b *Broker) Logs(ctx context.Context, runID string) (broker.LogSink, error)
 	run, err := b.st.Get(ctx, runID)
 	if err != nil {
 		return nil, err
+	}
+	if run.IsLocal() {
+		return discardSink{}, nil
 	}
 	// This transport's own resume point, not the machine's (amendment A28). The
 	// local broker is streaming the same run to the same disk and its row is

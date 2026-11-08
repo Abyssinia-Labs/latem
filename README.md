@@ -871,6 +871,30 @@ leg, each with its own `runs-on`. `--fix` writes the
 pinning an action and storing a secret stay yours. It exits 1 while any job
 cannot run, so it also works as a gate.
 
+**Then try one, before you push it.** `latem try <job>` runs one workflow job
+from your working tree, uncommitted and untracked changes included, on this
+machine's own runners, with no push and no control plane:
+
+```console
+$ latem try beacon
+try checks.yml › beacon at 366325402a69, as a push on refs/heads/try-demo
+  2 path(s) differ from HEAD 6a4f5987bb52: M .github/workflows/checks.yml, A TRY-UNTRACKED.txt
+  runs on linux
+
+[latem] on: and the job's if: were not evaluated: latem try runs the job it names
+[latem] needs changes taken as succeeded, with no outputs: a try runs one job
+…
+[latem] run succeeded
+```
+
+The tree becomes a commit on no ref, the way `git add -A && git commit` would
+make it, without touching your index, branches or stash. The job is read from
+that commit, so the run is the commit's and the log names it. It runs the job
+you name whatever `on:` and the job's `if:` say, and gets no GitHub token
+unless this machine stores one (`latem secrets set --repo R GITHUB_TOKEN`).
+Ctrl-C cancels it. Nothing about it reaches a control plane. RUNNER_SPEC A76
+has the design.
+
 **Edit `config.toml` by hand for anything else**, then tell the running
 agent, or the edit does nothing:
 
@@ -955,6 +979,7 @@ latem setup android-sdk                                   Google's Android comma
 latem init --repo <name>=<url>       Write a starting config.toml for this machine
 latem agent                          Run the daemon (foreground; see `latem service install`)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
+latem try [-C dir] [--workflow F] [--event E] [--input k=v] [--matrix k=v] [--detach] <job>   a workflow job from this working tree, uncommitted changes included; no push
 latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f]
 latem artifacts <run-id>             what a run collected, with each file's path on this machine; reads no content

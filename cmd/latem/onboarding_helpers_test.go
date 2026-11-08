@@ -62,6 +62,15 @@ func init() {
 	originURL = func(context.Context, string) string {
 		panic("a test reached a real git remote get-url; use fakeOrigin")
 	}
+	tryTopLevel = func(context.Context, string) (string, error) {
+		panic("a test reached a real git rev-parse; use fakeTry")
+	}
+	tryCommit = func(context.Context, string) (treeCommit, error) {
+		panic("a test reached latem try's real commit of a working tree; use fakeTry")
+	}
+	addTryCommit = func(context.Context, *config.Config, string, string, string) error {
+		panic("a test reached a real mirror, which can clone from GitHub; use fakeTry")
+	}
 	realReadRepo = readRepo
 	readRepo = func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
 		panic("a test reached the real readRepo, which can clone from GitHub; use fakeRepoFiles")

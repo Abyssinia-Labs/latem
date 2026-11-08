@@ -69,7 +69,7 @@ func withEnv(sc expr.Scope, env map[string]any) expr.Scope {
 // withContext is sc with one context replaced. The scope is copied, not
 // edited: one scope serves every job and step compiled from it.
 func withContext(sc expr.Scope, name string, value map[string]any) expr.Scope {
-	contexts := make(map[string]expr.Value, len(sc.Contexts)+1)
+	contexts := make(map[string]expr.Value, len(sc.Contexts))
 	maps.Copy(contexts, sc.Contexts)
 	contexts[name] = value
 	out := sc
