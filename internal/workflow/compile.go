@@ -112,6 +112,10 @@ type Options struct {
 	// it (A55). The job's matrix is expanded here, from the file, and this
 	// must be exactly one of its legs.
 	Matrix json.RawMessage
+	// IgnoreJobIf compiles a workflow run's job without evaluating its if:,
+	// for `latem try` (A76): the person named the job they want run, and
+	// whether this event would have run it is the question they did not ask.
+	IgnoreJobIf bool
 }
 
 // CompileWith is [Compile] against a machine's actions and its policy.
@@ -142,9 +146,11 @@ func CompileWith(
 		// The job's if:, against its needs and the event, before anything
 		// else about the job is read: a skipped job's steps are not
 		// compiled, because none of them runs (A52).
-		run, err := jobCondition(declared.If, sc)
-		if err != nil {
-			return nil, badRegistry("%s: job %q: if: %v", w.Path, jobName, err)
+		run := true
+		if !opts.IgnoreJobIf {
+			if run, err = jobCondition(declared.If, sc); err != nil {
+				return nil, badRegistry("%s: job %q: if: %v", w.Path, jobName, err)
+			}
 		}
 		if !run {
 			return &registry.Job{Description: declared.Name, Skip: true,

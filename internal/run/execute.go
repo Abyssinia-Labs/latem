@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Abyssinia-Labs/latem/internal/artifact"
+	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
@@ -285,50 +286,13 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		return nil, registry.Decision{}, errors.New("run: no source manager configured")
 	}
 
-	// Gate 6 — mirror fetch, under internal/source's per-repo mutex.
-	x.note("fetching %s", x.req.Repo)
-	mirror, err := x.o.src.Fetch(ctx, source.Repo{Key: x.req.Repo, URL: repoCfg.URL, Token: repoCfg.FetchToken(x.req.FetchToken)})
-	if err != nil {
-		return nil, registry.Decision{}, err
+	locate := x.fetchAndResolve
+	if x.run.IsLocal() {
+		locate = x.localCommit
 	}
-
-	// Gate 7 — normalization. Exactly one of refs/heads/<ref> and
-	// refs/tags/<ref> must exist; both is E_AMBIGUOUS_REF and never a guess.
-	normalized, err := registry.NormalizeRef(ctx, mirror, x.req.Ref)
-	gone := false
-	if err != nil {
-		if !x.pullGone(err) {
-			return nil, registry.Decision{}, err
-		}
-		normalized, gone = x.req.Ref, true
-		x.note("%s no longer exists; building the commit the event named", normalized)
-	}
-
-	// Gate 9 — resolve, BEFORE gate 8 decides (amendment A27). §10 used to
-	// order these the other way, and that ordering is what made INV-5's
-	// approval unimplementable: gate 8 parked a run without knowing which
-	// commit it was parking, so `latem approve` had nothing to bind to and the
-	// only approval it could express was "this ref, whenever it eventually
-	// builds" — a force-push away from meaningless.
-	//
-	// Resolving first is safe, and cheap. It is a `git rev-parse` against a
-	// mirror that gate 6 has already fetched: a local read, no execution, no
-	// clone, and nothing from the commit is trusted or even looked at. What it
-	// buys is that every parked run records exactly the commit an operator is
-	// being asked to approve.
-	// A gone pull request ref has no tip; pin goes by the event's commit alone.
-	var sha string
-	if !gone {
-		if sha, err = mirror.Resolve(ctx, normalized); err != nil {
-			return nil, registry.Decision{}, err
-		}
-	}
-	if x.isWorkflowRun() {
-		pinned, dec, err := x.pin(ctx, mirror, normalized, sha)
-		if err != nil || !dec.OK() {
-			return nil, dec, err
-		}
-		sha = pinned
+	mirror, normalized, sha, dec, err := locate(ctx, repoCfg)
+	if err != nil || !dec.OK() {
+		return nil, dec, err
 	}
 
 	// Record what INV-5 decided, in the columns §22 keeps for it (amendment
@@ -384,7 +348,7 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	opts := workflow.Options{
 		Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache(),
 		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
-		Matrix: x.req.Matrix,
+		Matrix: x.req.Matrix, IgnoreJobIf: x.run.IsLocal(),
 	}
 	var (
 		reg *registry.Registry
@@ -411,6 +375,60 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		}
 	}
 	return reg, registry.Decision{}, nil
+}
+
+// fetchAndResolve is gates 6, 7 and 9: fetch the mirror, normalize the ref
+// against it, and resolve it — pinned, for a workflow run's job, to the commit
+// its event named.
+func (x *execution) fetchAndResolve(ctx context.Context, repoCfg *config.Repo) (
+	Mirror, string, string, registry.Decision, error,
+) {
+	// Gate 6 — mirror fetch, under internal/source's per-repo mutex.
+	x.note("fetching %s", x.req.Repo)
+	mirror, err := x.o.src.Fetch(ctx, source.Repo{Key: x.req.Repo, URL: repoCfg.URL, Token: repoCfg.FetchToken(x.req.FetchToken)})
+	if err != nil {
+		return nil, "", "", registry.Decision{}, err
+	}
+
+	// Gate 7 — normalization. Exactly one of refs/heads/<ref> and
+	// refs/tags/<ref> must exist; both is E_AMBIGUOUS_REF and never a guess.
+	normalized, err := registry.NormalizeRef(ctx, mirror, x.req.Ref)
+	gone := false
+	if err != nil {
+		if !x.pullGone(err) {
+			return nil, "", "", registry.Decision{}, err
+		}
+		normalized, gone = x.req.Ref, true
+		x.note("%s no longer exists; building the commit the event named", normalized)
+	}
+
+	// Gate 9 — resolve, BEFORE gate 8 decides (amendment A27). §10 used to
+	// order these the other way, and that ordering is what made INV-5's
+	// approval unimplementable: gate 8 parked a run without knowing which
+	// commit it was parking, so `latem approve` had nothing to bind to and the
+	// only approval it could express was "this ref, whenever it eventually
+	// builds" — a force-push away from meaningless.
+	//
+	// Resolving first is safe, and cheap. It is a `git rev-parse` against a
+	// mirror that gate 6 has already fetched: a local read, no execution, no
+	// clone, and nothing from the commit is trusted or even looked at. What it
+	// buys is that every parked run records exactly the commit an operator is
+	// being asked to approve.
+	// A gone pull request ref has no tip; pin goes by the event's commit alone.
+	var sha string
+	if !gone {
+		if sha, err = mirror.Resolve(ctx, normalized); err != nil {
+			return nil, "", "", registry.Decision{}, err
+		}
+	}
+	if x.isWorkflowRun() {
+		pinned, dec, err := x.pin(ctx, mirror, normalized, sha)
+		if err != nil || !dec.OK() {
+			return nil, "", "", dec, err
+		}
+		sha = pinned
+	}
+	return mirror, normalized, sha, registry.Decision{}, nil
 }
 
 // awaitApproval parks a run whose ref failed gate 8, the authoritative policy

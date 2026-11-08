@@ -251,6 +251,9 @@ func (b *Broker) sendResume(ctx context.Context) error {
 
 	r := protocol.Resume{MachineID: b.MachineID(), Runs: make([]protocol.RunResume, 0, len(runs))}
 	for _, run := range runs {
+		if run.IsLocal() {
+			continue // latem try's, which the control plane never sent (A76)
+		}
 		var seq uint64
 		if s := b.sinkFor(run.ID); s != nil {
 			seq = s.Acked()
@@ -324,6 +327,12 @@ func (b *Broker) replayReports(ctx context.Context) {
 		return
 	}
 	for _, run := range rows {
+		if run.IsLocal() {
+			// Report marks these delivered as they happen (A76); one here is
+			// from an agent that predates that, and is marked now.
+			b.markReported(ctx, run.ID, run.State)
+			continue
+		}
 		u := protocol.Update{
 			State:         run.State,
 			ExitCode:      run.ExitCode,

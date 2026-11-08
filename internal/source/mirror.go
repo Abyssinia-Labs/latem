@@ -114,6 +114,12 @@ func (m *Manager) createMirror(ctx context.Context, repo Repo, path string) erro
 		return err
 	}
 	if err := os.Rename(staging, path); err != nil {
+		// Another process made the mirror while this one cloned: the agent and
+		// `latem try` can both be first to a repository (A76). Theirs is as
+		// fresh as this one, and the rename refused to replace it, so use it.
+		if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+			return nil
+		}
 		return wrapErr(protocol.ErrSource, err, "installing mirror at %s", path)
 	}
 	return nil
@@ -215,6 +221,65 @@ func (mi *Mirror) FetchCommit(ctx context.Context, sha string) error {
 		return gitErr(err, "fetching commit %s of %s", sha, mi.repo.Key)
 	}
 	return nil
+}
+
+// AddCommit puts a commit made in a local checkout into repo's mirror, by its
+// name and under no ref: `latem try`'s commit of a working tree (A76). The
+// mirror is made first, as gate 6 makes it, when the agent has none yet.
+//
+// It is the one write a process other than the agent makes to a mirror, and
+// what makes that safe is what it does not write. A57 kept commands out
+// because fetches into one bare repository race on refs, packed-refs and
+// FETCH_HEAD under a lock only the agent holds. This fetch names no
+// destination, so it writes no ref; it writes no FETCH_HEAD, runs no
+// maintenance and writes no commit graph. What is left is objects, which git
+// writes under their content's name by rename.
+//
+// Protocol v2 is pinned: v0 refuses to serve a commit no ref advertises, and
+// git clears config from a local transport's environment, so the side that
+// serves the checkout cannot be told otherwise. from is the operator's own
+// checkout, after "--".
+func (m *Manager) AddCommit(ctx context.Context, repo Repo, from, sha string) (*Mirror, error) {
+	if m.readOnly {
+		return nil, errReader
+	}
+	if err := repo.validate(); err != nil {
+		return nil, err
+	}
+	if err := validateSHA(sha); err != nil {
+		return nil, err
+	}
+	if !filepath.IsAbs(from) {
+		return nil, codeErr(protocol.ErrSource, "the checkout %q is not an absolute path", from)
+	}
+	path, err := m.mirrorPath(repo.Key)
+	if err != nil {
+		return nil, err
+	}
+	lock := m.repoLock(repo.Key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if _, statErr := os.Stat(path); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return nil, wrapErr(protocol.ErrSource, statErr, "inspecting mirror %s", path)
+		}
+		if err := m.createMirror(ctx, repo, path); err != nil {
+			return nil, err
+		}
+	}
+	mi := &Mirror{mgr: m, repo: repo, path: path}
+	if has, err := mi.HasCommit(ctx, sha); err != nil || has {
+		return mi, err
+	}
+	// git's own -c, a config entry for this one invocation: the argv starts
+	// with it, and no shell is anywhere near (INV-3).
+	fetch := []string{"-c", "protocol.version=2", "fetch", "--no-tags", "--no-write-fetch-head",
+		"--no-auto-maintenance", "--no-write-commit-graph", "--quiet", "--", from, sha}
+	if _, err := m.run(ctx, path, fetch...); err != nil {
+		return nil, gitErr(err, "adding commit %s from %s to the mirror of %s", sha, from, repo.Key)
+	}
+	return mi, nil
 }
 
 // HasCommit reports whether a commit is present in the mirror.

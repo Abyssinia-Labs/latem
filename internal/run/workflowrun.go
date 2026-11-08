@@ -132,7 +132,7 @@ func (x *execution) workflowRunContext(github map[string]any) {
 	github["actor"] = ev.Actor
 	github["triggering_actor"] = ev.Actor
 	github["run_id"] = x.req.WorkflowRunID
-	github["run_number"] = float64(x.req.RunNumber)
+	github["run_number"] = float64(x.runNumber())
 	github["run_attempt"] = float64(max(x.req.RunAttempt, 1))
 	github["base_ref"], github["head_ref"] = "", ""
 	if strings.HasPrefix(ev.Name, "pull_request") {
@@ -151,12 +151,24 @@ func (x *execution) workflowRunEnv(env map[string]string) {
 	env["GITHUB_ACTOR"] = ev.Actor
 	env["GITHUB_TRIGGERING_ACTOR"] = ev.Actor
 	env["GITHUB_RUN_ID"] = x.req.WorkflowRunID
-	env["GITHUB_RUN_NUMBER"] = strconv.FormatInt(x.req.RunNumber, 10)
+	if n := x.runNumber(); n > 0 {
+		env["GITHUB_RUN_NUMBER"] = strconv.FormatInt(n, 10)
+	}
 	env["GITHUB_RUN_ATTEMPT"] = strconv.FormatInt(max(x.req.RunAttempt, 1), 10)
 	if strings.HasPrefix(ev.Name, "pull_request") {
 		env["GITHUB_BASE_REF"] = ev.BaseRef
 		env["GITHUB_HEAD_REF"] = ev.HeadRef
 	}
+}
+
+// runNumber is github.run_number: the workflow run's, or for one no control
+// plane numbered — a try (A76) — the machine's own, as $LATEM_BUILD_NUMBER.
+// A control plane numbers a workflow run from 1, so 0 means "not numbered".
+func (x *execution) runNumber() int64 {
+	if x.req.RunNumber > 0 {
+		return x.req.RunNumber
+	}
+	return x.run.Number
 }
 
 // skip ends a workflow run's job whose if: was false (A52): straight from

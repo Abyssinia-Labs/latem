@@ -85,6 +85,11 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 		switch {
 		case x.req.Token != "":
 			names = slices.DeleteFunc(slices.Clone(names), func(n string) bool { return n == workflow.TokenSecret })
+		case x.run.IsLocal():
+			// latem try borrows no one's token, and no control plane minted
+			// one (A76): it is the machine's secret, scoped as any other.
+			x.note("a try has no GitHub token, since no control plane minted one, so GITHUB_TOKEN is this "+
+				"machine's secret of that name, if it has one (`latem secrets set --repo %s GITHUB_TOKEN`)", x.req.Repo)
 		case x.isWorkflowRun():
 			x.note("this job's GitHub token is not held — the agent restarted after the job arrived, or none was " +
 				"sent — so GITHUB_TOKEN is this machine's secret of that name, if it has one")

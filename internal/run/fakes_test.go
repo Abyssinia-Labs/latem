@@ -60,6 +60,10 @@ type fakeSource struct {
 	// fetchedByName the ones it was asked for.
 	upstream      map[string]bool
 	fetchedByName []string
+	// opened are the repositories Open was asked for, unfetched (A76), and
+	// noMirror makes it answer that there is no mirror yet.
+	opened   []source.Repo
+	noMirror bool
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -86,6 +90,18 @@ func (s *fakeSource) Fetch(_ context.Context, repo source.Repo) (Mirror, error) 
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	return &fakeMirror{src: s}, nil
+}
+
+// Open is the mirror unfetched, for a local run (A76). noMirror makes it
+// answer as a machine that has never fetched the repository.
+func (s *fakeSource) Open(repo source.Repo) (Mirror, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opened = append(s.opened, repo)
+	if s.noMirror {
+		return nil, fmt.Errorf("%s: %w", repo.Key, source.ErrNoMirror)
 	}
 	return &fakeMirror{src: s}, nil
 }

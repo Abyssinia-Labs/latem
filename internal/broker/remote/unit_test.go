@@ -351,3 +351,71 @@ func TestResume_SaysWhichJobsLostTheirTokens(t *testing.T) {
 		}
 	}
 }
+
+// A run latem try made never reaches a control plane (A76), which has never
+// heard of it and would answer every frame "unknown run". Its updates are
+// recorded as delivered without being sent, so the replay set does not hand
+// it back at every reconnect; its log goes nowhere; and the resume frame
+// leaves it out. A control plane's run beside it is reported as ever.
+func TestLocalRuns_NeverReachTheControlPlane(t *testing.T) {
+	db := newStore(t)
+	sha := strings.Repeat("c", 40)
+	if err := db.Create(t.Context(), store.Run{ID: "r_try", Repo: "myapp", Job: "build", Ref: "refs/heads/x",
+		State: protocol.StateRunning, OriginKind: "cli", ApprovedSHA: sha,
+		Workflow: &store.WorkflowRun{Workflow: ".github/workflows/ci.yml", SHA: sha, WorkflowRunID: "r_try", Local: true}}); err != nil {
+		t.Fatal(err)
+	}
+	seedRun(t, db, "r_cloud", protocol.StateRunning)
+
+	h := newHarnessOn(t, db, nil)
+	h.AwaitConnected(t)
+	h.AwaitResumes(t, 1)
+	for _, r := range h.CP.Resumes()[0].Runs {
+		if r.RunID == "r_try" {
+			t.Error("the resume frame lists a local run")
+		}
+	}
+
+	sink, err := h.Logs(t.Context(), "r_try")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Write(t.Context(), []protocol.LogFrame{{RunID: "r_try", Seq: 1, Stream: "stdout", At: time.Now(), Line: "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// Each reported in the state its row is in, as the agent reports a
+	// transition only once it is persisted.
+	for _, id := range []string{"r_try", "r_cloud"} {
+		if err := h.Report(t.Context(), id, protocol.Update{State: protocol.StateRunning}); err != nil {
+			t.Fatalf("Report %s: %v", id, err)
+		}
+	}
+	h.CP.Await(t, "the control plane's run to be reported", func() bool {
+		for _, u := range h.CP.Updates() {
+			if u.RunID == "r_cloud" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, u := range h.CP.Updates() {
+		if u.RunID == "r_try" {
+			t.Errorf("a local run's update reached the control plane: %+v", u)
+		}
+	}
+	if frames := h.CP.Frames("r_try"); len(frames) != 0 {
+		t.Errorf("%d log frame(s) of a local run reached the control plane", len(frames))
+	}
+	rows, err := db.Unreported(t.Context(), store.BrokerRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == "r_try" {
+			t.Error("a local run is still in the remote transport's replay set")
+		}
+	}
+}

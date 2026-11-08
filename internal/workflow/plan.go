@@ -97,6 +97,34 @@ func PlanEvent(fsys fs.FS, ev protocol.Event, opts PlanOptions) ([]protocol.Plan
 	return plan, nil
 }
 
+// PlanFile plans one workflow file for an event whether or not its on:
+// matches the event. It is what `latem try` asks (A76): the person names the
+// job they want run, and whether this event would have run it is the question
+// they are not asking. A dispatch is still a dispatch: the file must declare
+// workflow_dispatch, and the inputs are validated against it. A file that
+// cannot be read, parsed or planned is an error rather than a planned failure,
+// because there is nobody downstream to report it to.
+func PlanFile(fsys fs.FS, file string, ev protocol.Event, opts PlanOptions) (protocol.PlannedWorkflow, error) {
+	if err := checkEvent(ev); err != nil {
+		return protocol.PlannedWorkflow{}, err
+	}
+	if ev.Name == EventWorkflowDispatch && ev.Workflow != file {
+		return protocol.PlannedWorkflow{}, fmt.Errorf("the dispatch names %s, not %s", ev.Workflow, file)
+	}
+	payload := map[string]any{}
+	if len(ev.Payload) > 0 {
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			return protocol.PlannedWorkflow{}, fmt.Errorf("%s: the event's payload is not a JSON object: %w", ev.Name, err)
+		}
+	}
+	p := &planner{fsys: fsys, ev: ev, payload: payload, opts: opts, anyTrigger: true}
+	pw, _, err := p.workflow(file)
+	if err == nil && pw.Error != "" {
+		err = errors.New(pw.Error)
+	}
+	return pw, err
+}
+
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 // checkEvent refuses an event the planner cannot read, before any file is.
@@ -158,6 +186,8 @@ type planner struct {
 	ev      protocol.Event
 	payload map[string]any
 	opts    PlanOptions
+	// anyTrigger plans a file whatever its on: says (PlanFile).
+	anyTrigger bool
 
 	diffDone bool
 	diff     []string
@@ -196,18 +226,24 @@ func (p *planner) workflow(file string) (protocol.PlannedWorkflow, bool, error) 
 		if dispatch {
 			return pw, false, fmt.Errorf("%s has no workflow_dispatch trigger", file)
 		}
-		return pw, false, nil
+		if !p.anyTrigger {
+			return pw, false, nil
+		}
 	}
-	t, err := decodeTrigger(p.ev.Name, raw)
-	if err != nil {
-		return broken(fmt.Errorf("%s: on.%s: %w", file, p.ev.Name, err))
+	t := &trigger{}
+	if ok {
+		if t, err = decodeTrigger(p.ev.Name, raw); err != nil {
+			return broken(fmt.Errorf("%s: on.%s: %w", file, p.ev.Name, err))
+		}
 	}
-	match, err := p.matches(t)
-	if err != nil {
-		return broken(fmt.Errorf("%s: on.%s: %w", file, p.ev.Name, err))
-	}
-	if !match {
-		return pw, false, nil
+	if !p.anyTrigger {
+		match, err := p.matches(t)
+		if err != nil {
+			return broken(fmt.Errorf("%s: on.%s: %w", file, p.ev.Name, err))
+		}
+		if !match {
+			return pw, false, nil
+		}
 	}
 
 	inputs := map[string]any{}

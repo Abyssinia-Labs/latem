@@ -255,6 +255,8 @@ Two consequences worth stating because they are the point of the rule. `refs/hea
 
 Runs on non-matching refs enter `awaiting_approval` and require a local `latem approve <run-id>`. Approval is a local action only; a broker cannot grant it, and no inbound command kind can express it (INV-2).
 
+`latem try` (A76) is the other local approval: the run it queues is a commit it has just made from the operator's working tree, and it is created approved for exactly that commit, in the row, where no broker can write.
+
 **Approval is bound to a commit, not to a ref.** `latem approve` records `approved_at` and `approved_sha` (§22), where `approved_sha` is the commit the run was parked at, and gate 8 admits an out-of-policy run only while the freshly resolved commit still equals it. This is the whole content of the mechanism rather than an implementation detail. The reason this invariant exists at all is that a `ref` can point at a branch a contributor controls — so an approval that granted the *ref* could be obtained for a benign commit and spent on a hostile one: push, ask, get approved, force-push, and the run builds what arrived last. That is a time-of-check-to-time-of-use hole wide enough to defeat the invariant completely, and an approval mechanism with it is decoration.
 
 If the ref moves between the approval and the build, the run is **parked again** rather than built, the approval is discarded, and the message says the ref moved. The operator is then asked about the commit that actually arrived. Two consequences follow:
@@ -1291,6 +1293,7 @@ The original argument survives for what it did cover: the runner still invokes `
 latem setup [--url U] [--repo owner/name …] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
+latem try [-C dir] [--workflow F] [--event E] [--input k=v] [--ref R] [--matrix k=v] [--repo R] [--detach] <job>   One workflow job from this working tree, uncommitted changes included; no push, no control plane (A76)
 latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
 latem artifacts <run-id>             A run's recorded artifacts and their local paths; reads no content (§17)
@@ -3389,4 +3392,137 @@ waits up to 90 seconds before it begins, and says in its log what came of it: th
 N seconds, or none came and it fetches with the machine's credential. That is the behaviour it had
 before, reached a minute and a half later. A job this process received never waits, nor does one
 that still holds a token.
+
+### Amendment from changing a workflow without pushing it
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A76 | §5 INV-5, §7.3, §7.4, §12, §19, A50, A52, A57 | **`latem try <job>` runs one workflow job on this machine from a working tree, uncommitted and untracked changes included, with no push and no control plane. The tree becomes a commit on no ref; the command adds its objects to the agent's mirror and queues a workflow run's job pinned to it, approved for that commit as `latem approve` would approve it. No new command kind and no new `RunRequest` field: the run is a row the command writes, as `latem run` writes one with no agent (§7.3)** | Changing CI was push, wait, read. Every repository being migrated runs GitHub workflows, and a workflow job reaches a machine only from a control plane after a push (A52), so a one-line change to a workflow cost a commit, a push, a plan, a queue and a clone before it said anything; `latem run` runs a jobs.yaml job at a remote ref and nothing else. `act` replays a workflow in a container that is not the machine that will run it. This is that machine, with its runners, labels, toolchains, secrets and caches |
+
+**The commit.** `git stash create` was the first idea and is wrong: it records tracked changes only,
+so a new workflow file — the commonest change to CI — is not in it. Measured on git 2.54: a stash
+of a tree with a new `.github/workflows/new.yml` lists one file, the modified tracked one. latem try
+copies the checkout's index to a temporary file, runs `git add -A` against the copy, `write-tree`,
+and `commit-tree -p HEAD --no-gpg-sign`. That is the commit `git add -A && git commit` would make,
+with `.gitignore` honoured, while the person's index, working tree, refs and stash are untouched. A
+tree equal to HEAD's is HEAD itself, and no commit is made. The commit's author is the person's own
+git identity, and its message says latem try made it. The command prints the paths that differ
+from HEAD, so nobody is surprised by what was included. A submodule's recorded commit is included,
+and its dirty tree is not.
+
+**Into the mirror.** The commit's objects are fetched into the agent's mirror from the checkout, by
+the commit's name: `fetch --no-tags --no-write-fetch-head --no-auto-maintenance --no-write-commit-graph`,
+with no refspec destination, so no ref is written. Protocol v2 is pinned for that one fetch, because
+v0 refuses a commit no ref advertises ("not allow request for unadvertised object"), and git strips
+config from the environment of a local transport, so the server side cannot be told otherwise.
+This is the one write a command makes beside a running agent, and A57's rule ("a command never
+writes a mirror") is narrowed to say so. A57's reason was that fetches into one bare repository race
+on refs, `packed-refs` and `FETCH_HEAD`, under a lock only the agent's process holds; this fetch
+writes none of those. It writes objects, which git writes under their content's name by rename, so
+a concurrent writer of the same object writes the same bytes. The command runs it, not the agent,
+because the command runs as the person at the terminal: macOS keeps a LaunchAgent out of
+`~/Documents` and `~/Desktop` until the person grants it access, and the terminal already has it.
+A repository the agent has never fetched gets its mirror first, cloned as gate 6 clones it. Two
+processes making one mirror at once is now harmless both ways: whichever loses the rename into
+place keeps the other's.
+
+**In the queue.** latem try writes the run's row itself, as `latem run` does with no agent (§7.3),
+then rings the agent's socket with an ordinary `run` command for the same id, which re-queues a row
+that is already queued and changes nothing else. The row is a workflow run's job (A52): its file,
+its job, the commit, an event, its `needs`, and a workflow run id that is its own run id, with no
+token. It carries two things no broker can write, because no `RunRequest` field expresses either
+and a broker's run is a row made from a request:
+
+- `approved_at` and `approved_sha`, set to the commit. Running latem try *is* the local approval
+  INV-5 asks for of a ref outside policy, and it is bound to one commit, as every approval is.
+- `local` in `workflow_json`, which tells the gates that the ref is a name and not a thing to look up.
+
+**At the gates.** A local run skips gate 6's fetch: its commit is already in the mirror, and nothing
+on the remote can change what it builds. A try works with no network until a step needs one. It
+skips gate 7's normalization, because its ref is the branch the tree was on, which need not exist
+on any remote. Gate 9 asks whether the commit is in the mirror. Gate 8 admits it by its approval,
+whatever `allowed_refs` says. A local run that is not approved for exactly its commit is rejected
+with `E_INVALID_REF`, never parked: nothing a broker sent can be one, and a row that claims to be one
+without the approval is not to be trusted with a person's attention. Gates 10 to 19 are unchanged.
+A checkout step with no `ref:` gets the run's commit. One with a `ref:` goes through A53, against a
+freshly fetched mirror, as before.
+
+**INV-5 holds.** The invariant has two halves: a job's definition comes from the pinned commit, and an
+approval binds a commit. A local run keeps both. The job is compiled at gate 11 from a workspace
+cloned out of the mirror at the commit, never from the working tree. So a file edited after latem
+try returns is not in the run, and the run's log names the commit. The commit is a git commit like
+any other, so `git show <sha>` in the checkout or the mirror shows exactly what ran. The mirror
+keeps an unreachable object for the thirty days of §14.4's gc, and the checkout keeps it for its own
+gc's two weeks, so a try worth keeping is one `git branch` away.
+
+**What the job sees.** `github.event_name` is `push`, or `workflow_dispatch` with `--event
+workflow_dispatch` and its `--input`s, validated against the file's `workflow_dispatch` declaration,
+as the planner validates a dispatch. `github.ref` is `refs/heads/<branch>` for the branch the tree
+is on, or `--ref`. A detached HEAD runs as a push to the repository's default branch (the first
+literal `allowed_refs` entry, else `main`), and the command says so. `github.sha` is the commit. The
+event payload holds what latem knows and nothing it would have to invent:
+
+- `ref`, and the repository's `full_name`, `name` and `owner.login` when it is a GitHub repository;
+- for a push, `after`, and `before` set to HEAD (the try is one commit pushed onto it), with `before`
+  absent for a clean tree;
+- no `head_commit`, `commits` or `pusher`.
+
+`github.actor` is the person's login on this machine. `github.run_id` is the run id, `run_number` the
+machine's run counter, as `$LATEM_BUILD_NUMBER` (A36), and `run_attempt` 1. A control plane always
+numbers a workflow run from 1, so a run number of 0 now means "not numbered" and reads the machine's
+own.
+
+**What a try does not ask.** `on:` is not evaluated, and neither is the job's own `if:`. Both answer
+whether this event would have run this job in a workflow run, and the person has just named the job
+they want run. The log says, for each, that it was not evaluated. A job's `needs` are taken as
+succeeded, with no outputs, and the log says so too. A step that reads a needed job's output reads
+"", as it would if that job had set nothing. A matrix job names its leg with `--matrix key=value`
+for each value that tells legs apart. A job with several legs and no `--matrix` is refused with the
+list of legs and the flags that pick each. The command plans the file through a variant of A52's
+planner that plans one named file whatever its `on:` says (`workflow.PlanFile`).
+
+**`GITHUB_TOKEN`.** No control plane minted one, and latem does not borrow the person's. `gh auth
+token` is their identity with every scope they hold, and handing it to a job, and to every
+third-party action in it, is the opposite of GitHub's token, which covers one repository and one
+job's permissions for an hour. So `secrets.GITHUB_TOKEN` and `github.token` resolve the way A50
+resolved them before A52, from this machine's own secrets (`<repo>__GITHUB_TOKEN`, then
+`GITHUB_TOKEN`). An operator who wants tries to have a token stores a narrow one with `latem secrets
+set --repo R GITHUB_TOKEN`. Without one it reads as empty, and the log says why. A checkout step gets
+no credential, which the run's own commit, already in the workspace, does not need.
+
+**Nothing leaves the machine.** A control plane has never heard of a local run and answers each
+report about one "unknown run": a mutation per transition and per log batch, for nothing. So the
+remote transport carries none of it. Its `Report` records a local run's state as delivered without
+sending it, so `store.Unreported` does not hand the run back at every reconnect. Its `Logs` returns
+a sink that discards, and the resume frame leaves it out. The local transport, the log file and
+`latem logs` see everything, as for any run.
+
+**Before it queues anything** latem try plans the file and checks the chosen job the way `latem
+workflows check` checks it, through the same planner and compiler. A job no runner here can take,
+an action `[actions]` refuses, or a job the compiler refuses is reported with the same findings and
+fixes, exit 1, and nothing is queued. A typo in `runs-on` costs a second rather than a clone.
+
+**The command.** `latem try [-C dir] [--workflow file] [--event push|workflow_dispatch] [--input k=v]
+[--ref R] [--matrix k=v] [--repo R] [--detach] <job>`.
+
+- **The checkout** is `-C`, default the current directory, matched to a `[repos.*]` entry by its
+  origin remote or by `--repo`, as `workflows check` matches one.
+- **The file** is the one workflow under `.github/workflows` that has a job with that id, or
+  `--workflow` (a name or a path) when more than one does. An unknown job is refused with the jobs
+  each file has.
+- **Following.** It follows the run's log to stdout and exits with its result (0 succeeded, 1
+  otherwise), like `latem run --follow`. With no agent listening that is exit 3, and nothing is
+  queued. Ctrl-C cancels the run.
+- **`--detach`** queues it, prints the run id, and exits 0, with or without an agent, as `latem run`
+  does.
+
+**Costs.** Nothing here reaches latem-cloud: the command talks to the local socket and sqlite, and
+the agent's remote transport drops local runs before any frame is built. On the machine a try costs
+one `git add -A` into a temporary index (its time is the checkout's untracked files, which a commit
+would hash too), one object-only local fetch of the changed objects, and one sqlite row. That is the
+same as a `latem run`, less gate 6's network fetch.
+
+**Not in this amendment.** Pull request events, whose merge commit and base are a GitHub
+computation. Running a job's `needs` before it, or several jobs at once. A try on another machine,
+which would be a push by another name.
 

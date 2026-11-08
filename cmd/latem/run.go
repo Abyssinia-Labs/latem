@@ -174,18 +174,23 @@ func submitRun(cmd *cobra.Command, s submission) error {
 // keeping the last one is how somebody spends an afternoon on a build that
 // used a value they thought they had overridden.
 func parseInputs(pairs []string) (map[string]string, error) {
+	return parsePairs("--input", pairs)
+}
+
+// parsePairs is [parseInputs] for any repeated key=value flag.
+func parsePairs(flag string, pairs []string) (map[string]string, error) {
 	out := make(map[string]string, len(pairs))
 	for _, p := range pairs {
 		key, value, ok := strings.Cut(p, "=")
 		if !ok {
-			return nil, usageErrorf("--input %q is not key=value", p)
+			return nil, usageErrorf("%s %q is not key=value", flag, p)
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
-			return nil, usageErrorf("--input %q has an empty key", p)
+			return nil, usageErrorf("%s %q has an empty key", flag, p)
 		}
 		if _, dup := out[key]; dup {
-			return nil, usageErrorf("--input %s given more than once", key)
+			return nil, usageErrorf("%s %s given more than once", flag, key)
 		}
 		out[key] = value
 	}
