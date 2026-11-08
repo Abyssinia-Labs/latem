@@ -302,6 +302,13 @@ func newServiceStatusCommand() *cobra.Command {
 
 // serviceSpec builds the service definition from this machine and this config.
 func serviceSpec(sys *system.System, execPath string) (system.ServiceSpec, error) {
+	if link, ok := homebrewLink(); execPath == "" && ok {
+		// Homebrew's link at the installed version, not the keg it leads to:
+		// `brew upgrade` deletes the keg, and a service pointing at it would
+		// start nothing at the next boot. The link moves with each upgrade,
+		// and the agent follows it (A78).
+		execPath = link
+	}
 	if execPath == "" {
 		// The running binary, resolved through symlinks. Installing a service
 		// that points at a symlink an operator later replaces is how a machine

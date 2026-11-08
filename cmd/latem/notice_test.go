@@ -46,6 +46,7 @@ func newNoticeTest(t *testing.T, running string) *noticeFixture {
 	noticeCache = func() (string, error) { return f.cache, nil }
 	noticeNow = func() time.Time { return f.now }
 	noticeAllowed = func(*os.File) bool { return true }
+	asHomebrews(t, "")
 	return f
 }
 
@@ -86,6 +87,17 @@ func TestNotice_SaysANewerReleaseExists(t *testing.T) {
 	}
 	if c := readReleaseCheck(f.cache); c.Latest != "v0.4.0" || !c.CheckedAt.Equal(f.now) {
 		t.Errorf("remembered %+v", c)
+	}
+}
+
+// Homebrew's latem is upgraded by Homebrew; `latem update` would refuse.
+func TestNotice_OnAHomebrewInstallSaysBrewUpgrade(t *testing.T) {
+	f := newNoticeTest(t, "v0.3.0")
+	asHomebrews(t, "/opt/homebrew/opt/latem/bin/latem")
+	f.latest = "v0.4.0"
+	got := f.run(t, "list")
+	if !strings.Contains(got, "To upgrade, run: brew upgrade latem") || strings.Contains(got, "latem update") {
+		t.Errorf("notice on a Homebrew install:\n%s", got)
 	}
 }
 

@@ -32,6 +32,7 @@ func newSwitchFixture(t *testing.T, to string, grace time.Duration) *switchFixtu
 		Version:       "v0.3.0",
 		ShutdownGrace: grace,
 		BinaryVersion: func(context.Context, string) (string, error) { return f.to, f.failTo },
+		Homebrew:      notHomebrews,
 		Exec: func(path string, _, _ []string) error {
 			f.execed <- path
 			return nil

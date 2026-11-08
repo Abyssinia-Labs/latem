@@ -197,7 +197,21 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 ```
 
 Never as root. The script detects your OS and architecture, verifies the
-download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
+download, installs to `~/.local/bin`, and runs `latem doctor`.
+
+Or with Homebrew, on macOS or Linux:
+
+```console
+$ brew install abyssinia-labs/tap/latem
+```
+
+The same release archive, whose checksums the tap verifies against latem's
+signing key before it writes them into the formula. Homebrew updates it with
+`brew upgrade latem` (`latem update` refuses to write into Homebrew's directory),
+and the running agent moves onto the new version by itself, the first moment no
+build is in flight.
+
+Then:
 
 ```console
 $ latem setup

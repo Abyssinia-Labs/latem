@@ -68,7 +68,18 @@ func newUpdateTest(t *testing.T, running string) *updateFixture {
 	}
 	global.configDir = t.TempDir()
 	t.Cleanup(func() { global.configDir = "" })
+	asHomebrews(t, "")
 	return f
+}
+
+// asHomebrews makes this binary one Homebrew installed with its opt link at
+// link, or with "" one it did not, whatever installed the Go that built the
+// test.
+func asHomebrews(t *testing.T, link string) {
+	t.Helper()
+	old := homebrewLink
+	t.Cleanup(func() { homebrewLink = old })
+	homebrewLink = func() (string, bool) { return link, link != "" }
 }
 
 func (f *updateFixture) installed(t *testing.T) string {
@@ -180,6 +191,33 @@ func TestUpdate_Refusals(t *testing.T) {
 			t.Errorf("err = %v", err)
 		}
 	})
+}
+
+// A keg is Homebrew's: it records the version there and deletes the keg on
+// the next upgrade, so `latem update` writes nothing into it and moves no
+// agent. It names the command that does update it (A78).
+func TestUpdate_AHomebrewInstallIsHomebrews(t *testing.T) {
+	f := newUpdateTest(t, "v0.3.0")
+	asHomebrews(t, "/opt/homebrew/opt/latem/bin/latem")
+
+	err := runUpdate(context.Background(), &bytes.Buffer{}, false)
+	if err == nil || !strings.Contains(err.Error(), "brew upgrade latem") ||
+		!strings.Contains(err.Error(), "/opt/homebrew/opt/latem/bin/latem") {
+		t.Errorf("err = %v, want it to name the link and `brew upgrade latem`", err)
+	}
+	if f.rel.fetched || f.installed(t) != "the old binary" || len(f.asked) != 0 {
+		t.Errorf("a Homebrew install downloaded, installed or signalled: fetched=%v asked=%v", f.rel.fetched, f.asked)
+	}
+
+	// --check changes nothing anywhere, so it still answers.
+	var out bytes.Buffer
+	if err := runUpdate(context.Background(), &out, true); err != nil {
+		t.Fatalf("runUpdate --check: %v", err)
+	}
+	if !strings.Contains(out.String(), "latem v0.4.0 is available") ||
+		!strings.Contains(out.String(), "run `brew upgrade latem` to install it") {
+		t.Errorf("--check on a Homebrew install said:\n%s", out.String())
+	}
 }
 
 // What the command says for each answer the agent can give. The binary is

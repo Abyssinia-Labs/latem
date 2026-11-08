@@ -100,6 +100,12 @@ that release using the key they already trust, and arrive carrying the next
 one. Skipping that step strands every machine on the last release its key can
 verify.
 
+The Homebrew tap pins a copy too, `latem.pub` in
+[`Abyssinia-Labs/homebrew-tap`](https://github.com/Abyssinia-Labs/homebrew-tap),
+and verifies each release's checksums with it before it writes a formula. Update
+it with the release that carries the new key, or the tap stops at the last
+release the old one signed (RUNNER_SPEC A78).
+
 ---
 
 ## 3. Rehearsing, before there is anything to lose
