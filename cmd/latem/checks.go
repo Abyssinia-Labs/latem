@@ -104,6 +104,9 @@ type doctor struct {
 	// without reaching api.github.com — and so a test can arrange the three
 	// answers that matter: current, newer, and unreachable.
 	latestRelease func(context.Context) (selfupdate.Release, error)
+	// homebrew is [homebrewLink], overridable: the real one asks where the
+	// binary running the test is.
+	homebrew func() (string, bool)
 	// kegRubies is [kegOnlyRubies], overridable.
 	//
 	// It is a list of absolute paths that [system.System.ToolAt] stats on the

@@ -190,6 +190,11 @@ type Options struct {
 	// runs it with `version --short`.
 	BinaryVersion func(ctx context.Context, path string) (string, error)
 
+	// Homebrew is the link Homebrew keeps at the installed version, when
+	// this binary is in a Homebrew keg (A78). Nil asks
+	// [selfupdate.Homebrew] about this process's executable.
+	Homebrew func() (link string, ok bool)
+
 	// ProbeToolchains finds what this machine has for builds, for the note a
 	// run writes about what its job needs and the machine lacks (A59). Nil
 	// probes nothing and writes no note.
@@ -222,6 +227,7 @@ type Options struct {
 	TeardownGrace       time.Duration
 	UpdateInterval      time.Duration
 	UpdateIdleWait      time.Duration
+	HomebrewInterval    time.Duration
 
 	// ShutdownGrace overrides agent.shutdown_grace. Zero uses the config
 	// value, which itself defaults to 30 minutes because an iOS build is long.
@@ -245,6 +251,7 @@ type Agent struct {
 	claimEvery       time.Duration
 	updateEvery      time.Duration
 	updateIdleWait   time.Duration
+	homebrewEvery    time.Duration
 	preflightTimeout time.Duration
 	shutdownGrace    time.Duration
 	teardownGrace    time.Duration
@@ -372,6 +379,7 @@ func New(opts Options) (*Agent, error) {
 		claimEvery:       orDuration(opts.ClaimInterval, DefaultClaimInterval),
 		updateEvery:      orDuration(opts.UpdateInterval, DefaultUpdateInterval),
 		updateIdleWait:   orDuration(opts.UpdateIdleWait, DefaultUpdateIdleWait),
+		homebrewEvery:    orDuration(opts.HomebrewInterval, DefaultHomebrewInterval),
 		preflightTimeout: orDuration(opts.PreflightTimeout, DefaultPreflightTimeout),
 		teardownGrace:    orDuration(opts.TeardownGrace, DefaultTeardownGrace),
 		shutdownGrace:    grace,
@@ -429,6 +437,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.spawn(&wg, func() { a.toolchainsLoop(workCtx) })
 	a.spawn(&wg, func() { a.watchLoop(workCtx) })
 	a.spawn(&wg, func() { a.updateLoop(workCtx) })
+	a.spawn(&wg, func() { a.homebrewLoop(workCtx) })
 
 	pool := a.startPool(workCtx)
 	a.startReloads()

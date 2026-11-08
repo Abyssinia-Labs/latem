@@ -265,6 +265,8 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		latestRelease: func(context.Context) (selfupdate.Release, error) {
 			return selfupdate.Release{}, selfupdate.ErrUpToDate
 		},
+		// Not Homebrew's, whatever installed the Go that built the test.
+		homebrew: func() (string, bool) { return "", false },
 		// Nowhere, unless a test puts a ruby somewhere it controls. The real
 		// list is absolute paths under /opt, which system.ToolAt stats for
 		// real: inheriting them means reading whatever Homebrew this machine
