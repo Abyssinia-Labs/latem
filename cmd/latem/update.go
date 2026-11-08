@@ -43,6 +43,9 @@ run to do it.
 Every other command says, at most once a day and only on a terminal, when a
 newer release exists. LATEM_NO_UPDATE_NOTIFIER=1 or CI=1 turns that off.
 
+It also puts ltm, latem's short name, beside the binary as a link to it, when
+nothing called ltm is there yet (A79).
+
 A latem that Homebrew installed is Homebrew's to update: this command refuses
 to write into its keg and says to run ` + "`brew upgrade latem`" + `. The agent
 moves onto what that installs by itself, the first moment no run is in flight
@@ -130,6 +133,7 @@ func runUpdate(ctx context.Context, out io.Writer, checkOnly bool) error {
 			// an update whose agent was busy and has since restarted on the
 			// old one. Asking costs a read when there is nothing to do.
 			if target, err := selfBinary(); err == nil {
+				linkShortName(out, target)
 				moveAgent(ctx, out, target, version)
 			}
 		}
@@ -165,8 +169,25 @@ func runUpdate(ctx context.Context, out io.Writer, checkOnly bool) error {
 		return err
 	}
 	printf(out, "installed latem %s at %s (was %s)\n", rel.Version, target, version)
+	linkShortName(out, target)
 	moveAgent(ctx, out, target, rel.Version)
 	return nil
+}
+
+// linkShortName puts ltm beside the binary at target, as a link to it, when
+// nothing of that name is there (A79): a machine installed before the short
+// name existed gets it from its next update. A file called ltm that is
+// anything else is somebody else's, and stays.
+func linkShortName(out io.Writer, target string) {
+	link := filepath.Join(filepath.Dir(target), shortName)
+	if _, err := os.Lstat(link); !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if err := os.Symlink(filepath.Base(target), link); err != nil {
+		printf(out, "could not add %s beside %s: %v\n", shortName, target, err)
+		return
+	}
+	printf(out, "added %s, a link to %s\n", link, filepath.Base(target))
 }
 
 // moveAgent asks the running agent to move onto want, and says what came of

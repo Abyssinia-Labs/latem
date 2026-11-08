@@ -1313,6 +1313,8 @@ latem update [--check]               Install the latest release; the agent moves
 latem version
 ```
 
+**`ltm` is latem** (A79): the same binary by its short name, a link beside it that install.sh, `latem update` and the Homebrew formula put there. Every command above works under either name. Run as `ltm`, the root command calls itself that, so its usage and its completion script are for the name typed.
+
 **`latem doctor` is a first-class deliverable, not a nice-to-have.** It is what makes G6 achievable and what turns the failure table in §18.1 into a self-service fix. It must check, and for each failure print the exact command to run:
 
 - git, docker, tart availability and versions
@@ -1537,7 +1539,7 @@ Three things `latem doctor` must verify and explain, because getting any of them
 
 **Directory and file modes**, created by the installer and enforced at startup: `~/.latem` is `0700`; `config.toml`, `secrets.env`, and the token file are `0600`; `agent.sock` is `0600`. The agent refuses to start otherwise rather than warning, because a world-readable directory holding a machine token and every secret is the threat model failing silently.
 
-**Install script** `curl -fsSL … | sh`: detect OS/arch, download the matching binary, verify checksum, place in `~/.local/bin`, run `latem doctor`, print the next command. Never run as root.
+**Install script** `curl -fsSL … | sh`: detect OS/arch, download the matching binary, verify checksum, place in `~/.local/bin` with an `ltm` link beside it (A79), run `latem doctor`, print the next command. Never run as root.
 
 **Homebrew** `brew install abyssinia-labs/tap/latem` installs the same release archive. The service a Homebrew binary installs starts `<prefix>/opt/latem/bin/latem`, the link each `brew upgrade` moves, not the keg the next one deletes (A78).
 
@@ -3619,3 +3621,28 @@ checksums manifest only after verifying its minisign signature against a pinned 
 `internal/selfupdate/trusted.pub`. So a Homebrew install rests on the same signature as install.sh's,
 verified once by the tap rather than on each machine. A key rotation (docs/release.md §2) updates
 the tap's copy in the same release.
+
+### Amendment from a short name
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A79 | §19, §23, A56, A78 | **`ltm` is latem's short name: a link to the binary, beside it, that install.sh, `latem update` and the Homebrew formula put there. Run by that name the root command calls itself `ltm`, so its usage and its completion script are for the name typed.** | Five letters typed hundreds of times a day, by the person who owns the machine. An alias in a shell profile reaches one shell. A link beside the binary reaches every shell, ssh, scripts and the service's own PATH, and moves with the binary when it moves |
+
+**A link, not a second file.** The link is relative (`ltm -> latem`), so the pair moves together,
+and every path that resolves the running binary resolves through it: `latem update` replaces
+`latem`, the service starts `latem` (or Homebrew's opt link, A78), and SIGUSR2 asks `latem` its
+version. Nothing in the release changes. The archive still holds one binary at its root (§20,
+A41), and the link is made where the binary is installed.
+
+**Somebody else's `ltm` stays.** install.sh and `latem update` make the link only where nothing
+called `ltm` exists, and leave anything else alone. install.sh says it did; `latem update` says
+nothing, because it runs on every update and the answer does not change. A machine installed before
+the short name existed gets it from its next `latem update`. Homebrew's formula links it into the
+keg, and a formula conflict over the name is Homebrew's to report.
+
+**The name it was run by.** The root command's `Use` is `ltm` when `argv[0]`'s base name is `ltm`,
+and `latem` for any other name, a renamed file included, so a binary called `latem-dev` does not
+start answering to that. Messages that name a command to run still say `latem`, which works
+everywhere the short name does, and some places it does not, such as an ssh session on a machine
+that has not updated yet. The one exception is the usage hint after a usage error, which repeats
+the name typed.

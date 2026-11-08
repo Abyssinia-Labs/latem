@@ -193,6 +193,49 @@ func TestUpdate_Refusals(t *testing.T) {
 	})
 }
 
+// An update puts ltm beside the binary, as a link to it, so a machine
+// installed before the short name existed gets it (A79). Somebody else's ltm
+// stays, and --check writes nothing.
+func TestUpdate_AddsTheShortName(t *testing.T) {
+	link := func(f *updateFixture) string { return filepath.Join(filepath.Dir(f.target), "ltm") }
+
+	f := newUpdateTest(t, "v0.3.0")
+	if err := runUpdate(context.Background(), &bytes.Buffer{}, true); err != nil {
+		t.Fatalf("runUpdate --check: %v", err)
+	}
+	if _, err := os.Lstat(link(f)); err == nil {
+		t.Error("--check added ltm")
+	}
+	var out bytes.Buffer
+	if err := runUpdate(context.Background(), &out, false); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if to, err := os.Readlink(link(f)); err != nil || to != "latem" {
+		t.Errorf("ltm = %q, %v; want a link to latem\n%s", to, err, out.String())
+	}
+
+	// Up to date, on a machine with no ltm yet.
+	f = newUpdateTest(t, "v0.4.0")
+	f.rel.checkErr = selfupdate.ErrUpToDate
+	if err := runUpdate(context.Background(), &bytes.Buffer{}, false); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if to, _ := os.Readlink(link(f)); to != "latem" {
+		t.Errorf("an up-to-date update did not add ltm: %q", to)
+	}
+
+	f = newUpdateTest(t, "v0.3.0")
+	if err := os.WriteFile(link(f), []byte("somebody else's ltm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUpdate(context.Background(), &bytes.Buffer{}, false); err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if b, _ := os.ReadFile(link(f)); string(b) != "somebody else's ltm" {
+		t.Errorf("an update replaced somebody else's ltm with %q", b)
+	}
+}
+
 // A keg is Homebrew's: it records the version there and deletes the keg on
 // the next upgrade, so `latem update` writes nothing into it and moves no
 // agent. It names the command that does update it (A78).

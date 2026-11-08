@@ -185,6 +185,43 @@ func TestInstallScript_InstallsAVerifiedRelease(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".latem.new")); err == nil {
 		t.Error("the staging file survived the install")
 	}
+	// A79: ltm beside it, a relative link, so the pair can move together.
+	if to, err := os.Readlink(filepath.Join(dir, "ltm")); err != nil || to != "latem" {
+		t.Errorf("ltm = %q, %v; want a link to latem\n%s", to, err, out)
+	}
+
+	// Run again over its own install: the link is latem's, and stays.
+	if out, err := runInstaller(t, r, dir); err != nil || strings.Contains(out, "not latem's") {
+		t.Errorf("a second install: %v\n%s", err, out)
+	}
+}
+
+// A file called ltm that is not latem's link is somebody else's: the install
+// goes ahead, leaves it as it was, and says the short name is not installed.
+func TestInstallScript_LeavesSomebodyElsesLtm(t *testing.T) {
+	r := newFakeRelease(t, "v0.9.0", "latem v0.9.0")
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	theirs := filepath.Join(dir, "ltm")
+	if err := os.WriteFile(theirs, []byte("#!/bin/sh\necho another ltm\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstaller(t, r, dir)
+	if err != nil {
+		t.Fatalf("install.sh: %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(theirs); !strings.Contains(string(b), "another ltm") {
+		t.Errorf("install.sh replaced somebody else's ltm:\n%s", b)
+	}
+	if !strings.Contains(out, "not latem's") {
+		t.Errorf("install.sh did not say it left ltm alone:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "latem")); err != nil {
+		t.Errorf("latem was not installed: %v", err)
+	}
 }
 
 // The checksum is the only thing standing between `curl | sh` and running
