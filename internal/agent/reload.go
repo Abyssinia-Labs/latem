@@ -28,6 +28,11 @@ type ReloadStatus struct {
 	PID int `json:"pid"`
 	// Started is when that agent became ready.
 	Started time.Time `json:"started"`
+	// Loaded is when that agent read config.toml as it started, or a moment
+	// before (A80). Started is no substitute: it comes after a startup that
+	// can take minutes, and an edit made during it is in no config the agent
+	// has. An agent built before A80 writes none.
+	Loaded time.Time `json:"loaded,omitzero"`
 	// Reloads counts the SIGHUPs it has acted on, so a reader can tell its
 	// own reload's outcome from the one before.
 	Reloads int `json:"reloads"`
@@ -172,6 +177,7 @@ func (a *Agent) writeStatus() {
 	st := ReloadStatus{
 		PID:      os.Getpid(),
 		Started:  a.startedAt,
+		Loaded:   a.opts.ConfigLoaded,
 		Reloads:  a.reloads,
 		At:       a.now(),
 		Error:    a.reloadErr,

@@ -86,6 +86,49 @@ allowed_refs = ["main", "refs/pull/*/merge"]
 	}
 }
 
+// A80: the status says when the agent read config.toml as it started, for
+// doctor, and a reload leaves that alone: a reload's own read is `at`.
+func TestReloadStatus_SaysWhenTheConfigWasRead(t *testing.T) {
+	cfg := newConfigDir(t, configOptions{})
+	loaded := time.Now().Add(-time.Minute).Round(0)
+	ta := newTestAgent(t, cfg, func(o *Options) { o.ConfigLoaded = loaded })
+	ta.run(t)
+
+	st, err := ReadReloadStatus(cfg.Paths.ReloadStatus)
+	if err != nil {
+		t.Fatalf("reading the reload status: %v", err)
+	}
+	if !st.Loaded.Equal(loaded) {
+		t.Errorf("status loaded = %v, want %v", st.Loaded, loaded)
+	}
+	if !st.Started.After(st.Loaded) {
+		t.Errorf("status started = %v, loaded = %v; the agent reads its config before it is ready", st.Started, st.Loaded)
+	}
+
+	if _, err := ta.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if st, err = ReadReloadStatus(cfg.Paths.ReloadStatus); err != nil || !st.Loaded.Equal(loaded) || st.Reloads != 1 {
+		t.Errorf("after a reload, status = %+v (%v); want loaded unchanged and one reload", st, err)
+	}
+}
+
+// An agent given no time, as `--once` under a debugger could be, writes none,
+// and a reader takes the field as absent rather than as the year 1.
+func TestReloadStatus_NoLoadedTimeIsLeftOut(t *testing.T) {
+	cfg := newConfigDir(t, configOptions{})
+	ta := newTestAgent(t, cfg, nil)
+	ta.run(t)
+
+	data, err := os.ReadFile(cfg.Paths.ReloadStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"loaded"`) {
+		t.Errorf("status = %s, want no loaded field", data)
+	}
+}
+
 // §8: a file that does not load must not take down a running agent, and must
 // not half-apply either.
 func TestReload_RefusesABrokenFileAndKeepsTheConfigItHad(t *testing.T) {

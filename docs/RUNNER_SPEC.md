@@ -3646,3 +3646,19 @@ start answering to that. Messages that name a command to run still say `latem`, 
 everywhere the short name does, and some places it does not, such as an ssh session on a machine
 that has not updated yet. The one exception is the usage hint after a usage error, which repeats
 the name typed.
+
+### Amendment from an in-place switch
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A80 | §19, A54, A56 | **The agent's status file says when it read `config.toml` as it started (`loaded`), and `latem doctor` compares an edit with that, not with the process's start time** | `doctor` warned on all three machines that the agent ran an old config, right after `latem update` had moved each one onto v0.4.0 and it had read the file afresh. An in-place switch re-executes the same pid (A56), and the kernel dates a pid from its first start, which on the MacBook was nine days earlier. So the warning was false after every switch, and its fix, a restart, was a restart nobody needed |
+
+**Before the read, not at ready.** `latem agent` takes the time just before it loads the file, and
+the agent writes it into every status after that. The status's `started` was not usable instead: it
+is when the agent became ready, after a startup that can take minutes, and an edit made during it is
+in no config the agent has. A reload's time (`at`, A54) is still the later read when there has been
+one. The pass says which it was: the agent started after the last change, or re-read it.
+
+**An older agent writes no `loaded`.** `doctor` then falls back to the process's start time as
+before, so the false warning goes only once the agent itself runs a release with this amendment.
+A status naming another pid still vouches for nothing.

@@ -1265,6 +1265,74 @@ func TestDoctorConfigLoadedByAgent(t *testing.T) {
 		}
 	})
 
+	// A80: SIGUSR2 and `latem update` re-execute the agent in place (A56).
+	// The kernel still dates the pid from the first start, and the new
+	// binary read config.toml as it started, at the time its status gives.
+	switched := func(t *testing.T, d *doctor, pid int, loaded time.Time) {
+		t.Helper()
+		ready := loaded.Add(2 * time.Minute)
+		b, err := json.Marshal(agent.ReloadStatus{PID: pid, Started: ready, Loaded: loaded, At: ready, Version: "v0.4.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config.DerivePaths(d.dir).ReloadStatus, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("config edited, then the agent switched in place", func(t *testing.T) {
+		d := newDoctor(t, running(), agentStarted.Add(30*time.Minute))
+		installed(t, d.dir)
+		switched(t, d, 2566, agentStarted.Add(50*time.Minute))
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelPass || !strings.Contains(got.Detail, "started after") {
+			t.Errorf("check = %+v, want a pass: the switched agent read the file after the edit", got)
+		}
+	})
+
+	t.Run("config edited after the agent switched in place", func(t *testing.T) {
+		loaded := agentStarted.Add(30 * time.Minute)
+		d := newDoctor(t, running(), agentStarted.Add(50*time.Minute))
+		installed(t, d.dir)
+		switched(t, d, 2566, loaded)
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn {
+			t.Fatalf("check = %+v, want a warning", got)
+		}
+		if want := "20m0s after"; !strings.Contains(got.Detail, want) || !strings.Contains(got.Detail, loaded.Format("15:04:05")) {
+			t.Errorf("detail = %q, want %q and the switch's read time", got.Detail, want)
+		}
+		if !strings.Contains(strings.Join(got.Fix, " "), "latem service reload") {
+			t.Errorf("fix = %q, want `latem service reload`", got.Fix)
+		}
+	})
+
+	// The time a switched agent read the file is still before it was ready.
+	t.Run("an edit while the switched agent started", func(t *testing.T) {
+		loaded := agentStarted.Add(30 * time.Minute)
+		d := newDoctor(t, running(), loaded.Add(time.Minute))
+		installed(t, d.dir)
+		switched(t, d, 2566, loaded)
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn {
+			t.Errorf("check = %+v, want a warning: the edit came after the read", got)
+		}
+	})
+
+	t.Run("another process's read time vouches for nothing", func(t *testing.T) {
+		d := newDoctor(t, running(), agentStarted.Add(30*time.Minute))
+		installed(t, d.dir)
+		switched(t, d, 1, agentStarted.Add(50*time.Minute))
+
+		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
+		if got == nil || got.Level != levelWarn || !strings.Contains(strings.Join(got.Fix, " "), "restart") {
+			t.Errorf("check = %+v, want a warning naming a restart", got)
+		}
+	})
+
 	t.Run("no service installed is not a finding", func(t *testing.T) {
 		d := newDoctor(t, healthyRunner("darwin"), time.Now())
 		got := checkByID(d.checkConfiguration(t.Context()), "config.loaded")
