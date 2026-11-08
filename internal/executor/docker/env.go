@@ -82,6 +82,9 @@ func (e *runEnv) ActionsDir() string {
 // TempDir is the container path exported as $RUNNER_TEMP (A50).
 func (e *runEnv) TempDir() string { return TempPath }
 
+// WorkspaceDir is where the workspace is bind-mounted.
+func (e *runEnv) WorkspaceDir() string { return WorkspacePath }
+
 // PutTemp copies the file into $RUNNER_TEMP through the archive API (A53).
 //
 // It is readable by every user in the container, because this package cannot

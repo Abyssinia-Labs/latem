@@ -41,7 +41,12 @@ then it takes work again and moves at the first idle moment. It never cancels a
 run to do it.
 
 Every other command says, at most once a day and only on a terminal, when a
-newer release exists. LATEM_NO_UPDATE_NOTIFIER=1 or CI=1 turns that off.`,
+newer release exists. LATEM_NO_UPDATE_NOTIFIER=1 or CI=1 turns that off.
+
+A latem that Homebrew installed is Homebrew's to update: this command refuses
+to write into its keg and says to run ` + "`brew upgrade latem`" + `. The agent
+moves onto what that installs by itself, the first moment no run is in flight
+(A78). --check still says whether a newer release exists.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUpdate(cmd.Context(), cmd.OutOrStdout(), checkOnly)
@@ -75,12 +80,41 @@ var (
 		return filepath.EvalSymlinks(exe)
 	}
 	signalSwitch = agent.SignalSwitch
+	// homebrewLink is the link Homebrew keeps at the installed version, when
+	// this binary is in a Homebrew keg (A78).
+	homebrewLink = func() (string, bool) {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", false
+		}
+		return selfupdate.Homebrew(exe)
+	}
 )
+
+// brewUpgrade is how a Homebrew install updates.
+const brewUpgrade = "brew upgrade latem"
+
+// upgradeCommand is what this binary's operator runs to install a newer
+// release.
+func upgradeCommand() string {
+	if _, ok := homebrewLink(); ok {
+		return brewUpgrade
+	}
+	return "latem update"
+}
 
 func runUpdate(ctx context.Context, out io.Writer, checkOnly bool) error {
 	if version == "" || version == selfupdate.DevVersion {
 		return fmt.Errorf("this is a development build (version %q), with no version to compare a release with; "+
 			"install a release with install.sh, or build the one you want with `make install`", version)
+	}
+	link, brewed := homebrewLink()
+	if brewed && !checkOnly {
+		// Homebrew records which version a keg holds and deletes the keg on
+		// the next upgrade, so a release written into it would be one brew
+		// reports as something else and then removes.
+		return fmt.Errorf("this latem is Homebrew's (%s), so Homebrew updates it: run `%s`; "+
+			"the agent moves onto what that installs by itself, the first moment no run is in flight", link, brewUpgrade)
 	}
 	r, err := newReleaser()
 	if err != nil {
@@ -108,8 +142,8 @@ func runUpdate(ctx context.Context, out io.Writer, checkOnly bool) error {
 	}
 
 	if checkOnly {
-		printf(out, "latem %s is available; this is %s\n%s\n\nrun `latem update` to install it\n",
-			rel.Version, version, selfupdate.ReleasePage(rel.Version))
+		printf(out, "latem %s is available; this is %s\n%s\n\nrun `%s` to install it\n",
+			rel.Version, version, selfupdate.ReleasePage(rel.Version), upgradeCommand())
 		return nil
 	}
 

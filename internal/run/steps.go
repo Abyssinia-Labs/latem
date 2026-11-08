@@ -74,7 +74,7 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 			// Performed by the agent, not an executor: it is a copy between
 			// the workspace and this run's artifact store, both of which the
 			// agent reaches from the host whichever executor is running.
-			out = x.runArtifactStep(ctx, s, label)
+			out, outputs = x.runArtifactStep(ctx, s, label, sc)
 		case s.Checkout != nil:
 			// Split: the agent decides and prepares in the mirror, the
 			// environment switches the workspace (A53).

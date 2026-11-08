@@ -39,6 +39,23 @@ func (d *doctor) checkSelfUpdate(ctx context.Context) []check {
 		return nil
 	}
 
+	brewed := d.homebrew
+	if brewed == nil {
+		brewed = homebrewLink
+	}
+	if link, ok := brewed(); ok {
+		// Not a failure: the machine does keep itself current, through
+		// Homebrew, and the agent follows what that installs. The setting is
+		// what is wrong, because it promises something this install will not
+		// do (A78).
+		return []check{warn(id, "self-update",
+			"agent.auto_update is on, and this latem is Homebrew's, so it does not replace itself",
+			brewUpgrade+"   # the agent moves onto what it installs when no run is in flight").
+			withNotes(fmt.Sprintf("Homebrew keeps this binary at %s and deletes its keg on the next "+
+				"upgrade, so a release written there is one Homebrew would report as something else and "+
+				"then remove. agent.auto_update does nothing on this install; remove it.", link))}
+	}
+
 	key, err := selfupdate.TrustedKey()
 	if err != nil {
 		// The config loader refuses this pairing, so reaching it means the

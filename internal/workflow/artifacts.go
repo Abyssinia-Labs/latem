@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,16 +55,17 @@ func artifactShim(st Step, sc expr.Scope) (spec *registry.ArtifactStep, outputs 
 
 func uploadShim(st Step, with map[string]string, sc expr.Scope) (*registry.ArtifactStep, map[string]*expr.Program, bool, error) {
 	spec := &registry.ArtifactStep{Name: "artifact", IfNoFilesFound: "warn"}
+	var lateName registry.LateValue
 	hidden := false
 	for _, k := range sortedNames(with) {
 		v := strings.TrimSpace(with[k])
 		switch strings.ToLower(k) {
 		case "name":
-			name, err := staticValue(st.Uses, "name", v, sc)
+			name, late, err := artifactValue(st.Uses, "name", v, sc)
 			if err != nil {
 				return nil, nil, true, err
 			}
-			spec.Name = name
+			spec.Name, lateName = name, late
 		case "path":
 		case "if-no-files-found":
 			spec.IfNoFilesFound = strings.ToLower(v)
@@ -78,6 +80,17 @@ func uploadShim(st Step, with map[string]string, sc expr.Scope) (*registry.Artif
 			spec.Retain = protocol.Duration(time.Duration(days) * 24 * time.Hour)
 		case "include-hidden-files":
 			hidden = truthy(v) && v != ""
+		case "archive":
+			// v7: false uploads one file as it is, named after the file. It
+			// decides what the step is, so it has to be known at admission.
+			a, err := staticValue(st.Uses, "archive", v, sc)
+			if err != nil {
+				return nil, nil, true, err
+			}
+			if !truthy(a) && !strings.EqualFold(a, "false") {
+				return nil, nil, true, fmt.Errorf("uses: %s archive %q is not true or false", st.Uses, a)
+			}
+			spec.Single = strings.EqualFold(a, "false")
 		case "compression-level", "overwrite":
 			// Nothing is zipped, and a second upload under one name adds to
 			// the same directory rather than failing — more permissive than
@@ -86,21 +99,38 @@ func uploadShim(st Step, with map[string]string, sc expr.Scope) (*registry.Artif
 			return nil, nil, true, fmt.Errorf("uses: %s has an input latem does not know: %s", st.Uses, k)
 		}
 	}
+	if spec.Single {
+		// GitHub ignores the name, and so does this.
+		spec.Name, lateName = "", nil
+	}
 
 	raw := with["path"]
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil, true, fmt.Errorf("uses: %s requires the input \"path\"", st.Uses)
 	}
+	type line struct {
+		exclude bool
+		static  string
+		late    registry.LateValue
+	}
+	var lines []line
+	anyLate := false
 	rooted := workspaceRooted(sc)
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, text := range strings.Split(raw, "\n") {
+		text = strings.TrimSpace(text)
+		if text == "" {
 			continue
 		}
-		exclude := strings.HasPrefix(line, "!")
-		p, err := staticValue(st.Uses, "path", strings.TrimPrefix(line, "!"), rooted)
+		exclude := strings.HasPrefix(text, "!")
+		p, late, err := artifactValue(st.Uses, "path", strings.TrimPrefix(text, "!"), rooted)
 		if err != nil {
 			return nil, nil, true, err
+		}
+		if late != nil {
+			// Placed in the workspace or runner.temp once it is known (A77).
+			anyLate = true
+			lines = append(lines, line{exclude: exclude, late: late})
+			continue
 		}
 		p, err = workspaceRelative(st.Uses, p)
 		if err != nil {
@@ -112,40 +142,78 @@ func uploadShim(st Step, with map[string]string, sc expr.Scope) (*registry.Artif
 		if p == "." || p == "./" {
 			p = "**"
 		}
-		if exclude {
-			spec.Exclude = append(spec.Exclude, p)
-		} else {
-			spec.Include = append(spec.Include, p)
+		lines = append(lines, line{exclude: exclude, static: p})
+	}
+	if anyLate || lateName != nil {
+		spec.Late = &registry.ArtifactLate{Name: lateName}
+		if lateName != nil {
+			spec.Name = ""
+		}
+	}
+	for _, l := range lines {
+		switch {
+		case anyLate:
+			// One late line makes them all late, so that the run loop places
+			// every line in the same directory and refuses two.
+			v := l.late
+			if v == nil {
+				v = newLate(expr.Literal(l.static), rooted)
+			}
+			if l.exclude {
+				spec.Late.Exclude = append(spec.Late.Exclude, v)
+			} else {
+				spec.Late.Include = append(spec.Late.Include, v)
+			}
+		case l.exclude:
+			spec.Exclude = append(spec.Exclude, l.static)
+		default:
+			spec.Include = append(spec.Include, l.static)
 		}
 	}
 	if !hidden {
 		spec.Exclude = append(spec.Exclude, hiddenFiles...)
 	}
 
+	// What is known at admission is folded, through A44's output machinery.
+	// A name built from a step's outputs, or one taken from the file
+	// (archive: false), is only known as the step runs, and so are the
+	// outputs: the run loop sets them then (A77).
+	if spec.Late != nil || spec.Single {
+		return spec, nil, true, nil
+	}
 	// artifact-id is the name, which is how this store knows it; there is no
-	// web page to link to, so the url is empty rather than invented.
+	// web page to link to, so the url is empty rather than invented, and
+	// there is no zip to take a digest of.
 	outputs := map[string]*expr.Program{
-		"artifact-id":  expr.Literal(spec.Name),
-		"artifact-url": expr.Literal(""),
+		"artifact-id":     expr.Literal(spec.Name),
+		"artifact-url":    expr.Literal(""),
+		"artifact-digest": expr.Literal(""),
 	}
 	return spec, outputs, true, nil
 }
 
 func downloadShim(st Step, with map[string]string, sc expr.Scope) (*registry.ArtifactStep, map[string]*expr.Program, bool, error) {
 	spec := &registry.ArtifactStep{Download: true}
+	var lateName, latePath registry.LateValue
 	for _, k := range sortedNames(with) {
 		v := strings.TrimSpace(with[k])
 		switch strings.ToLower(k) {
 		case "name":
-			name, err := staticValue(st.Uses, "name", v, sc)
+			name, late, err := artifactValue(st.Uses, "name", v, sc)
 			if err != nil {
 				return nil, nil, true, err
 			}
-			spec.Name = name
+			spec.Name, lateName = name, late
 		case "path":
-			p, err := staticValue(st.Uses, "path", v, workspaceRooted(sc))
+			p, late, err := artifactValue(st.Uses, "path", v, workspaceRooted(sc))
 			if err != nil {
 				return nil, nil, true, err
+			}
+			if late != nil {
+				// runner.temp, or a step's outputs: placed as the step runs
+				// (A77).
+				latePath = late
+				continue
 			}
 			if p, err = workspaceRelative(st.Uses, p); err != nil {
 				return nil, nil, true, err
@@ -163,6 +231,12 @@ func downloadShim(st Step, with map[string]string, sc expr.Scope) (*registry.Art
 			return nil, nil, true, fmt.Errorf("uses: %s has an input latem does not know: %s", st.Uses, k)
 		}
 	}
+	if lateName != nil || latePath != nil {
+		spec.Late = &registry.ArtifactLate{Name: lateName, Path: latePath}
+	}
+	if latePath != nil {
+		return spec, nil, true, nil
+	}
 	// Relative to the workspace, which is where a step starts, so it resolves
 	// the same on every executor without knowing where the workspace is.
 	dest := spec.Path
@@ -172,33 +246,104 @@ func downloadShim(st Step, with map[string]string, sc expr.Scope) (*registry.Art
 	return spec, map[string]*expr.Program{"download-path": expr.Literal(dest)}, true, nil
 }
 
-// staticValue evaluates a `with:` value that has to be known before the step
-// runs — a name or a path. A step's outputs, the job's status and the runner
-// are refused by name, because the registry step is fixed at admission.
-func staticValue(uses, field, v string, sc expr.Scope) (string, error) {
+// artifactValue compiles one `with:` value of an artifact step: the text, when
+// it is known at admission, or a late value, when it reads a step's outputs,
+// the runner or the job (A77).
+//
+// A secret is refused by name. A name and a path are written where a run's
+// artifacts are listed and sent to the control plane with them (§17), and
+// neither is a place for a credential to end up.
+func artifactValue(uses, field, v string, sc expr.Scope) (string, registry.LateValue, error) {
 	if !expr.Has(v) {
-		return v, nil
+		return v, nil, nil
 	}
 	spans, err := expr.Spans(v)
 	if err != nil {
-		return "", fmt.Errorf("uses: %s %s: %w", uses, field, err)
+		return "", nil, fmt.Errorf("uses: %s %s: %w", uses, field, err)
 	}
+	anyLate := false
 	for _, sp := range spans {
+		contexts, _ := sp.Prog.References()
+		keys, _ := sp.Prog.ContextKeys("github")
+		if slices.Contains(contexts, secretsContext) || slices.Contains(keys, "token") {
+			return "", nil, fmt.Errorf(
+				"uses: %s %s %q reads a secret, and an artifact's name and paths are listed with the run's "+
+					"artifacts, where no secret belongs", uses, field, v)
+		}
 		w, err := classify(sp.Prog, sc)
 		if err != nil {
-			return "", fmt.Errorf("uses: %s %s: %w", uses, field, err)
+			return "", nil, fmt.Errorf("uses: %s %s: %w", uses, field, err)
 		}
 		if w == whenLate {
-			return "", fmt.Errorf(
-				"uses: %s %s %q is only known once the job is running, and this step is fixed when "+
-					"the run is admitted", uses, field, v)
+			anyLate = true
 		}
+	}
+	if anyLate {
+		if len(spans) == 1 && spans[0].Start == 0 && spans[0].End == len(v) {
+			return "", newLate(spans[0].Prog, sc), nil
+		}
+		return "", newLateTemplate(v, spans, sc), nil
 	}
 	out, err := expr.EvalString(v, sc)
 	if err != nil {
-		return "", fmt.Errorf("uses: %s %s: %w", uses, field, err)
+		return "", nil, fmt.Errorf("uses: %s %s: %w", uses, field, err)
 	}
-	return strings.TrimSpace(out), nil
+	return strings.TrimSpace(out), nil, nil
+}
+
+// staticValue evaluates a `with:` value that has to be known before the step
+// runs, because it decides what the step is. A step's outputs, the job's
+// status and the runner are refused by name.
+func staticValue(uses, field, v string, sc expr.Scope) (string, error) {
+	s, late, err := artifactValue(uses, field, v, sc)
+	if err != nil {
+		return "", err
+	}
+	if late != nil {
+		return "", fmt.Errorf(
+			"uses: %s %s %q is only known once the job is running, and it decides what this step is, "+
+				"which is fixed when the run is admitted", uses, field, v)
+	}
+	return s, nil
+}
+
+// downloadable refuses a download that can only find another job's artifact.
+//
+// GitHub's artifacts belong to the workflow run, so one job downloads what
+// another uploaded. latem's belong to a run, which is one job on whichever
+// machine took it, and stay on that machine (A52 left artifacts across
+// machines out), so a download finds what an earlier step of the same job
+// uploaded and nothing else. Without this the job is admitted and fails at the
+// step — and `workflows check` says it can run.
+//
+// A name only known as either step runs could be anything, so it is let
+// through to be answered then.
+func (x *expander) downloadable(uses string, spec *registry.ArtifactStep) error {
+	const why = "latem runs each job as a run of its own, on whichever machine takes it, and a run's " +
+		"artifacts stay on that machine; artifacts across jobs are not implemented (A52, A77)"
+	if len(x.uploads) == 0 {
+		return fmt.Errorf("uses: %s — no step before this one in the job uploads an artifact, so it "+
+			"would download one that another job uploaded. %s", uses, why)
+	}
+	if spec.Name == "" || (spec.Late != nil && spec.Late.Name != nil) {
+		return nil
+	}
+	for _, n := range x.uploads {
+		if n == "" || n == spec.Name {
+			return nil
+		}
+	}
+	return fmt.Errorf("uses: %s — no step before this one in the job uploads an artifact named %q, so it "+
+		"would download one that another job uploaded. %s", uses, spec.Name, why)
+}
+
+// uploadName is the name an upload is known by at admission, or "" when it
+// is only known as the step runs.
+func uploadName(spec *registry.ArtifactStep) string {
+	if spec.Single || (spec.Late != nil && spec.Late.Name != nil) {
+		return ""
+	}
+	return spec.Name
 }
 
 // workspaceRooted is sc with github.workspace set to ".", the collector's own
@@ -224,14 +369,15 @@ func workspaceRooted(sc expr.Scope) expr.Scope {
 	return out
 }
 
-// workspaceRelative normalises a path in the workspace and refuses one
-// anywhere else. Artifacts are collected from the checkout (§17); a file in
-// runner.temp or $HOME has to be copied in first.
+// workspaceRelative normalises a path known at admission, which is in the
+// workspace, and refuses one anywhere else. runner.temp is the other place an
+// artifact step reaches, and is only known as the step runs, so a path in it
+// is late and placed then (A77); a file in $HOME has to be copied in first.
 func workspaceRelative(uses, p string) (string, error) {
 	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, "~") {
 		return "", fmt.Errorf(
-			"uses: %s path %q is outside the workspace. Artifacts are collected from the checkout "+
-				"(§17); copy the file into it in an earlier step", uses, p)
+			"uses: %s path %q is outside the workspace and runner.temp, the two places an artifact "+
+				"step reaches (§17, A77); copy the file into one of them in an earlier step", uses, p)
 	}
 	for strings.HasPrefix(p, "./") {
 		p = strings.TrimPrefix(p, "./")

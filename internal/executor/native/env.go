@@ -107,6 +107,12 @@ func (e *runEnv) ActionsDir() string { return e.spec.ActionsDir }
 // TempDir is the host path itself, for the same reason as [runEnv.ActionsDir].
 func (e *runEnv) TempDir() string { return e.tempDir }
 
+// HostTempDir is TempDir, which is already the host's (A77).
+func (e *runEnv) HostTempDir() string { return e.tempDir }
+
+// WorkspaceDir is the host path itself, likewise.
+func (e *runEnv) WorkspaceDir() string { return e.workspace }
+
 // ToolCacheDir is the host path itself, likewise.
 func (e *runEnv) ToolCacheDir() string { return e.toolCache }
 

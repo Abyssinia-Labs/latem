@@ -109,6 +109,12 @@ type Env interface {
 	// nothing written there reaches `git status` or a collected artifact.
 	TempDir() string
 
+	// WorkspaceDir is the environment-visible path of the workspace,
+	// exported as $GITHUB_WORKSPACE (A50): the host path for native, the
+	// mount target for docker. The run loop reads it to place a path a step
+	// wrote in its outputs (A77).
+	WorkspaceDir() string
+
 	// ToolCacheDir is the environment-visible path of the runner's tool
 	// cache, exported as $RUNNER_TOOL_CACHE and answered for
 	// `runner.tool_cache` (A51), or "" when the run has none.
@@ -128,6 +134,16 @@ type Env interface {
 	// best effort even when it has already failed once — a leaked container is
 	// untidy, a leaked Tart VM grows toward its image's provisioned 140 GB.
 	Close(ctx context.Context) error
+}
+
+// HostTemp is an [Env] whose temporary directory is a directory on the host
+// the agent may read and write as it is, which is how an upload-artifact or
+// download-artifact step reaches runner.temp (A77). Native's is. Docker's is
+// in the run's volume, inside Docker's VM on a Mac and root's on Linux, and
+// reached only through the archive API, so docker does not implement it.
+type HostTemp interface {
+	// HostTempDir is the host path of [Env.TempDir].
+	HostTempDir() string
 }
 
 // ValidTempName reports why name cannot be a [Env.PutTemp] file: it must

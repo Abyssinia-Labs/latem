@@ -96,6 +96,7 @@ func newUpdateFixture(t *testing.T, autoUpdate bool) *updateFixture {
 		Version:        "v0.3.0",
 		Releases:       f.src,
 		UpdateIdleWait: 750 * time.Millisecond,
+		Homebrew:       notHomebrews,
 		Exec: func(path string, _, _ []string) error {
 			f.execed <- path
 			// The real syscall.Exec never returns. Returning nil here is the

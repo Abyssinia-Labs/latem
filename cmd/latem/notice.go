@@ -132,7 +132,7 @@ func printNotice(w io.Writer, latest string) {
 	st := newStyler(w)
 	printf(w, "\n%s %s → %s\n%s\n%s\n",
 		st.warn("A new release of latem is available:"), st.accent(version), st.accent(latest),
-		"To upgrade, run: latem update",
+		"To upgrade, run: "+upgradeCommand(),
 		st.dim(selfupdate.ReleasePage(latest)))
 }
 

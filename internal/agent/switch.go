@@ -90,7 +90,7 @@ func (a *Agent) Switch(ctx context.Context) {
 	}
 	a.countSwitch()
 
-	target, err := runningBinary()
+	target, err := a.selfPath()
 	if err != nil {
 		a.answerSwitch(SwitchFailed, "", 0, fmt.Errorf("locating the running binary: %w", err))
 		return
@@ -124,7 +124,7 @@ func (a *Agent) Switch(ctx context.Context) {
 		a.answerSwitch(SwitchWaiting, to, a.activeRuns(), nil)
 		return
 	}
-	go a.switchWhenIdle(ctx, target, to, restart)
+	go a.switchWhenIdle(ctx, target, to, restart, a.shutdownGrace)
 }
 
 // pendingRestart is what the last reload read and did not apply.
@@ -136,19 +136,21 @@ func (a *Agent) pendingRestart() []string {
 
 // switchWhenIdle waits for idleness and re-execs. It returns only if the
 // re-exec failed or the agent is shutting down. restart is a re-exec of the
-// same binary for config.toml's sake.
-func (a *Agent) switchWhenIdle(ctx context.Context, target, to string, restart bool) {
+// same binary for config.toml's sake. hold is how long it stops claiming for
+// the runs in flight before it takes work again and waits for an idle moment
+// instead.
+func (a *Agent) switchWhenIdle(ctx context.Context, target, to string, restart bool, hold time.Duration) {
 	defer a.switching.Store(false)
 	a.log.Info("moving onto the binary on disk once nothing is running",
 		"running", a.version, "to", to, "path", target, "runs", a.activeRuns())
 
-	if a.quiesce(ctx, a.shutdownGrace, to) {
+	if a.quiesce(ctx, hold, to) {
 		a.moveInto(target, to, restart)
 		return
 	}
 	a.resumeClaims()
-	a.log.Info("still busy after shutdown_grace; taking work again, and moving at the first idle moment",
-		"to", to, "runs", a.activeRuns())
+	a.log.Info("still busy; taking work again, and moving at the first idle moment",
+		"to", to, "runs", a.activeRuns(), "held", hold)
 	a.answerSwitch(SwitchWaiting, to, a.activeRuns(), nil)
 
 	t := time.NewTicker(switchRetry)

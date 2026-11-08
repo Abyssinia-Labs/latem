@@ -72,6 +72,10 @@ type expander struct {
 	// actions appear: pre runs before the job's first step, post after its
 	// last, in reverse (A51).
 	pre, post []Step
+	// uploads names the artifacts the job's steps so far upload, "" for a
+	// name only known as the step runs, so that a download can be asked
+	// whether anything in this job could be what it finds.
+	uploads []string
 }
 
 func newExpander(loader ActionLoader, where string) *expander {
@@ -194,6 +198,13 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 	if spec, outputs, ok, err := artifactShim(st, x.scope); err != nil {
 		return nil, err
 	} else if ok {
+		if spec.Download {
+			if err := x.downloadable(st.Uses, spec); err != nil {
+				return nil, err
+			}
+		} else {
+			x.uploads = append(x.uploads, uploadName(spec))
+		}
 		st.Uses, st.With, st.artifact = "", nil, spec
 		if st.Name == "" {
 			if spec.Download {
@@ -203,7 +214,9 @@ func (x *expander) expand(ctx context.Context, st Step, stack []string) ([]Step,
 			}
 			st.Name = strings.TrimSpace(st.Name)
 		}
-		if st.ID != "" {
+		// Outputs known at admission are folded; those only known as the
+		// step runs are the run loop's to set (A77).
+		if st.ID != "" && outputs != nil {
 			x.outputs[st.ID] = outputs
 		}
 		return []Step{st}, nil

@@ -149,7 +149,12 @@ differently, and they follow from the model rather than from a shortcut:
 
 A path inside the workspace (`node_modules`) is refused, because a mount there
 would shadow the checkout — cache `~/.npm` instead. `upload-artifact` and
-`download-artifact` work too, collecting into §17's store when their step runs.
+`download-artifact` work too, collecting into §17's store when their step runs:
+from the workspace or `runner.temp` (native runners), with a name or path read
+from an earlier step's outputs, and v7's `archive: false`. A download finds what
+an earlier step of the same job uploaded; one of another job's artifacts is
+refused by name, because each job is its own run and its artifacts stay on the
+machine that ran it.
 
 **`uses: actions/checkout` is a step latem performs**, with no action fetched.
 Left bare, it checks out the run's commit — on a push, as the branch, with
@@ -192,7 +197,21 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 ```
 
 Never as root. The script detects your OS and architecture, verifies the
-download, installs to `~/.local/bin`, and runs `latem doctor`. Then:
+download, installs to `~/.local/bin`, and runs `latem doctor`.
+
+Or with Homebrew, on macOS or Linux:
+
+```console
+$ brew install abyssinia-labs/tap/latem
+```
+
+The same release archive, whose checksums the tap verifies against latem's
+signing key before it writes them into the formula. Homebrew updates it with
+`brew upgrade latem` (`latem update` refuses to write into Homebrew's directory),
+and the running agent moves onto the new version by itself, the first moment no
+build is in flight.
+
+Then:
 
 ```console
 $ latem setup

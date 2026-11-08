@@ -12,6 +12,7 @@ import (
 )
 
 func TestServiceSpecUsesThisBinary(t *testing.T) {
+	asHomebrews(t, "")
 	home := t.TempDir()
 	sys := system.New(system.Options{GOOS: "linux", Home: home, User: "tester"})
 
@@ -26,6 +27,29 @@ func TestServiceSpecUsesThisBinary(t *testing.T) {
 	}
 	if spec.Home != home || spec.User != "tester" {
 		t.Errorf("spec = %+v, want the injected home and user", spec)
+	}
+}
+
+// A keg is deleted by the next `brew upgrade`, so the service starts
+// Homebrew's link instead, which that upgrade moves to the new version (A78).
+func TestServiceSpecUsesHomebrewsLink(t *testing.T) {
+	asHomebrews(t, "/opt/homebrew/opt/latem/bin/latem")
+	sys := system.New(system.Options{GOOS: "darwin", Home: t.TempDir(), User: "tester"})
+	spec, err := serviceSpec(sys, "")
+	if err != nil {
+		t.Fatalf("serviceSpec: %v", err)
+	}
+	if spec.ExecPath != "/opt/homebrew/opt/latem/bin/latem" {
+		t.Errorf("ExecPath = %q, want Homebrew's opt link", spec.ExecPath)
+	}
+
+	// --exec is the operator's choice, and it wins.
+	spec, err = serviceSpec(sys, "/usr/local/bin/latem")
+	if err != nil {
+		t.Fatalf("serviceSpec: %v", err)
+	}
+	if spec.ExecPath != "/usr/local/bin/latem" {
+		t.Errorf("ExecPath = %q, want the explicit path", spec.ExecPath)
 	}
 }
 

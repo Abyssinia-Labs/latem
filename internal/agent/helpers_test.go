@@ -202,6 +202,8 @@ func (e *fakeEnv) ActionsDir() string { return "" }
 
 func (e *fakeEnv) TempDir() string { return "" }
 
+func (e *fakeEnv) WorkspaceDir() string { return "" }
+
 func (e *fakeEnv) ToolCacheDir() string { return "" }
 
 func (e *fakeEnv) PutTemp(_ context.Context, name string, _ []byte) (string, error) {
