@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
@@ -79,6 +81,11 @@ func init() {
 	// here, instead of introducing itself to the production control plane.
 	registerURL = "ws://127.0.0.1:1/agent"
 	openBrowser = func(string) error { panic("a test tried to open a browser") }
+	// Not a panic, unlike the rest: it reaches nothing, and every `latem run`
+	// test before A81 is a script's. What matters is that the answer is the
+	// test's and never the terminal `go test` was started from; fakeTerminal
+	// says it is one.
+	stdoutIsTerminal = func(*cobra.Command) bool { return false }
 	newSetupDeps = func() setupDeps {
 		panic("a test reached setup's real service manager, Docker or doctor; use fakeSetup")
 	}
