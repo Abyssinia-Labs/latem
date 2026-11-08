@@ -15,10 +15,27 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
 )
+
+// shortName is latem's other name: the same binary, by a link beside it
+// that install.sh, `latem update` and the Homebrew formula put there (A79).
+const shortName = "ltm"
+
+// programName is what the root command calls itself: the short name when that
+// is what was typed, so help, usage and the completion script are for it, and
+// latem otherwise, whatever the file is called.
+var programName = rootName(os.Args[0])
+
+func rootName(arg0 string) string {
+	if filepath.Base(arg0) == shortName {
+		return shortName
+	}
+	return "latem"
+}
 
 // version is stamped at build time by the Makefile's -ldflags. "dev" means
 // somebody ran `go build` directly, which is worth being able to tell apart
@@ -59,7 +76,11 @@ func run() int {
 	st := newStyler(os.Stderr)
 	printf(os.Stderr, "%s %v\n", st.bad("latem:"), err)
 	if isUsage(err) {
-		printf(os.Stderr, "\n%s\n", st.dim(fmt.Sprintf("Run `latem %s --help` for usage.", commandPath(root))))
+		usage := programName
+		if sub := commandPath(root); sub != "" {
+			usage += " " + sub
+		}
+		printf(os.Stderr, "\n%s\n", st.dim(fmt.Sprintf("Run `%s --help` for usage.", usage)))
 	}
 	return exitCode(err)
 }
@@ -99,7 +120,7 @@ Start here:
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "latem",
+		Use:   programName,
 		Short: "Self-hosted CI runner with first-class mobile builds",
 		Long:  rootLong,
 		// Errors and usage are printed by main, once, in one format. Cobra's

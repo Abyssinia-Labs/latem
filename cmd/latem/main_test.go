@@ -536,3 +536,35 @@ func TestUseColorOffForNonTerminal(t *testing.T) {
 		t.Error("NO_COLOR should disable colour")
 	}
 }
+
+// ltm is the same program as latem (A79). Run by that name it calls itself
+// that, so its usage and its completion script are for the name typed; any
+// other name, including a renamed file, is latem.
+func TestTheShortName(t *testing.T) {
+	for arg0, want := range map[string]string{
+		"/home/me/.local/bin/ltm":       "ltm",
+		"ltm":                           "ltm",
+		"/opt/homebrew/bin/latem":       "latem",
+		"./bin/latem":                   "latem",
+		"/tmp/go-build1/b001/main.test": "latem",
+		"/usr/local/bin/ltm-dev":        "latem",
+	} {
+		if got := rootName(arg0); got != want {
+			t.Errorf("rootName(%q) = %q, want %q", arg0, got, want)
+		}
+	}
+
+	old := programName
+	t.Cleanup(func() { programName = old })
+	programName = "ltm"
+	root := newRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"completion", "zsh"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("ltm completion zsh: %v", err)
+	}
+	if !strings.HasPrefix(out.String(), "#compdef ltm") || !strings.Contains(out.String(), "compdef _ltm ltm") {
+		t.Errorf("ltm's zsh completion is not for ltm:\n%.200s", out.String())
+	}
+}

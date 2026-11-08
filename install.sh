@@ -3,7 +3,7 @@
 # Latem installer.  curl -fsSL https://.../install.sh | sh
 #
 # Detects the platform, downloads the matching binary, verifies its checksum,
-# installs it to ~/.local/bin, and runs `latem doctor`.
+# installs it to ~/.local/bin with `ltm` beside it, and runs `latem doctor`.
 #
 # It never runs as root, and that is a requirement rather than a preference
 # (RUNNER_SPEC §23). The agent must run as a logged-in user: on macOS a
@@ -239,6 +239,17 @@ mv "$TMP/latem" "$INSTALL_DIR/.latem.new"
 chmod 0755 "$INSTALL_DIR/.latem.new"
 mv "$INSTALL_DIR/.latem.new" "$INSTALL_DIR/latem"
 info "  $INSTALL_DIR/latem"
+
+# ltm is latem's short name: the same binary, by a link beside it (A79). A file
+# called ltm that is anything else is somebody else's, and stays.
+if [ -L "$INSTALL_DIR/ltm" ] && [ "$(readlink "$INSTALL_DIR/ltm")" = latem ]; then
+	info "  $INSTALL_DIR/ltm (a link to latem)"
+elif [ -e "$INSTALL_DIR/ltm" ] || [ -L "$INSTALL_DIR/ltm" ]; then
+	warn "$INSTALL_DIR/ltm is not latem's, so it was left alone; the short name ltm is not installed"
+else
+	ln -s latem "$INSTALL_DIR/ltm"
+	info "  $INSTALL_DIR/ltm (a link to latem)"
+fi
 
 # macOS quarantines anything downloaded through a browser or curl and refuses
 # to execute it with a dialog nobody sees over ssh.

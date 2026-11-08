@@ -197,7 +197,8 @@ $ curl -fsSL https://raw.githubusercontent.com/Abyssinia-Labs/latem/main/install
 ```
 
 Never as root. The script detects your OS and architecture, verifies the
-download, installs to `~/.local/bin`, and runs `latem doctor`.
+download, installs to `~/.local/bin` with `ltm` beside it, latem's short name,
+and runs `latem doctor`.
 
 Or with Homebrew, on macOS or Linux:
 
@@ -971,6 +972,9 @@ digest, never its content. `latem artifacts <run-id>` prints where each file is,
 and you copy it off with `cp` or `scp`.
 
 ## Commands
+
+Every command also answers to `ltm`, latem's short name: `ltm run myapp test`
+is `latem run myapp test`.
 
 ```
 latem setup [--url U] [--repo owner/name] [--no-register]  config, repositories, toolchains, registration, service and doctor, idempotently
