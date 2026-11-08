@@ -119,9 +119,37 @@ type ArtifactStep struct {
 	Exclude        []string
 	Retain         protocol.Duration
 	IfNoFilesFound string
+	// Single is upload-artifact v7's `archive: false`: one file, kept as it
+	// is, and the artifact named after the file rather than Name (A77).
+	Single bool
 
 	// Download: where in the workspace to put it. Empty is the root.
 	Path string
+
+	// Late is what is only known as the step is about to run (A77). Nil when
+	// everything is known at admission.
+	Late *ArtifactLate
+}
+
+// ArtifactLate is the part of an [ArtifactStep] only known as the step is
+// about to run: a name built from a step's outputs, or a path in runner.temp
+// or read from a step's outputs (A77). The run loop resolves it then and
+// checks the result as admission checks the rest.
+//
+// Each field stands in for the static one beside it, which is then empty.
+// Late paths resolve to the path as a step sees it, so they may be absolute:
+// the run loop places each in the workspace or the run's temporary directory,
+// and refuses one in neither.
+type ArtifactLate struct {
+	Name LateValue
+	// Include and Exclude are an upload's every `path:` line once any one of
+	// them is late, in order, without the leading ! that sorted them. Exclude
+	// beside them in [ArtifactStep] then holds only the hidden-file default,
+	// which means the same under either directory.
+	Include []LateValue
+	Exclude []LateValue
+	// Path is a download's.
+	Path LateValue
 }
 
 var ifNoFilesFound = map[string]bool{"warn": true, "error": true, "ignore": true}
@@ -130,26 +158,45 @@ func (a *ArtifactStep) validate() []error {
 	var problems []error
 	add := func(format string, args ...any) { problems = append(problems, fmt.Errorf(format, args...)) }
 
+	late := a.Late
+	if late == nil {
+		late = &ArtifactLate{}
+	}
 	if a.Name != "" && !artifactNamePattern.MatchString(a.Name) {
 		add("artifact: name %q is not a plain name", a.Name)
 	}
 	if strings.Contains(a.Name, "..") {
 		add("artifact: name %q contains ..", a.Name)
 	}
+	if a.Name != "" && late.Name != nil {
+		add("artifact: name is either known at admission or late, not both")
+	}
 	if a.Download {
-		if len(a.Include) > 0 || len(a.Exclude) > 0 {
+		if len(a.Include) > 0 || len(a.Exclude) > 0 || len(late.Include) > 0 || len(late.Exclude) > 0 {
 			add("artifact: a download has no patterns")
+		}
+		if a.Single {
+			add("artifact: archive is an upload's")
 		}
 		if bad := escapes(a.Path); bad != "" {
 			add("artifact: download path %q %s", a.Path, bad)
 		}
+		if a.Path != "" && late.Path != nil {
+			add("artifact: download path is either known at admission or late, not both")
+		}
 		return problems
 	}
-	if a.Name == "" {
+	if late.Path != nil {
+		add("artifact: an upload has no download path")
+	}
+	if a.Name == "" && late.Name == nil && !a.Single {
 		add("artifact: an upload needs a name")
 	}
-	if len(a.Include) == 0 {
+	if len(a.Include) == 0 && len(late.Include) == 0 {
 		add("artifact: an upload needs at least one path")
+	}
+	if len(a.Include) > 0 && len(late.Include) > 0 {
+		add("artifact: an upload's paths are either all known at admission or all late")
 	}
 	for _, p := range append(append([]string(nil), a.Include...), a.Exclude...) {
 		if bad := escapes(p); bad != "" {

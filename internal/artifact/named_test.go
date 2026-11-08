@@ -93,12 +93,14 @@ func TestRestoreByNameAndAll(t *testing.T) {
 		}
 	}
 
+	// `dist` roots the artifact at dist (A77), so app.bin comes back
+	// straight into the destination, where GitHub's download puts it.
 	dest := workspace(t, map[string]string{"keep.txt": "k"})
 	n, err := c.Restore("r_rt", dest, "app", "restored")
 	if err != nil || n != 1 {
 		t.Fatalf("Restore = %d, %v", n, err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dest, "restored", "dist", "app.bin")); string(b) != "bin" {
+	if b, _ := os.ReadFile(filepath.Join(dest, "restored", "app.bin")); string(b) != "bin" {
 		t.Errorf("restored content = %q", b)
 	}
 
@@ -107,7 +109,7 @@ func TestRestoreByNameAndAll(t *testing.T) {
 	if n, err := c.Restore("r_rt", all, "", ""); err != nil || n != 2 {
 		t.Fatalf("Restore all = %d, %v", n, err)
 	}
-	for _, p := range []string{"app/dist/app.bin", "logs/logs/run.log"} {
+	for _, p := range []string{"app/app.bin", "logs/run.log"} {
 		if _, err := os.Stat(filepath.Join(all, filepath.FromSlash(p))); err != nil {
 			t.Errorf("%s was not restored: %v", p, err)
 		}
@@ -140,5 +142,52 @@ func TestRestoreCannotBeRedirectedOutOfTheWorkspace(t *testing.T) {
 
 	if _, err := c.Restore("r_sym", dest, "app", "../escape"); err == nil {
 		t.Error("a destination that climbs out was accepted")
+	}
+}
+
+// The root an upload's files are stored under is upload-artifact's (A77), so
+// that `latem artifacts` lists what GitHub's zip would hold and a download
+// puts the files where GitHub's would.
+func TestArtifactRootIsUploadArtifacts(t *testing.T) {
+	cases := []struct {
+		name     string
+		patterns []string
+		files    []string
+		want     string
+	}{
+		{"a directory", []string{"dist/**"}, []string{"dist/a.js", "dist/sub/b.js"}, "dist"},
+		{"a pattern's literal prefix", []string{"export/*.ipa"}, []string{"export/App.ipa"}, "export"},
+		{"a lone file, by name", []string{"out/App.dmg"}, []string{"out/App.dmg"}, "out"},
+		{"a lone file at the top", []string{"App.dmg"}, []string{"App.dmg"}, ""},
+		{"the deepest shared directory", []string{"a/b/*.txt", "a/c/**"}, []string{"a/b/x.txt", "a/c/y"}, "a"},
+		{"nothing shared", []string{"dist/**", "reports/*.xml"}, []string{"dist/a", "reports/j.xml"}, ""},
+		{"a search path inside another", []string{"dist/**", "dist/sub/*.so"}, []string{"dist/sub/l.so"}, "dist"},
+		{"the same file twice", []string{"out/App.dmg", "out/App.dmg"}, []string{"out/App.dmg"}, "out"},
+		{"everything", []string{"**", "dist/*.js"}, []string{"a", "dist/b.js"}, ""},
+	}
+	for _, c := range cases {
+		if got := artifactRoot(c.patterns, c.files); got != c.want {
+			t.Errorf("%s: root of %q = %q, want %q", c.name, c.patterns, got, c.want)
+		}
+	}
+}
+
+// archive: false (A77): the file's own name is the artifact's, and more than
+// one file is refused.
+func TestCollectNamedSingle(t *testing.T) {
+	ws := workspace(t, map[string]string{"out/app-1.2.zip": "zip", "out/app-1.2.crx": "crx"})
+	c := NewCollector(t.TempDir())
+	refs, err := c.CollectNamed(t.Context(), "r_one", ws, Upload{Include: []string{"out/app-1.2.zip"}, Single: true})
+	if err != nil || len(refs) != 1 || refs[0].Path != "app-1.2.zip/app-1.2.zip" {
+		t.Fatalf("refs = %+v, err = %v", refs, err)
+	}
+	// A directory holding the one file still gives the file itself.
+	deep := workspace(t, map[string]string{"pkg/sub/app.zip": "zip"})
+	refs, err = c.CollectNamed(t.Context(), "r_deep", deep, Upload{Include: []string{"pkg"}, Single: true})
+	if err != nil || len(refs) != 1 || refs[0].Path != "app.zip/app.zip" {
+		t.Errorf("one file under a directory: refs = %+v, err = %v", refs, err)
+	}
+	if _, err := c.CollectNamed(t.Context(), "r_two", ws, Upload{Include: []string{"out/*"}, Single: true}); !errors.Is(err, ErrNotSingle) {
+		t.Errorf("two files = %v, want ErrNotSingle", err)
 	}
 }

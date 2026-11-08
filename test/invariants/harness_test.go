@@ -232,6 +232,8 @@ func (e *recordingEnv) ActionsDir() string { return e.spec.ActionsDir }
 
 func (e *recordingEnv) TempDir() string { return "" }
 
+func (e *recordingEnv) WorkspaceDir() string { return "" }
+
 func (e *recordingEnv) ToolCacheDir() string { return "" }
 
 func (e *recordingEnv) PutTemp(_ context.Context, name string, _ []byte) (string, error) {
