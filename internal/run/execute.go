@@ -223,6 +223,13 @@ func (x *execution) drive(ctx context.Context) Result {
 	jobCtx, cancelJob := context.WithDeadline(ctx, deadline)
 	defer cancelJob()
 
+	// Gate 15, first half: a pull request's run that would reach the
+	// machine's secrets, declared or within a step's reach, waits for its
+	// commit to be approved here (A85).
+	if dec, ok := x.holdPullRequest(); !ok {
+		return x.awaitApproval(ctx, dec)
+	}
+
 	// Gate 15, for real: resolve the values behind the declared names. §15
 	// makes this an admission answer rather than "a runtime surprise 40
 	// minutes in", and ResolveAll registers every value with the redactor

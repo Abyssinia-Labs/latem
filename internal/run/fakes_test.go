@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -634,11 +635,24 @@ func (c *fakeCache) requests() []cache.Request {
 type fakeSecrets struct {
 	values map[string]string
 	err    error
+	// asked is every name looked up, found or not: what a test asserts on to
+	// say that no store was consulted at all.
+	mu    sync.Mutex
+	asked []string
 }
 
 func (s *fakeSecrets) Name() string { return "fake" }
 
+func (s *fakeSecrets) lookedUp() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.asked)
+}
+
 func (s *fakeSecrets) Resolve(_ context.Context, name string) (secrets.Value, error) {
+	s.mu.Lock()
+	s.asked = append(s.asked, name)
+	s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
 	}

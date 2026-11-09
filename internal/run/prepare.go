@@ -42,6 +42,14 @@ func (x *execution) resolveSecrets(ctx context.Context) (outcome, bool) {
 	if len(names) == 0 {
 		return outcome{}, true
 	}
+	// holdPullRequest parked such a run already. The same rule stands here,
+	// where the values are read, so that no path to this line — a gate moved,
+	// a new kind of run — resolves a pull request's secrets unapproved (A85).
+	// Every store is behind it, whichever would have answered.
+	if x.isPullRequest() && !x.approvedHere() && len(x.machineSecrets()) > 0 {
+		return fail(errors.New("a pull request's secrets are resolved only for a commit approved on this machine"),
+			protocol.ErrSecretBackend), false
+	}
 	if x.workflow != nil {
 		return x.resolveWorkflowSecrets(ctx, names)
 	}
