@@ -186,11 +186,14 @@ Exit codes:
 func newApproveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approve <run-id>",
-		Short: "Approve a run whose ref falls outside policy",
+		Short: "Approve a run whose ref falls outside policy, or a pull request's commit",
 		Long: `Approve a run parked in awaiting_approval.
 
 A run reaches that state when its ref does not match the repo's allowed_refs
-and require_approval_otherwise is set (INV-5). Approval is a local action
+and require_approval_otherwise is set (INV-5). A pull request's job reaches it
+too when it asks for one of this machine's secrets or would run on a native
+runner (A85). Its job definition is the pull request's own, so read the commit
+before you give it secrets. Approval is a local action
 only: a broker cannot grant it, and no inbound command kind can express it —
 the command set is closed at run and cancel, and a third kind is a security
 review rather than a feature (INV-2).

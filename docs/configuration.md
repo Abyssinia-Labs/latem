@@ -59,7 +59,15 @@ the agent (pid 4182) reloaded config.toml
 It writes `[repos.<name>]` with the https URL and the refs a build may use
 without approval — the repository's default branch, and `refs/pull/*/merge`,
 which is what a pull request's checks are built from (`--allowed-refs`
-replaces both, `--require-approval` parks anything else). It checks the
+replaces both, `--require-approval` parks anything else). **A pull request's
+build gets none of this machine's secrets unless you approve its commit**
+(A85). A pull request's job builds without approval only when it asks for no
+secret and its runner isolates it (docker). One that asks for a secret, or
+would run on a native runner, waits in `awaiting_approval` until someone on
+this machine reads the commit and runs `latem approve <run-id>`. That is
+because its job definition is the pull request's own: a fork can name any
+secret, and any environment, in it. The approval covers that one commit,
+and the next push is asked about again. It checks the
 repository first with `git ls-remote` the way the agent runs git: no terminal
 to prompt on, and none of your shell's ssh agent, which a service does not
 inherit — so a repository only your terminal can read is refused here rather

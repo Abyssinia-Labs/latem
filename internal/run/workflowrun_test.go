@@ -334,6 +334,9 @@ func TestExecute_WorkflowRunJobAfterItsPullRequestMerged(t *testing.T) {
 			h.source.registry = ""
 			h.source.upstream = map[string]bool{merge: true}
 			h.cfg.Repos["app"].AllowedRefs = append(h.cfg.Repos["app"].AllowedRefs, "refs/pull/**")
+			// An isolating runner, so a pull request's job builds unapproved
+			// (A85) and this test is about the commit it fetches.
+			h.exec.name = "docker"
 			if c.inMirror {
 				h.source.commits = map[string]bool{c.sha: false}
 			}

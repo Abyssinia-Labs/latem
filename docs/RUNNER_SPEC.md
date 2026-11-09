@@ -249,7 +249,7 @@ Draft 01 said the glob was "matched after resolution," which is meaningless — 
 
 Draft 02 had steps 4 and 5 the other way round, and amendment A27 swapped them. Matching still happens against the name, so nothing about the policy answer changes; what changes is that the commit is known *before* the policy decision, which is what lets a run refused by step 5 be parked with the commit an operator is being asked to approve. Resolving first costs a `git rev-parse` against a mirror that has already been fetched — a local read, no clone, and nothing in the commit is looked at, let alone executed.
 
-Two consequences worth stating because they are the point of the rule. `refs/heads/main` and `main` are the same ref and get the same policy answer — a fully-qualified spelling cannot smuggle a branch past a short-form allowlist. And `refs/pull/*`, `refs/merge-requests/*`, and every other server-synthesised namespace fail step 3 by construction, so an untrusted pull request cannot execute without an explicit, deliberate config entry.
+Two consequences worth stating because they are the point of the rule. `refs/heads/main` and `main` are the same ref and get the same policy answer — a fully-qualified spelling cannot smuggle a branch past a short-form allowlist. And `refs/pull/*`, `refs/merge-requests/*`, and every other server-synthesised namespace fail step 3 by construction, so an untrusted pull request cannot execute without an explicit, deliberate config entry. A54's `latem repo add` writes that entry, `refs/pull/*/merge`, so that a pull request's checks run. Since A85, such a run still waits for approval of its commit when it asks for a secret or would run on a runner that does not isolate it.
 
 #### Approval
 
@@ -944,7 +944,7 @@ Two executors ship: Docker (§13.1) and native (§13.3). Both are choices on eve
 
 If the answer is "repositories my team controls, and nothing else", native is correct and the rest of this section is a v2 concern. If the answer includes a fork, a pull request from outside the team, or any ref a contributor can move, native is not defensible and the machine needs `tart` (§13.2).
 
-The reason is that native's blast radius is the operator's account. A step runs as the logged-in user with that user's keychain — which on a Mac mini doing iOS work is the machine holding the signing certificates and the App Store Connect key. INV-5's approval mechanism (§5, §10) still applies under native and still stops unapproved code from running at all, but it is the *only* thing standing there: once a commit is approved, native gives it everything. Under Tart the same commit gets a VM that is deleted afterwards. The invariant is unchanged; what changes is the cost of it being wrong once.
+The reason is that native's blast radius is the operator's account. A step runs as the logged-in user with that user's keychain — which on a Mac mini doing iOS work is the machine holding the signing certificates and the App Store Connect key. INV-5's approval mechanism (§5, §10) still applies under native and still stops unapproved code from running at all, but it is the *only* thing standing there: once a commit is approved, native gives it everything. A pull request's ref that `allowed_refs` admits is still held for approval before it runs natively (A85). Under Tart the same commit gets a VM that is deleted afterwards. The invariant is unchanged; what changes is the cost of it being wrong once.
 
 This is a deliberate reversal of draft 02, which made Tart the default and described native as a fallback. See amendment A31 for why the ordering was wrong: Tart is a ~69 GB pull and ~140 GB of provisioned disk to isolate against a threat that a single-team, self-hosted runner does not have, and making it the default meant every operator paid for a boundary most of them did not need before their first green build. The section numbers are unchanged — 54 code comments cite `§13.2` and `§13.3` by number, and renumbering to reflect precedence would be churn with real regression risk in comments for a purely cosmetic gain.
 
@@ -1125,6 +1125,7 @@ Rules:
 - Never written to sqlite, never included in `Update.ErrorMsg`, never sent to a broker (INV-4).
 - A declared secret that resolves empty is `E_MISSING_SECRET` at admission, not a runtime surprise 40 minutes in.
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
+- A pull request's job resolves no secret from any link of the chain until its commit is approved on the machine with `latem approve`. Until then it waits in `awaiting_approval`, and no store is asked anything (A85).
 - `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value. A value with a control character in it other than tab and a line ending is refused, and so is a variable's (A73).
 - `latem secrets copy --to HOST [--repo R] [--env E] NAME...` reads each value from secrets.env or the Keychain here, under exactly that scope, and hands it to `latem secrets set` on HOST over ssh, on its stdin (A73).
 - A name secrets.env defines twice has no value, and the error names its lines; every other name in the file still resolves. `secrets set --store file` keeps one line and `secrets rm --store file` removes them all (A73).
@@ -3955,3 +3956,68 @@ tick.
 and so may jobs whose downloads read from more than one job. A relay for those, which needs a
 decision on paid storage. latem's own `release.yml` is such a case: its `smoke` legs run on macOS
 and Linux and both read `build`'s artifact. It stays on GitHub's runners.
+
+### Amendment from a pull request that could read every secret
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A85 | §5 INV-5, §13.0, §15, A50, A52, A54 | **A pull request's job, one whose ref is under `refs/pull/`, waits in `awaiting_approval` for its commit to be approved on the machine when it asks for one of the machine's secrets or when its runner does not isolate it. Until then no store is asked for anything. `latem approve` gives it what it asks for, for that commit only. A pull request's job that asks for no secret and runs isolated builds as before** | `latem repo add` writes `refs/pull/*/merge` into `allowed_refs` so a pull request's checks run (A54), and gate 8 then admits them without approval. A pull request's job is compiled from its own commit (INV-5), and its secrets were resolved before the first step with no question about who wrote it. So anyone who could open a pull request could name any secret, and any `environment:`, in a workflow of their own, and send the value somewhere. Redaction stops it reaching the log, not the network. On a native runner they needed no secret at all: a step runs as the agent's user, beside secrets.env and the Keychain. §13.0 says approval is the only thing standing there, and for a pull request nothing stood |
+
+**What counts as a pull request's.** The ref this machine normalized and builds, under
+`refs/pull/`: `refs/pull/N/merge`, `refs/pull/N/head`, and a merged pull request's ref built by
+the commit its event named (A64). The event's name, and its payload's word on whether the head is
+a fork, are not asked. Both come from the control plane, and the control plane is outside the
+trust boundary (INV-2). The ref settles it alone. A branch's or a tag's run builds only a commit
+on that ref: a workflow run's job is pinned to a commit the branch reaches, and any other run to
+the commit the ref resolves to. So a pull request's commit builds under a `refs/pull/` ref or not
+at all. A fork and a branch of the repository are held alike, which is stricter than GitHub, which
+gives a same-repository pull request its secrets. A rule that trusts a same-repository pull
+request has to tell the two apart on the machine. One way: the head commit is on a branch of the
+repository in the mirror, which only someone who can write to the repository can put there.
+It would also trust everyone who can write, with production's secrets, through a pull request
+nobody reviewed. That is a choice for the owner of the repository, and not part of this amendment.
+
+**What it would reach.** Two things, and the hold covers both:
+
+- A declared secret. A workflow job's own `GITHUB_TOKEN`, minted by the control plane for the job
+  (A52), is not the machine's and does not count. Nor does a called workflow's secret that no
+  caller passed (A82), which is looked up as nothing. Every other name would be looked up through
+  every link of §15's chain, whichever would answer. The environment, the Keychain, secrets.env,
+  pass and commands are all behind the same line, and so is any store added later.
+- A runner that does not isolate the job (`native`). Its steps run as the agent's user. There,
+  withholding the declared secrets withholds nothing: `cat ~/.latem/secrets.env`, `security
+  find-generic-password` and a local socket are a step away. Such a job is held whether it
+  declares anything or not. Docker isolates it. It mounts the workspace, the job's caches and the
+  actions it uses, and none of the agent's environment, so no store and no `LATEM_SECRET_*`
+  reaches the container.
+
+**Where.** Between gate 13, which chooses the runner, and gate 15, which resolves the values:
+the first moment both are known, and before any store is asked anything. Gate 15 checks the same
+rule again where it reads the values. If anything ever reaches it unapproved, it fails with
+`E_SECRET_BACKEND` rather than resolve. A held run moves `preparing → awaiting_approval`, A17's
+edge, and its workspace is removed.
+
+**The allowed path is INV-5's approval, unchanged.** `latem approve <run-id>` on the machine
+records the commit the run was held at. The next attempt builds it with what it asked for. The
+held run's log says which secrets, which environment, and that the runner is native, so the
+approver knows what they are giving and to which commit. Nothing the pull request contains can
+give it: not its job, its environment, a label, an `if:`, or its payload. Nothing a broker sends
+can either, since no inbound command kind can express an approval (INV-2). A push to the pull
+request is a new event with a new commit, so a new run, held again. The approval does not
+outlive the commit. An unapproved run expires after `approval_ttl` with `E_APPROVAL_EXPIRED`, as
+any held run does.
+
+**What it costs.** Nothing per run that is not held: one prefix comparison, after the registry is
+read. A held run has already fetched, checked out and read its job, which a run gate 8 holds has
+not. Only the job says what it asks for, and the log has to say it. Approving it costs a second
+checkout. A
+pull request's checks that need a secret now wait for a person, on every push. That is the price
+of the rule, and it is why a same-repository rule is named above.
+
+**Not in this amendment.** The permissions of the `GITHUB_TOKEN` the control plane mints for a
+fork's pull request. On GitHub it is read-only, and that is the control plane's to decide, in
+latem-cloud. `pull_request_target`, which the planner treats like `pull_request`. A run of it
+under a `refs/pull/` ref is held like any other. GitHub plans it from the base branch, with
+secrets, and which ref latem-cloud sends for it was not checked. Caches a pull request's job writes
+and a branch's job later reads. Approval from
+anywhere but the machine.

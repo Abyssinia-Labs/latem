@@ -76,3 +76,33 @@ interpreted — so put anything that needs a shell in a script and name the scri
 
 Redaction does not depend on which source a value came from, and multi-line
 values are redacted line by line (INV-4).
+
+## Pull requests
+
+**A pull request's build gets none of these values until someone on the
+machine approves its commit (A85).** Its job definition comes from its own
+commit, so a pull request, and a fork's above all, can name any secret and
+any `environment:` it likes. Redaction is no defence: a value encoded or sent
+to another host leaves no trace in the log.
+
+So a pull request's job that asks for a secret waits in `awaiting_approval`
+before any store is asked for anything. So does one that would run on a native
+runner, whether it asks or not, because a native step runs as this machine's
+user, with `secrets.env` and the Keychain in reach:
+
+```console
+$ latem list --state awaiting_approval     # the runs waiting, and their refs
+$ latem logs <run-id>                      # its commit, and what it asks for: secrets, an environment, a native runner
+$ latem approve <run-id>                   # after reading the commit; it prints the commit it approves
+```
+
+The approval is local and covers that one commit. Nothing in the pull request
+and nothing the control plane sends can give it. The next push to the pull
+request is a new commit, and is asked about again. A pull request's job that
+asks for nothing and runs on docker builds without approval, so its checks
+still run.
+
+The rule follows the ref the machine builds, `refs/pull/…`, and not what the
+event says about the pull request. A fork and a branch of the repository are
+treated alike: the payload that tells them apart is relayed by the control
+plane, and nothing on the machine can check it.
