@@ -3825,9 +3825,11 @@ file names it. A download an earlier step of the same job could satisfy, by A77'
 other job. Any other download is matched against the uploads of every job the downloading job needs,
 directly or further up, as planned keys, job paths included. Two names match when both are known and
 equal, or when either is unknown. A download with no name is every artifact, and matches every
-upload. The jobs matched are `artifacts_from`, sorted. A download that matches none is left for the
-compiler, which refuses it as A77 did, with the jobs it needs added to the reason. An upload inside a
-composite action is not seen, because a plan does not expand actions.
+upload. The jobs matched are `artifacts_from`, sorted, one list for the job. A job none of whose
+downloads matches is left for the compiler, which refuses it as A77 did, with the jobs it needs
+added to the reason. In a job where one download matched, another that matches nothing is answered
+at its step, which fails naming where it looked. An upload inside a composite action is not seen,
+because a plan does not expand actions.
 
 **Who decides what.** The control plane places: such a job goes only to the machine that ran those
 jobs. While that machine is offline the job waits, and once it is lost, by the control plane's
