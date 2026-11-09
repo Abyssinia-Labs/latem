@@ -455,8 +455,8 @@ Unix socket at `~/.latem/agent.sock`, mode `0600`, newline-delimited JSON, backe
 The queue is not only a buffer for a busy agent — it is also what `latem run` writes to when **no agent is running at all**. Draft 01 said "momentarily busy," which under-promises. Concretely:
 
 - Agent up → `latem run` connects to the socket, enqueues, and the run starts.
-- Agent down → the socket connect fails; `latem run` enqueues directly into sqlite, prints `queued (agent not running)` and the run id, and exits 0. The agent picks it up at step 6 of §6.
-- `latem run --wait` or `--follow` against a down agent is an error, not a hang: `E_AGENT_DOWN`, exit 3, with the start command in the message.
+- Agent down → the socket connect fails; a `latem run` that only queues — `--detach`, or a bare `latem run` whose stdout is not a terminal — enqueues directly into sqlite, prints `queued (agent not running)` and the run id, and exits 0. The agent picks it up at step 6 of §6.
+- A `latem run` that follows or waits — `--follow`, `--wait`, or a bare `latem run` whose stdout is a terminal, which follows (A81) — against a down agent is an error, not a hang: `E_AGENT_DOWN`, exit 3, with the start command in the message.
 
 Cancel arrives on the local broker as the same `protocol.Command`, emitted by `latem cancel`. One code path, both transports.
 
@@ -1292,7 +1292,7 @@ The original argument survives for what it did cover: the runner still invokes `
 ```
 latem setup [--url U] [--repo owner/name …] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
-latem run <repo> <job> [--ref R] [--input k=v] [--follow] [--wait]
+latem run <repo> <job> [--ref R] [--input k=v] [--follow | --wait | --detach]   Follows the run's log on a terminal and exits with its result; for a script, or with --detach, queues it and prints its id (A81)
 latem try [-C dir] [--workflow F] [--event E] [--input k=v] [--ref R] [--matrix k=v] [--repo R] [--detach] <job>   One workflow job from this working tree, uncommitted changes included; no push, no control plane (A76)
 latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
@@ -1397,7 +1397,7 @@ Stable codes; the web app maps them to human copy, and they appear in `Update.Er
 
 Retryable errors are safe for the control plane to offer as a one-click retry. Non-retryable ones need a human or a commit.
 
-One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what `latem run --wait` or `--follow` exits with (exit 3) when no agent is listening (§7.3). It is a CLI condition, not a run outcome.
+One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what a `latem run` that follows or waits exits with (exit 3) when no agent is listening (§7.3, A81). It is a CLI condition, not a run outcome.
 
 ---
 
@@ -3664,6 +3664,30 @@ one. The pass says which it was: the agent started after the last change, or re-
 **An older agent writes no `loaded`.** `doctor` then falls back to the process's start time as
 before, so the false warning goes only once the agent itself runs a release with this amendment.
 A status naming another pid still vouches for nothing.
+
+### Amendment from a run that said "queued"
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A81 | §7.3, §19, §21 | **A bare `latem run` whose stdout is a terminal follows the run, as `--follow` does, and exits with its result. With stdout a pipe or a file it queues the run, prints its id and exits 0, as before, and `--detach` does that at a terminal** | `latem run myapp test` at a prompt printed a run id and exited 0, which at a terminal reads as a build that passed, and 0 meant only that the run was queued. Learning how it went took `latem logs -f` with the id pasted in. `latem try` (A76) already follows by default and has `--detach` |
+
+**Who is watching.** The test is stdout alone: `id=$(latem run …)`, a pipe and a redirect to a file
+are a script's, whatever stdin is, and get what they always got. A person piping through `tee` gets
+the script's answer too, and `--follow` is there for them. `--detach` with `--wait` or `--follow`
+is a usage error, exit 2.
+
+**The exit codes are `--follow`'s**, including the one that changes most at a terminal: with no agent
+listening, a bare `latem run` there was queued and exit 0 and is now `E_AGENT_DOWN`, exit 3, with
+nothing queued (§7.3). The message adds the way to queue it anyway, `--detach`.
+
+**Ctrl-C** ends the following and leaves the run going, as before, since the run belongs to the
+agent and may be shown by a broker. The message says so and names `latem logs -f` and
+`latem cancel`, rather than `context canceled`, which read as though the run was. Exit 1, as
+before. `latem try` still cancels its run on Ctrl-C (A76): that run is a working tree nobody else
+can see.
+
+**Costs.** None: the follow is the same local sqlite point query and log file read `--follow` makes,
+every 250 ms, and nothing new reaches a control plane.
 
 ### Amendment from calling a workflow
 

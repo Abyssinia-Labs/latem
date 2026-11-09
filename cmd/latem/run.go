@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +22,7 @@ func newRunCommand() *cobra.Command {
 		inputs []string
 		follow bool
 		wait   bool
+		detach bool
 		actor  string
 	)
 	cmd := &cobra.Command{
@@ -35,40 +40,58 @@ Inputs are declared in the job's inputs: block. An undeclared key is a hard
 rejection with E_BAD_INPUT, not a warning.
 
 Output:
-  by default, the run id on stdout and nothing else, so it can be captured
+  on a terminal, the run id, then the run's log as it is produced, until the
+  run finishes: as --follow. Ctrl-C stops following and leaves the run going.
+  When stdout is not a terminal, the run id and nothing else, so it can be
+  captured: id=$(latem run myapp test)
   --wait     block until the run reaches a terminal state; exit non-zero if it
              did not succeed
   --follow   stream log lines to stdout as they are produced, then behave
              as --wait
+  --detach   queue it, print the run id, and exit, on a terminal too
 
 Exit codes:
-  0  the run succeeded, or was accepted when neither --wait nor --follow was given
+  0  the run succeeded, or was queued: with --detach, or when stdout is not
+     a terminal and neither --wait nor --follow was given
   1  the run did not succeed
   2  usage
-  3  no agent is listening and --wait or --follow was given (E_AGENT_DOWN, §7.3)
+  3  no agent is listening, and the run was being followed or waited for
+     (E_AGENT_DOWN, §7.3)
 
-Without --wait or --follow the run is enqueued directly in sqlite and this
-exits 0 even when no agent is running; it starts when one does. With either
-flag there is nothing to wait for, so the answer is exit 3 rather than a
-process that blocks forever.
+A run that is only queued is queued directly in sqlite, and this exits 0 even
+when no agent is running; it starts when one does. A run that is followed or
+waited for has nothing to wait for on a machine with no agent, so the answer
+is exit 3 rather than a process that blocks forever, and nothing is queued.
 
 Examples:
   latem run myapp test
-  latem run myapp ios-release --ref release/1.4 --input channel=beta --follow`,
+  latem run myapp ios-release --ref release/1.4 --input channel=beta
+  latem run myapp nightly --detach`,
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if detach && (wait || follow) {
+				return usageErrorf("--detach queues the run and exits; it cannot also --wait or --follow")
+			}
 			parsed, err := parseInputs(inputs)
 			if err != nil {
 				return err
 			}
+			// A person at a terminal is waiting for an answer, and "queued"
+			// is not one (A81). A script's stdout is a pipe or a file, and it
+			// gets the id and exit 0, as before.
+			byDefault := !detach && !wait && !follow && stdoutIsTerminal(cmd)
+			if byDefault {
+				follow = true
+			}
 			return submitRun(cmd, submission{
-				repo:   args[0],
-				job:    args[1],
-				ref:    ref,
-				inputs: parsed,
-				actor:  actor,
-				follow: follow,
-				wait:   wait || follow,
+				repo:      args[0],
+				job:       args[1],
+				ref:       ref,
+				inputs:    parsed,
+				actor:     actor,
+				follow:    follow,
+				wait:      wait || follow,
+				byDefault: byDefault,
 			})
 		},
 	}
@@ -76,6 +99,7 @@ Examples:
 	cmd.Flags().StringArrayVar(&inputs, "input", nil, "job input as key=value; repeatable")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "stream logs until the run finishes")
 	cmd.Flags().BoolVar(&wait, "wait", false, "block until the run finishes")
+	cmd.Flags().BoolVar(&detach, "detach", false, "queue the run and exit without following it, on a terminal too")
 	cmd.Flags().StringVar(&actor, "actor", "", "who to record as having requested this (default: the current user)")
 	return cmd
 }
@@ -92,23 +116,34 @@ Examples:
 // tried, not a mysterious failure.
 const DefaultRef = "main"
 
+// stdoutIsTerminal reports whether cmd's stdout is a terminal, which is how
+// `latem run` knows a person is watching it (A81). A seam: under `go test`
+// stdout is a terminal at a desk and a pipe in CI, so a test says which.
+var stdoutIsTerminal = func(cmd *cobra.Command) bool {
+	f, ok := cmd.OutOrStdout().(*os.File)
+	return ok && isTerminal(f)
+}
+
 // submission is the shape of one `latem run`, after flag parsing.
 type submission struct {
 	repo, job, ref string
 	inputs         map[string]string
 	actor          string
 	follow, wait   bool
+	// byDefault is a follow nobody asked for: stdout is a terminal and no
+	// flag said otherwise (A81).
+	byDefault bool
 }
 
 // submitRun queues a run and, depending on the flags, watches it.
 //
 // The two paths through here are §7.3's, and the asymmetry is deliberate.
-// Without --wait or --follow the run is queued whether or not an agent is
-// listening, and the command exits 0 — the work is durable and starts when an
-// agent does. With either flag there is nothing to wait for on a machine with
-// no agent, so the answer is exit 3 and no queue write at all: queueing a run
-// that will begin hours later, unwatched, after the user has moved on, is
-// worse than refusing.
+// A run that is only queued (--detach, or a script's bare `latem run`) is
+// queued whether or not an agent is listening, and the command exits 0 — the
+// work is durable and starts when an agent does. A run that is followed or
+// waited for has nothing to wait for on a machine with no agent, so the
+// answer is exit 3 and no queue write at all: queueing a run that will begin
+// hours later, unwatched, after the user has moved on, is worse than refusing.
 func submitRun(cmd *cobra.Command, s submission) error {
 	ctx := cmd.Context()
 	st, closeState, err := openState(ctx)
@@ -146,7 +181,13 @@ func submitRun(cmd *cobra.Command, s submission) error {
 		RequireAgent: s.wait,
 	})
 	if err != nil {
-		return st.agentDown(err)
+		err = st.agentDown(err)
+		if s.byDefault && exitCode(err) == ExitAgentDown {
+			// Before A81 this command queued and said so. Whoever expects
+			// that is told how to get it.
+			err = &ExitError{Code: ExitAgentDown, Err: fmt.Errorf("%w\nor queue it to start when one does:\n  the same command with --detach", err)}
+		}
+		return err
 	}
 
 	// The id goes to stdout on its own so `id=$(latem run myapp test)` works.
@@ -158,7 +199,13 @@ func submitRun(cmd *cobra.Command, s submission) error {
 	if !s.wait {
 		return nil
 	}
-	return watchRun(cmd, st, sub.RunID, s.follow)
+	err = watchRun(cmd, st, sub.RunID, s.follow)
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		// Ctrl-C ends the watching, not the run, which an agent is running
+		// and a broker may be showing; "context canceled" would say otherwise.
+		return fmt.Errorf("stopped watching %s, which goes on\n  latem logs -f %[1]s   follows it again\n  latem cancel %[1]s    stops it", sub.RunID)
+	}
+	return err
 }
 
 // parseInputs turns repeated --input key=value flags into a map.
