@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.7"`.
+in both directions carries it**. The current value is `"2.8"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -284,6 +284,18 @@ The control plane answers by sending the job's `run` command again, which brings
 fresh ones. The agent sends it to any control plane: `resume` goes before `hello`
 says what one speaks, and a decoder of `resume` reads the fields it knows. A
 control plane answers a 2.7 agent's hello with 2.7.
+
+**2.8 (amendment A82)** lets a key be a **job path**: a job of a workflow that a
+job calls (`uses: ./.github/workflows/x.yml`), planned into the caller's
+workflow run as `<caller>/<job>`, at most four ids, `release/package/pack`. It
+appears in a plan's `jobs[].key` and `jobs[].needs` (§4.8), and in `run.job` and
+the keys of `run.needs` (§3.2). No field is added; what changes is that a `/`
+may appear where only a job's id could. A 2.7 control plane refuses a plan with
+one, and the whole plan with it, so the agent plans calls only for a control
+plane whose `hello` said 2.8, and before that plans each call as one job with an
+`error`. A 2.7 agent refuses a run whose `job` holds a `/`, so a control plane
+sends one only to an agent whose frames say 2.8. A control plane answers a 2.8
+agent's hello with 2.8.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -425,14 +437,17 @@ smuggled `script` or `image` is a hard decode failure at the agent.
 **A workflow run's job (2.0, A52)** adds the fields below, which are **all set or
 all absent** — a run carrying any of them without `workflow` is refused. `job` is
 then the job's id under `jobs:` in that file, which is what makes `web` in three
-files three different jobs.
+files three different jobs. Since 2.8 (A82) it may be a job path, `release/pack`:
+the job `pack` of the workflow that the file's job `release` calls. The agent
+finds each id in a file it reads at the pinned commit, through the `uses:` of
+the one above, so no inbound field names the called file.
 
 | Field | JSON | Type | Notes |
 |---|---|---|---|
 | Workflow | `workflow` | string | Must match `^\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9._-]*\.ya?ml$` — the only path an inbound field may name. |
 | SHA | `sha` | string | The commit to build, 40 or 64 hex. Must be reachable from `ref`: the job builds what the event named, not what the branch says by the time it starts. |
 | Event | `event` | object | `protocol.Event`, §3.2's `plan` below. Data: the payload reaches a step only as `$GITHUB_EVENT_PATH` or an expression bound to an env var (A42). |
-| Needs | `needs` | object, job id → `{result, outputs?}` | `result` is `success`, `failure`, `cancelled` or `skipped`. Outputs are strings. |
+| Needs | `needs` | object, job id → `{result, outputs?}` | `result` is `success`, `failure`, `cancelled` or `skipped`. Outputs are strings. Keyed as the plan keyed the needs: since 2.8, a key may be a job path (§4.8). |
 | WorkflowRunID | `workflow_run_id` | string | The workflow run's id, shared by its jobs: `github.run_id`. Same pattern as `id`. |
 | RunNumber, RunAttempt | `run_number`, `run_attempt` | number | GitHub's per-workflow numbers. `$LATEM_BUILD_NUMBER` stays the machine's own (A36). |
 | Token | `token` | string | A GitHub installation token for this job alone, scoped by its `permissions`. One printable word, at most 1024 bytes. **Held in memory only**: stripped before the run is made durable, registered with the redactor before the first step, dropped when the run is terminal. An agent that restarts with the job queued builds it without one. |
@@ -882,8 +897,8 @@ The answer to a `plan` command, correlated by `plan.id`, and acked like an
 | `workflows[].inputs` | object | A dispatch's inputs with defaults filled in; give every job of the run these. |
 | `workflows[].error` | string | Why this workflow could not be planned — it cannot be parsed, its `on:` or `needs:` is invalid, its `concurrency` reads something unknown when planning. **Report it as a failed run**, as GitHub reports an invalid workflow file. |
 | `jobs[]` | array | Ordered so each job comes after every job it needs. |
-| `jobs[].key`, `.name` | string | The id under `jobs:` (send it as `run.job`), and the display name a check run is named by. |
-| `jobs[].needs` | array | Keys of jobs in the same workflow. |
+| `jobs[].key`, `.name` | string | The id under `jobs:` (send it as `run.job`), and the display name a check run is named by. 2.8, A82: a job of a called workflow is keyed by its **job path**, the caller's id and its own joined by `/` (`release/pack`, at most four ids, each a job id), and named as GitHub names it, `release / pack`. Schedule it as any job; send it only to an agent that said 2.8. The caller itself is not in the plan: no machine runs it. |
+| `jobs[].needs` | array | Keys of jobs in the same workflow run, job paths included. A job that needs a call needs every job of it; a job of a call needs its caller's needs. |
 | `jobs[].labels` | array | `runs-on` after the **planning** machine's aliases and GitHub's hosted labels. Dispatch to a runner whose labels cover these only when `runs_on` is absent or the machine is too old to report its aliases. |
 | `jobs[].runs_on` | `[{label, hosted?}]` | 2.4, A68. `runs-on` before any machine's aliases: each `label` lowercased, without `self-hosted`, and `hosted`, what it stands for on a machine with no alias for it when that is not itself. **Read it per machine**: the machine's alias for `label`, else `hosted`, else `label` itself, which is how that machine will compile the job. Sent only to a control plane that said 2.4. |
 | `jobs[].reads_vars` | array | 2.4, A68. The variables that decide whether the job runs, where, and as what: everything of it but its steps. Names as the file writes them, read without case, or `"*"` when no list can say. Never a value. **Do not send the job to a machine whose `repos[].vars` differ on these from the machine that stands for the repository.** Sent only to a control plane that said 2.4. |
@@ -895,7 +910,7 @@ The answer to a `plan` command, correlated by `plan.id`, and acked like an
 | `jobs[].timeout_minutes` | number | 360 unless the job says. |
 | `jobs[].matrix` | object | 2.1, A55. Set on each **leg** of a matrix job: its values. A matrix job is planned as one entry per leg, all with the job's `key`, each with its own `name` (GitHub's: `check (linux, 22)`), `labels`, `environment` and `concurrency`. **Send it back as `run.matrix`.** |
 | `jobs[].strategy` | `{job_index, job_total, fail_fast, max_parallel?}` | 2.1, A55. Set on each leg. Legs are jobs to schedule, with three rules the control plane enforces: **a job that needs `key` waits for every leg**, and reads `needs.<key>.result` as `failure` if a leg failed, else `cancelled` if one was, else `skipped` if all were, else `success`, and `needs.<key>.outputs` as the legs' outputs merged in the order they ended; **`fail_fast`** cancels a failed leg's queued and running siblings, unless that leg is `continue_on_error`; **`max_parallel`**, when set, caps how many legs run at once. |
-| `jobs[].error` | string | This job cannot run — a matrix computed from another job's outputs, a reusable workflow, a Windows label. It fails alone; jobs that need it are skipped as after any failure. |
+| `jobs[].error` | string | This job cannot run — a matrix computed from another job's outputs, a workflow of another repository, a Windows label. It fails alone; jobs that need it are skipped as after any failure. |
 | `jobs[].requires` | `[{key, version?}]` | 2.2, A61. What the job needs of a machine that nothing in it provides, read from the commit: `xcode` at `27`, `ios-simulator`, `jdk` at `17`, `docker-daemon`. Keys from a closed vocabulary that may grow (a control plane keeps a key it has no words for), versions only digits and dots, at most 32. **Never route on it**: it is for saying a job is likely to fail on the machine it went to. Sent only to a control plane that said 2.2. |
 
 ---

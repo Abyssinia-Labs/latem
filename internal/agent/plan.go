@@ -32,7 +32,7 @@ func (a *Agent) plan(ctx context.Context, t transport, req protocol.PlanRequest)
 	}
 	defer func() { <-a.planSlots }()
 
-	res := a.makePlan(ctx, req, speaksRequires(t))
+	res := a.makePlan(ctx, req, planPeer{requires: speaksRequires(t), calls: speaksCalls(t)})
 	if res.Error != "" {
 		a.log.Warn("plan refused", "plan_id", req.ID, "repo", req.Repo, "code", res.ErrorCode, "err", res.Error)
 	} else {
@@ -44,10 +44,18 @@ func (a *Agent) plan(ctx context.Context, t transport, req protocol.PlanRequest)
 	}
 }
 
+// planPeer is what the control plane a plan goes to takes.
+type planPeer struct {
+	// requires: each job also says what it needs of a machine (A61, 2.2).
+	requires bool
+	// calls: a called workflow's jobs are planned into the caller's run,
+	// under job paths (A82, 2.8). Without it a call is one job that fails.
+	calls bool
+}
+
 // makePlan reads the event's commit from this machine's own mirror and plans
-// it (INV-5). Nothing here runs anything from the repository. With requires,
-// each job also says what it needs of a machine (A61).
-func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, requires bool) protocol.PlanResult {
+// it (INV-5). Nothing here runs anything from the repository.
+func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, peer planPeer) protocol.PlanResult {
 	res := protocol.PlanResult{ID: req.ID}
 	fail := func(code protocol.ErrorCode, err error) protocol.PlanResult {
 		res.ErrorCode = code
@@ -84,6 +92,7 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, requires
 		Repository:   slug,
 		LabelAliases: cfg.LabelAliases,
 		Vars:         repoCfg.VarsFor(""),
+		NoCalls:      !peer.calls,
 		Changed: func() ([]string, error) {
 			// A push compares with what the branch was; anything else — a
 			// new branch, a pull request's merge commit — with the commit's
@@ -98,7 +107,7 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, requires
 	if err != nil {
 		return fail(codeOr(registry.CodeOf(err), protocol.ErrBadRegistry), err)
 	}
-	if requires {
+	if peer.requires {
 		addRequires(ctx, mirror, ev.SHA, workflows)
 	}
 	for i := range workflows {

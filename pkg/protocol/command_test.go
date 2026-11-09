@@ -285,6 +285,22 @@ func TestCommandUnmarshal_WorkflowRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(run("")), &c); err != nil {
 		t.Fatalf("a 1.0 run is still a run: %v", err)
 	}
+	// 2.8 (A82): a called workflow's job is named by its job path, and so is
+	// a need on one; a path is never deeper than MaxCallDepth calls.
+	called := strings.Replace(run(full), `"job":"web"`, `"job":"release/package/pack"`, 1)
+	called = strings.Replace(called, `"lint":{`, `"release/plan":{`, 1)
+	if err := json.Unmarshal([]byte(called), &c); err != nil {
+		t.Fatalf("a called workflow's job: %v", err)
+	}
+	if c.Run.Job != "release/package/pack" || c.Run.Needs["release/plan"].Result != NeedSuccess {
+		t.Fatalf("%+v", c.Run)
+	}
+	for _, job := range []string{"a/b/c/d/e", "a//b", "/a", "a/", "a/../b", "a/b c"} {
+		bad := strings.Replace(run(full), `"job":"web"`, `"job":"`+job+`"`, 1)
+		if err := json.Unmarshal([]byte(bad), &c); err == nil {
+			t.Errorf("run.job %q was accepted", job)
+		}
+	}
 	for name, extra := range map[string]string{
 		"fields without a workflow": `,"sha":"` + testSHA + `","token":"t"`,
 		"workflow outside the dir":  strings.Replace(full, ".github/workflows/checks.yml", ".github/actions/x.yml", 1),

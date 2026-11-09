@@ -76,6 +76,32 @@ func TestResolveScoped(t *testing.T) {
 	}
 }
 
+// A called workflow's job reads a secret as the name its caller passed it as,
+// kept under its own name; one with no candidates is missing (A82).
+func TestResolveAs(t *testing.T) {
+	reg := &fakeRegistrar{}
+	p := &registeringProvider{reg: reg, t: t, values: map[string]string{
+		"app__NPM_TOKEN": longEnough("repo-npm"),
+		"NPM":            longEnough("machine-npm"),
+	}}
+	lookup := func(name string) []string {
+		if name == "NPM" {
+			return []string{"app__production__NPM", "app__NPM_TOKEN", "NPM_TOKEN"}
+		}
+		return nil
+	}
+	set, missing, err := ResolveAs(context.Background(), p, reg, []string{"NPM", "OTHER"}, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := set.Value("NPM"); string(got) != longEnough("repo-npm") {
+		t.Errorf("NPM = %q, want the repository's NPM_TOKEN", got)
+	}
+	if !slices.Equal(missing, []string{"OTHER"}) {
+		t.Errorf("missing = %v", missing)
+	}
+}
+
 type brokenProvider struct{}
 
 func (brokenProvider) Resolve(context.Context, string) (Value, error) {

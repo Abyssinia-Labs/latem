@@ -252,6 +252,60 @@ jobs:
 	}
 }
 
+// A job that calls a workflow of the repository is checked as the called
+// workflow's jobs, each by its job path, with the secrets its caller passes
+// (A82).
+func TestWorkflowsCheck_ACalledWorkflowsJobs(t *testing.T) {
+	dir := configDirWith(t, baseConfig)
+	kc := fakeStores(t, true)
+	kc.items[secrets.ScopedName("NPM_TOKEN", "app")] = "x"
+	fakeOrigin(t, "")
+	repo := checkout(t, map[string]string{
+		"ci.yml": `on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+  release:
+    needs: build
+    uses: ./.github/workflows/release.yml
+    with: {version: "1.2.3"}
+    secrets: {NPM: "${{ secrets.NPM_TOKEN }}"}
+`,
+		"release.yml": `on:
+  workflow_call:
+    inputs:
+      version: {type: string, required: true}
+    secrets:
+      NPM: {required: true}
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm publish
+        env:
+          VERSION: ${{ inputs.version }}
+          NPM: ${{ secrets.NPM }}
+          OTHER: ${{ secrets.OTHER }}
+`,
+	})
+	out, _ := latemIn(t, dir, "", "workflows", "check", repo, "--repo", "app", "--no-color")
+	for _, want := range []string{
+		"[ ok ] build",
+		"release/pack (release / pack)  runs on linux",
+		"secrets the workflow calling this job does not pass, which read as empty: OTHER",
+		// The called workflow is not planned for a push of its own.
+		"(on: workflow_call)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "NPM") {
+		t.Errorf("NPM is passed as the repository's NPM_TOKEN, which is set:\n%s", out)
+	}
+}
+
 // A job using a remote action is refused on the native executor unless the
 // operator opts out of isolation (A47); the check says so with the opt-out.
 func TestWorkflowsCheck_RemoteActionsNeedAnIsolatingRunner(t *testing.T) {

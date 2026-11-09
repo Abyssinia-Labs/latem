@@ -30,8 +30,9 @@ For each job it names what stands in the way and the fix: a `runs-on` label
 no runner carries, a remote action outside `[actions] allowed` or not pinned to
 a commit, secrets with no value in any scope the run would look in (names
 only), vars that would read as empty, and what latem refuses outright — a
-reusable workflow, `services:`, `container:`. A matrix job is checked leg by
-leg, each with its own `runs-on`. `--fix` writes the
+workflow of another repository, `services:`, `container:`. A matrix job is checked leg by
+leg, each with its own `runs-on`, and a job that calls a workflow of the
+repository as the called workflow's jobs, each by its job path, `release/pack`. `--fix` writes the
 `[label_aliases]` and `[actions]` entries it suggests and reloads the agent;
 pinning an action and storing a secret stay yours. It exits 1 while any job
 cannot run, so it also works as a gate.
@@ -58,7 +59,8 @@ that commit, so the run is the commit's and the log names it. It runs the job
 you name whatever `on:` and the job's `if:` say, and gets no GitHub token
 unless this machine stores one (`latem secrets set --repo R GITHUB_TOKEN`).
 Ctrl-C cancels it. Nothing about it reaches a control plane. RUNNER_SPEC A76
-has the design.
+has the design. A job of a called workflow is tried by its job path,
+`latem try release/pack`; trying the caller lists its jobs (A82).
 
 ### Steps latem performs
 

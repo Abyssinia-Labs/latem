@@ -222,6 +222,56 @@ func TestTry_FindsTheJobsWorkflow(t *testing.T) {
 	}
 }
 
+// A called workflow's job is tried by its job path, with its caller's needs
+// taken as succeeded; the caller itself names its jobs (A82).
+func TestTry_AJobOfACalledWorkflow(t *testing.T) {
+	dir := configDirWith(t, baseConfig)
+	fakeStores(t, true)
+	fakeOrigin(t, "git@github.com:me/app.git")
+	repo := checkout(t, map[string]string{
+		"checks.yml": tryChecks + `  package:
+    needs: changes
+    uses: ./.github/workflows/pack.yml
+    with:
+      beacon: ${{ needs.changes.outputs.beacon }}
+`,
+		"pack.yml": `on:
+  workflow_call:
+    inputs:
+      beacon: {type: string, default: ''}
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps: [{run: npm pack}]
+  smoke:
+    needs: pack
+    runs-on: ubuntu-latest
+    steps: [{run: ./smoke.sh}]
+`,
+	})
+	fakeTry(t, repo, treeCommit{SHA: trySHA, Base: tryBase, Branch: "feature/x"})
+
+	out, err := latemIn(t, dir, "", "try", "package/smoke", "--detach")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	r := tryRow(t, dir, out)
+	if r.Job != "package/smoke" || r.Workflow.Workflow != ".github/workflows/checks.yml" {
+		t.Errorf("row %+v", r)
+	}
+	if len(r.Workflow.Needs) != 2 || r.Workflow.Needs["changes"].Result != protocol.NeedSuccess ||
+		r.Workflow.Needs["package/pack"].Result != protocol.NeedSuccess {
+		t.Errorf("needs %+v", r.Workflow.Needs)
+	}
+	if !strings.Contains(out, "package/smoke (package / smoke)") {
+		t.Errorf("the summary does not name the job:\n%s", out)
+	}
+	out, err = latemIn(t, dir, "", "try", "package", "--detach")
+	if exitCode(err) != ExitUsage || !strings.Contains(err.Error(), "package/pack, package/smoke") {
+		t.Errorf("trying the caller: exit %d: %v\n%s", exitCode(err), err, out)
+	}
+}
+
 // A matrix job with more than one leg names the flags that pick each, and
 // --matrix picks the leg the plan made.
 func TestTry_PicksAMatrixLeg(t *testing.T) {

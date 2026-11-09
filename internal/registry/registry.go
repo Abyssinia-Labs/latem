@@ -131,10 +131,17 @@ type Job struct {
 	SkipReason string `json:"-"`
 	// Outputs are a workflow run's job's outputs:, each evaluated as the job
 	// ends, against its steps (A52). Excluded from decoding.
-	Outputs   map[string]LateValue `json:"-"`
-	Secrets   []string             `json:"secrets,omitempty"`
-	Artifacts []ArtifactDecl       `json:"artifacts,omitempty"`
-	Steps     []Step               `json:"steps"`
+	Outputs map[string]LateValue `json:"-"`
+	// SecretsFrom is set on a job of a called workflow (A82): for each
+	// secret it reads, the name its callers pass it as from the top of the
+	// call, or "" for one no caller passes, which reads as empty unless the
+	// job's own environment has it. Nil — a job no workflow called, or one
+	// every caller passed `secrets: inherit` — reads each secret as itself.
+	// Names, never values. Excluded from decoding.
+	SecretsFrom map[string]string `json:"-"`
+	Secrets     []string          `json:"secrets,omitempty"`
+	Artifacts   []ArtifactDecl    `json:"artifacts,omitempty"`
+	Steps       []Step            `json:"steps"`
 }
 
 // Step is one command.

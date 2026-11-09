@@ -42,12 +42,17 @@ func (x *execution) noteNeeds(reg *registry.Registry, runner *Runner) {
 			return
 		}
 		wf, err := workflow.Parse(data, x.workflow.Path)
-		if err != nil || wf.Jobs[x.req.Job] == nil {
+		if err != nil {
+			return
+		}
+		// A called workflow's job is read from its own file (A82).
+		declaredIn, key, err := workflow.CalledJob(fsys, wf, x.req.Job)
+		if err != nil {
 			return
 		}
 		leg := needs.Leg{Labels: job.RunsOn}
 		_ = json.Unmarshal(x.req.Matrix, &leg.Matrix)
-		r = needs.Job(fsys, wf, x.req.Job, leg)
+		r = needs.Job(fsys, declaredIn, key, leg)
 	} else {
 		r = needs.RegistryJob(fsys, job)
 	}

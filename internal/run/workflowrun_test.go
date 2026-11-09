@@ -419,3 +419,89 @@ func TestExecute_MatrixLeg(t *testing.T) {
 		})
 	}
 }
+
+// A job of a called workflow runs from the file its caller's uses: names, with
+// the inputs its caller's with: gives it, as its own id, and with the secrets
+// its caller passes: an environment's own, and the rest under the names they
+// were passed as (A82).
+func TestExecute_CalledWorkflowJob(t *testing.T) {
+	const deploy = `
+name: Deploy
+on: [push]
+jobs:
+  convex:
+    runs-on: [linux]
+    steps: [{run: ./deploy.sh}]
+  cli:
+    needs: convex
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.convex.outputs.sha }}
+    secrets:
+      NPM: ${{ secrets.NPM_TOKEN }}
+`
+	const release = `
+on:
+  workflow_call:
+    inputs:
+      ref: {type: string, required: true}
+    secrets:
+      NPM: {required: true}
+jobs:
+  publish:
+    runs-on: [linux]
+    environment: production
+    steps:
+      - run: ./publish.sh
+        env:
+          REF: ${{ inputs.ref }}
+          NPM: ${{ secrets.NPM }}
+          CF: ${{ secrets.CLOUDFLARE }}
+          OTHER: ${{ secrets.OTHER }}
+`
+	h := newHarness(t)
+	h.source.registry = ""
+	h.secret.values = map[string]string{
+		"app__NPM_TOKEN":              "npm-token-of-the-repository",
+		"app__production__CLOUDFLARE": "cloudflare-of-production",
+		// Not passed by the caller, so not the job's, though the machine has it.
+		"OTHER": "a-machine-wide-secret-nobody-passed",
+		"NPM":   "a-machine-wide-secret-of-the-callee's-name",
+	}
+	o := h.build()
+
+	req := workflowRequest(h, "cli/publish")
+	req.Workflow = ".github/workflows/deploy.yml"
+	req.Needs = map[string]protocol.NeedResult{"convex": {Result: protocol.NeedSuccess, Outputs: map[string]string{"sha": "abc123"}}}
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/deploy.yml", deploy)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/release.yml", release)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s: %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	step := h.env.executed()[0]
+	for k, want := range map[string]string{
+		"REF": "abc123", "NPM": "npm-token-of-the-repository", "CF": "cloudflare-of-production", "OTHER": "",
+	} {
+		if step.Env[k] != want {
+			t.Errorf("%s = %q, want %q", k, step.Env[k], want)
+		}
+	}
+	if job := h.env.runSpec().Env["GITHUB_JOB"]; job != "publish" {
+		t.Errorf("GITHUB_JOB = %q, want the called job's own id", job)
+	}
+	logs := h.logContents(req.ID)
+	for _, want := range []string{
+		"job \"cli/publish\" from .github/workflows/deploy.yml",
+		".github/workflows/deploy.yml calls it: job \"publish\" of .github/workflows/release.yml",
+		"secret OTHER is not passed to this job by the workflow calling it",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("the log does not say %q:\n%s", want, logs)
+		}
+	}
+}

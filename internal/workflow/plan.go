@@ -48,6 +48,10 @@ type PlanOptions struct {
 	// plan names a job's environment, and nothing in it is evaluated inside
 	// one.
 	Vars map[string]string
+	// NoCalls plans a job that calls a workflow as one job that cannot run,
+	// saying why, for a control plane older than 2.8 (A82): it would refuse
+	// a plan whose keys are job paths, and the whole plan with them.
+	NoCalls bool
 	// Changed lists the paths the event changed, computed in the mirror: a
 	// pull request's three-dot diff, a push's two-dot one. It is called at
 	// most once, and only for a workflow with a paths filter. Nil means
@@ -272,9 +276,7 @@ func (p *planner) workflow(file string) (protocol.PlannedWorkflow, bool, error) 
 	if err != nil {
 		return broken(err)
 	}
-	for _, key := range order {
-		pw.Jobs = append(pw.Jobs, p.jobs(w, key, sc, perms)...)
-	}
+	pw.Jobs = p.workflowJobs(w, order, sc, perms, &callSite{files: []string{file}})
 	return pw, true, nil
 }
 
@@ -338,7 +340,8 @@ func (p *planner) jobs(w *Workflow, key string, sc expr.Scope, perms map[string]
 	return out
 }
 
-// job plans one job, or one leg of a matrix job when st is set. What is wrong
+// job plans one job, or one leg of a matrix job when st is set; a job that
+// calls a workflow is [planner.call]'s. What is wrong
 // with it is collected rather than stopped at, for the reason
 // [Job.unsupported] gives.
 func (p *planner) job(
@@ -382,11 +385,6 @@ func (p *planner) job(
 		pj.Strategy = &protocol.Strategy{
 			JobIndex: leg, JobTotal: len(st.legs), FailFast: st.failFast, MaxParallel: st.maxParallel,
 		}
-	}
-	if j.Uses != "" {
-		problems = append(problems, fmt.Sprintf(
-			"uses: calls the reusable workflow %s, and reusable workflows are not planned yet (A52)", j.Uses))
-		return pj
 	}
 	pj.ReadsVars = placeVarReads(w, j)
 	if labels, err := compileLabels(j.RunsOn, w.Path, key, p.opts.LabelAliases, sc); err != nil {
@@ -486,7 +484,8 @@ func placeVarReads(w *Workflow, j *Job) []string {
 		visit(label)
 	}
 	for _, raw := range []json.RawMessage{
-		j.Environment, j.Strategy, j.Concurrency, j.ContinueOnError, w.Concurrency,
+		// A call's with: is its called jobs' inputs, which may place them (A82).
+		j.Environment, j.Strategy, j.Concurrency, j.ContinueOnError, j.With, w.Concurrency,
 	} {
 		var v any
 		if len(raw) > 0 && json.Unmarshal(raw, &v) == nil {
@@ -994,6 +993,11 @@ func planReads(prog *expr.Program, sc expr.Scope) error {
 		if _, ok := github[strings.ToLower(k)]; !ok {
 			return fmt.Errorf("${{ %s }}: github.%s is not known when a run is planned", src, k)
 		}
+	}
+	// A called workflow's input its caller gives from needs (A82).
+	if name, li, ok := readsLateInput(prog, sc); ok {
+		return fmt.Errorf("${{ %s }} reads inputs.%s, which its caller gives as %s, and that is only known "+
+			"once the job runs", src, name, strings.TrimSpace(li.from))
 	}
 	return nil
 }

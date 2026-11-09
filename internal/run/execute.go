@@ -367,6 +367,9 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		// most readers of this repository would look in, and a workflow's own
 		// `on:` triggers are not what caused this run.
 		x.note("job %q from %s", x.req.Job, src.Path)
+		if src.JobFile != "" {
+			x.note("%s calls it: job %q of %s (A82)", src.Path, src.Job, src.JobFile)
+		}
 		x.workflow = &src
 		for _, j := range reg.Jobs {
 			for _, n := range j.Notes {

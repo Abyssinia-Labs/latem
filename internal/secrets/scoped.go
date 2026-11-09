@@ -53,6 +53,22 @@ func ScopedName(name string, parts ...string) string {
 func ResolveScoped(
 	ctx context.Context, p Provider, reg logstream.Registrar, names []string, scopes [][]string,
 ) (set *Set, missing []string, err error) {
+	return ResolveAs(ctx, p, reg, names, func(name string) []string {
+		out := make([]string, 0, len(scopes))
+		for _, scope := range scopes {
+			out = append(out, ScopedName(name, scope...))
+		}
+		return out
+	})
+}
+
+// ResolveAs is [ResolveScoped] with each name's candidates given rather than
+// made from scopes: name is looked up as each of lookup(name), in order, and
+// kept under name. A called workflow's job reads a secret as whatever its
+// caller passed it as (A82), so its candidates are not its own name's.
+func ResolveAs(
+	ctx context.Context, p Provider, reg logstream.Registrar, names []string, lookup func(name string) []string,
+) (set *Set, missing []string, err error) {
 	set = &Set{values: make(map[string]Value), sources: make(map[string]string)}
 	if len(names) == 0 {
 		return set, nil, nil
@@ -80,8 +96,7 @@ func ResolveScoped(
 		}
 
 		found := false
-		for _, scope := range scopes {
-			candidate := ScopedName(name, scope...)
+		for _, candidate := range lookup(name) {
 			if validName(candidate) != nil {
 				// A scope whose parts cannot make a usable name (a repository
 				// key starting with a digit) is skipped, not fatal: the next,

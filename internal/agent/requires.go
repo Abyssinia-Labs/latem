@@ -29,6 +29,15 @@ func speaksRequires(t transport) bool {
 	return ok && s.SpeaksRequires()
 }
 
+// callsSpeaker is a transport that can say whether its control plane
+// schedules a called workflow's jobs, keyed by job path (A82, 2.8).
+type callsSpeaker interface{ SpeaksCalls() bool }
+
+func speaksCalls(t transport) bool {
+	s, ok := t.b.(callsSpeaker)
+	return ok && s.SpeaksCalls()
+}
+
 // maxRequires is how many requirements a job carries; the control plane
 // refuses a plan with more.
 const maxRequires = 32
@@ -61,14 +70,19 @@ func addRequires(ctx context.Context, mirror *source.Mirror, sha string, workflo
 		}
 		for j := range pw.Jobs {
 			pj := &pw.Jobs[j]
-			if pj.Error != "" || wf.Jobs[pj.Key] == nil {
+			if pj.Error != "" {
+				continue
+			}
+			// A called workflow's job is read from its own file (A82).
+			declaredIn, key, err := workflow.CalledJob(fsys, wf, pj.Key)
+			if err != nil {
 				continue
 			}
 			leg := needs.Leg{Labels: pj.Labels}
 			if len(pj.Matrix) > 0 {
 				_ = json.Unmarshal(pj.Matrix, &leg.Matrix)
 			}
-			pj.Requires = requirementsOf(needs.Job(fsys, wf, pj.Key, leg))
+			pj.Requires = requirementsOf(needs.Job(fsys, declaredIn, key, leg))
 		}
 	}
 }

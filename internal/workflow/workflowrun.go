@@ -26,7 +26,8 @@ import (
 //
 // The scope must carry the needs context the run arrived with. A job whose
 // if: is false comes back with [registry.Job.Skip] set and is not validated,
-// because none of it runs.
+// because none of it runs. jobKey may be a job path, a job of a workflow the
+// file calls (A82): [CompileJobPath].
 func ResolveWorkflowJob(
 	ctx context.Context, workspace, file, jobKey string, sc expr.Scope, opts Options,
 ) (*registry.Registry, Source, error) {
@@ -58,8 +59,7 @@ func ResolveWorkflowJob(
 	src := Source{Path: file, Workflow: name}
 
 	opts.Actions = rootLoader{root: root}
-	opts.WorkflowRun = true
-	job, err := CompileWith(ctx, w, jobKey, sc, opts)
+	job, declaredIn, key, err := CompileJobPath(ctx, root.FS(), w, jobKey, sc, opts)
 	if err != nil {
 		return nil, Source{}, err
 	}
@@ -67,7 +67,13 @@ func ResolveWorkflowJob(
 	if job.Skip {
 		return reg, src, nil
 	}
-	if err := reg.Validate(); err != nil {
+	if declaredIn != w {
+		src.JobFile, src.Job = declaredIn.Path, key
+	}
+	// A job path is no registry job's name, and the registry's name rule is
+	// jobs.yaml's; the job is checked under its own id in its own file, and
+	// admitted under the path the run names it by.
+	if err := RegistryFor(key, job).Validate(); err != nil {
 		return nil, Source{}, &registry.Error{
 			Code: protocol.ErrBadRegistry,
 			Msg:  fmt.Sprintf("%s: job %q compiled to a registry job that does not validate", file, jobKey),
