@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -242,6 +243,63 @@ type fakeEnv struct {
 	hostTemp bool
 	// puts is what PutTemp was handed, by name (A53).
 	puts map[string][]byte
+	// copies, when set, makes the environment a [executor.TempCopier] whose
+	// tempDir the agent reaches only by copying, as docker's is (A84).
+	copies bool
+}
+
+// copyingEnv is a fakeEnv whose runner.temp is reached by copying (A84):
+// tempDir stands for the container's, which the agent cannot open.
+type copyingEnv struct{ *fakeEnv }
+
+var _ executor.TempCopier = copyingEnv{}
+
+func (e copyingEnv) CopyFromTemp(_ context.Context, rel, dst string, limit int64) (int64, error) {
+	var total int64
+	src := filepath.Join(e.tempDir, filepath.FromSlash(rel))
+	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		r, _ := filepath.Rel(e.tempDir, p)
+		out := filepath.Join(dst, r)
+		if d.IsDir() {
+			return os.MkdirAll(out, 0o750)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if total += int64(len(b)); total > limit {
+			return fmt.Errorf("past %d bytes", limit)
+		}
+		if err := os.MkdirAll(filepath.Dir(out), 0o750); err != nil {
+			return err
+		}
+		return os.WriteFile(out, b, 0o600)
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	return total, err
+}
+
+func (e copyingEnv) CopyToTemp(_ context.Context, src string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		r, _ := filepath.Rel(src, p)
+		out := filepath.Join(e.tempDir, r)
+		if d.IsDir() {
+			return os.MkdirAll(out, 0o750)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(out, b, 0o600)
+	})
 }
 
 func (e *fakeEnv) Exec(ctx context.Context, step executor.Step, stdout, stderr io.Writer) (executor.Result, error) {
@@ -355,7 +413,11 @@ func (f *fakeExecutor) Prepare(_ context.Context, spec executor.Spec) (executor.
 	}
 	f.env.mu.Lock()
 	f.env.spec = spec
+	copies := f.env.copies
 	f.env.mu.Unlock()
+	if copies {
+		return copyingEnv{f.env}, nil
+	}
 	return f.env, nil
 }
 

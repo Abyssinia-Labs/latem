@@ -307,23 +307,32 @@ func staticValue(uses, field, v string, sc expr.Scope) (string, error) {
 	return s, nil
 }
 
-// downloadable refuses a download that can only find another job's artifact.
+// downloadable refuses a download that nothing could satisfy, and says which
+// other jobs' artifacts it may read.
 //
 // GitHub's artifacts belong to the workflow run, so one job downloads what
-// another uploaded. latem's belong to a run, which is one job on whichever
-// machine took it, and stay on that machine (A52 left artifacts across
-// machines out), so a download finds what an earlier step of the same job
-// uploaded and nothing else. Without this the job is admitted and fails at the
-// step — and `workflows check` says it can run.
+// another uploaded. latem's belong to a run, which is one job, and stay on the
+// machine that ran it (§17). A download finds what an earlier step of its own
+// job uploaded, and what a job it needs uploaded, which the control plane
+// places it beside (A84): spec.From names those jobs, from the plan of the
+// pinned commit. With neither, the job would be admitted and fail at the step
+// — and `workflows check` would say it can run.
 //
 // A name only known as either step runs could be anything, so it is let
 // through to be answered then.
 func (x *expander) downloadable(uses string, spec *registry.ArtifactStep) error {
-	const why = "latem runs each job as a run of its own, on whichever machine takes it, and a run's " +
-		"artifacts stay on that machine; artifacts across jobs are not implemented (A52, A77)"
+	if !x.fromAsked && x.artifactsFrom != nil {
+		x.from, x.fromAsked = x.artifactsFrom(), true
+	}
+	spec.From = slices.Clone(x.from)
+	if len(spec.From) > 0 {
+		return nil
+	}
+	const why = "a download finds what an earlier step of its job uploaded, or what a job it needs " +
+		"uploaded, on the machine that ran that job (A77, A84)"
 	if len(x.uploads) == 0 {
-		return fmt.Errorf("uses: %s — no step before this one in the job uploads an artifact, so it "+
-			"would download one that another job uploaded. %s", uses, why)
+		return fmt.Errorf("uses: %s — no step before this one in the job, and no job it needs, uploads "+
+			"an artifact; %s", uses, why)
 	}
 	if spec.Name == "" || (spec.Late != nil && spec.Late.Name != nil) {
 		return nil
@@ -333,8 +342,8 @@ func (x *expander) downloadable(uses string, spec *registry.ArtifactStep) error 
 			return nil
 		}
 	}
-	return fmt.Errorf("uses: %s — no step before this one in the job uploads an artifact named %q, so it "+
-		"would download one that another job uploaded. %s", uses, spec.Name, why)
+	return fmt.Errorf("uses: %s — no step before this one in the job, and no job it needs, uploads an "+
+		"artifact named %q; %s", uses, spec.Name, why)
 }
 
 // uploadName is the name an upload is known by at admission, or "" when it

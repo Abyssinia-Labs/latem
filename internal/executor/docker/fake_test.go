@@ -55,11 +55,14 @@ type fakeAPI struct {
 	blockExec      bool // exec output never arrives until the attach is closed
 	envFileData    []byte
 	envFileMissing bool
-	containers     []container.Summary
-	pingErr        error
-	waitStatus     int64
-	listedVolumes  []*volume.Volume
-	repoDigests    []string
+	// archives, when set, is what CopyFromContainer answers, by path; a path
+	// not in it is not found.
+	archives      map[string][]byte
+	containers    []container.Summary
+	pingErr       error
+	waitStatus    int64
+	listedVolumes []*volume.Volume
+	repoDigests   []string
 
 	execSeq  int
 	closed   bool
@@ -69,6 +72,8 @@ type fakeAPI struct {
 type copiedFile struct {
 	dst     string
 	entries map[string]string
+	// headers are the archive's own, for what a copy says of mode and owner.
+	headers map[string]tar.Header
 }
 
 func (f *fakeAPI) Info(context.Context) (system.Info, error) {
@@ -197,6 +202,15 @@ func (f *fakeAPI) ContainerExecInspect(context.Context, string) (container.ExecI
 func (f *fakeAPI) CopyFromContainer(
 	_ context.Context, _, srcPath string,
 ) (io.ReadCloser, container.PathStat, error) {
+	if f.archives != nil {
+		// A84: what the container's runner.temp holds, as the daemon would
+		// archive it.
+		data, ok := f.archives[srcPath]
+		if !ok {
+			return nil, container.PathStat{}, errdefs.NotFound(errors.New("no such file: " + srcPath))
+		}
+		return io.NopCloser(bytes.NewReader(data)), container.PathStat{}, nil
+	}
 	if f.envFileMissing {
 		return nil, container.PathStat{}, errdefs.NotFound(errors.New("no such file: " + srcPath))
 	}
@@ -211,7 +225,7 @@ func (f *fakeAPI) CopyFromContainer(
 func (f *fakeAPI) CopyToContainer(
 	_ context.Context, _, dstPath string, content io.Reader, _ container.CopyToContainerOptions,
 ) error {
-	entries := map[string]string{}
+	entries, headers := map[string]string{}, map[string]tar.Header{}
 	tr := tar.NewReader(content)
 	for {
 		hdr, err := tr.Next()
@@ -220,10 +234,11 @@ func (f *fakeAPI) CopyToContainer(
 		}
 		body, _ := io.ReadAll(tr)
 		entries[hdr.Name] = string(body)
+		headers[hdr.Name] = *hdr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.copiedTo = append(f.copiedTo, copiedFile{dst: dstPath, entries: entries})
+	f.copiedTo = append(f.copiedTo, copiedFile{dst: dstPath, entries: entries, headers: headers})
 	// A truncating copy is what a real daemon would do: the next read sees
 	// an empty file.
 	f.envFileData = nil

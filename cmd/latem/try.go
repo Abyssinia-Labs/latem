@@ -496,6 +496,12 @@ func precheckTry(
 	for _, f := range jr.findings {
 		printFinding(w, st, "", f)
 	}
+	if len(pj.ArtifactsFrom) > 0 && jr.level() != levelFail {
+		// A84: a try is one job, and its needs did not run.
+		printFinding(w, st, "", finding{level: levelWarn, text: fmt.Sprintf(
+			"it downloads what %s uploaded, and a try runs one job: the download finds only what "+
+				"this job uploads itself", strings.Join(pj.ArtifactsFrom, ", "))})
+	}
 	if jr.level() == levelFail {
 		msg := fmt.Sprintf("this machine cannot run %s as it is; nothing was queued", pj.Key)
 		if rep.hasFixes() {

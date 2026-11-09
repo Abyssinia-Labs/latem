@@ -177,6 +177,12 @@ type PlannedJob struct {
 	// and as what (A68, 2.4): everything of it but its steps. Names as the
 	// file writes them, or [AllVars]. Never a value.
 	ReadsVars []string `json:"reads_vars,omitempty"`
+	// ArtifactsFrom names the jobs of the run whose uploads this job's
+	// download-artifact reads (A84, 2.9): jobs it needs, directly or further
+	// up, as planned keys. A run's artifacts stay on the machine that ran it
+	// (§17), so the job goes to the machine that ran these, and to no other.
+	// Sent only to a control plane that says 2.9.
+	ArtifactsFrom []string `json:"artifacts_from,omitempty"`
 }
 
 // AllVars in [PlannedJob.ReadsVars] says the job reads vars in a way no list

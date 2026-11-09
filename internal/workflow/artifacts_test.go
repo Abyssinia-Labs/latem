@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -295,9 +296,11 @@ jobs:
 
 // take-one's and wake-cloud's Mac publish jobs, and antescript's indexnow:
 // each downloads what another job built. A run is one job, and its artifacts
-// stay on the machine it ran on, so this is refused when the job is admitted —
-// and `workflows check` says so — rather than failing at the step (A77).
-func TestDownloadOfAnotherJobsArtifactIsRefused(t *testing.T) {
+// stay on the machine it ran on. With nothing saying which job's runs to read
+// it is refused when the job is admitted — and `workflows check` says so —
+// rather than failing at the step (A77). With the jobs the plan of the commit
+// names, it compiles, and the step reads their runs (A84).
+func TestDownloadOfAnotherJobsArtifact(t *testing.T) {
 	wf := `
 on:
   workflow_dispatch:
@@ -324,11 +327,35 @@ jobs:
 `
 	sc := runScope(map[string]protocol.NeedResult{"build": {Result: "success", Outputs: map[string]string{"version": "1.0"}}}, nil)
 	_, err := compileRun(t, wf, "publish", sc)
-	if err == nil || !strings.Contains(err.Error(), "artifacts across jobs are not implemented") {
+	if err == nil || !strings.Contains(err.Error(), "no job it needs, uploads an artifact") {
 		t.Fatalf("want the cross-job download refused by name, got %v", err)
 	}
 	if _, err := compileRun(t, wf, "build", sc); err != nil {
 		t.Errorf("the uploading job is fine on its own: %v", err)
+	}
+	asked := 0
+	job, err := CompileWith(t.Context(), parse(t, wf), "publish", sc, Options{
+		WorkflowRun:   true,
+		ArtifactsFrom: func() []string { asked++; return []string{"build"} },
+	})
+	if err != nil {
+		t.Fatalf("with build named: %v", err)
+	}
+	if got := job.Steps[0].Artifact; got == nil || !slices.Equal(got.From, []string{"build"}) {
+		t.Errorf("the download reads %+v, want build's runs", got)
+	}
+	if asked != 1 {
+		t.Errorf("artifacts_from asked %d times", asked)
+	}
+	if err := RegistryFor("publish", job).Validate(); err != nil {
+		t.Errorf("validate: %v", err)
+	}
+	// The uploading job is not asked: nothing in it downloads.
+	if _, err := CompileWith(t.Context(), parse(t, wf), "build", sc, Options{
+		WorkflowRun:   true,
+		ArtifactsFrom: func() []string { t.Error("asked for a job with no download"); return nil },
+	}); err != nil {
+		t.Errorf("build: %v", err)
 	}
 
 	// A name nothing before it uploads, in a job that does upload something.
@@ -356,7 +383,7 @@ func TestArtifactShimRefusals(t *testing.T) {
 		"download from another run":    {"download-artifact@v4", "run-id: 42", "another run"},
 		"download with a token":        {"download-artifact@v4", "github-token: x", "another run"},
 		"download across a matrix":     {"download-artifact@v4", "pattern: build-*", "N2"},
-		"download from another job":    {"download-artifact@v4", "name: x", "artifacts across jobs are not implemented"},
+		"download from another job":    {"download-artifact@v4", "name: x", "no job it needs, uploads an artifact"},
 		"the merge sub-action":         {"upload-artifact/merge@v4", "name: x", "not implemented"},
 	}
 	for name, c := range cases {

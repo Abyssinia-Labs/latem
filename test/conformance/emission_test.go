@@ -39,9 +39,9 @@ func TestConformance_AgentEmissions(t *testing.T) {
 	dir := shortTemp(t)
 	db := openStore(t, dir)
 	rec := newRecorder(t, "tok-conformance")
-	// A61, A68, A70: a control plane that says 2.5 is sent a plan's requires,
-	// runs_on and reads_vars, and a heartbeat's toolchains, label_aliases and
-	// readiness.
+	// A61, A68, A70, A84: a control plane that says 2.9 is sent a plan's
+	// requires, runs_on, reads_vars and artifacts_from, and a heartbeat's
+	// toolchains, label_aliases and readiness.
 	rec.hello = []byte(`{"kind":"hello","hello":{"protocol_version":"` + protocol.Version + `"}}`)
 
 	ctx := context.Background()
@@ -237,6 +237,12 @@ func TestConformance_AgentEmissions(t *testing.T) {
 				// its caller's needs.
 				Key: "release/pack", Name: "release / pack", Needs: []string{"lint"}, Labels: []string{"linux"},
 				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+			}, {
+				// A84: a job whose download reads what release/pack uploaded,
+				// placed on the machine that ran it.
+				Key: "publish", Name: "publish", Needs: []string{"lint", "release/pack"}, Labels: []string{"linux"},
+				Permissions: map[string]string{"contents": "read"}, TimeoutMinutes: 360,
+				ArtifactsFrom: []string{"release/pack"},
 			}, {
 				Key: "remote", Name: "remote", Permissions: map[string]string{"contents": "read"},
 				TimeoutMinutes: 360, Error: "uses: calls octo/tools/.github/workflows/r.yml@v1, a workflow in " +

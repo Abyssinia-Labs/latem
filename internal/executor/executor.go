@@ -140,10 +140,30 @@ type Env interface {
 // the agent may read and write as it is, which is how an upload-artifact or
 // download-artifact step reaches runner.temp (A77). Native's is. Docker's is
 // in the run's volume, inside Docker's VM on a Mac and root's on Linux, and
-// reached only through the archive API, so docker does not implement it.
+// reached only through the archive API, so docker is a [TempCopier] instead.
 type HostTemp interface {
 	// HostTempDir is the host path of [Env.TempDir].
 	HostTempDir() string
+}
+
+// TempCopier is an [Env] whose temporary directory the agent reaches only by
+// copying, through the executor (A84). Docker's is one: its runner.temp is in
+// the run's volume, so an upload-artifact step copies out of it, and a
+// download-artifact step into it, through Docker's archive API, which
+// [Env.PutTemp] already writes through. An Env that is a [HostTemp] needs
+// neither.
+type TempCopier interface {
+	// CopyFromTemp copies rel, a file or a directory under [Env.TempDir], to
+	// the same relative path under the host directory dst, and reports the
+	// bytes it copied. Only regular files and directories are copied; a
+	// symlink, a device or a pipe is left out. Copying stops, and fails, once
+	// it would pass limit bytes. rel that does not exist copies nothing.
+	CopyFromTemp(ctx context.Context, rel, dst string, limit int64) (int64, error)
+	// CopyToTemp copies what is under the host directory src into
+	// [Env.TempDir], at the same relative paths, for the step's user to read
+	// and write. src's regular files and directories are copied, and
+	// nothing else.
+	CopyToTemp(ctx context.Context, src string) error
 }
 
 // ValidTempName reports why name cannot be a [Env.PutTemp] file: it must

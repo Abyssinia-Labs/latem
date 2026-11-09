@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -206,4 +207,32 @@ func (x *execution) jobOutputs() map[string]string {
 		out[name] = v
 	}
 	return out
+}
+
+// artifactsFrom is the jobs of the workflow run this job's download-artifact
+// may read (A84): its artifacts_from, as the plan of the commit in its own
+// workspace makes it, and never what the control plane sent (INV-5). A file
+// the plan cannot make sense of reads no other job's, and the compiler then
+// refuses the download by name. Asked only by a job with a download.
+func (x *execution) artifactsFrom() []string {
+	if x.ws == nil || x.req.Event == nil {
+		return nil
+	}
+	root, err := os.OpenRoot(x.ws.Path)
+	if err != nil {
+		x.note("download-artifact reads no other job's artifacts: %v", err)
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+	slug, _ := x.githubRepository()
+	opts := workflow.PlanOptions{Repository: slug, LabelAliases: x.o.labelAliases()}
+	if vars := x.repoVars(); vars != nil {
+		opts.Vars = vars("")
+	}
+	from, err := workflow.ArtifactsFrom(root.FS(), x.req.Workflow, x.req.Job, *x.req.Event, opts)
+	if err != nil {
+		x.note("download-artifact reads no other job's artifacts: planning %s: %v", x.req.Workflow, err)
+		return nil
+	}
+	return from
 }

@@ -662,3 +662,65 @@ func TestIntegration_ContainerStepSharesTheRunFiles(t *testing.T) {
 		t.Errorf("$GITHUB_ENV written by a container step did not carry: %s", log.String())
 	}
 }
+
+// A84: an upload reads runner.temp out of a real container, and a download
+// writes into it, through the archive API: a file and a directory come out at
+// their paths under runner.temp, a symlink a step left there does not, and
+// what goes in can be read, and removed, by the step's user.
+func TestIntegration_RunnerTempCopiesOutAndIn(t *testing.T) {
+	e := newIntegrationExecutor(t, nil)
+	env, _ := prepareRun(t, e, "int-tempcopy", nil)
+	tc, ok := env.(executor.TempCopier)
+	if !ok {
+		t.Fatal("docker's environment is no TempCopier")
+	}
+	if code, out := run(t, env, "pack", `set -e
+mkdir -p "$RUNNER_TEMP/pack/sub"
+printf tgz > "$RUNNER_TEMP/pack/sokie-1.0.0.tgz"
+printf notes > "$RUNNER_TEMP/pack/sub/notes.txt"
+ln -s /etc/passwd "$RUNNER_TEMP/pack/passwd"`); code != 0 {
+		t.Fatalf("pack: exit %d\n%s", code, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dst := t.TempDir()
+	n, err := tc.CopyFromTemp(ctx, "pack/sokie-1.0.0.tgz", dst, 1<<20)
+	if err != nil || n != 3 {
+		t.Fatalf("one file: %d, %v", n, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "pack", "sokie-1.0.0.tgz")); string(b) != "tgz" {
+		t.Errorf("the tarball reads %q", b)
+	}
+	dst = t.TempDir()
+	if _, err := tc.CopyFromTemp(ctx, "pack", dst, 1<<20); err != nil {
+		t.Fatalf("a directory: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "pack", "sub", "notes.txt")); string(b) != "notes" {
+		t.Errorf("notes.txt reads %q", b)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "pack", "passwd")); err == nil {
+		t.Error("a symlink came out of the container")
+	}
+	if n, err := tc.CopyFromTemp(ctx, "nothing-here", t.TempDir(), 1<<20); err != nil || n != 0 {
+		t.Errorf("a path not there: %d, %v", n, err)
+	}
+
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "dmg"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "dmg", "Wake-1.dmg"), []byte("dmg"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tc.CopyToTemp(ctx, src); err != nil {
+		t.Fatalf("CopyToTemp: %v", err)
+	}
+	code, out := run(t, env, "publish", `set -e
+test "$(cat "$RUNNER_TEMP/dmg/Wake-1.dmg")" = dmg
+rm -rf "$RUNNER_TEMP/dmg"
+echo removed`)
+	if code != 0 || !strings.Contains(out, "removed") {
+		t.Errorf("the step's user could not read and remove what came in: exit %d\n%s", code, out)
+	}
+}

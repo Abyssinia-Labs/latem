@@ -11,6 +11,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
+	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 func testScope() expr.Scope {
@@ -464,7 +465,18 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 			// Allowed by policy, so what is left to refuse them is the
 			// implementation — which is the fact A42 measured these files for.
 			opts := Options{Policy: actions.Policy{Allowed: []string{"*/*"}}}
+			// release.yml's smoke, sign and publish download what build and
+			// sign uploaded, which the plan of the file names (A84).
+			repo, file := os.DirFS(filepath.Join("..", "..")), Dir+"/"+filepath.Base(p)
+			push := protocol.Event{Name: EventPush, Ref: "refs/tags/v1.0.0", SHA: planSHA}
 			for _, name := range w.JobNames() {
+				opts.ArtifactsFrom = func() []string {
+					from, err := ArtifactsFrom(repo, file, name, push, PlanOptions{Repository: "Abyssinia-Labs/latem"})
+					if err != nil {
+						t.Errorf("job %q: artifacts_from: %v", name, err)
+					}
+					return from
+				}
 				// A matrix job is compiled a leg at a time, as a run builds
 				// it (A55); every leg is tried.
 				legs := []json.RawMessage{nil}
@@ -479,16 +491,15 @@ func TestAgainstThisRepositorysOwnWorkflows(t *testing.T) {
 					if err == nil {
 						continue // a job with no uses: is allowed to compile
 					}
-					// Three honest refusals remain with no cache wired: an
-					// action that would have to be fetched; this repository's
-					// own release.yml asking checkout for a different ref —
-					// which is `latem run --ref` here, and the shim says so; and
-					// its jobs that download what an earlier job built (A77).
+					// Two honest refusals remain with no cache wired: an
+					// action that would have to be fetched, and this
+					// repository's own release.yml asking checkout for a
+					// different ref — which is `latem run --ref` here, and the
+					// shim says so.
 					msg := err.Error()
 					if !strings.Contains(msg, "no action cache") &&
 						!strings.Contains(msg, "latem has already checked this repository out") &&
-						!strings.Contains(msg, "latem does not implement yet") &&
-						!strings.Contains(msg, "artifacts across jobs are not implemented") {
+						!strings.Contains(msg, "latem does not implement yet") {
 						t.Errorf("job %q (leg %s) refused for an unexpected reason: %v", name, leg, err)
 					}
 				}

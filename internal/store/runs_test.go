@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -477,5 +478,67 @@ func TestCreate_LocalRunIsMarkedOnlyByItsRow(t *testing.T) {
 	var cmd protocol.Command
 	if err := json.Unmarshal([]byte(frame), &cmd); err == nil {
 		t.Fatal("a run command carrying local decoded")
+	}
+}
+
+// A download-artifact finds the run that uploaded what it reads by the
+// workflow run they share (A84): the named jobs of that workflow run, in that
+// repository, newest first, and nothing of another workflow run or another
+// repository however alike — through an index, never a scan of every run.
+func TestWorkflowRunJobs(t *testing.T) {
+	d := newTestDB(t)
+	at := time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	add := func(id, repo, job, workflowRun string, minute int) {
+		r := testRun(id, protocol.StateSucceeded)
+		r.Repo, r.Job, r.SHA, r.CreatedAt = repo, job, sha, at.Add(time.Duration(minute)*time.Minute)
+		r.Workflow = &WorkflowRun{Workflow: ".github/workflows/mac-release.yml", SHA: sha, WorkflowRunID: workflowRun,
+			Event: protocol.Event{Name: "workflow_dispatch", Ref: "refs/heads/main", SHA: sha}}
+		mustCreate(t, d, r)
+	}
+	add("r-build", "take-one", "build", "wr-1", 0)
+	add("r-build-again", "take-one", "build", "wr-1", 5) // a second attempt, after a lost machine
+	add("r-notes", "take-one", "notes", "wr-1", 1)
+	add("r-other-run", "take-one", "build", "wr-2", 2)
+	add("r-other-repo", "wake-cloud", "build", "wr-1", 3)
+	mustCreate(t, d, testRun("r-native", protocol.StateSucceeded)) // a jobs.yaml run has no workflow run
+
+	got, err := d.WorkflowRunJobs(t.Context(), "take-one", "wr-1", []string{"build", "nope"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.ID)
+	}
+	if !slices.Equal(ids, []string{"r-build-again", "r-build"}) {
+		t.Errorf("got %v, want build's two runs of wr-1, newest first", ids)
+	}
+	if got, _ := d.WorkflowRunJobs(t.Context(), "take-one", "wr-1", []string{"build", "notes"}, 1); len(got) != 1 {
+		t.Errorf("limit 1 returned %d", len(got))
+	}
+	if got, err := d.WorkflowRunJobs(t.Context(), "take-one", "wr-1", nil, 0); err != nil || got != nil {
+		t.Errorf("no jobs: %v, %v", got, err)
+	}
+
+	var detail strings.Builder
+	rows, err := d.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN SELECT id FROM runs
+	 WHERE repo = ? AND workflow_json IS NOT NULL
+	   AND json_extract(workflow_json, '$.workflow_run_id') = ?
+	   AND job IN (?) ORDER BY created_at DESC, id DESC LIMIT ?`, "take-one", "wr-1", "build", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, parent, notused int
+		var s string
+		if err := rows.Scan(&id, &parent, &notused, &s); err != nil {
+			t.Fatal(err)
+		}
+		detail.WriteString(s + "\n")
+	}
+	if !strings.Contains(detail.String(), "runs_workflow_run_idx") {
+		t.Errorf("the lookup does not use runs_workflow_run_idx:\n%s", detail.String())
 	}
 }

@@ -350,6 +350,9 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
 		Matrix: x.req.Matrix, IgnoreJobIf: x.run.IsLocal(),
 	}
+	if x.isWorkflowRun() {
+		opts.ArtifactsFrom = x.artifactsFrom
+	}
 	var (
 		reg *registry.Registry
 		src workflow.Source

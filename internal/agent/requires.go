@@ -38,6 +38,15 @@ func speaksCalls(t transport) bool {
 	return ok && s.SpeaksCalls()
 }
 
+// artifactsSpeaker is a transport that can say whether its control plane
+// places a job with the artifacts it downloads (A84, 2.9).
+type artifactsSpeaker interface{ SpeaksArtifacts() bool }
+
+func speaksArtifacts(t transport) bool {
+	s, ok := t.b.(artifactsSpeaker)
+	return ok && s.SpeaksArtifacts()
+}
+
 // maxRequires is how many requirements a job carries; the control plane
 // refuses a plan with more.
 const maxRequires = 32

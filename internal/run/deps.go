@@ -70,6 +70,9 @@ type Collector interface {
 	// base is the workspace or the run's temporary directory (A77).
 	CollectNamed(ctx context.Context, runID, base string, up artifact.Upload) ([]protocol.ArtifactRef, error)
 	Restore(runID, base, name, dest string) (int, error)
+	// Names lists a run's stored artifacts, for a download of every one of
+	// them across several runs (A84).
+	Names(runID string) ([]string, error)
 }
 
 // SourceManager adapts a *source.Manager to [Source].
