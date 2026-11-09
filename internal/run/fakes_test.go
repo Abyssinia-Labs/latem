@@ -745,9 +745,12 @@ type harness struct {
 	broker *fakeBroker
 	source *fakeSource
 	secret *fakeSecrets
-	caches *fakeCache
-	exec   *fakeExecutor
-	env    *fakeEnv
+	// provider replaces secret as the run's provider when set, for a test
+	// that needs a chain rather than one flat store.
+	provider secrets.Provider
+	caches   *fakeCache
+	exec     *fakeExecutor
+	env      *fakeEnv
 
 	runners []Runner
 	opts    Options
@@ -825,6 +828,9 @@ func (h *harness) build() *Orchestrator {
 	}
 	o.Source = h.source
 	o.Secrets = h.secret
+	if h.provider != nil {
+		o.Secrets = h.provider
+	}
 	o.Caches = h.caches
 	o.Artifacts = artifact.NewCollector(h.dir)
 	o.Runners = h.runners

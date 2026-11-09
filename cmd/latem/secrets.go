@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
@@ -122,12 +123,56 @@ func storedName(name string, scope secretScope) (string, error) {
 type secretStores struct {
 	keychain secrets.Store
 	file     secrets.Store
+	// openvault lists what OpenVault holds, and is read only when config.toml
+	// says `[secrets] openvault = true`. latem never writes to it: a value
+	// goes in with `openvault set`, on whichever machine may write the
+	// collection, and syncs from there (A86).
+	openvault openVaultLister
+}
+
+// openVaultLister is [secrets.OpenVaultProvider.Names].
+type openVaultLister interface {
+	Names(ctx context.Context, repos []string) (names, absent []string, err error)
+}
+
+// onceOpenVault answers each listing once. A readiness beat reads the
+// inventory once per repository (analyzeWorkflows), and each reading lists
+// every repository's collection, so without it a beat would ask OpenVault for
+// repositories squared. A secretStores lives for one command or one beat, and
+// so does what this remembers.
+type onceOpenVault struct {
+	inner openVaultLister
+	mu    sync.Mutex
+	seen  map[string]onceAnswer
+}
+
+type onceAnswer struct {
+	names, absent []string
+	err           error
+}
+
+func (o *onceOpenVault) Names(ctx context.Context, repos []string) ([]string, []string, error) {
+	key := strings.Join(slices.Sorted(slices.Values(repos)), "\x00")
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if a, ok := o.seen[key]; ok {
+		return a.names, a.absent, a.err
+	}
+	names, absent, err := o.inner.Names(ctx, repos)
+	if o.seen == nil {
+		o.seen = map[string]onceAnswer{}
+	}
+	o.seen[key] = onceAnswer{names, absent, err}
+	return names, absent, err
 }
 
 // newSecretStores is a seam: a test must never write to, list, or delete from
-// the Keychain of the machine running it.
+// the Keychain of the machine running it, nor ask its OpenVault anything.
 var newSecretStores = func(paths config.Paths) (secretStores, error) {
 	st := secretStores{file: secrets.NewFileStore(paths.SecretsEnv)}
+	if socket, err := secrets.OpenVaultSocket(os.Environ()); err == nil {
+		st.openvault = &onceOpenVault{inner: secrets.NewOpenVaultProvider(socket, 0)}
+	}
 	if runtime.GOOS == "darwin" {
 		kc, err := secrets.NewKeychainStore("", secrets.ExecRunner{})
 		if err != nil {
@@ -237,12 +282,39 @@ Setting a name that already has a value replaces it.`,
 						"  latem secrets rm --store file %s\n", paths.SecretsEnv, stored, scopeArgs(sc, name))
 				}
 			}
+			// And OpenVault, when it is read, before both (A86).
+			if where := openVaultShadow(cmd.Context(), stores, sc, name); where != "" {
+				printf(out, "\nwarning: OpenVault holds %s, and is read first — this value is used only once it is "+
+					"gone from there:\n  openvault delete %s\n", where, where)
+			}
 			return nil
 		},
 	}
 	scope.register(cmd)
 	cmd.Flags().StringVar(&store, "store", "auto", "where to keep it: keychain (macOS default) or file (secrets.env)")
 	return cmd
+}
+
+// openVaultShadow is the OpenVault entry that answers for name in sc before
+// any store `secrets set` writes, or "". It is a listing, names only, and
+// says nothing when OpenVault is not read here or cannot be asked.
+func openVaultShadow(ctx context.Context, stores secretStores, sc secretScope, name string) string {
+	if stores.openvault == nil || sc.repo == "" {
+		return ""
+	}
+	cfg, err := loadConfig()
+	if err != nil || !cfg.Secrets.OpenVault {
+		return ""
+	}
+	collection, entry, err := secrets.OpenVaultEntry(sc.parts(), name)
+	if err != nil {
+		return ""
+	}
+	names, _, err := stores.openvault.Names(ctx, []string{sc.repo})
+	if err != nil || !slices.Contains(names, secrets.ScopedName(name, sc.parts()...)) {
+		return ""
+	}
+	return collection + "/" + entry
 }
 
 // storeWord names a store in a sentence.
@@ -448,7 +520,9 @@ func newSecretsListCommand() *cobra.Command {
 
 Names only, never values: nothing is decrypted to list them. The Keychain's
 items are read from their attributes, secrets.env's from the names its lines
-declare, and [secrets.commands] from config.toml. LATEM_SECRET_* variables in
+declare, and [secrets.commands] from config.toml. With [secrets] openvault =
+true, OpenVault's are listed too, from each repository's collection, and a
+repository this machine has no collection for is named. LATEM_SECRET_* variables in
 the agent's own environment answer too and are not listed: that environment
 is the service manager's, not this shell's.`,
 		Args: noArgs,
@@ -480,6 +554,7 @@ is the service manager's, not this shell's.`,
 				}
 				rows = append(rows, []string{e.scopeLabel(), e.name, where})
 			}
+			inv.printOpenVault(cmd.ErrOrStderr(), sc)
 			if len(rows) == 0 {
 				printf(cmd.ErrOrStderr(), "no secrets stored for %s — `latem secrets set` stores one\n", sc)
 				return nil
@@ -555,12 +630,29 @@ Removes it from every store that holds it under this scope, or from the one
 type inventory struct {
 	// byName maps a stored (scoped) name to its stores, in chain order.
 	byName map[string][]string
+	// noCollection are the configured repositories OpenVault holds no
+	// collection for on this machine, when it is read.
+	noCollection []string
+	// openvaultErr is why OpenVault could not be listed: most often, its
+	// service is not running. Its names are then absent, and so is every
+	// run's answer from it, so a list without them is the truth about what a
+	// job would read now.
+	openvaultErr error
 }
 
 // secretInventory lists stored names from every store and from
 // [secrets.commands].
 func secretInventory(ctx context.Context, cfg *config.Config, stores secretStores) (inventory, error) {
 	inv := inventory{byName: map[string][]string{}}
+	if cfg.Secrets.OpenVault && stores.openvault != nil {
+		// First, as the chain reads it (A86). Only the configured
+		// repositories' collections: the vault's others are not latem's.
+		names, absent, err := stores.openvault.Names(ctx, slices.Sorted(maps.Keys(cfg.Repos)))
+		inv.noCollection, inv.openvaultErr = absent, err
+		for _, n := range names {
+			inv.byName[n] = append(inv.byName[n], "openvault")
+		}
+	}
 	for _, s := range stores.all() {
 		if s == nil {
 			continue // none configured: doctor reads needs, not secrets
@@ -577,6 +669,22 @@ func secretInventory(ctx context.Context, cfg *config.Config, stores secretStore
 		inv.byName[n] = append(inv.byName[n], "command")
 	}
 	return inv, nil
+}
+
+// printOpenVault says what OpenVault could not list for sc, by name: a
+// service that is not running, or a repository this machine has no
+// collection for.
+func (inv inventory) printOpenVault(w io.Writer, sc secretScope) {
+	if inv.openvaultErr != nil {
+		printf(w, "%v — OpenVault's names are not listed\n", inv.openvaultErr)
+		return
+	}
+	for _, repo := range inv.noCollection {
+		if sc.repo == "" || sc.repo == repo {
+			printf(w, "openvault: this machine has no collection %s, so none of %s's secrets come from OpenVault here\n",
+				repo, repo)
+		}
+	}
 }
 
 // inEnvironment reports whether name is stored for repo's environment env

@@ -1,10 +1,13 @@
 package run
 
 import (
+	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -218,6 +221,66 @@ jobs:
 	}
 	if strings.Contains(log, "production deploy key") {
 		t.Error("a secret value reached the log")
+	}
+}
+
+// partsStore is a store keyed by a scope's parts, as OpenVault is (A86).
+type partsStore struct {
+	values map[string]string // parts and name joined by "/"
+	asked  []string
+}
+
+func (s *partsStore) Name() string { return "parts" }
+
+func (s *partsStore) Resolve(ctx context.Context, name string) (secrets.Value, error) {
+	return s.ResolveIn(ctx, nil, name)
+}
+
+func (s *partsStore) ResolveIn(_ context.Context, scope []string, name string) (secrets.Value, error) {
+	key := strings.Join(append(slices.Clone(scope), name), "/")
+	s.asked = append(s.asked, key)
+	if v, ok := s.values[key]; ok {
+		return secrets.Value(v), nil
+	}
+	return nil, secrets.ErrNotFound
+}
+
+// A86: a workflow job's lookup reaches a store keyed by scope with the
+// repository and the environment as they are, not flattened into one name,
+// and a flat store behind it still gets the flat name.
+func TestExecute_WorkflowSecretsReachAScopedStoreAsTheirParts(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	vault := &partsStore{values: map[string]string{"app/production/DEPLOY_KEY": "deploy key from the vault"}}
+	h.secret.values = map[string]string{"app__NPM_TOKEN": "npm token from the file"}
+	h.provider = secrets.NewChain(vault, h.secret)
+	o := h.build()
+
+	req := h.request("deploy")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/deploy.yml", `
+on: [workflow_dispatch]
+jobs:
+  deploy:
+    runs-on: [linux]
+    environment: production
+    steps:
+      - run: ./deploy.sh
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+`)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil || res.State != protocol.StateSucceeded {
+		t.Fatalf("Execute = %s/%s (%s), %v; want succeeded", res.State, res.ErrorCode, res.ErrorMsg, err)
+	}
+	env := h.env.executed()[0].Env
+	if env["DEPLOY_KEY"] != "deploy key from the vault" || env["NPM_TOKEN"] != "npm token from the file" {
+		t.Errorf("DEPLOY_KEY = %q, NPM_TOKEN = %q", env["DEPLOY_KEY"], env["NPM_TOKEN"])
+	}
+	want := []string{"app/production/DEPLOY_KEY", "app/production/NPM_TOKEN", "app/NPM_TOKEN"}
+	if !slices.Equal(vault.asked, want) {
+		t.Errorf("the scoped store was asked %q, want %q", vault.asked, want)
 	}
 }
 

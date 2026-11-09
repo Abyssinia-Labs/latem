@@ -50,9 +50,10 @@ wins:
 | | Source | Set by |
 |---|---|---|
 | 1 | Environment | `LATEM_SECRET_<NAME>` in the agent's environment — the override, useful for `LATEM_SECRET_X=… latem run` to answer "is it the secret or is it the build?" |
-| 2 | File | `latem secrets set --store file`, or a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
-| 3 | Keychain | `latem secrets set` on a Mac |
-| 4 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
+| 2 | OpenVault | `openvault set <repo>/<env>/<NAME>`, on any machine that may write the collection; read only with `[secrets] openvault = true`; see [From OpenVault](#from-openvault) |
+| 3 | File | `latem secrets set --store file`, or a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
+| 4 | Keychain | `latem secrets set` on a Mac |
+| 5 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
 
 **By hand, `secrets.env` holds a multi-line value only in double quotes with
 `\n` escapes** — `KEY="-----BEGIN…\n…\n-----END…\n"` — and a quoted block
@@ -88,7 +89,7 @@ to another host leaves no trace in the log.
 So a pull request's job that asks for a secret waits in `awaiting_approval`
 before any store is asked for anything. So does one that would run on a native
 runner, whether it asks or not, because a native step runs as this machine's
-user, with `secrets.env` and the Keychain in reach:
+user, with `secrets.env`, the Keychain and OpenVault's socket in reach:
 
 ```console
 $ latem list --state awaiting_approval     # the runs waiting, and their refs
@@ -106,3 +107,53 @@ The rule follows the ref the machine builds, `refs/pull/…`, and not what the
 event says about the pull request. A fork and a branch of the repository are
 treated alike: the payload that tells them apart is relayed by the control
 plane, and nothing on the machine can check it.
+
+## From OpenVault
+
+[OpenVault](https://github.com/Abyssinia-Labs/openvault) keeps one encrypted
+copy of the values and syncs it between your machines, so a value is set once
+rather than on each machine that builds the repository. A machine reads it
+when its `config.toml` says so (A86):
+
+```toml
+[secrets]
+openvault = true
+```
+
+Each repository is a collection named exactly as its `[repos.<key>]` key,
+hyphens included, and an entry is named by environment:
+
+| A job of repo `R` looks for | In OpenVault |
+|---|---|
+| `R__E__NAME` (environment `E`) | collection `R`, entry `E/NAME` |
+| `R__NAME` | collection `R`, entry `NAME`, at the top of the collection |
+| `NAME`, machine-wide | nothing: a machine-wide name is in no collection, and comes from the stores below |
+
+```console
+$ openvault collections create latem-cloud                      # once, on an admin device
+$ openvault set latem-cloud/production/CONVEX_DEPLOY_KEY --secret < key.txt
+$ openvault scope <device> latem-cloud read                     # each machine that builds it
+```
+
+OpenVault comes straight after the environment, before secrets.env and the
+Keychain: the vault is the copy every machine shares, and a machine's own copy
+is the one that goes stale. So a value both hold is the vault's, `latem
+secrets list` shows `openvault` first, and `latem secrets set` warns when the
+value it stores will not be read.
+
+The value is read when the job starts, over the OpenVault service's socket
+(`~/.openvault/service.sock`, or `$OPENVAULT_HOME/service.sock`), and never
+sits in the agent's environment. latem never runs the `openvault` command,
+which can stop to ask for a passphrase. **If the service is not running, a
+job that needs a value from it fails with `E_SECRET_BACKEND` and can be
+retried**, as for a locked Keychain. It does not read as unset: a deploy
+should not run without its token. On a machine whose key opens with a
+passphrase, start `openvault service` after each reboot. A job that reads only
+machine-wide names never asks OpenVault.
+
+`latem doctor` says whether the service answers and which repositories this
+machine has no collection for — "no collection wake" — by name. For those
+repositories, OpenVault simply holds nothing, and the stores after it answer.
+
+A pull request's job asks OpenVault nothing until its commit is approved, as
+for every other store; see [Pull requests](#pull-requests).

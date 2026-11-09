@@ -1101,10 +1101,11 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 Resolution chain, first hit wins. Only names declared in the job's `secrets:` block are looked up.
 
 1. `LATEM_SECRET_<NAME>` in the agent's own environment
-2. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
-3. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
-4. `pass` / `gopass`, if configured
-5. A shell command per secret, defined in config
+2. OpenVault, with `[secrets] openvault = true` — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86)
+3. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
+4. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
+5. `pass` / `gopass`, if configured
+6. A shell command per secret, defined in config
 
 ```toml
 [secrets.commands]
@@ -4021,3 +4022,92 @@ under a `refs/pull/` ref is held like any other. GitHub plans it from the base b
 secrets, and which ref latem-cloud sends for it was not checked. Caches a pull request's job writes
 and a branch's job later reads. Approval from
 anywhere but the machine.
+
+### Amendment from a vault on every machine
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A86 | §15, A50, A54, A73 | **OpenVault is a link in §15's chain, after the environment and before secrets.env, when `[secrets] openvault = true`. A workflow job's secret of repo `R` is read from collection `R`: entry `E/NAME` for its environment `E`, then entry `NAME`. A machine-wide name is in no collection. The value is read when the job starts, from the OpenVault service's local socket. A service that does not answer is `E_SECRET_BACKEND`. `latem secrets list`, `workflows check` and the heartbeat's missing secrets count OpenVault's names, and doctor names each repository this machine has no collection for** | The Android build was to move to the desktop, and the desktop had none of its secrets. They had to be typed again on each machine, or copied with `latem secrets copy`. OpenVault now syncs them between the user's machines on the LAN, and latem could take them only by starting the agent under `openvault run --prefix LATEM_SECRET_`. That read every value once, when the agent started, so a value changed afterwards reached no job until a restart. And it kept every value of every repository in the agent's environment, where a native job's step running as the same user can read `/proc/<pid>/environ` on Linux |
+
+**The mapping.** OpenVault keeps one collection per repository, and names an entry by environment.
+§15's lookup (A50) already reads a workflow job's name under its repository and its environment,
+most specific first, so each of its three names has a place:
+
+| Lookup | OpenVault |
+|---|---|
+| `R__E__NAME` | collection `R`, entry `E/NAME` |
+| `R__NAME` | collection `R`, entry `NAME` |
+| `NAME` | none |
+
+The collection is the `[repos.<key>]` key as written. `ScopedName` flattens `latem-cloud` to
+`latem_cloud`, and that would name no collection. So a lookup now carries its scope as parts
+(`secrets.Lookup`), and the chain gives OpenVault the parts and every other store the flat name. A
+key OpenVault cannot hold as a collection name is a miss, and so is an environment that cannot be
+a folder (empty, `.`, `..`, or with a `/`). A machine-wide name has no repository, so it has no
+collection, and OpenVault is not asked for it. A jobs.yaml job reads only machine-wide names (§15),
+so it never reads OpenVault. Giving it a repository scope would change what every jobs.yaml job
+looks up, and is not part of this amendment.
+
+**Its place in the chain.** The environment stays first, as the override. OpenVault comes next,
+before secrets.env and the Keychain. The vault is the one copy the machines share. A value in a
+machine's own store is a copy someone made, and copies are what go stale. After them, a token
+rotated in the vault would lose to the old one left in secrets.env, and nothing would say so. The
+cost is that a value both hold is the vault's. `latem secrets list` shows `openvault` answering,
+and `latem secrets set` warns when it stores a value OpenVault would answer before. Only names
+are compared.
+
+**How it reads.** It speaks the service's local API (OpenVault `service.md`). It sends one request
+per connection, `get` with the collection and the entry name, and gets one answer. It never runs
+the `openvault` command. Without the service, the command opens the vault itself, and on a machine
+whose key opens with a passphrase it asks for one on `/dev/tty`: a job would wait for someone who is
+not there. The answer says whether the entry exists, so a missing entry is a miss without parsing
+stderr. Nothing needs `openvault` on the service manager's PATH (A33), and no process starts per
+lookup. A socket that is not a socket, or that another user owns, is refused. The service checks
+its peer's user. This is the other direction, for an `OPENVAULT_HOME` somewhere shared. The value is
+copied out of the response and the response is zeroed, as every value is (§15).
+
+**When it does not answer.** A service that is not running is `E_SECRET_BACKEND`, retryable. It is
+not a miss. The operator said this machine's secrets are in OpenVault. A miss would give a workflow
+job an empty secret, which reads as unset (A50), so a deploy would run without its token. This is
+A16's rule for a locked Keychain. The service also answers `get` with an error when the machine
+holds no such collection: it was never created, or this machine was never scoped to it. latem then
+asks for the machine's collections. If the collection is not among them, that is a miss, and the
+stores after OpenVault answer. Any other refusal is `E_SECRET_BACKEND`. The service's own message
+stays local, in doctor, the way a program's stderr does (`CommandError`). It is another program's
+text, and an error string can reach a broker. A service that accepts and never answers times out
+after the chain's command timeout, 30 seconds.
+
+**Off unless asked.** A machine reads OpenVault because its config says `[secrets] openvault =
+true`, never because a vault happens to be there. A vault whose service is not running would
+otherwise fail every job on that machine that reads a secret its other stores lack. That includes
+optional secrets, which until then read as unset. Like every `[secrets]` change, it takes effect
+when the agent restarts.
+
+**Pull requests.** A pull request's job is held before any store is asked anything (A85), so
+OpenVault is asked nothing for it until its commit is approved. The socket answers any process of
+its user, and a step on a native runner is one. A85 holds a pull request's job on a native runner
+whether it declares a secret or not, and that is what keeps such a step away from the socket.
+
+**What reports it.** Names only, never values (INV-2, INV-4). OpenVault lists a collection from its
+index without decrypting it. `latem secrets list` shows OpenVault's names in each configured
+repository's collection, and names each repository with no collection here. The vault's other
+collections are not listed. `workflows check`, `latem setup` and the heartbeat's missing secrets
+(A73) read the same inventory. A name OpenVault holds is not "not set", so the control plane never
+shows a machine missing a secret that OpenVault holds for it. `latem doctor` has an OpenVault
+section: whether the service answers, the collections it holds for configured repositories, and a
+warning naming each repository it holds none for, with `openvault scope` as the fix. A stopped
+service fails that check. The heartbeat does not name collections yet. "Machine X lacks collection
+Y" in the app is protocol work, and comes after this.
+
+**What it costs.** Per job, one socket round trip for each repository-scoped name a store before
+OpenVault does not hold: at most two per declared secret, and one more for each the service
+refuses. A
+round trip is a local SQLite read in the service. No network, no egress, no polling. A listing
+(`secrets list`, doctor, and each readiness beat) is one `collections` request, plus one `list` for
+each configured repository the machine holds. A listing reads only the index, so its cost grows
+with the number of entries and not with their size.
+
+**Not in this amendment.** Files: a signing keystore or `google-services.json` from OpenVault, at a
+temporary path for the job. OpenVault calls that M4. Variables (`vars.*`) from OpenVault, which
+would end A68's per-machine mismatches. A machine-wide collection. Writing to OpenVault from
+`latem secrets set`.

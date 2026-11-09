@@ -165,7 +165,7 @@ latem version
 | [Install and set up](docs/install.md) | install.sh and Homebrew, `latem setup` step by step, checking a release by hand, updates, and a machine's git credential |
 | [Jobs](docs/jobs.md) | GitHub workflows (`workflows check`, `latem try`, the steps latem performs itself) and `.latem/jobs.yaml` |
 | [Configuration](docs/configuration.md) | `config.toml`, adding repositories, reloading the agent, metrics |
-| [Secrets](docs/secrets.md) | where values live, scopes, copying them between machines, the lookup order |
+| [Secrets](docs/secrets.md) | where values live, scopes, copying them between machines, reading them from OpenVault, the lookup order |
 | [`latem doctor`](docs/doctor.md) | what it checks, and running a Mac headless |
 | [Commands](docs/commands.md) | `latem list`, run states, exit codes, `latem run`'s output |
 | [Why latem](docs/why.md) | why it exists, the executors, caches, the five invariants, and what is built |

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -135,6 +136,15 @@ type doctor struct {
 	// canConnect is whether a running process may connect to a Unix socket
 	// (A66); nil asks the real one through /proc.
 	canConnect func(pid int, socket string) (bool, error)
+	// openVault is the OpenVault service a run would read (A86); nil asks
+	// the one at this user's socket. A test never reaches the real one.
+	openVault func() (openVaultCollections, error)
+}
+
+// openVaultCollections is [secrets.OpenVaultProvider]'s listing.
+type openVaultCollections interface {
+	Collections(ctx context.Context) ([]string, error)
+	Socket() string
 }
 
 func newDoctor() *doctor {
@@ -185,6 +195,7 @@ func (d *doctor) run(ctx context.Context) report {
 	rep.section("Executors", append(d.checkExecutors(ctx), d.checkRunnerLabels(ctx)...)...)
 	rep.section("Capacity", d.checkCapacity(ctx)...)
 	rep.section("Repositories", d.checkRepos(ctx)...)
+	rep.section("OpenVault", d.checkOpenVault(ctx)...)
 	rep.section("What jobs need", needsChecks...)
 	rep.section("Actions", d.checkActions()...)
 	if d.includeSecrets {
@@ -1035,8 +1046,9 @@ func (d *doctor) checkSecrets(ctx context.Context) []check {
 	}
 
 	chain, err := d.newSecrets(secrets.Options{
-		FilePath: d.cfg.Paths.SecretsEnv,
-		Commands: d.cfg.Secrets.Commands,
+		FilePath:  d.cfg.Paths.SecretsEnv,
+		Commands:  d.cfg.Secrets.Commands,
+		OpenVault: d.cfg.Secrets.OpenVault,
 	})
 	if err != nil {
 		return []check{fail("secrets.chain", "secrets chain", err.Error())}
@@ -1074,9 +1086,8 @@ func (d *doctor) checkSecrets(ctx context.Context) []check {
 			// A backend's own words are the whole answer to a support question
 			// — "op: you are not currently signed in" — and are deliberately
 			// absent from the error string, which can reach a broker (INV-4).
-			var ce *secrets.CommandError
-			if errors.As(err, &ce) && ce.Diagnostic() != "" {
-				c.Notes = append(c.Notes, ce.Diagnostic())
+			if diag := backendDiagnostic(err); diag != "" {
+				c.Notes = append(c.Notes, diag)
 			}
 			out = append(out, c)
 		case len(value) == 0:
@@ -1124,6 +1135,80 @@ func (d *doctor) knownSecretNames() (names []string, fileErr error) {
 		}
 	}
 	return sortedStrings(set), fileErr
+}
+
+// backendDiagnostic is a secret store's own words about a failure, for this
+// terminal only: a program's stderr, or the OpenVault service's message.
+func backendDiagnostic(err error) string {
+	var ce *secrets.CommandError
+	if errors.As(err, &ce) {
+		return ce.Diagnostic()
+	}
+	var oe *secrets.OpenVaultError
+	if errors.As(err, &oe) {
+		return oe.Diagnostic()
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------- openvault
+
+// checkOpenVault says whether the OpenVault service a run reads answers, and
+// which configured repositories this machine holds no collection for, by
+// name (A86). Nothing is decrypted: OpenVault lists collections from its
+// index. Silent unless `[secrets] openvault = true`.
+func (d *doctor) checkOpenVault(ctx context.Context) []check {
+	if d.cfg == nil || !d.cfg.Secrets.OpenVault {
+		return nil
+	}
+	open := d.openVault
+	if open == nil {
+		open = func() (openVaultCollections, error) {
+			socket, err := secrets.OpenVaultSocket(os.Environ())
+			if err != nil {
+				return nil, err
+			}
+			return secrets.NewOpenVaultProvider(socket, 0), nil
+		}
+	}
+	ov, err := open()
+	if err != nil {
+		return []check{fail("openvault.service", "OpenVault service", err.Error())}
+	}
+	have, err := ov.Collections(ctx)
+	if err != nil {
+		c := fail("openvault.service", "OpenVault service", err.Error(), "openvault service").
+			withNotes("A job reading a secret that no store before OpenVault holds fails with " +
+				"E_SECRET_BACKEND until the service answers, and is retried. On a machine whose key " +
+				"opens with a passphrase, the service waits for it after every reboot.")
+		if diag := backendDiagnostic(err); diag != "" {
+			c.Notes = append(c.Notes, diag)
+		}
+		return []check{c}
+	}
+	out := []check{pass("openvault.service", "OpenVault service", "answers on "+ov.Socket())}
+
+	var here, absent []string
+	for _, key := range sortedStrings(d.cfg.Repos) {
+		if slices.Contains(have, key) {
+			here = append(here, key)
+		} else {
+			absent = append(absent, key)
+		}
+	}
+	if len(here) > 0 {
+		out = append(out, pass("openvault.collections", "OpenVault collections", strings.Join(here, ", ")))
+	}
+	if len(absent) > 0 {
+		out = append(out, warn("openvault.collections.absent", "OpenVault collections",
+			"this machine has no collection "+strings.Join(absent, ", ")+
+				", so those repositories' secrets come from the other stores here, or read empty",
+			fmt.Sprintf("openvault scope <this device> %s read   # on an admin device", absent[0])).
+			withNotes("A collection is named as the repository's key in config.toml, and holds "+
+				"<environment>/NAME for one environment and NAME for every other. `openvault "+
+				"collections create` makes one, and `openvault import-env` fills it from a secrets.env."))
+	}
+	return out
 }
 
 func envName(name string) string {
