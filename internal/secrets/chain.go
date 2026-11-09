@@ -46,6 +46,28 @@ type Sourced interface {
 	ResolveFrom(ctx context.Context, name string) (value Value, provider string, err error)
 }
 
+// ScopedProvider is a Provider that keeps each scope's secrets apart, and so
+// is asked with the scope's parts as they are rather than flattened into one
+// name (A86).
+//
+// The flattening is [ScopedName], and it is lossy: latem-cloud and
+// latem_cloud both become latem_cloud. That costs nothing in a store keyed by
+// the flat name — the Keychain, secrets.env — and makes a store keyed by the
+// repository itself unreachable, which is what OpenVault is: one collection
+// per repository, named as the repository is. Resolve is the machine-wide
+// name, ResolveIn with no scope.
+type ScopedProvider interface {
+	Provider
+	ResolveIn(ctx context.Context, scope []string, name string) (Value, error)
+}
+
+// locator is a ScopedProvider that can say where it found a scoped name, for
+// a run's provenance: "openvault as latem-cloud/production/TOKEN" names the
+// entry an operator would go and rotate.
+type locator interface {
+	Where(scope []string, name string) string
+}
+
 // Chain resolves a name through its providers in order, first hit wins (§15).
 //
 // Two rules define it, and both are about failing loudly rather than
@@ -67,8 +89,9 @@ type Chain struct {
 }
 
 var (
-	_ Provider = (*Chain)(nil)
-	_ Sourced  = (*Chain)(nil)
+	_ Provider       = (*Chain)(nil)
+	_ Sourced        = (*Chain)(nil)
+	_ ScopedProvider = (*Chain)(nil)
 )
 
 // NewChain returns a chain over providers, in order. Nil providers are
@@ -103,9 +126,28 @@ func (c *Chain) Resolve(ctx context.Context, name string) (Value, error) {
 
 // ResolveFrom is [Chain.Resolve] plus the name of the provider that answered.
 func (c *Chain) ResolveFrom(ctx context.Context, name string) (Value, string, error) {
+	return c.ResolveInFrom(ctx, nil, name)
+}
+
+// ResolveIn returns name under scope's parts, a repository and then its
+// environment, from the first provider that holds it.
+func (c *Chain) ResolveIn(ctx context.Context, scope []string, name string) (Value, error) {
+	v, _, err := c.ResolveInFrom(ctx, scope, name)
+	return v, err
+}
+
+// ResolveInFrom is [Chain.ResolveIn] plus where the value was found.
+//
+// A [ScopedProvider] is asked with the scope's parts; every other provider
+// with [ScopedName]'s flat name. A scope that flattens into no usable name — a
+// repository key starting with a digit — is skipped by the flat providers
+// alone, since the scoped ones may still hold it.
+func (c *Chain) ResolveInFrom(ctx context.Context, scope []string, name string) (Value, string, error) {
 	if err := validName(name); err != nil {
 		return nil, "", err
 	}
+	flat := ScopedName(name, scope...)
+	flatErr := validName(flat)
 	if len(c.providers) == 0 {
 		return nil, "", fmt.Errorf("secrets: no providers configured: %w", ErrNotFound)
 	}
@@ -115,10 +157,28 @@ func (c *Chain) ResolveFrom(ctx context.Context, name string) (Value, string, er
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
 		}
-		v, err := p.Resolve(ctx, name)
+		var (
+			v   Value
+			err error
+		)
+		sp, scoped := p.(ScopedProvider)
+		switch {
+		case scoped:
+			v, err = sp.ResolveIn(ctx, scope, name)
+		case flatErr != nil:
+			err = fmt.Errorf("%s: %w: %w", p.Name(), flatErr, ErrNotFound)
+		default:
+			v, err = p.Resolve(ctx, flat)
+		}
 		switch {
 		case err == nil:
-			return v, p.Name(), nil
+			source := p.Name()
+			if l, ok := p.(locator); ok && len(scope) > 0 {
+				if where := l.Where(scope, name); where != "" {
+					source += " as " + where
+				}
+			}
+			return v, source, nil
 		case errors.Is(err, ErrNotFound):
 			// Accumulated rather than discarded: when nothing holds the name,
 			// "keychain: no item; pass: not readable: gpg exited 2" is the
@@ -129,7 +189,7 @@ func (c *Chain) ResolveFrom(ctx context.Context, name string) (Value, string, er
 			return nil, p.Name(), err
 		}
 	}
-	return nil, "", fmt.Errorf("secrets: no provider holds %s: %w (%w)", name, ErrNotFound, misses)
+	return nil, "", fmt.Errorf("secrets: no provider holds %s: %w (%w)", flat, ErrNotFound, misses)
 }
 
 // Options configures the standard §15 chain.
@@ -150,6 +210,12 @@ type Options struct {
 	Pass PassOptions
 	// Commands is the [secrets.commands] table: secret name to command string.
 	Commands map[string]string
+	// OpenVault puts OpenVault in the chain, read from the service at
+	// [OpenVaultSocket] of Environ. Off is the default: a machine reads its
+	// secrets from OpenVault because its config says so (`[secrets]
+	// openvault = true`), never because a vault happens to be there — a vault
+	// whose service is not running would otherwise fail every job on it.
+	OpenVault bool
 	// Runner executes external programs. Nil uses [ExecRunner]; a test
 	// substitutes a fake and the chain never touches a real credential store.
 	Runner Runner
@@ -160,7 +226,15 @@ type Options struct {
 }
 
 // New assembles the resolution chain of RUNNER_SPEC §15, in order: environment,
-// secrets.env, macOS Keychain, pass/gopass, per-secret command.
+// OpenVault when configured, secrets.env, macOS Keychain, pass/gopass,
+// per-secret command.
+//
+// OpenVault comes straight after the environment (A86). It is the one copy
+// the machines share, kept in step by OpenVault's sync; a value in this
+// machine's secrets.env or Keychain is a copy somebody made, and copies are
+// what go stale. Read after them, a rotated token in the vault would lose to
+// the old one left in the file, and nothing would say so. The environment
+// stays the override, as it is for every store.
 //
 // It returns an error rather than skipping a misconfigured provider. A machine
 // whose [secrets.commands] entry does not parse has a config bug, and starting
@@ -178,6 +252,14 @@ func New(opts Options) (*Chain, error) {
 	}
 
 	providers := []Provider{NewEnvProvider(environ)}
+
+	if opts.OpenVault {
+		socket, err := OpenVaultSocket(environ)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, NewOpenVaultProvider(socket, opts.Timeout))
+	}
 
 	if opts.FilePath != "" {
 		providers = append(providers, NewFileProvider(opts.FilePath))

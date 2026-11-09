@@ -262,8 +262,9 @@ func (a *Agent) buildOrchestrator() error {
 	provider := a.opts.Secrets
 	if provider == nil {
 		chain, err := secrets.New(secrets.Options{
-			FilePath: a.cfg.Paths.SecretsEnv,
-			Commands: a.cfg.Secrets.Commands,
+			FilePath:  a.cfg.Paths.SecretsEnv,
+			Commands:  a.cfg.Secrets.Commands,
+			OpenVault: a.cfg.Secrets.OpenVault,
 		})
 		if err != nil {
 			return wrapStartup("secrets", err)

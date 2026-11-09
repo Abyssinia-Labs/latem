@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
@@ -37,6 +38,27 @@ func ScopedName(name string, parts ...string) string {
 	return b.String()
 }
 
+// Lookup is one place a secret is looked for: Name under Scope's parts, a
+// repository and then its environment (A50). A store keyed by one flat name
+// reads it as [Lookup.String]; a [ScopedProvider] reads the parts.
+type Lookup struct {
+	Scope []string
+	Name  string
+}
+
+// String is the flat name the Keychain and secrets.env hold this under.
+func (l Lookup) String() string { return ScopedName(l.Name, l.Scope...) }
+
+// LookupNames is each lookup's flat name, for a log line saying what was
+// tried.
+func LookupNames(ls []Lookup) []string {
+	out := make([]string, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, l.String())
+	}
+	return out
+}
+
 // ResolveScoped resolves names the way a workflow reads secrets (A50): each
 // name is looked up under every scope in order, most specific first, and the
 // first that answers wins. The value is kept under the bare name, which is
@@ -53,10 +75,10 @@ func ScopedName(name string, parts ...string) string {
 func ResolveScoped(
 	ctx context.Context, p Provider, reg logstream.Registrar, names []string, scopes [][]string,
 ) (set *Set, missing []string, err error) {
-	return ResolveAs(ctx, p, reg, names, func(name string) []string {
-		out := make([]string, 0, len(scopes))
+	return ResolveAs(ctx, p, reg, names, func(name string) []Lookup {
+		out := make([]Lookup, 0, len(scopes))
 		for _, scope := range scopes {
-			out = append(out, ScopedName(name, scope...))
+			out = append(out, Lookup{Scope: scope, Name: name})
 		}
 		return out
 	})
@@ -67,7 +89,7 @@ func ResolveScoped(
 // kept under name. A called workflow's job reads a secret as whatever its
 // caller passed it as (A82), so its candidates are not its own name's.
 func ResolveAs(
-	ctx context.Context, p Provider, reg logstream.Registrar, names []string, lookup func(name string) []string,
+	ctx context.Context, p Provider, reg logstream.Registrar, names []string, lookup func(name string) []Lookup,
 ) (set *Set, missing []string, err error) {
 	set = &Set{values: make(map[string]Value), sources: make(map[string]string)}
 	if len(names) == 0 {
@@ -96,14 +118,9 @@ func ResolveAs(
 		}
 
 		found := false
-		for _, candidate := range lookup(name) {
-			if validName(candidate) != nil {
-				// A scope whose parts cannot make a usable name (a repository
-				// key starting with a digit) is skipped, not fatal: the next,
-				// wider scope may still answer.
-				continue
-			}
-			value, source, rerr := resolveFrom(ctx, p, candidate)
+		for _, l := range lookup(name) {
+			candidate := l.String()
+			value, source, rerr := resolveLookup(ctx, p, l)
 			switch {
 			case rerr == nil:
 			case errors.Is(rerr, ErrNotFound):
@@ -125,7 +142,7 @@ func ResolveAs(
 			}
 			set.names = append(set.names, name)
 			set.values[name] = value
-			if candidate != name {
+			if candidate != name && !strings.Contains(source, " as ") {
 				source += " as " + candidate
 			}
 			set.sources[name] = source
@@ -137,4 +154,23 @@ func ResolveAs(
 		}
 	}
 	return set, missing, nil
+}
+
+// resolveLookup asks p for l: with its parts when p reads them, and otherwise
+// by the flat name. A scope whose parts make no usable flat name (a
+// repository key starting with a digit) is a miss for a flat store, not a
+// failure: the next, wider scope may still answer.
+func resolveLookup(ctx context.Context, p Provider, l Lookup) (Value, string, error) {
+	switch s := p.(type) {
+	case *Chain:
+		return s.ResolveInFrom(ctx, l.Scope, l.Name)
+	case ScopedProvider:
+		v, err := s.ResolveIn(ctx, l.Scope, l.Name)
+		return v, p.Name(), err
+	}
+	flat := l.String()
+	if err := validName(flat); err != nil {
+		return nil, "", fmt.Errorf("%w: %w", err, ErrNotFound)
+	}
+	return resolveFrom(ctx, p, flat)
 }

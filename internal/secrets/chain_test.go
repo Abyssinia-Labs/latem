@@ -164,18 +164,21 @@ func TestNew_BuildsTheSpecChainInOrder(t *testing.T) {
 	}
 
 	c, err := New(Options{
-		Environ:  []string{"LATEM_SECRET_A=x"},
-		FilePath: path,
-		Keychain: On,
-		Pass:     PassOptions{Binary: "pass"},
-		Commands: map[string]string{"A": "op read op://x/y"},
-		Runner:   answering("x"),
+		Environ:   []string{"LATEM_SECRET_A=x", "OPENVAULT_HOME=" + dir},
+		FilePath:  path,
+		Keychain:  On,
+		Pass:      PassOptions{Binary: "pass"},
+		Commands:  map[string]string{"A": "op read op://x/y"},
+		OpenVault: true,
+		Runner:    answering("x"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"env", "file", "keychain", "pass", "command"}
+	// OpenVault straight after the override: it is the copy every machine
+	// shares, and the stores after it are the copies that go stale (A86).
+	want := []string{"env", "openvault", "file", "keychain", "pass", "command"}
 	if got := c.Providers(); !slices.Equal(got, want) {
 		t.Errorf("Providers() = %q, want %q", got, want)
 	}
@@ -261,5 +264,75 @@ func TestToggle(t *testing.T) {
 		if got := tc.toggle.enabled(tc.platformDefault); got != tc.want {
 			t.Errorf("Toggle(%d).enabled(%v) = %v, want %v", tc.toggle, tc.platformDefault, got, tc.want)
 		}
+	}
+}
+
+// scopedStub is a ScopedProvider that records what it was asked.
+type scopedStub struct {
+	values map[string]string // "scope parts/NAME", parts joined by "/"
+	asked  []string
+}
+
+func (s *scopedStub) Resolve(ctx context.Context, name string) (Value, error) {
+	return s.ResolveIn(ctx, nil, name)
+}
+
+func (s *scopedStub) ResolveIn(_ context.Context, scope []string, name string) (Value, error) {
+	key := strings.Join(append(slices.Clone(scope), name), "/")
+	s.asked = append(s.asked, key)
+	if v, ok := s.values[key]; ok {
+		return Value(v), nil
+	}
+	return nil, ErrNotFound
+}
+
+func (s *scopedStub) Name() string { return "scoped" }
+
+func (s *scopedStub) Where(scope []string, name string) string {
+	return strings.Join(append(slices.Clone(scope), name), "/")
+}
+
+func TestChain_AScopedStoreGetsTheScopesPartsAndAFlatStoreTheFlatName(t *testing.T) {
+	flat := &stubProvider{name: "file", values: map[string]string{}}
+	scoped := &scopedStub{values: map[string]string{"latem-cloud/production/TOKEN": "vault"}}
+	c := NewChain(flat, scoped)
+
+	v, source, err := c.ResolveInFrom(context.Background(), []string{"latem-cloud", "production"}, "TOKEN")
+	if err != nil || string(v) != "vault" {
+		t.Fatalf("ResolveInFrom = %q, %v", v, err)
+	}
+	if source != "scoped as latem-cloud/production/TOKEN" {
+		t.Errorf("source = %q, want the entry it was found as", source)
+	}
+	if flat.calls != 1 {
+		t.Errorf("flat store asked %d times", flat.calls)
+	}
+	if !slices.Equal(scoped.asked, []string{"latem-cloud/production/TOKEN"}) {
+		t.Errorf("scoped store asked %q; the hyphen must reach it, since latem_cloud names no collection", scoped.asked)
+	}
+}
+
+func TestChain_AScopeNoFlatNameCanHoldStillReachesAScopedStore(t *testing.T) {
+	flat := &stubProvider{name: "file", values: map[string]string{}}
+	scoped := &scopedStub{values: map[string]string{"1password-sync/TOKEN": "vault"}}
+
+	v, err := NewChain(flat, scoped).ResolveIn(context.Background(), []string{"1password-sync"}, "TOKEN")
+	if err != nil || string(v) != "vault" {
+		t.Fatalf("ResolveIn = %q, %v", v, err)
+	}
+	if flat.calls != 0 {
+		t.Error("a flat store was asked for a name starting with a digit")
+	}
+}
+
+func TestResolveScoped_AScopedStoresAnswerNamesTheEntryNotTheFlatName(t *testing.T) {
+	scoped := &scopedStub{values: map[string]string{"app/production/TOKEN": longEnough("vault")}}
+	set, _, err := ResolveScoped(context.Background(), NewChain(scoped), &fakeRegistrar{},
+		[]string{"TOKEN"}, [][]string{{"app", "production"}, {"app"}, nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := set.Source("TOKEN"); got != "scoped as app/production/TOKEN" {
+		t.Errorf("source = %q", got)
 	}
 }

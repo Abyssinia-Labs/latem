@@ -53,6 +53,10 @@ Among the checks worth knowing about:
   that wrong produces the same 401 from `fastlane pilot upload`, two minutes
   in, after a full archive and export. Verified on a laptop holding four
   `AuthKey_*.p8` files, all valid, one of them the right one.
+- **Whether the OpenVault service answers**, when `[secrets] openvault = true`,
+  and which configured repositories this machine holds no collection for, by
+  name. A stopped service fails every job that needs a value only it holds,
+  and a passphrase-protected key stops it at every reboot.
 - **The locale a step's shell actually resolves to.** The agent sets
   `LANG=en_US.UTF-8`, and a login shell's profile can still overrule it, so
   `doctor` asks the shell rather than trusting the executor. Without it

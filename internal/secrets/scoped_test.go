@@ -84,9 +84,13 @@ func TestResolveAs(t *testing.T) {
 		"app__NPM_TOKEN": longEnough("repo-npm"),
 		"NPM":            longEnough("machine-npm"),
 	}}
-	lookup := func(name string) []string {
+	lookup := func(name string) []Lookup {
 		if name == "NPM" {
-			return []string{"app__production__NPM", "app__NPM_TOKEN", "NPM_TOKEN"}
+			return []Lookup{
+				{Scope: []string{"app", "production"}, Name: "NPM"},
+				{Scope: []string{"app"}, Name: "NPM_TOKEN"},
+				{Name: "NPM_TOKEN"},
+			}
 		}
 		return nil
 	}

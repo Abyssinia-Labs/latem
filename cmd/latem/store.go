@@ -382,6 +382,7 @@ func (s *storeChecker) resolver() (secretResolver, error) {
 	opts := secrets.Options{FilePath: paths.SecretsEnv}
 	if s.cfg != nil {
 		opts.FilePath, opts.Commands = s.cfg.Paths.SecretsEnv, s.cfg.Secrets.Commands
+		opts.OpenVault = s.cfg.Secrets.OpenVault
 	}
 	chain, err := s.newSecrets(opts)
 	if err != nil {
@@ -404,12 +405,23 @@ type scopedResolver struct {
 }
 
 func (r scopedResolver) Resolve(ctx context.Context, name string) (secrets.Value, error) {
+	scoped, _ := r.secretResolver.(secrets.ScopedProvider)
 	for _, scope := range r.scopes {
-		candidate := secrets.ScopedName(name, scope...)
-		if secrets.ValidName(candidate) != nil {
-			continue // a repository key no store can scope a name with
+		var (
+			value secrets.Value
+			err   error
+		)
+		if scoped != nil {
+			// The chain flattens the name for the stores that want it, and
+			// gives OpenVault the repository's own collection (A86).
+			value, err = scoped.ResolveIn(ctx, scope, name)
+		} else {
+			candidate := secrets.ScopedName(name, scope...)
+			if secrets.ValidName(candidate) != nil {
+				continue // a repository key no store can scope a name with
+			}
+			value, err = r.secretResolver.Resolve(ctx, candidate)
 		}
-		value, err := r.secretResolver.Resolve(ctx, candidate)
 		switch {
 		case errors.Is(err, secrets.ErrNotFound):
 			continue

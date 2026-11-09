@@ -101,6 +101,13 @@ func (e *Error) Code() protocol.ErrorCode {
 	if errors.As(e.Err, &ce) && !ce.NotInstalled() {
 		return protocol.ErrSecretBackend
 	}
+	var oe *OpenVaultError
+	if errors.As(e.Err, &oe) {
+		// Not running is the common case: on a machine whose key opens with
+		// a passphrase, the service waits for someone to type it after every
+		// reboot. Retryable, like a locked Keychain.
+		return protocol.ErrSecretBackend
+	}
 	if errors.Is(e.Err, fs.ErrPermission) {
 		// A world-readable secrets.env, or a file this user cannot read: the
 		// value exists, the store is unusable. Fixable in place.

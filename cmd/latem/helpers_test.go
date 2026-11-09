@@ -281,6 +281,10 @@ func newTestDoctor(goos, dir string, cmds map[string]fakeCmd, cfg *config.Config
 		// A service that can reach Docker; the real one reads this machine's
 		// /proc and its Docker socket.
 		canConnect: func(int, string) (bool, error) { return true, nil },
+		// Never this user's OpenVault, which holds their real secrets.
+		openVault: func() (openVaultCollections, error) {
+			return nil, errors.New("a test reached the real OpenVault; give the doctor a fakeOpenVault")
+		},
 	}
 }
 

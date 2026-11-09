@@ -123,8 +123,8 @@ const (
 )
 
 // SecretsProviderChain is the only provider §15 defines: environment, then
-// secrets.env, then the macOS keychain, then pass/gopass, then a per-secret
-// command, first hit wins.
+// OpenVault when [Secrets.OpenVault] is set, then secrets.env, then the macOS
+// keychain, then pass/gopass, then a per-secret command, first hit wins.
 const SecretsProviderChain = "chain"
 
 var (
@@ -443,6 +443,10 @@ type Secrets struct {
 	Provider string `toml:"provider"`
 	// Commands is a per-secret shell command, the last link in the chain.
 	Commands map[string]string `toml:"commands"`
+	// OpenVault reads a job's secrets from the OpenVault service on this
+	// machine, after the environment and before every other store (A86): a
+	// repository's collection, entry <environment>/NAME, then NAME.
+	OpenVault bool `toml:"openvault"`
 }
 
 // MinFreeGB is the effective disk floor for this runner, with the §13 default

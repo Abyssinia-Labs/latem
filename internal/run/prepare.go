@@ -114,7 +114,7 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 	}
 	from := x.resolved.Job.SecretsFrom
 	for _, name := range missing {
-		tried := strings.Join(lookup(name), ", ")
+		tried := strings.Join(secrets.LookupNames(lookup(name)), ", ")
 		switch {
 		case from != nil && from[strings.ToUpper(name)] == "" && tried == "":
 			x.note("secret %s is not passed to this job by the workflow calling it; it reads as empty, as on GitHub", name)
@@ -137,19 +137,22 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 // environment's secrets as its own, as on GitHub, and every other one as the
 // name its callers passed it as, without the environment, which a caller never
 // has; one no caller passed is looked up as nothing.
-func (x *execution) secretLookup() func(name string) []string {
+//
+// The scope is kept as its parts, not flattened, so that OpenVault can read
+// the repository's own collection (A86).
+func (x *execution) secretLookup() func(name string) []secrets.Lookup {
 	repo, env, from := x.req.Repo, x.resolved.Job.Environment, x.resolved.Job.SecretsFrom
-	return func(name string) []string {
-		var out []string
+	return func(name string) []secrets.Lookup {
+		var out []secrets.Lookup
 		if env != "" {
-			out = append(out, secrets.ScopedName(name, repo, env))
+			out = append(out, secrets.Lookup{Scope: []string{repo, env}, Name: name})
 		}
 		if from != nil {
 			if name = from[strings.ToUpper(name)]; name == "" {
 				return out
 			}
 		}
-		return append(out, secrets.ScopedName(name, repo), name)
+		return append(out, secrets.Lookup{Scope: []string{repo}, Name: name}, secrets.Lookup{Name: name})
 	}
 }
 
