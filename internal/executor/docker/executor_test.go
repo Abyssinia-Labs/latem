@@ -251,6 +251,106 @@ func TestValidateCacheMounts(t *testing.T) {
 	}
 }
 
+// LAT-3, amendment A38's docker half: `~/.cargo/git`, as GitHub's
+// actions/cache writes it, was refused as "not an absolute path". It is the
+// step user's home in the job's image, which only the image can say.
+func TestPrepare_TildeCacheTargetIsTheStepUsersHomeInTheImage(t *testing.T) {
+	f := &fakeAPI{execStdout: []string{"home=/home/runner\n"}}
+	e, ws := newExecutor(t, f, func(o *Options) { o.User = "1000:1000" })
+
+	_, err := e.Prepare(context.Background(), executor.Spec{
+		RunID:     "r1",
+		Workspace: ws,
+		Caches: []executor.CacheMount{
+			{Name: "gha-cargo-git", Source: "latem-cache-linux-cargo-git", Target: "~/.cargo/git"},
+			{Name: "home", Source: "latem-cache-linux-home", Target: "~"},
+			{Name: "abs", Source: "latem-cache-linux-abs", Target: "/opt/cache"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	// The probe asks as the steps will run, so it reads the same passwd entry.
+	probe := f.createdConfigs[0]
+	if probe.Labels["latem.probe"] != "true" || probe.User != "1000:1000" ||
+		!slices.Equal(probe.Entrypoint, []string{"/bin/sh", "-c", homeProbeScript}) {
+		t.Fatalf("first container = user %q entrypoint %q labels %v, want the home probe as 1000:1000",
+			probe.User, probe.Entrypoint, probe.Labels)
+	}
+
+	run := f.createdHosts[slices.Index(f.createdNames, ContainerNamePrefix+"r1")]
+	for _, want := range []mount.Mount{
+		{Type: mount.TypeVolume, Source: "latem-cache-linux-cargo-git", Target: "/home/runner/.cargo/git"},
+		{Type: mount.TypeVolume, Source: "latem-cache-linux-home", Target: "/home/runner"},
+		{Type: mount.TypeVolume, Source: "latem-cache-linux-abs", Target: "/opt/cache"},
+	} {
+		if !slices.Contains(run.Mounts, want) {
+			t.Errorf("run container mounts = %v, want %v", run.Mounts, want)
+		}
+	}
+
+	// The ownership fix-up reads the expanded targets too: the lesson of the
+	// native executor's first A38, which checked one set and used another.
+	chown := strings.Join(f.createdConfigs[1].Entrypoint, " ")
+	if !strings.Contains(chown, "/home/runner/.cargo/git") || strings.Contains(chown, "~") {
+		t.Errorf("ownership script = %q, want the expanded targets", chown)
+	}
+}
+
+func TestPrepare_NoHomeProbeWithoutATildeTarget(t *testing.T) {
+	f := &fakeAPI{}
+	e, ws := newExecutor(t, f, nil)
+	_, err := e.Prepare(context.Background(), executor.Spec{
+		RunID:     "r1",
+		Workspace: ws,
+		Caches:    []executor.CacheMount{{Name: "a", Source: "vol-a", Target: "/home/runner/.npm"}},
+	})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	for _, c := range f.createdConfigs {
+		if c.Labels["latem.probe"] == "true" {
+			t.Errorf("a probe container ran for a run with no ~ target: %q", c.Entrypoint)
+		}
+	}
+}
+
+func TestPrepare_TildeCacheTargetRefusedWhenTheImageHasNoHome(t *testing.T) {
+	tests := map[string]struct {
+		stdout string
+		exit   int64
+		want   string
+	}{
+		"unset":      {"home=\n", 0, `$HOME is unset for the image's user`},
+		"relative":   {"home=runner\n", 0, `$HOME is "runner"`},
+		"no answer":  {"", 0, `$HOME is unset`},
+		"probe fail": {"sh: not found\n", 127, "(exit 127): sh: not found"},
+		// Expanded, then validated: a home of / makes ~ a mount over /.
+		"root": {"home=/\n", 0, "would mount over /"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeAPI{execStdout: []string{tc.stdout}, waitStatus: tc.exit}
+			e, ws := newExecutor(t, f, nil)
+			_, err := e.Prepare(context.Background(), executor.Spec{
+				RunID:     "r1",
+				Workspace: ws,
+				Caches:    []executor.CacheMount{{Name: "home", Source: "vol", Target: "~"}},
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Prepare = %v, want an error containing %q", err, tc.want)
+			}
+			if CodeOf(err) != protocol.ErrCache {
+				t.Errorf("error code = %q, want %q", CodeOf(err), protocol.ErrCache)
+			}
+			if slices.Contains(f.createdNames, ContainerNamePrefix+"r1") {
+				t.Error("the run's container was created for a cache that has nowhere to go")
+			}
+		})
+	}
+}
+
 func TestPrepare_GPUAndKVM(t *testing.T) {
 	t.Run("per-run gpu", func(t *testing.T) {
 		f := &fakeAPI{}
