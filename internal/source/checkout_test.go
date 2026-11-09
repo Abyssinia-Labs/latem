@@ -177,6 +177,106 @@ func TestSwitchClean(t *testing.T) {
 	}
 }
 
+// treeFiles is every file in a workspace's working tree, outside .git,
+// slash-separated and sorted.
+func treeFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			files = append(files, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(files)
+	return files
+}
+
+// A83: a sparse checkout leaves only what its patterns match, as GitHub's
+// `sparse-checkout:` does — sokie's one file, not in cone mode, on a commit
+// the workspace was cloned before; a directory in cone mode, which keeps the
+// root's own files as cone mode always does; and, once a checkout names no
+// patterns, the whole tree again, with no sparse config left behind.
+func TestSwitchSparse(t *testing.T) {
+	ctx := t.Context()
+	f := newFixture(t)
+	f.up.commit("packages/cli/package.json", `{"version":"1.0.0"}`+"\n", "cli")
+	f.up.commit("packages/cli/index.js", "cli\n", "cli code")
+	f.up.commit("src/app.go", "package app\n", "app")
+	ws := f.acquire("run-1", "refs/heads/main")
+	pinned := ws.SHA
+	all := []string{"README.md", "packages/cli/index.js", "packages/cli/package.json", "src/app.go"}
+	if got := treeFiles(t, ws.Path); !slices.Equal(got, all) {
+		t.Fatalf("the workspace holds %q before any checkout, want %q", got, all)
+	}
+
+	// The commit an earlier job pushed adds a file the patterns do not
+	// match, and the checkout must not write it.
+	f.up.commit("src/new.go", "package app\n", "more app")
+	next := f.up.commit("packages/cli/package.json", `{"version":"1.0.1"}`+"\n", "release: 1.0.1")
+	pack, err := f.fetch().PackSince(ctx, next, pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packPath := filepath.Join(t.TempDir(), "checkout.pack")
+	if err := os.WriteFile(packPath, pack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runSwitch(t, ws.Path, Switch{SHA: next, Pack: packPath, Clean: true,
+		Sparse: []string{"packages/cli/package.json"}})
+	if err != nil {
+		t.Fatalf("switch: %v\n%s", err, out)
+	}
+	if got := treeFiles(t, ws.Path); !slices.Equal(got, []string{"packages/cli/package.json"}) {
+		t.Errorf("not in cone mode, the tree holds %q, want only packages/cli/package.json", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(ws.Path, "packages/cli/package.json")); !strings.Contains(string(b), "1.0.1") {
+		t.Errorf("package.json = %q, want the checked-out commit's", b)
+	}
+	if head := runGit(t, ws.Path, "rev-parse", "HEAD"); head != next {
+		t.Errorf("HEAD = %s, want %s", head, next)
+	}
+	if st := runGit(t, ws.Path, "status", "--porcelain"); st != "" {
+		t.Errorf("the sparse tree is not clean:\n%s", st)
+	}
+
+	out, err = runSwitch(t, ws.Path, Switch{SHA: pinned, Clean: true, Sparse: []string{"src"}, SparseCone: true})
+	if err != nil {
+		t.Fatalf("switch: %v\n%s", err, out)
+	}
+	if got, want := treeFiles(t, ws.Path), []string{"README.md", "src/app.go"}; !slices.Equal(got, want) {
+		t.Errorf("in cone mode, the tree holds %q, want %q", got, want)
+	}
+
+	out, err = runSwitch(t, ws.Path, Switch{SHA: pinned, Clean: true})
+	if err != nil {
+		t.Fatalf("switch: %v\n%s", err, out)
+	}
+	if got := treeFiles(t, ws.Path); !slices.Equal(got, all) {
+		t.Errorf("with no patterns, the tree holds %q, want all of %q", got, all)
+	}
+	if v, _ := gitWith(ws.Path, nil, "config", "--bool", "core.sparseCheckout"); v == "true" {
+		t.Error("core.sparseCheckout is still true")
+	}
+	if code := gitStatus(t, ws.Path, "config", "--get", "extensions.worktreeConfig"); code == 0 {
+		t.Error("the worktree-config extension sparse-checkout set was left behind")
+	}
+}
+
 // gitServer is `git http-backend` behind a check for one job token, standing
 // in for github.com. It counts the requests the token came with and the ones
 // it did not.
@@ -331,6 +431,8 @@ func TestSwitchEnvRefusesWhatTheScriptCannotCarry(t *testing.T) {
 		"a ref for a commit":     {SHA: "main"},
 		"an ssh remote":          {SHA: sha, Remote: "git@github.com:acme/app.git"},
 		"a remote with userinfo": {SHA: sha, Remote: "https://x:y@github.com/acme/app.git"},
+		"a pattern of two lines": {SHA: sha, Sparse: []string{"src\ndocs"}},
+		"an empty pattern":       {SHA: sha, Sparse: []string{""}},
 	} {
 		if _, err := sw.Env(); err == nil {
 			t.Errorf("%s: accepted", name)

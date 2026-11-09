@@ -59,6 +59,9 @@ func TestCheckoutStepValidate(t *testing.T) {
 		{"a commit", CheckoutStep{Ref: "0123456789abcdef0123456789abcdef01234567"}, ""},
 		{"a hostile ref", CheckoutStep{Ref: "main;rm -rf /"}, "checkout: ref:"},
 		{"a negative depth", CheckoutStep{FetchDepth: -1}, "negative"},
+		{"sparse patterns", CheckoutStep{Sparse: []string{"packages/cli/package.json", "!*.md"}}, ""},
+		{"a sparse pattern of two lines", CheckoutStep{Sparse: []string{"src\ndocs"}}, "not one line"},
+		{"an empty sparse pattern", CheckoutStep{Sparse: []string{""}}, "not one line"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

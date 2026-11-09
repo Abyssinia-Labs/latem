@@ -31,6 +31,11 @@ type CheckoutStep struct {
 	// already holds the mirror's whole history and every tag (A53).
 	FetchDepth int
 	FetchTags  bool
+	// Sparse is `sparse-checkout:`, one pattern each, and SparseCone its
+	// cone mode. The step leaves only what they match in the working tree,
+	// as `git sparse-checkout set` does; none restores the whole tree.
+	Sparse     []string
+	SparseCone bool
 }
 
 // commitID is a full commit id: SHA-1, or SHA-256 for a repository using it.
@@ -53,6 +58,11 @@ func (c *CheckoutStep) validate() []error {
 	}
 	if c.FetchDepth < 0 {
 		add("checkout: fetch-depth %d is negative", c.FetchDepth)
+	}
+	for _, p := range c.Sparse {
+		if p == "" || strings.ContainsAny(p, "\n\x00") {
+			add("checkout: sparse-checkout pattern %q is not one line of a path", p)
+		}
 	}
 	return problems
 }
