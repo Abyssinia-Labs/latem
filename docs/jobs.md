@@ -82,11 +82,15 @@ differently, and they follow from the model rather than from a shortcut:
 A path inside the workspace (`node_modules`) is refused, because a mount there
 would shadow the checkout — cache `~/.npm` instead. `upload-artifact` and
 `download-artifact` work too, collecting into the artifact store (RUNNER_SPEC §17) when their step runs:
-from the workspace or `runner.temp` (native runners), with a name or path read
-from an earlier step's outputs, and v7's `archive: false`. A download finds what
-an earlier step of the same job uploaded; one of another job's artifacts is
-refused by name, because each job is its own run and its artifacts stay on the
-machine that ran it.
+from the workspace or `runner.temp`, with a name or path read from an earlier
+step's outputs, and v7's `archive: false`. A docker runner's `runner.temp` is
+copied out of and into the container. A download finds what an earlier step of
+the same job uploaded, and what a job it needs uploaded. An artifact never
+leaves the machine that made it, so a job that downloads another job's is run
+on the machine that ran that job. `workflows check` says so under the job
+(`artifacts from build`), and a control plane has to speak protocol 2.9 to place
+it there. A job whose downloads read jobs that ran on two machines cannot run.
+[`artifacts-across-jobs.md`](artifacts-across-jobs.md) has the reasons.
 
 **`uses: actions/checkout` is a step latem performs**, with no action fetched.
 Left bare, it checks out the run's commit — on a push, as the branch, with

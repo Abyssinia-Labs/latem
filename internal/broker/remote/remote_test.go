@@ -458,6 +458,40 @@ func TestCalls_OnlyForAControlPlaneThatSays28(t *testing.T) {
 	}
 }
 
+// A job's artifacts_from goes only to a control plane that says 2.9 (A84),
+// which places the job on the machine that ran those jobs: an older one
+// decodes a plan strictly. The agent plans such a job with an error for one,
+// so this is the decoder's protection, not the job's.
+func TestArtifacts_OnlyToAControlPlaneThatSays29(t *testing.T) {
+	plan := protocol.PlanResult{ID: "p-1", Workflows: []protocol.PlannedWorkflow{{
+		File: ".github/workflows/mac-release.yml", Name: "mac-release",
+		Jobs: []protocol.PlannedJob{{Key: "publish", Name: "publish", Needs: []string{"build"}, TimeoutMinutes: 360,
+			ArtifactsFrom: []string{"build"}}},
+	}}}
+	for _, c := range []struct {
+		version string
+		want    bool
+	}{{"2.8", false}, {"", false}, {"2.9", true}, {"2.10", true}, {"3.0", true}} {
+		h := newHarness(t, nil)
+		h.CP.SetHello(&helloFrame{Version: c.version})
+		h.CP.Partition()
+		h.CP.Await(t, "the partition", func() bool { return !h.Connected() })
+		h.CP.Heal()
+		h.AwaitConnected(t)
+		h.CP.Await(t, "the hello", func() bool { return h.SpeaksArtifacts() == c.want || c.version == "" })
+		if err := h.ReportPlan(t.Context(), plan); err != nil {
+			t.Fatalf("%q: ReportPlan: %v", c.version, err)
+		}
+		plans := h.CP.Plans()
+		if got := plans[len(plans)-1].Workflows[0].Jobs[0].ArtifactsFrom != nil; got != c.want {
+			t.Errorf("hello %q: artifacts_from sent %v, want %v", c.version, got, c.want)
+		}
+	}
+	if plan.Workflows[0].Jobs[0].ArtifactsFrom == nil {
+		t.Error("stripping for an old control plane wrote the caller's plan")
+	}
+}
+
 // A job's runs_on and reads_vars, and a heartbeat's aliases and digests (A68),
 // go only to a control plane that says 2.4: a 2.3 one decodes both strictly.
 func TestPlacement_OnlyToAControlPlaneThatSays24(t *testing.T) {

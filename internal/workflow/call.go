@@ -630,6 +630,7 @@ func (p *planner) workflowJobs(
 			jobs = p.jobs(w, key, sc, perms)
 			for i := range jobs {
 				site.place(&jobs[i], w, j, keysOf)
+				p.noteArtifacts(jobs[i].Key, j, sc)
 			}
 		}
 		for _, pj := range jobs {

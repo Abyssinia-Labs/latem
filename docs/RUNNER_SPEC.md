@@ -3801,3 +3801,96 @@ each of the call's jobs' outputs in `run.needs`, rather than the call's.
 refusal this lifts, sokie's `release-cli` has two more. `plan`'s checkout asks for
 `sparse-checkout`, which A53's checkout does not take. `publish` downloads what `pack` uploaded on
 another machine, which is artifacts across jobs (A77).
+
+### Amendment from a release whose publish job ran somewhere else
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A84 | §5 INV-2 and INV-5, §7, §17, A49, A52, A77, A82 | **A `download-artifact` reads what an earlier step of its own job uploaded, and what a job it needs, directly or further up, uploaded. A planned job carries `artifacts_from`, the keys of those jobs, and the control plane runs it on the machine that ran them. No artifact leaves the machine that made it. The machine works the list out again from the pinned commit and reads only its own runs of those jobs in the same workflow run. Docker's `runner.temp` is copied out of and into the container. Protocol 2.9** | A77 refused every cross-job download at compile time, and on 2026-11-08 that was every `download-artifact` in the organisation: take-one's and wake-cloud's Mac `publish` (a DMG `build` made on a Mac), antescript's `indexnow` (the sitemap `sitemap-before` fetched, four needs up), and sokie's `cli/publish` in both deploys (the tarball `cli/package/pack` packed, which the call in A82 made reachable). Until they can download, those release jobs cannot leave Blacksmith |
+
+**Placement, not transfer.** [`artifacts-across-jobs.md`](artifacts-across-jobs.md) weighs three ways
+to move an artifact. A relay through latem-cloud's object storage breaks §17's rule that content
+never crosses the boundary. It also breaks the threat model: the downloader would run bytes the
+control plane served, checked against a digest that came through the same control plane, and the
+machines share no key to do better. A connection from one machine to another breaks INV-1. Placing
+the job where the artifact is moves no byte, and every job above can do it. Both Macs carry a
+native macOS runner and a Docker Linux one, and the Linux pairs run anywhere Linux does. At the
+organisation's 11.7 MB a day, and at 100 times that, nothing is stored off a machine and nothing
+egresses.
+
+**The plan.** A job's own `upload-artifact` and `download-artifact` steps are read as the plan reads
+names: evaluated against the plan's scope where it can, and otherwise unknown, as a name built from
+a step's outputs, `needs` or `github.run_number` is. An `archive: false` upload is unknown, since its
+file names it. A download an earlier step of the same job could satisfy, by A77's rule, reads no
+other job. Any other download is matched against the uploads of every job the downloading job needs,
+directly or further up, as planned keys, job paths included. Two names match when both are known and
+equal, or when either is unknown. A download with no name is every artifact, and matches every
+upload. The jobs matched are `artifacts_from`, sorted. A download that matches none is left for the
+compiler, which refuses it as A77 did, with the jobs it needs added to the reason. An upload inside a
+composite action is not seen, because a plan does not expand actions.
+
+**Who decides what.** The control plane places: such a job goes only to the machine that ran those
+jobs. While that machine is offline the job waits, and once it is lost, by the control plane's
+partition limit, the job fails and says why. That limit is the deadline a wait needs. A job whose
+sources ran on two machines fails, naming both. So does one whose machine has no runner for its
+labels. A busy runner is waited for, not routed around. The machine decides everything else, from
+the commit it pinned (INV-5). Compiling the job, it plans the workflow file again from its own
+workspace and takes the job's `artifacts_from` from that plan, never from the control plane. The
+download step looks first in its own run, then in the runs this machine recorded of those jobs in
+the same workflow run. Those must have the same workflow file, commit and run number, be finished,
+and be `latem try`'s or not as this run is, newest first, and at most 64 of them. The first run with
+the artifact wins. A download of every artifact takes each name from the first run that has it, each
+under `<path>/<name>`, as GitHub lays them out. The log says which job's run the files came from.
+
+**INV-2 and the threat model.** No `run` field is added. The control plane names a workflow run, as
+it did since A52, and that id selects only among runs this machine already made, of the jobs the
+commit names. The most a lying control plane can do is point a job at another build, on this
+machine, of the same commit and file: the bytes are this machine's own work, never the control
+plane's.
+
+**`runner.temp` on docker.** A77 left it unreachable, because it is in the run's volume, and every
+release job above uses it. sokie's `pack` uploads `${{ runner.temp }}/pack/<tarball>`, and every
+`publish` downloads into `${{ runner.temp }}/…`. An executor's environment may now be an
+`executor.TempCopier`, and docker's is. An upload copies each pattern's literal prefix out of the
+container through `CopyFromContainer` into a staging directory beside the workspace, and collects
+from there. A download restores into staging and copies in through `CopyToContainer`, which A53's
+`PutTemp` already writes through. The archive from a container is read as hostile. Each entry is
+placed through an `os.Root`, an entry that climbs out fails the step, only regular files and
+directories are written, and an upload stops at 10 GB. Files copied in belong to the step's user
+when it is a uid, and are anyone's otherwise, as `PutTemp`'s are. Staging is removed when the step
+ends, and a restart's emptying of the work directory removes any left after a crash. Tart's
+`runner.temp`, inside its VM, is still refused at the step.
+
+**The store.** A downloading run finds its sources by the workflow run's id, in `workflow_json`.
+Migration 0006 indexes `(repo, json_extract(workflow_json, '$.workflow_run_id'), created_at)` over the
+rows that have one, so the lookup reads the few jobs of one workflow run, never every run kept. A
+test asserts SQLite's plan uses the index.
+
+**Protocol 2.9.** The control plane is upgraded first. It decodes `artifacts_from` from a 2.9 plan,
+keeps it on the job's row, places the job by it, and sends it only to an agent that says 2.9. A 2.8
+agent would run the job and find nothing to download. Until a control plane says 2.9, the agent
+plans such a job with an error that names its sources and 2.9, as A82 did calls before 2.8. A 2.8
+control plane would place it on any machine.
+
+**`workflows check` and `latem try`.** Check plans `artifacts_from` whatever the control plane
+speaks, and prints it under the job: `artifacts from build: runs on the machine that ran them`. Try
+warns that a try runs one job, so its download finds only what the job uploads itself.
+
+**Retention.** Unchanged. The sources' files stay under `artifacts/<run-id>/` until `retention-days`
+or the 50 GB budget removes them in the daily sweep. The budget evicts the oldest runs first, and a
+downloading job follows its upload by minutes. A download that finds the files gone fails with
+`E_ARTIFACT`, naming the runs it read.
+
+**What it costs.** On the agent: a plan reads what it already read. A downloading job's compile plans
+its own workflow file once more from its workspace, capped as every workflow file is, and its
+download makes one indexed query bounded at 64 rows. On docker, an artifact in `runner.temp` is copied
+once more on the same disk and removed when the step ends: 48 MB for Wake's DMG. On the control
+plane: one list of one to three keys on each downloading job's row, read with the rows the scheduler
+already loads for the run, whose `machineId` a finished job keeps. Nothing new is read or written per
+tick.
+
+**Not in this amendment.** Artifacts of another workflow run (`run-id:`). `pattern:` and
+`merge-multiple:`, which select across a matrix's legs. Those legs may have run on several machines,
+and so may jobs whose downloads read from more than one job. A relay for those, which needs a
+decision on paid storage. latem's own `release.yml` is such a case: its `smoke` legs run on macOS
+and Linux and both read `build`'s artifact. It stays on GitHub's runners.

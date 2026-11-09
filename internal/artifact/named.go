@@ -281,20 +281,9 @@ func (c *Collector) Restore(runID, base, name, dest string) (int, error) {
 
 	names := []string{name}
 	if name == "" {
-		entries, err := os.ReadDir(runDir)
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
+		if names, err = c.Names(runID); err != nil {
+			return 0, err
 		}
-		if err != nil {
-			return 0, artifactErr(err, "reading %s", runDir)
-		}
-		names = names[:0]
-		for _, e := range entries {
-			if e.IsDir() && ValidName(e.Name()) {
-				names = append(names, e.Name())
-			}
-		}
-		sort.Strings(names)
 	} else if !ValidName(name) {
 		return 0, registryErr("artifact name %q is not a plain name", name)
 	}
@@ -341,6 +330,30 @@ func (c *Collector) Restore(runID, base, name, dest string) (int, error) {
 		}
 	}
 	return count, nil
+}
+
+// Names lists the artifacts a run has stored, sorted: the directories under
+// the run's own whose names are plain ones. A run that stored none has none.
+func (c *Collector) Names(runID string) ([]string, error) {
+	runDir, err := c.Dir(runID)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(runDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, artifactErr(err, "reading %s", runDir)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && ValidName(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func restoreFile(ws *os.Root, src, dst string) error {

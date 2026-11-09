@@ -29,6 +29,7 @@ real store listing.
 | [`RUNNER_SPEC.md`](RUNNER_SPEC.md) | The specification. Every invariant, every gate, every error code, and an amendment log recording what changed and what forced it |
 | [`PROTOCOL.md`](PROTOCOL.md) | The wire protocol between an agent and a control plane. `test/conformance` is its executable half |
 | [`architecture.html`](architecture.html) | The same shape as a diagram. Open it in a browser |
+| [`artifacts-across-jobs.md`](artifacts-across-jobs.md) | Why a job that downloads another job's artifact runs on the machine that made it, with the cost of the alternatives (A84) |
 
 ## If you are working on latem
 

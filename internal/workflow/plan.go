@@ -52,6 +52,11 @@ type PlanOptions struct {
 	// saying why, for a control plane older than 2.8 (A82): it would refuse
 	// a plan whose keys are job paths, and the whole plan with them.
 	NoCalls bool
+	// NoPlacedArtifacts plans a job that downloads another job's artifacts
+	// as one that cannot run, saying why, for a control plane older than 2.9
+	// (A84): it would place the job on any machine, and the artifacts are on
+	// one.
+	NoPlacedArtifacts bool
 	// Changed lists the paths the event changed, computed in the mirror: a
 	// pull request's three-dot diff, a push's two-dot one. It is called at
 	// most once, and only for a workflow with a paths filter. Nil means
@@ -196,6 +201,10 @@ type planner struct {
 	diffDone bool
 	diff     []string
 	diffErr  error
+
+	// artifacts is what each planned job's steps upload and download, by
+	// planned key, for artifacts_from (A84).
+	artifacts map[string]*jobArtifacts
 }
 
 // workflow plans one file, reporting whether the event triggers it.
@@ -276,7 +285,9 @@ func (p *planner) workflow(file string) (protocol.PlannedWorkflow, bool, error) 
 	if err != nil {
 		return broken(err)
 	}
+	p.artifacts = nil
 	pw.Jobs = p.workflowJobs(w, order, sc, perms, &callSite{files: []string{file}})
+	p.placeArtifacts(pw.Jobs)
 	return pw, true, nil
 }
 

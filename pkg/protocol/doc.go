@@ -44,4 +44,4 @@ package protocol
 // older agents as a decode failure rather than as silence, which is the
 // trade this package makes deliberately: at a trust boundary, a loud refusal
 // beats a quiet misinterpretation.
-const Version = "2.8"
+const Version = "2.9"

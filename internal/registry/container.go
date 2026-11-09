@@ -125,6 +125,11 @@ type ArtifactStep struct {
 
 	// Download: where in the workspace to put it. Empty is the root.
 	Path string
+	// From is the jobs of the workflow run a download also reads (A84): the
+	// planned keys of jobs it needs, directly or further up, whose uploads
+	// could be the one it names, as the pinned commit says. Their runs on
+	// this machine are searched after this run's own.
+	From []string
 
 	// Late is what is only known as the step is about to run (A77). Nil when
 	// everything is known at admission.
@@ -184,7 +189,15 @@ func (a *ArtifactStep) validate() []error {
 		if a.Path != "" && late.Path != nil {
 			add("artifact: download path is either known at admission or late, not both")
 		}
+		for _, k := range a.From {
+			if !protocol.IsJobPath(k) {
+				add("artifact: %q is not a job of the workflow run", k)
+			}
+		}
 		return problems
+	}
+	if len(a.From) > 0 {
+		add("artifact: an upload reads from no other job")
 	}
 	if late.Path != nil {
 		add("artifact: an upload has no download path")

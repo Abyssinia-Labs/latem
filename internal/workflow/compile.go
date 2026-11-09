@@ -112,6 +112,12 @@ type Options struct {
 	// it (A55). The job's matrix is expanded here, from the file, and this
 	// must be exactly one of its legs.
 	Matrix json.RawMessage
+	// ArtifactsFrom answers which jobs of the workflow run a download-artifact
+	// in this job may also read (A84): the job's artifacts_from, as the plan
+	// of this commit makes it — [ArtifactsFrom]. It is asked at most once, and
+	// only when the job has a download. Nil, or none, refuses a download that
+	// nothing earlier in the job could satisfy, as A77 did.
+	ArtifactsFrom func() []string
 	// IgnoreJobIf compiles a workflow run's job without evaluating its if:,
 	// for `latem try` (A76): the person named the job they want run, and
 	// whether this event would have run it is the question they did not ask.
@@ -184,6 +190,7 @@ func CompileWith(
 	// compiled for more than one run.
 	x := newExpander(opts.Actions, w.Path)
 	x.policy, x.fetcher, x.scope = opts.Policy, opts.Fetcher, sc
+	x.artifactsFrom = opts.ArtifactsFrom
 	// A58: the platform the job's labels settle, for a step whose if: asks
 	// nothing else. An error here is reported where labels are compiled.
 	if labels, err := compileLabels(declared.RunsOn, w.Path, jobName, opts.LabelAliases, sc); err == nil {

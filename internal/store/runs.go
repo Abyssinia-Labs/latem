@@ -298,6 +298,39 @@ func (d *DB) List(ctx context.Context, f Filter) ([]Run, error) {
 	return scanRuns(rows)
 }
 
+// WorkflowRunJobs returns this machine's runs of jobs of one workflow run,
+// newest first (A84). The predicate is runs_workflow_run_idx's, spelled as the
+// index spells it so that SQLite uses it: a download reads the few jobs of its
+// own workflow run, never a scan of every run kept here. limit bounds it all
+// the same, and DefaultListLimit stands in for none.
+func (d *DB) WorkflowRunJobs(ctx context.Context, repo, workflowRunID string, jobs []string, limit int) ([]Run, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	holders := make([]string, len(jobs))
+	args := []any{repo, workflowRunID}
+	for i, j := range jobs {
+		holders[i] = "?"
+		args = append(args, j)
+	}
+	args = append(args, limit)
+	// Only the column list and placeholders are concatenated; every value is
+	// a bound parameter.
+	q := `SELECT ` + runColumns + ` FROM runs` + //nolint:gosec // see above
+		` WHERE repo = ? AND workflow_json IS NOT NULL
+	   AND json_extract(workflow_json, '$.workflow_run_id') = ?
+	   AND job IN (` + strings.Join(holders, ",") + `)
+	 ORDER BY created_at DESC, id DESC LIMIT ?`
+	rows, err := d.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: WorkflowRunJobs: %w", err)
+	}
+	return scanRuns(rows)
+}
+
 // NonTerminal returns every run a crash could have left mid-flight, oldest
 // first, for the startup reconciliation at RUNNER_SPEC §6 step 5.
 //

@@ -370,7 +370,9 @@ type jobReport struct {
 	unisolated         bool
 	moving, notAllowed []string
 	secrets            []string
-	environment        string
+	// artifactsFrom is the jobs whose uploads its downloads read (A84).
+	artifactsFrom []string
+	environment   string
 	// stopped: this machine's variables keep the job from running here, on
 	// every event it was checked against, so nothing it needs is in the way.
 	stopped bool
@@ -778,7 +780,7 @@ func checkJob(
 	ctx context.Context, cfg *config.Config, t checkTarget, inv inventory, fetcher *stubFetcher,
 	fsys fs.FS, pw *parsedWorkflow, pf *plannedFile, pj protocol.PlannedJob, rep *checkReport,
 ) jobReport {
-	jr := jobReport{key: pj.Key, name: pj.Name, labels: pj.Labels}
+	jr := jobReport{key: pj.Key, name: pj.Name, labels: pj.Labels, artifactsFrom: pj.ArtifactsFrom}
 	fail := func(text string, fixes ...string) {
 		jr.findings = append(jr.findings, finding{level: levelFail, text: text, fixes: fixes})
 	}
@@ -826,6 +828,9 @@ func checkJob(
 		// What runs the job is the question, not whether this event would:
 		// stoppedHere answers that, and the job's callers' if: too (A82).
 		IgnoreJobIf: true,
+		// What the plan made of its downloads, as a run works it out from
+		// its commit (A84).
+		ArtifactsFrom: func() []string { return pj.ArtifactsFrom },
 	})
 	checkActions(cfg, fetcher.seen(), rep, &jr, fail)
 	if err != nil {
@@ -1287,6 +1292,10 @@ func printCheckReport(w io.Writer, t checkTarget, rep checkReport, verbose bool)
 				if verbose {
 					printNeedsEvidence(w, st, "           ", j.needs)
 				}
+			}
+			if len(j.artifactsFrom) > 0 {
+				printf(w, "         %s\n", st.dim("artifacts from "+strings.Join(j.artifactsFrom, ", ")+
+					": runs on the machine that ran them (A84)"))
 			}
 			for _, f := range j.findings {
 				printFinding(w, st, "       ", f)

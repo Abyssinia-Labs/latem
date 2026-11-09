@@ -222,7 +222,7 @@ flight at once.
 ### 2.2 `protocol_version`
 
 `encode` sets `f.Version = protocol.Version` unconditionally, so **every frame
-in both directions carries it**. The current value is `"2.8"`.
+in both directions carries it**. The current value is `"2.9"`.
 
 **2.0 (amendment A52)** added the `plan` command and the `plan` frame that
 answers it, the workflow-run fields of `run` (§3.2), `update.outputs` (§4.2),
@@ -296,6 +296,20 @@ plane whose `hello` said 2.8, and before that plans each call as one job with an
 `error`. A 2.7 agent refuses a run whose `job` holds a `/`, so a control plane
 sends one only to an agent whose frames say 2.8. A control plane answers a 2.8
 agent's hello with 2.8.
+
+**2.9 (amendment A84)** added a planned job's `artifacts_from` (§4.8): the keys
+of the jobs of the workflow run whose uploads the job's `download-artifact`
+reads. An artifact stays on the machine that made it, so **such a job goes to
+the machine that ran those jobs, and to no other**. It waits while that machine
+is offline. It fails, saying why, when that machine is lost, when those jobs ran
+on more than one machine, or when that machine has no runner for the job's
+labels. A job none of whose sources ran (all skipped) has nothing to read there
+and is placed as any job. No `run` field is added: the agent works the list out
+again from the commit and reads only its own runs of those jobs, so a 2.8 agent
+sent such a job runs it and its download finds nothing. A control plane sends
+one only to an agent whose frames say 2.9. Before a control plane says 2.9, the
+agent plans such a job with an `error` naming 2.9, as it planned a call before
+2.8. A control plane answers a 2.9 agent's hello with 2.9.
 
 The agent's own test control plane fails a test if an inbound frame arrives
 without it, so a server that omits it is non-conformant against the suite that
@@ -902,6 +916,7 @@ The answer to a `plan` command, correlated by `plan.id`, and acked like an
 | `jobs[].labels` | array | `runs-on` after the **planning** machine's aliases and GitHub's hosted labels. Dispatch to a runner whose labels cover these only when `runs_on` is absent or the machine is too old to report its aliases. |
 | `jobs[].runs_on` | `[{label, hosted?}]` | 2.4, A68. `runs-on` before any machine's aliases: each `label` lowercased, without `self-hosted`, and `hosted`, what it stands for on a machine with no alias for it when that is not itself. **Read it per machine**: the machine's alias for `label`, else `hosted`, else `label` itself, which is how that machine will compile the job. Sent only to a control plane that said 2.4. |
 | `jobs[].reads_vars` | array | 2.4, A68. The variables that decide whether the job runs, where, and as what: everything of it but its steps. Names as the file writes them, read without case, or `"*"` when no list can say. Never a value. **Do not send the job to a machine whose `repos[].vars` differ on these from the machine that stands for the repository.** Sent only to a control plane that said 2.4. |
+| `jobs[].artifacts_from` | array | 2.9, A84. Keys of jobs it needs, directly or further up, whose uploads its `download-artifact` reads; job paths included. **Dispatch it only to the machine that ran these jobs**, every leg of a matrix among them, skipped ones aside, and only to an agent that said 2.9. Wait while that machine is offline. Fail the job, saying which, when it is lost, when they ran on two machines, or when it has no runner whose labels cover the job's. Sent only to a control plane that said 2.9. |
 | `jobs[].environment` | string | The environment's name. |
 | `jobs[].permissions` | object | The token's scopes in the workflow's vocabulary (`pull-requests`, not `pull_requests`), `read` or `write`; a scope absent has none. Always present: the job's, else the workflow's, else GitHub's restricted default (`contents` and `packages` read). |
 | `jobs[].concurrency` | object | Job-level, evaluated, enforced like the workflow's. |

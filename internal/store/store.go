@@ -182,6 +182,10 @@ type Store interface {
 	Create(ctx context.Context, r Run) error
 	Get(ctx context.Context, runID string) (Run, error)
 	List(ctx context.Context, f Filter) ([]Run, error)
+	// WorkflowRunJobs returns this machine's runs of the named jobs of one
+	// workflow run, newest first, at most limit: the runs a download-artifact
+	// may read (A84).
+	WorkflowRunJobs(ctx context.Context, repo, workflowRunID string, jobs []string, limit int) ([]Run, error)
 
 	// Transition persists a state change and any fields that accompany it. It
 	// MUST reject a transition the state machine does not allow, so an
@@ -306,6 +310,10 @@ func (NotImplemented) Get(context.Context, string) (Run, error) {
 
 func (NotImplemented) List(context.Context, Filter) ([]Run, error) {
 	return nil, unsupported("List")
+}
+
+func (NotImplemented) WorkflowRunJobs(context.Context, string, string, []string, int) ([]Run, error) {
+	return nil, unsupported("WorkflowRunJobs")
 }
 
 func (NotImplemented) Transition(context.Context, string, protocol.RunState, protocol.Update) error {

@@ -212,17 +212,18 @@ jobs:
 }
 
 // What an artifact step cannot reach is refused at the step, naming why: a
-// docker runner's runner.temp is inside the container, and anywhere but the
-// workspace and runner.temp is not an artifact step's to read (A77).
+// tart runner's runner.temp is inside its VM, which neither the agent nor a
+// copy reaches (docker's is copied, A84), and anywhere but the workspace and
+// runner.temp is not an artifact step's to read (A77).
 func TestExecute_ArtifactPathsOutOfReach(t *testing.T) {
 	cases := map[string]struct {
 		hostTemp bool
 		path     func(temp string) string
 		want     string
 	}{
-		"docker's runner.temp": {false, func(temp string) string { return filepath.Join(temp, "out.txt") }, "inside the container"},
-		"outside both":         {true, func(string) string { return "/etc/hosts" }, "outside the workspace and runner.temp"},
-		"a home directory":     {true, func(string) string { return "~/.ssh/id_ed25519" }, "home directory"},
+		"a VM's runner.temp": {false, func(temp string) string { return filepath.Join(temp, "out.txt") }, "inside its VM"},
+		"outside both":       {true, func(string) string { return "/etc/hosts" }, "outside the workspace and runner.temp"},
+		"a home directory":   {true, func(string) string { return "~/.ssh/id_ed25519" }, "home directory"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

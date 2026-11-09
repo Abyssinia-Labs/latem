@@ -41,6 +41,9 @@ type jobJSON struct {
 	Runner   string        `json:"runner,omitempty"`
 	Findings []findingJSON `json:"findings,omitempty"`
 	Needs    *needs.Report `json:"needs,omitempty"`
+	// ArtifactsFrom is the jobs whose uploads its downloads read, which it
+	// runs beside (A84).
+	ArtifactsFrom []string `json:"artifacts_from,omitempty"`
 }
 
 type findingJSON struct {
@@ -96,7 +99,7 @@ func printCheckJSON(w io.Writer, t checkTarget, rep checkReport, fixed []string)
 		for _, j := range wr.jobs {
 			wj.Jobs = append(wj.Jobs, jobJSON{
 				Key: j.key, Name: j.name, Level: levelName(j.level()), Runner: j.runner,
-				Findings: findingsJSON(j.findings), Needs: j.needs,
+				Findings: findingsJSON(j.findings), Needs: j.needs, ArtifactsFrom: j.artifactsFrom,
 			})
 		}
 		out.Workflows = append(out.Workflows, wj)

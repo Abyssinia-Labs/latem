@@ -76,6 +76,12 @@ type expander struct {
 	// name only known as the step runs, so that a download can be asked
 	// whether anything in this job could be what it finds.
 	uploads []string
+	// artifactsFrom answers which earlier jobs a download may also read
+	// (A84), asked once, by the first download that needs it; from is the
+	// answer.
+	artifactsFrom func() []string
+	from          []string
+	fromAsked     bool
 }
 
 func newExpander(loader ActionLoader, where string) *expander {

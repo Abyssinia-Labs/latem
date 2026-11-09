@@ -32,7 +32,9 @@ func (a *Agent) plan(ctx context.Context, t transport, req protocol.PlanRequest)
 	}
 	defer func() { <-a.planSlots }()
 
-	res := a.makePlan(ctx, req, planPeer{requires: speaksRequires(t), calls: speaksCalls(t)})
+	res := a.makePlan(ctx, req, planPeer{
+		requires: speaksRequires(t), calls: speaksCalls(t), artifacts: speaksArtifacts(t),
+	})
 	if res.Error != "" {
 		a.log.Warn("plan refused", "plan_id", req.ID, "repo", req.Repo, "code", res.ErrorCode, "err", res.Error)
 	} else {
@@ -51,6 +53,9 @@ type planPeer struct {
 	// calls: a called workflow's jobs are planned into the caller's run,
 	// under job paths (A82, 2.8). Without it a call is one job that fails.
 	calls bool
+	// artifacts: a job that downloads another job's artifacts goes to the
+	// machine that ran that job (A84, 2.9). Without it such a job fails.
+	artifacts bool
 }
 
 // makePlan reads the event's commit from this machine's own mirror and plans
@@ -89,10 +94,11 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, peer pla
 	}
 	ev := req.Event
 	workflows, err := workflow.PlanEvent(fsys, ev, workflow.PlanOptions{
-		Repository:   slug,
-		LabelAliases: cfg.LabelAliases,
-		Vars:         repoCfg.VarsFor(""),
-		NoCalls:      !peer.calls,
+		Repository:        slug,
+		LabelAliases:      cfg.LabelAliases,
+		Vars:              repoCfg.VarsFor(""),
+		NoCalls:           !peer.calls,
+		NoPlacedArtifacts: !peer.artifacts,
 		Changed: func() ([]string, error) {
 			// A push compares with what the branch was; anything else — a
 			// new branch, a pull request's merge commit — with the commit's

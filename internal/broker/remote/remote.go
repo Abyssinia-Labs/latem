@@ -736,8 +736,8 @@ func (b *Broker) SpeaksRequires() bool {
 // planForPeer is p without the fields a control plane has not said it knows.
 // A copy: the caller's slices are not written.
 func (b *Broker) planForPeer(p protocol.PlanResult) protocol.PlanResult {
-	requires, placement := b.SpeaksRequires(), b.speaksPlacement()
-	if requires && placement {
+	requires, placement, artifacts := b.SpeaksRequires(), b.speaksPlacement(), b.SpeaksArtifacts()
+	if requires && placement && artifacts {
 		return p
 	}
 	workflows := slices.Clone(p.Workflows)
@@ -749,6 +749,11 @@ func (b *Broker) planForPeer(p protocol.PlanResult) protocol.PlanResult {
 			}
 			if !placement {
 				jobs[j].RunsOn, jobs[j].ReadsVars = nil, nil
+			}
+			if !artifacts {
+				// The plan was made without them for such a control plane
+				// (A84); this is the decoder's strictness, not the agent's.
+				jobs[j].ArtifactsFrom = nil
 			}
 		}
 		workflows[i].Jobs = jobs
@@ -765,6 +770,16 @@ func (b *Broker) SpeaksCalls() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return versionAtLeast(b.peerVersion, 2, 8)
+}
+
+// SpeaksArtifacts reports whether the control plane said 2.9, so places a job
+// that downloads another job's artifacts on the machine that ran that job, and
+// sends it only to an agent that says 2.9 (A84). An older one would put it
+// anywhere, and on any other machine its download finds nothing.
+func (b *Broker) SpeaksArtifacts() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return versionAtLeast(b.peerVersion, 2, 9)
 }
 
 // speaksCapacity reports whether the control plane said 2.3, so takes a
