@@ -541,6 +541,35 @@ func TestIntegration_CacheVolumePersistsBetweenRuns(t *testing.T) {
 	}
 }
 
+// LAT-3: a target written `~/…`, as actions/cache writes ~/.cargo/git, is
+// mounted where the steps' own $HOME says, whichever user and image that is:
+// root's /root on Docker Desktop, / for a uid alpine has no entry for on Linux.
+func TestIntegration_TildeCacheIsMountedUnderTheStepsHome(t *testing.T) {
+	e := newIntegrationExecutor(t, nil)
+	const volName = "latem-test-cache-lat3"
+	cache := []executor.CacheMount{{Name: "test", Source: volName, Target: "~/.latem-lat3"}}
+
+	t.Cleanup(func() {
+		if _, err := exec.LookPath("docker"); err == nil {
+			_ = exec.Command("docker", "volume", "rm", "-f", volName).Run()
+		}
+	})
+
+	first, _ := prepareRun(t, e, "int-lat3-1", func(s *executor.Spec) { s.Caches = cache })
+	if code, out := run(t, first, "warm", `echo warmed > "$HOME/.latem-lat3/marker"`); code != 0 {
+		t.Fatalf("warming the cache under $HOME exited %d: %s", code, out)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	second, _ := prepareRun(t, e, "int-lat3-2", func(s *executor.Spec) { s.Caches = cache })
+	code, out := run(t, second, "read", `cat "$HOME/.latem-lat3/marker"`)
+	if code != 0 || !strings.Contains(out, "warmed") {
+		t.Errorf("the cache under $HOME did not survive the run: exit %d, %q", code, out)
+	}
+}
+
 // The base image contract check, against an image that deliberately does not
 // satisfy it. Alpine has no uid 1000, no bash and no git, so `latem doctor`
 // must say so by name rather than failing vaguely.

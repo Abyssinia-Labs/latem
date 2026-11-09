@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -240,6 +241,13 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 	if img == "" {
 		return nil, codeErr(protocol.ErrExecutor, "no image: neither the job nor the runner names one")
 	}
+	// Expand ~ once, here, and validate, mount and hand on the result: the
+	// native executor's first A38 expanded a copy and mounted the original.
+	caches, err := e.expandCacheTargets(ctx, img, spec.Caches)
+	if err != nil {
+		return nil, err
+	}
+	spec.Caches = caches
 	if err := validateCacheMounts(spec.Caches); err != nil {
 		return nil, err
 	}
@@ -444,6 +452,72 @@ func validateCacheMounts(caches []executor.CacheMount) error {
 		seen[target] = c.Name
 	}
 	return nil
+}
+
+// homeProbeScript prints $HOME as a step sees it. A compile-time constant,
+// handed to the shell as one argv element (INV-3).
+const homeProbeScript = `printf 'home=%s\n' "${HOME:-}"`
+
+// expandCacheTargets resolves a leading ~ in each cache target to the home
+// the run's steps will have (amendment A38).
+//
+// That is the step user's home in this image: the image's HOME if it sets
+// one, else the daemon's reading of /etc/passwd for that user. Nothing on the
+// host knows it, and the mounts are fixed before the run's container starts,
+// so a probe container from the same image, as the same user, is asked. It
+// runs only when a target starts with ~, and once per run: remembering the
+// answer by image would outlive a tag rebuilt with another home.
+func (e *Executor) expandCacheTargets(
+	ctx context.Context, img string, in []executor.CacheMount,
+) ([]executor.CacheMount, error) {
+	tilde := func(c executor.CacheMount) bool {
+		return c.Target == "~" || strings.HasPrefix(c.Target, "~/")
+	}
+	if !slices.ContainsFunc(in, tilde) {
+		return in, nil
+	}
+	home, err := e.stepHome(ctx, img)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]executor.CacheMount, len(in))
+	copy(out, in)
+	for i := range out {
+		if tilde(out[i]) {
+			out[i].Target = path.Join(home, strings.TrimPrefix(out[i].Target, "~"))
+		}
+	}
+	return out, nil
+}
+
+// stepHome asks the image for the home its steps run with.
+func (e *Executor) stepHome(ctx context.Context, img string) (string, error) {
+	res, err := e.runProbe(ctx, probeSpec{
+		image: img,
+		// As the steps run: the user decides which /etc/passwd entry, and so
+		// which home, the daemon hands them.
+		user: e.user,
+		// As the entrypoint, because the image may declare one of its own.
+		entrypoint: []string{"/bin/sh", "-c", homeProbeScript},
+	})
+	if err != nil {
+		return "", wrapErr(protocol.ErrCache, err, "finding the home ~ stands for in image %q", img)
+	}
+	if res.exitCode != 0 {
+		return "", codeErr(protocol.ErrCache, "finding the home ~ stands for in image %q (exit %d): %s",
+			img, res.exitCode, firstLine(res.output))
+	}
+	home := parseProbeOutput(res.output)["home"]
+	if !path.IsAbs(home) {
+		who := "the image's user"
+		if e.user != "" {
+			who = "user " + e.user
+		}
+		return "", codeErr(protocol.ErrCache,
+			"a cache target starts with ~, but $HOME is %s for %s in image %q; "+
+				"the image needs a user with a home (§13.1)", quoteOrUnset(home), who, img)
+	}
+	return path.Clean(home), nil
 }
 
 // ensureMounts builds the mount set and creates any named cache volume that
