@@ -49,7 +49,7 @@ type PlanOptions struct {
 	// one.
 	Vars map[string]string
 	// NoCalls plans a job that calls a workflow as one job that cannot run,
-	// saying why, for a control plane older than 2.8 (A81): it would refuse
+	// saying why, for a control plane older than 2.8 (A82): it would refuse
 	// a plan whose keys are job paths, and the whole plan with them.
 	NoCalls bool
 	// Changed lists the paths the event changed, computed in the mirror: a
@@ -484,7 +484,7 @@ func placeVarReads(w *Workflow, j *Job) []string {
 		visit(label)
 	}
 	for _, raw := range []json.RawMessage{
-		// A call's with: is its called jobs' inputs, which may place them (A81).
+		// A call's with: is its called jobs' inputs, which may place them (A82).
 		j.Environment, j.Strategy, j.Concurrency, j.ContinueOnError, j.With, w.Concurrency,
 	} {
 		var v any
@@ -994,7 +994,7 @@ func planReads(prog *expr.Program, sc expr.Scope) error {
 			return fmt.Errorf("${{ %s }}: github.%s is not known when a run is planned", src, k)
 		}
 	}
-	// A called workflow's input its caller gives from needs (A81).
+	// A called workflow's input its caller gives from needs (A82).
 	if name, li, ok := readsLateInput(prog, sc); ok {
 		return fmt.Errorf("${{ %s }} reads inputs.%s, which its caller gives as %s, and that is only known "+
 			"once the job runs", src, name, strings.TrimSpace(li.from))

@@ -369,7 +369,7 @@ func tryWorkflowFile(fsys fs.FS, flag, job string) (string, error) {
 		}
 		byFile[f] = p.wf.JobNames()
 		// A job of a called workflow is named by its job path, which
-		// starts with its caller's id (A81).
+		// starts with its caller's id (A82).
 		first, _, _ := strings.Cut(job, "/")
 		if p.wf.Jobs[first] != nil {
 			has = append(has, f)
@@ -402,7 +402,7 @@ func tryLeg(pw protocol.PlannedWorkflow, job string, want map[string]string) (pr
 	}
 	if len(legs) == 0 {
 		// A job that calls a workflow runs as the called workflow's jobs, each
-		// named by its job path (A81).
+		// named by its job path (A82).
 		var called []string
 		for _, pj := range pw.Jobs {
 			if strings.HasPrefix(pj.Key, job+"/") && !slices.Contains(called, pj.Key) {

@@ -77,7 +77,7 @@ func TestResolveScoped(t *testing.T) {
 }
 
 // A called workflow's job reads a secret as the name its caller passed it as,
-// kept under its own name; one with no candidates is missing (A81).
+// kept under its own name; one with no candidates is missing (A82).
 func TestResolveAs(t *testing.T) {
 	reg := &fakeRegistrar{}
 	p := &registeringProvider{reg: reg, t: t, values: map[string]string{

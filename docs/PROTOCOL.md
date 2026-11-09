@@ -285,7 +285,7 @@ fresh ones. The agent sends it to any control plane: `resume` goes before `hello
 says what one speaks, and a decoder of `resume` reads the fields it knows. A
 control plane answers a 2.7 agent's hello with 2.7.
 
-**2.8 (amendment A81)** lets a key be a **job path**: a job of a workflow that a
+**2.8 (amendment A82)** lets a key be a **job path**: a job of a workflow that a
 job calls (`uses: ./.github/workflows/x.yml`), planned into the caller's
 workflow run as `<caller>/<job>`, at most four ids, `release/package/pack`. It
 appears in a plan's `jobs[].key` and `jobs[].needs` (§4.8), and in `run.job` and
@@ -437,7 +437,7 @@ smuggled `script` or `image` is a hard decode failure at the agent.
 **A workflow run's job (2.0, A52)** adds the fields below, which are **all set or
 all absent** — a run carrying any of them without `workflow` is refused. `job` is
 then the job's id under `jobs:` in that file, which is what makes `web` in three
-files three different jobs. Since 2.8 (A81) it may be a job path, `release/pack`:
+files three different jobs. Since 2.8 (A82) it may be a job path, `release/pack`:
 the job `pack` of the workflow that the file's job `release` calls. The agent
 finds each id in a file it reads at the pinned commit, through the `uses:` of
 the one above, so no inbound field names the called file.
@@ -897,7 +897,7 @@ The answer to a `plan` command, correlated by `plan.id`, and acked like an
 | `workflows[].inputs` | object | A dispatch's inputs with defaults filled in; give every job of the run these. |
 | `workflows[].error` | string | Why this workflow could not be planned — it cannot be parsed, its `on:` or `needs:` is invalid, its `concurrency` reads something unknown when planning. **Report it as a failed run**, as GitHub reports an invalid workflow file. |
 | `jobs[]` | array | Ordered so each job comes after every job it needs. |
-| `jobs[].key`, `.name` | string | The id under `jobs:` (send it as `run.job`), and the display name a check run is named by. 2.8, A81: a job of a called workflow is keyed by its **job path**, the caller's id and its own joined by `/` (`release/pack`, at most four ids, each a job id), and named as GitHub names it, `release / pack`. Schedule it as any job; send it only to an agent that said 2.8. The caller itself is not in the plan: no machine runs it. |
+| `jobs[].key`, `.name` | string | The id under `jobs:` (send it as `run.job`), and the display name a check run is named by. 2.8, A82: a job of a called workflow is keyed by its **job path**, the caller's id and its own joined by `/` (`release/pack`, at most four ids, each a job id), and named as GitHub names it, `release / pack`. Schedule it as any job; send it only to an agent that said 2.8. The caller itself is not in the plan: no machine runs it. |
 | `jobs[].needs` | array | Keys of jobs in the same workflow run, job paths included. A job that needs a call needs every job of it; a job of a call needs its caller's needs. |
 | `jobs[].labels` | array | `runs-on` after the **planning** machine's aliases and GitHub's hosted labels. Dispatch to a runner whose labels cover these only when `runs_on` is absent or the machine is too old to report its aliases. |
 | `jobs[].runs_on` | `[{label, hosted?}]` | 2.4, A68. `runs-on` before any machine's aliases: each `label` lowercased, without `self-hosted`, and `hosted`, what it stands for on a machine with no alias for it when that is not itself. **Read it per machine**: the machine's alias for `label`, else `hosted`, else `label` itself, which is how that machine will compile the job. Sent only to a control plane that said 2.4. |

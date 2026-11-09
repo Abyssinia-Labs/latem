@@ -30,7 +30,7 @@ func speaksRequires(t transport) bool {
 }
 
 // callsSpeaker is a transport that can say whether its control plane
-// schedules a called workflow's jobs, keyed by job path (A81, 2.8).
+// schedules a called workflow's jobs, keyed by job path (A82, 2.8).
 type callsSpeaker interface{ SpeaksCalls() bool }
 
 func speaksCalls(t transport) bool {
@@ -73,7 +73,7 @@ func addRequires(ctx context.Context, mirror *source.Mirror, sha string, workflo
 			if pj.Error != "" {
 				continue
 			}
-			// A called workflow's job is read from its own file (A81).
+			// A called workflow's job is read from its own file (A82).
 			declaredIn, key, err := workflow.CalledJob(fsys, wf, pj.Key)
 			if err != nil {
 				continue

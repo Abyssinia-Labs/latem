@@ -19,7 +19,7 @@ import (
 )
 
 // A job may call another workflow of its repository instead of running steps:
-// `uses: ./.github/workflows/package.yml` (A81). Such a job is planned as the
+// `uses: ./.github/workflows/package.yml` (A82). Such a job is planned as the
 // called workflow's jobs, into the caller's own workflow run, each under a job
 // path — the caller's id, "/", the called job's id — and named as GitHub
 // names it, "release / pack". When one of them runs it is compiled from the
@@ -54,7 +54,7 @@ func localCall(uses string) (string, error) {
 		return "", fmt.Errorf("uses: %s is not a file directly under %s, and GitHub calls no other", uses, Dir)
 	case remoteCallPattern.MatchString(u):
 		return "", fmt.Errorf("uses: calls %s, a workflow in another repository, which latem does not run: "+
-			"what it runs would come from outside the commit this run is pinned to (A81, INV-5)", uses)
+			"what it runs would come from outside the commit this run is pinned to (A82, INV-5)", uses)
 	}
 	return "", fmt.Errorf("uses: %q is neither ./%s/<file> nor owner/repo/%s/<file>@ref", uses, Dir, Dir)
 }
@@ -113,7 +113,7 @@ func readCall(w *Workflow, key string) (*callSpec, error) {
 		notYet = append(notYet, "concurrency:")
 	}
 	if len(notYet) > 0 {
-		return nil, fmt.Errorf("a call with %s is not planned yet (A81)", strings.Join(notYet, " or "))
+		return nil, fmt.Errorf("a call with %s is not planned yet (A82)", strings.Join(notYet, " or "))
 	}
 
 	spec := &callSpec{file: file, with: map[string]any{}}
@@ -311,12 +311,12 @@ var secretRefPattern = regexp.MustCompile(`^\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0
 func secretRef(value string) (string, error) {
 	m := secretRefPattern.FindStringSubmatch(strings.TrimSpace(value))
 	if m == nil {
-		return "", fmt.Errorf("%q: latem passes a secret written ${{ secrets.NAME }}, and nothing else (A81)", value)
+		return "", fmt.Errorf("%q: latem passes a secret written ${{ secrets.NAME }}, and nothing else (A82)", value)
 	}
 	return m[1], nil
 }
 
-// passSecrets is what each secret of a called workflow reads as (A81), given
+// passSecrets is what each secret of a called workflow reads as (A82), given
 // what each of its caller's reads as — nil for the triggered workflow, whose
 // every secret is itself. Keys are upper-cased, as secret names do not go by
 // case. inherit passes the caller's on as they are; a map passes one each; no
@@ -341,7 +341,7 @@ func passSecrets(spec *callSpec, from map[string]string) (map[string]string, err
 }
 
 // lateInput stands in a plan's inputs context for an input of a called
-// workflow that only a run can answer (A81): its caller's with: reads needs, a
+// workflow that only a run can answer (A82): its caller's with: reads needs, a
 // github property a plan does not have, or an input that is itself one of
 // these. planReads refuses to read one, so nothing planned depends on a value
 // the plan made up.
@@ -353,7 +353,7 @@ var withContexts = map[string]bool{
 }
 
 // callInputs answers a call's with: as the called workflow declares its
-// inputs, against the caller's scope (A81). An input it does not declare, and
+// inputs, against the caller's scope (A82). An input it does not declare, and
 // a required one left out, are refused; a default fills in the rest, and each
 // value takes its input's type. planning is the plan asking: a value the plan
 // cannot answer is a lateInput, which a run answers.
@@ -516,7 +516,7 @@ func readsLateInput(prog *expr.Program, sc expr.Scope) (string, lateInput, bool)
 	return "", lateInput{}, false
 }
 
-// callSite is where a workflow's jobs go in a plan (A81): the triggered
+// callSite is where a workflow's jobs go in a plan (A82): the triggered
 // workflow's at the top, and a called workflow's under the job that calls it.
 type callSite struct {
 	// prefix starts each job's key, "release/", and name each job's name,
@@ -642,7 +642,7 @@ func (p *planner) workflowJobs(
 	return out
 }
 
-// call plans a job that calls a workflow (A81): the called workflow's jobs,
+// call plans a job that calls a workflow (A82): the called workflow's jobs,
 // under job paths that start with the caller's, after the jobs the caller
 // needs. A call that cannot be planned is one job, under the caller's own
 // path, carrying why: it fails alone, and the jobs that need it are skipped.
@@ -698,14 +698,14 @@ func (p *planner) call(
 	}
 	if p.opts.NoCalls {
 		return failed(fmt.Sprintf("uses: calls %s, and the control plane this plan is for does not schedule "+
-			"a called workflow's jobs: that takes protocol 2.8 (A81)", spec.file))
+			"a called workflow's jobs: that takes protocol 2.8 (A82)", spec.file))
 	}
 	if slices.Contains(site.files, spec.file) {
 		return failed(fmt.Sprintf("uses: calls %s, which is already calling down to here (%s)",
 			spec.file, strings.Join(append(slices.Clone(site.files), spec.file), " → ")))
 	}
 	if len(site.files) > protocol.MaxCallDepth {
-		return failed(fmt.Sprintf("uses: calls %s, %d calls down from %s; latem plans calls %d deep (A81)",
+		return failed(fmt.Sprintf("uses: calls %s, %d calls down from %s; latem plans calls %d deep (A82)",
 			spec.file, len(site.files), site.files[0], protocol.MaxCallDepth))
 	}
 	cw, err := readCalled(p.fsys, spec.file)
@@ -716,7 +716,7 @@ func (p *planner) call(
 		return failed(err.Error())
 	}
 	if len(cw.w.Concurrency) > 0 {
-		return failed(spec.file + ": concurrency: on a called workflow is not planned yet (A81)")
+		return failed(spec.file + ": concurrency: on a called workflow is not planned yet (A82)")
 	}
 	inputs, err := callInputs(cw, spec, sc, true)
 	if err != nil {
@@ -740,7 +740,7 @@ func (p *planner) call(
 	return p.workflowJobs(cw.w, order, withContext(sc, "inputs", inputs), calleePerms, sub)
 }
 
-// CalledJob finds the job a job path names (A81): the workflow that declares
+// CalledJob finds the job a job path names (A82): the workflow that declares
 // it, read from fsys through each caller's uses:, and its id there. A job's
 // own id names itself, in w.
 func CalledJob(fsys fs.FS, w *Workflow, jobPath string) (*Workflow, string, error) {
@@ -788,7 +788,7 @@ func unknownJob(w *Workflow, key string) error {
 }
 
 // calledJob is a run's job as its job path names it, and what compiling it
-// takes from the calls above it (A81).
+// takes from the calls above it (A82).
 type calledJob struct {
 	w   *Workflow
 	key string
@@ -804,7 +804,7 @@ type calledJob struct {
 }
 
 // resolveCall walks a run's job path down from the triggered workflow, as the
-// run starts (A81). Each caller's if: is answered against its own needs, as
+// run starts (A82). Each caller's if: is answered against its own needs, as
 // GitHub answers it before the called workflow starts, and a false one skips
 // the job; each with: is answered against the caller's scope into the called
 // workflow's inputs; each secrets: decides what the level below reads its
@@ -906,7 +906,7 @@ func resolveCall(fsys fs.FS, w *Workflow, jobPath string, sc expr.Scope, opts Op
 	return cur, nil
 }
 
-// jobNeeds is the needs context a job of w reads (A81): each job it needs, by
+// jobNeeds is the needs context a job of w reads (A82): each job it needs, by
 // the id it needs it by. A run carries its needs by planned key, so a job
 // under a call finds its own under the call's prefix, and a job that called a
 // workflow is answered from the jobs of that call.
@@ -996,7 +996,7 @@ func callOutcome(results []string) string {
 	return protocol.NeedSuccess
 }
 
-// CompileJobPath compiles the job a workflow run's job path names (A81): one
+// CompileJobPath compiles the job a workflow run's job path names (A82): one
 // of w's own, or a job of a workflow w calls, read from fsys through each
 // caller's uses:. sc is the run's scope, its needs keyed as the run carries
 // them. The job's inputs to admission are w's dispatch's, which are the ones a

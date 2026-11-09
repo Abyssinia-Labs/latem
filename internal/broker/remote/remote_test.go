@@ -441,7 +441,7 @@ func TestRequires_OnlyToAControlPlaneThatSays22(t *testing.T) {
 }
 
 // A called workflow's jobs are planned, under job paths, only for a control
-// plane that says 2.8 (A81): an older one refuses a "/" in a plan's key, and
+// plane that says 2.8 (A82): an older one refuses a "/" in a plan's key, and
 // the whole plan with it.
 func TestCalls_OnlyForAControlPlaneThatSays28(t *testing.T) {
 	for _, c := range []struct {

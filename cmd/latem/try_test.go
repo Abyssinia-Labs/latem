@@ -223,7 +223,7 @@ func TestTry_FindsTheJobsWorkflow(t *testing.T) {
 }
 
 // A called workflow's job is tried by its job path, with its caller's needs
-// taken as succeeded; the caller itself names its jobs (A81).
+// taken as succeeded; the caller itself names its jobs (A82).
 func TestTry_AJobOfACalledWorkflow(t *testing.T) {
 	dir := configDirWith(t, baseConfig)
 	fakeStores(t, true)

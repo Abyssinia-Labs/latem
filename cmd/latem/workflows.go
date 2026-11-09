@@ -75,7 +75,7 @@ For every job it reports whether a runner here takes it, and if not why:
 A matrix job is checked leg by leg, as the plan expands it, and each leg's
 runs-on — which may read the matrix — is matched on its own (A55). A job that
 calls a workflow of the repository is checked as the called workflow's jobs,
-each by its job path, release/pack (A81).
+each by its job path, release/pack (A82).
 
 Each job's needs are said too (A59): iOS, a macOS app, Android, Linux with a
 Docker daemon, and what of Xcode, the JDK, the Android SDK and the rest its
@@ -788,7 +788,7 @@ func checkJob(
 	// it: a job latem cannot run is exactly the one worth explaining.
 	w, err := workflow.Parse(pw.data, pw.file)
 	if err == nil {
-		// A called workflow's job is read from its own file (A81).
+		// A called workflow's job is read from its own file (A82).
 		if declaredIn, key, cerr := workflow.CalledJob(fsys, w, pj.Key); cerr == nil {
 			leg := needs.Leg{Labels: pj.Labels}
 			_ = json.Unmarshal(pj.Matrix, &leg.Matrix)
@@ -824,7 +824,7 @@ func checkJob(
 		// made, exactly what a run of it would be given as run.matrix.
 		Matrix: pj.Matrix,
 		// What runs the job is the question, not whether this event would:
-		// stoppedHere answers that, and the job's callers' if: too (A81).
+		// stoppedHere answers that, and the job's callers' if: too (A82).
 		IgnoreJobIf: true,
 	})
 	checkActions(cfg, fetcher.seen(), rep, &jr, fail)
@@ -1103,7 +1103,7 @@ func checkSecrets(t checkTarget, inv inventory, job *registry.Job, jr *jobReport
 			}
 			continue
 		}
-		// A called workflow's job (A81): its environment's own, else what
+		// A called workflow's job (A82): its environment's own, else what
 		// its callers pass it as.
 		if inv.inEnvironment(name, t.repoKey, job.Environment) {
 			continue

@@ -12,7 +12,7 @@ import (
 )
 
 // calls is sokie's release path, cut down: a dispatched deploy whose cli job
-// calls release.yml, which calls package.yml (A81).
+// calls release.yml, which calls package.yml (A82).
 var calls = map[string]string{
 	"deploy.yml": `
 name: Deploy
@@ -146,7 +146,7 @@ func dispatchDeploy(t *testing.T, files map[string]string, opts PlanOptions) []p
 // A called workflow's jobs are planned into the caller's run, under job
 // paths, named as GitHub names them, after the caller's needs, with tokens no
 // wider than the caller grants. A job needing the caller needs every job of
-// the call (A81).
+// the call (A82).
 func TestPlanCalls(t *testing.T) {
 	jobs := dispatchDeploy(t, calls, PlanOptions{})
 	type row struct {
@@ -305,7 +305,7 @@ func TestPlanCallRefusals(t *testing.T) {
 	}
 }
 
-// latem plans calls three deep, and refuses the fourth by name (A81).
+// latem plans calls three deep, and refuses the fourth by name (A82).
 func TestPlanCallDepth(t *testing.T) {
 	level := func(next string) string {
 		return "on: workflow_call\njobs:\n  leaf:\n    runs-on: ubuntu-latest\n    steps: [{run: x}]\n" +
@@ -333,7 +333,7 @@ func TestPlanCallDepth(t *testing.T) {
 
 // A run of a called workflow's job: its callers' if: answered against their
 // own needs, its inputs from their with:, typed as declared, its needs by the
-// ids it needs them by, and its secrets as its callers pass them (A81).
+// ids it needs them by, and its secrets as its callers pass them (A82).
 func TestCompileCalledJob(t *testing.T) {
 	fsys := fleetFS(calls)
 	deploy, err := Parse([]byte(calls["deploy.yml"]), Dir+"/deploy.yml")

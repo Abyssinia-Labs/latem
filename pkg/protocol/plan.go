@@ -133,7 +133,7 @@ type PlannedWorkflow struct {
 // PlannedJob is one job of a planned workflow run.
 type PlannedJob struct {
 	// Key is the job's id under jobs:, which needs: and a run's job name.
-	// Since 2.8 (A81) a called workflow's job is planned into its caller's
+	// Since 2.8 (A82) a called workflow's job is planned into its caller's
 	// workflow run, and its key is a job path: the caller's id, then the
 	// called job's, joined by "/" — release/package/pack. GitHub's ids
 	// cannot hold a "/", so a path is never a job's own id.
@@ -244,13 +244,13 @@ type NeedResult struct {
 // jobKey is GitHub's rule for a job's id.
 const jobKey = `[_A-Za-z][A-Za-z0-9_-]*`
 
-// MaxCallDepth is how many workflow calls deep a job may be planned (A81):
+// MaxCallDepth is how many workflow calls deep a job may be planned (A82):
 // a job of a workflow that a workflow calls, which another workflow calls,
 // which the triggered workflow calls. GitHub allows deeper; a job path with
 // more segments than this allows is no job latem planned.
 const MaxCallDepth = 3
 
-// jobPathPattern is a run's job (2.8, A81): a job's id, or a job path of at
+// jobPathPattern is a run's job (2.8, A82): a job's id, or a job path of at
 // most MaxCallDepth calls.
 var jobPathPattern = regexp.MustCompile(`^` + jobKey + `(/` + jobKey + `){0,` + fmt.Sprint(MaxCallDepth) + `}$`)
 

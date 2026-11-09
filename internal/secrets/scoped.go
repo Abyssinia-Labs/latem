@@ -65,7 +65,7 @@ func ResolveScoped(
 // ResolveAs is [ResolveScoped] with each name's candidates given rather than
 // made from scopes: name is looked up as each of lookup(name), in order, and
 // kept under name. A called workflow's job reads a secret as whatever its
-// caller passed it as (A81), so its candidates are not its own name's.
+// caller passed it as (A82), so its candidates are not its own name's.
 func ResolveAs(
 	ctx context.Context, p Provider, reg logstream.Registrar, names []string, lookup func(name string) []string,
 ) (set *Set, missing []string, err error) {

@@ -49,7 +49,7 @@ type planPeer struct {
 	// requires: each job also says what it needs of a machine (A61, 2.2).
 	requires bool
 	// calls: a called workflow's jobs are planned into the caller's run,
-	// under job paths (A81, 2.8). Without it a call is one job that fails.
+	// under job paths (A82, 2.8). Without it a call is one job that fails.
 	calls bool
 }
 

@@ -254,7 +254,7 @@ jobs:
 
 // A job that calls a workflow of the repository is checked as the called
 // workflow's jobs, each by its job path, with the secrets its caller passes
-// (A81).
+// (A82).
 func TestWorkflowsCheck_ACalledWorkflowsJobs(t *testing.T) {
 	dir := configDirWith(t, baseConfig)
 	kc := fakeStores(t, true)

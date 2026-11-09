@@ -82,7 +82,7 @@ func (x *execution) githubEnv() map[string]string {
 	}
 	if x.workflow != nil {
 		env["GITHUB_WORKFLOW"] = x.workflow.Workflow
-		// A called workflow's job is its own id there, as on GitHub (A81).
+		// A called workflow's job is its own id there, as on GitHub (A82).
 		if x.workflow.Job != "" {
 			env["GITHUB_JOB"] = x.workflow.Job
 		}

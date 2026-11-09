@@ -27,7 +27,7 @@ import (
 // The scope must carry the needs context the run arrived with. A job whose
 // if: is false comes back with [registry.Job.Skip] set and is not validated,
 // because none of it runs. jobKey may be a job path, a job of a workflow the
-// file calls (A81): [CompileJobPath].
+// file calls (A82): [CompileJobPath].
 func ResolveWorkflowJob(
 	ctx context.Context, workspace, file, jobKey string, sc expr.Scope, opts Options,
 ) (*registry.Registry, Source, error) {

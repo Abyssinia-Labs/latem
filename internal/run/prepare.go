@@ -125,7 +125,7 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 
 // secretLookup is the names a workflow job's secret is looked up as, most
 // specific first (A50): under its environment and repository, its repository,
-// then the machine's. A called workflow's job (A81) reads its own
+// then the machine's. A called workflow's job (A82) reads its own
 // environment's secrets as its own, as on GitHub, and every other one as the
 // name its callers passed it as, without the environment, which a caller never
 // has; one no caller passed is looked up as nothing.

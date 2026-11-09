@@ -45,7 +45,7 @@ func (x *execution) noteNeeds(reg *registry.Registry, runner *Runner) {
 		if err != nil {
 			return
 		}
-		// A called workflow's job is read from its own file (A81).
+		// A called workflow's job is read from its own file (A82).
 		declaredIn, key, err := workflow.CalledJob(fsys, wf, x.req.Job)
 		if err != nil {
 			return

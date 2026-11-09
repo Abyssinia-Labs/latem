@@ -285,7 +285,7 @@ func TestCommandUnmarshal_WorkflowRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(run("")), &c); err != nil {
 		t.Fatalf("a 1.0 run is still a run: %v", err)
 	}
-	// 2.8 (A81): a called workflow's job is named by its job path, and so is
+	// 2.8 (A82): a called workflow's job is named by its job path, and so is
 	// a need on one; a path is never deeper than MaxCallDepth calls.
 	called := strings.Replace(run(full), `"job":"web"`, `"job":"release/package/pack"`, 1)
 	called = strings.Replace(called, `"lint":{`, `"release/plan":{`, 1)

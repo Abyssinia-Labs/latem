@@ -439,10 +439,10 @@ func (j *Job) unsupported(file, name string, workflowRun bool) error {
 	switch {
 	case j.Uses != "" && workflowRun:
 		// A workflow run plans a call as the called workflow's jobs, and a
-		// run names one of those by its job path (A81).
+		// run names one of those by its job path (A82).
 		add("uses: (a called workflow)", "the job runs as the called workflow's jobs; name one as <job>/<called job>")
 	case j.Uses != "":
-		add("uses: (a called workflow)", "a call is planned into a workflow run, and this run is not a workflow run's job (A81)")
+		add("uses: (a called workflow)", "a call is planned into a workflow run, and this run is not a workflow run's job (A82)")
 	case len(j.With) > 0 || len(j.Secrets) > 0:
 		add("with: or secrets: on a job", "only a job that calls a workflow has them, as on GitHub")
 	}
