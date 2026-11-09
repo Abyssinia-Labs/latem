@@ -90,3 +90,64 @@ func TestIntegration_CheckoutMovesTheTreeNotTheJob(t *testing.T) {
 		})
 	}
 }
+
+// sparseWorkflow is sokie's release-cli plan (A83): one file, not in cone
+// mode, then a checkout with no patterns, which brings the whole tree back.
+// Each step asks the working tree itself, as the build script after it would.
+const sparseWorkflow = `on: [push]
+jobs:
+  plan:
+    runs-on: [test]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packages/cli/package.json
+          sparse-checkout-cone-mode: false
+      - shell: sh
+        run: |
+          left=$(find . -path ./.git -prune -o -type f -print)
+          echo "sparse tree: $left"
+          test "$left" = ./packages/cli/package.json
+          grep -q 1.2.3 packages/cli/package.json
+      - uses: actions/checkout@v6
+      - shell: sh
+        run: |
+          test -f marker.txt
+          test -f packages/cli/index.js
+          test -f .github/workflows/sp.yml
+`
+
+// TestIntegration_SparseCheckoutLeavesOnlyItsPaths is A83 on both
+// executors: a sparse checkout leaves the workspace holding only what its
+// patterns match, with the job's own git doing it, and a later checkout
+// without patterns restores the rest.
+func TestIntegration_SparseCheckoutLeavesOnlyItsPaths(t *testing.T) {
+	for _, kind := range []string{"docker", "native"} {
+		t.Run(kind, func(t *testing.T) {
+			m := newMachine(t, machineOptions{
+				jobs:         fullRunJobs,
+				executorKind: kind,
+				files: map[string]string{
+					"marker.txt":                "one\n",
+					"packages/cli/package.json": `{"version": "1.2.3"}` + "\n",
+					"packages/cli/index.js":     "cli\n",
+					".github/workflows/sp.yml":  sparseWorkflow,
+				},
+			})
+			m.submit(t, "rsp", "plan", "main", nil)
+			r := m.terminal(t, "rsp", 5*time.Minute)
+			if r.State != protocol.StateSucceeded {
+				t.Fatalf("run finished %s (%s): %s\n--- log ---\n%s", r.State, r.ErrorCode, r.ErrorMsg, m.log("rsp"))
+			}
+			log := m.log("rsp")
+			for _, want := range []string{
+				"checkout: sparse, not cone mode, leaving only packages/cli/package.json",
+				"sparse tree: ./packages/cli/package.json",
+			} {
+				if !strings.Contains(log, want) {
+					t.Errorf("the log does not say %q:\n%s", want, log)
+				}
+			}
+		})
+	}
+}

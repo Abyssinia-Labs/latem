@@ -102,9 +102,11 @@ rather than re-running the workflow. `ref:` reaches any commit your
 such as `ref: main` after an earlier job pushed, a rollback tag, or
 `needs.bump.outputs.sha`. Anything else fails the step. `fetch-depth` and
 `fetch-tags` are answered by the full clone, `token:` must be a secret, and
-`persist-credentials: false` leaves no credential. The step's git runs inside
-the job's environment, so a docker image needs git, and `main`'s branch
-protection has to let the App push.
+`persist-credentials: false` leaves no credential. `sparse-checkout` leaves
+only the paths it lists in the workspace, in cone mode unless
+`sparse-checkout-cone-mode: false`; it needs git 2.35 or later. The step's git
+runs inside the job's environment, so a docker image needs git, and `main`'s
+branch protection has to let the App push.
 
 ## `.latem/jobs.yaml`
 

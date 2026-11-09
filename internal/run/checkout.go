@@ -71,8 +71,18 @@ func (x *execution) runCheckoutStep(
 		return fail(err, protocol.ErrSource)
 	}
 	x.noteCheckout(written, target)
+	if len(c.Sparse) > 0 {
+		mode := "cone mode"
+		if !c.SparseCone {
+			mode = "not cone mode"
+		}
+		x.note("checkout: sparse, %s, leaving only %s", mode, strings.Join(c.Sparse, ", "))
+	}
 
-	sw := source.Switch{SHA: target.sha, Clean: c.Clean, Tracking: written != ""}
+	sw := source.Switch{
+		SHA: target.sha, Clean: c.Clean, Tracking: written != "",
+		Sparse: c.Sparse, SparseCone: c.SparseCone,
+	}
 	if b, ok := strings.CutPrefix(target.ref, "refs/heads/"); ok {
 		sw.Branch = b
 	}

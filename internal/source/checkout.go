@@ -157,6 +157,12 @@ type Switch struct {
 	// as GitHub's `git clean -ffdx`. It cannot empty a cache: both executors
 	// refuse a cache target inside the workspace.
 	Clean bool
+	// Sparse, when set, leaves only the paths its patterns match in the
+	// working tree, in cone mode when SparseCone is set, as GitHub's
+	// `sparse-checkout:` does. Empty turns off a sparse checkout an earlier
+	// step left, so the whole tree is back.
+	Sparse     []string
+	SparseCone bool
 	// Remote is the URL origin is pinned to, for fetch and push, or empty to
 	// leave origin alone. Include is the environment-visible path of a
 	// [CredentialConfig] file, or empty for no credential.
@@ -175,14 +181,21 @@ func (s Switch) Env() (map[string]string, error) {
 			return nil, err
 		}
 	}
+	for _, p := range s.Sparse {
+		if p == "" || strings.ContainsAny(p, "\n\x00") {
+			return nil, codeErr(protocol.ErrSource, "a sparse-checkout pattern is one line of a path, got %q", p)
+		}
+	}
 	return map[string]string{
-		"LATEM_CHECKOUT_SHA":      s.SHA,
-		"LATEM_CHECKOUT_BRANCH":   s.Branch,
-		"LATEM_CHECKOUT_TRACKING": boolEnv(s.Tracking),
-		"LATEM_CHECKOUT_PACK":     s.Pack,
-		"LATEM_CHECKOUT_CLEAN":    boolEnv(s.Clean),
-		"LATEM_CHECKOUT_REMOTE":   s.Remote,
-		"LATEM_CHECKOUT_INCLUDE":  s.Include,
+		"LATEM_CHECKOUT_SHA":         s.SHA,
+		"LATEM_CHECKOUT_BRANCH":      s.Branch,
+		"LATEM_CHECKOUT_TRACKING":    boolEnv(s.Tracking),
+		"LATEM_CHECKOUT_PACK":        s.Pack,
+		"LATEM_CHECKOUT_CLEAN":       boolEnv(s.Clean),
+		"LATEM_CHECKOUT_SPARSE":      strings.Join(s.Sparse, "\n"),
+		"LATEM_CHECKOUT_SPARSE_CONE": boolEnv(s.SparseCone && len(s.Sparse) > 0),
+		"LATEM_CHECKOUT_REMOTE":      s.Remote,
+		"LATEM_CHECKOUT_INCLUDE":     s.Include,
 	}, nil
 }
 
@@ -197,16 +210,24 @@ func boolEnv(b bool) string {
 // the workspace root. It is fixed text: every value arrives through the
 // environment and is only ever expanded inside double quotes (INV-3).
 //
-// The order matters in two places. The pack is indexed before the checkout
-// that needs its objects. And origin is pinned after the credential's
-// include is in place but checked last: a push must go out as the job's
-// token, never as whatever the operator's ~/.gitconfig would route it
-// through — an ssh `insteadOf`, a keychain helper — because a push as a
-// person re-triggers the workflow that made it, where a push as the App is
-// one latem-cloud ignores (A52). So origin and its push URL are set, a
-// self-mapping insteadOf outranks any shorter prefix the operator rewrites,
-// the credential helpers are emptied for this repository, and the step fails
-// if the push URL still comes out as anything else.
+// The order matters in three places. The pack is indexed before the checkout
+// that needs its objects. The sparse patterns are set before it too, as
+// GitHub's checkout sets them, so the checkout writes only what they match.
+// And origin is pinned after the credential's include is in place but checked
+// last: a push must go out as the job's token, never as whatever the
+// operator's ~/.gitconfig would route it through — an ssh `insteadOf`, a
+// keychain helper — because a push as a person re-triggers the workflow that
+// made it, where a push as the App is one latem-cloud ignores (A52). So origin
+// and its push URL are set, a self-mapping insteadOf outranks any shorter
+// prefix the operator rewrites, the credential helpers are emptied for this
+// repository, and the step fails if the push URL still comes out as anything
+// else.
+//
+// `sparse-checkout set` reads the patterns on stdin, where none can be taken
+// for an option, and is told the mode, because git's default for it changed
+// in 2.37; `--cone` and `--no-cone` need git 2.35. A checkout with no
+// patterns turns off a sparse checkout an earlier step left, as GitHub's
+// does, and drops the worktree-config extension that leaves behind.
 const SwitchScript = `set -e
 if [ -n "$LATEM_CHECKOUT_PACK" ]; then
   git index-pack --stdin < "$LATEM_CHECKOUT_PACK" > /dev/null
@@ -214,6 +235,17 @@ fi
 if [ -n "$LATEM_CHECKOUT_CLEAN" ]; then
   git clean -ffdx -q
   git reset --hard -q HEAD
+fi
+if [ -n "$LATEM_CHECKOUT_SPARSE" ]; then
+  if [ -n "$LATEM_CHECKOUT_SPARSE_CONE" ]; then
+    cone=--cone
+  else
+    cone=--no-cone
+  fi
+  printf '%s\n' "$LATEM_CHECKOUT_SPARSE" | git sparse-checkout set "$cone" --stdin
+elif [ "$(git config --bool core.sparseCheckout)" = true ]; then
+  git sparse-checkout disable
+  git config --unset-all extensions.worktreeConfig || [ $? -eq 5 ]
 fi
 if [ -n "$LATEM_CHECKOUT_BRANCH" ]; then
   git checkout -q --force -B "$LATEM_CHECKOUT_BRANCH" "$LATEM_CHECKOUT_SHA" --

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -112,14 +113,20 @@ jobs:
 // back.
 func TestCheckoutRefusesWhatItCannotHonour(t *testing.T) {
 	cases := map[string]struct{ with, want string }{
-		"another repo":         {"repository: other/thing", "another repository"},
-		"a subdirectory":       {"path: vendor/thing", "workspace root"},
-		"submodules":           {"submodules: true", "submodules: true is not built"},
-		"an unknown input":     {"sparse-checkout: src", "sparse-checkout (not an input"},
-		"a depth that is not":  {"fetch-depth: many", "whole number"},
-		"a written token":      {"token: ghp_0123456789abcdefghij", "belongs in a secret"},
-		"another server":       {"github-server-url: https://ghe.example.com", "not github.com"},
-		"a boolean that isn't": {"clean: maybe", "not true or false"},
+		"another repo":           {"repository: other/thing", "another repository"},
+		"a subdirectory":         {"path: vendor/thing", "workspace root"},
+		"submodules":             {"submodules: true", "submodules: true is not built"},
+		"an unknown input":       {"filter: blob:none", "filter (not an input"},
+		"a depth that is not":    {"fetch-depth: many", "whole number"},
+		"a written token":        {"token: ghp_0123456789abcdefghij", "belongs in a secret"},
+		"another server":         {"github-server-url: https://ghe.example.com", "not github.com"},
+		"a boolean that isn't":   {"clean: maybe", "not true or false"},
+		"a cone mode that isn't": {"sparse-checkout-cone-mode: maybe", "sparse-checkout-cone-mode: maybe is not true or false"},
+		"sparse paths known only as the job runs": {"sparse-checkout: ${{ steps.pick.outputs.paths }}",
+			"is only known once the job runs"},
+		"a NUL in a pattern": {`sparse-checkout: "src\0"`, "holds a NUL"},
+		// Evaluated now it would be empty, and empty is clean's default.
+		"a boolean known only as the job runs": {"clean: ${{ steps.pick.outputs.clean }}", "is only known once the job runs"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -134,4 +141,87 @@ func TestCheckoutRefusesWhatItCannotHonour(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A83: `sparse-checkout:` is GitHub's multi-line input — one pattern a line,
+// trimmed, blank lines dropped — and cone mode is on unless the step says
+// otherwise. Both may be expressions, evaluated when the job is compiled.
+func TestCheckoutSparse(t *testing.T) {
+	cases := map[string]struct {
+		with string
+		want []string
+		cone bool
+	}{
+		"sokie's release-cli plan": {
+			with: "sparse-checkout: packages/cli/package.json\n          sparse-checkout-cone-mode: false",
+			want: []string{"packages/cli/package.json"},
+		},
+		"directories, one a line": {
+			with: "sparse-checkout: |\n            .github\n\n              src  \n            docs/guide\n",
+			want: []string{".github", "src", "docs/guide"},
+			cone: true,
+		},
+		"cone mode said": {
+			with: "sparse-checkout: src\n          sparse-checkout-cone-mode: True",
+			want: []string{"src"},
+			cone: true,
+		},
+		"cone mode alone does nothing": {
+			with: "sparse-checkout-cone-mode: false",
+		},
+		"no patterns is the whole tree": {
+			with: "sparse-checkout: ''",
+			cone: true,
+		},
+		"a pattern from an input": {
+			with: "sparse-checkout: ${{ inputs.dir }}/package.json\n          sparse-checkout-cone-mode: ${{ inputs.cone }}",
+			want: []string{"packages/cli/package.json"},
+		},
+		"patterns from an input, several lines": {
+			with: "sparse-checkout: ${{ inputs.paths }}",
+			want: []string{"packages/cli", "docs"},
+			cone: true,
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			sc := checkoutScope()
+			sc.Contexts["inputs"] = map[string]any{"dir": "packages/cli", "cone": "false", "paths": "packages/cli\n\n  docs\n"}
+			job, err := CompileWith(t.Context(),
+				parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: actions/checkout@v6\n        with:\n          "+c.with+"\n      - run: make\n"),
+				"b", sc, Options{Policy: actions.DefaultPolicy()})
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			co := job.Steps[0].Checkout
+			if co == nil {
+				t.Fatalf("step 0 = %+v, want a checkout", job.Steps[0])
+			}
+			if !slices.Equal(co.Sparse, c.want) || co.SparseCone != c.cone {
+				t.Errorf("sparse = %q, cone %v; want %q, cone %v", co.Sparse, co.SparseCone, c.want, c.cone)
+			}
+		})
+	}
+
+	// A leg's matrix values are known when the leg is compiled.
+	t.Run("a pattern from the matrix", func(t *testing.T) {
+		job, err := CompileWith(t.Context(), parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    strategy:
+      matrix:
+        pkg: [packages/cli, packages/web]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: ${{ matrix.pkg }}
+`), "b", checkoutScope(), Options{Policy: actions.DefaultPolicy(), Matrix: json.RawMessage(`{"pkg":"packages/web"}`)})
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		if got := job.Steps[0].Checkout.Sparse; !slices.Equal(got, []string{"packages/web"}) {
+			t.Errorf("sparse = %q, want the leg's packages/web", got)
+		}
+	})
 }

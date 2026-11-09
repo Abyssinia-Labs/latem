@@ -2452,6 +2452,9 @@ check is there.
 already handles both for the run's own commit); `sparse-checkout`, `filter`, and the `ssh-*`
 inputs. A48's other answers stand.
 
+*A83 supersedes this paragraph's `sparse-checkout` answer: a checkout takes it, and
+`sparse-checkout-cone-mode`.*
+
 ### Amendment from planning a matrix
 
 | # | Section | Change | Why |
@@ -3801,6 +3804,62 @@ each of the call's jobs' outputs in `run.needs`, rather than the call's.
 refusal this lifts, sokie's `release-cli` has two more. `plan`'s checkout asks for
 `sparse-checkout`, which A53's checkout does not take. `publish` downloads what `pack` uploaded on
 another machine, which is artifacts across jobs (A77).
+
+### Amendment from a checkout of one file
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A83 | §5 INV-3 and INV-5, §12, A48, A53 | **A checkout step takes `sparse-checkout` and `sparse-checkout-cone-mode`. The patterns narrow the job's working tree to what they match, as `git sparse-checkout set` does, run as the step in the job's environment. Cone mode is on unless the step turns it off. A later checkout with no patterns brings the whole tree back. Both inputs must be known when the job is compiled. Every input A53 evaluates at compile now refuses a late context by name** | sokie's `release-cli` reads one file in its `plan` job: `sparse-checkout: packages/cli/package.json`, with cone mode off. A53 refused both inputs by name. Once A82 let the call be planned, that refusal was one of the two still stopping the CLI's release from running on latem |
+
+**What GitHub's checkout does.** v6 reads `sparse-checkout` as a multi-line input. Each line is
+one pattern, trimmed, and blank lines are dropped. Cone mode is `true` unless the input says
+otherwise. In cone mode it runs `git sparse-checkout set` with the patterns. Out of cone mode it
+turns on `core.sparseCheckout` and writes the patterns to `info/sparse-checkout`. Then it checks
+out the commit. A checkout without patterns runs `git sparse-checkout disable` and unsets the
+`extensions.worktreeConfig` that leaves behind. It also fetches with `--filter=blob:none`, so the
+objects of the paths left out are never downloaded.
+
+**What latem does.** The same, in the same order, in `source.SwitchScript`. The patterns are set
+before the commit is checked out, so the checkout writes only what they match. `set` reads them on
+stdin, so no pattern can be read as an option. It is told `--cone` or `--no-cone`, so the result
+does not depend on git's default, which became cone mode in 2.37. Those flags need git 2.35 in the
+job's environment; GitHub's checkout needs 2.28. A checkout with no patterns turns a sparse checkout
+off only if one is on, so a job that never asks for one runs no new git command. The log names the
+patterns and the mode.
+
+There is no partial clone. The workspace hard-links the mirror's whole object store (§12), so the
+patterns decide which paths are written, not which objects are local.
+
+**INV-5 and A53.** Only the working tree changes, and there is less of it. The commit is the one
+A53 admits: the run's own, or one reachable from a ref the policy admits. The definition is still
+compiled from the run's commit at gate 11. The objects still come from the agent's mirror. The
+patterns reach the step through its environment, one a line, and are expanded only inside double
+quotes (INV-3). A pattern holding a NUL is refused when the job is compiled, and the switch refuses
+an empty pattern or one of two lines.
+
+**Known when the job is compiled.** Both inputs may be expressions over what a compile can answer:
+`inputs`, `github`, `matrix`, and `needs` for a workflow run's job. One that reads `steps`, `job`,
+`runner` or `secrets` is refused by name, because a late context evaluates to empty at compile
+rather than failing. A late `sparse-checkout:` would have compiled as the whole tree. The same hole
+was open for every other input A53 evaluates at compile: `clean: ${{ steps.x.outputs.clean }}`
+compiled as `clean: true`. All of them now refuse a late context. `ref:` and `token:` are
+unchanged: A53 lets both be late.
+
+**Where latem is stricter.** GitHub reads any cone-mode value other than `true` as `false`. latem
+refuses one that is neither `true` nor `false`, as it does for A53's other booleans. A line of only
+spaces in the middle of the patterns is dropped. GitHub keeps it as an empty pattern.
+
+**`workflows check`.** On sokie at 43a95cb, `cli/plan` goes from refused to `ok` in both deploys'
+plans. Nothing else changes. `cli/publish` is still refused, for artifacts across jobs (A77).
+
+**What it costs.** The change is agent-side only, and costs nothing in a run that does not ask for
+it. A sparse checkout runs one more git command in the job's environment, and its environment
+carries two more variables. A checkout with no patterns reads one config key. There is no new frame,
+no protocol change and no change to latem-cloud.
+
+**Not in this amendment.** `filter`, which is still refused by name. Patterns known only as the job
+runs. A sparse checkout of a submodule or of LFS objects, since `submodules` and `lfs` are still
+refused unless false.
 
 ### Amendment from a release whose publish job ran somewhere else
 
