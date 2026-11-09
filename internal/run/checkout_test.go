@@ -225,3 +225,69 @@ jobs:
 		t.Errorf("the log does not say why:\n%s", log)
 	}
 }
+
+// A83: sokie's release-cli plan. The switch carries the patterns and the
+// mode, the log says what the tree was narrowed to, and a later checkout
+// with none carries none, which is what turns the sparse checkout off.
+func TestCheckout_SparseCarriesThePatterns(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	o := h.build()
+	req := workflowRequest(h, "deploy")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/checks.yml", `
+on: [push]
+jobs:
+  deploy:
+    runs-on: [linux]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            packages/cli/package.json
+            docs
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: src
+      - uses: actions/checkout@v6
+`)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s: %s", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	steps := h.env.executed()
+	if len(steps) != 3 {
+		t.Fatalf("executed %d steps, want 3: %+v", len(steps), steps)
+	}
+	for i, want := range []struct{ sparse, cone string }{
+		{"packages/cli/package.json\ndocs", ""},
+		{"src", "true"},
+		{"", ""},
+	} {
+		env := steps[i].Env
+		if steps[i].Run != source.SwitchScript {
+			t.Fatalf("step %d is not the checkout script", i)
+		}
+		if env["LATEM_CHECKOUT_SPARSE"] != want.sparse || env["LATEM_CHECKOUT_SPARSE_CONE"] != want.cone {
+			t.Errorf("step %d: sparse %q, cone %q; want %q, %q", i,
+				env["LATEM_CHECKOUT_SPARSE"], env["LATEM_CHECKOUT_SPARSE_CONE"], want.sparse, want.cone)
+		}
+		// The commit stays the run's own (INV-5).
+		if env["LATEM_CHECKOUT_SHA"] != h.source.sha {
+			t.Errorf("step %d checks out %s, want the run's commit", i, env["LATEM_CHECKOUT_SHA"])
+		}
+	}
+	log := h.logContents(req.ID)
+	for _, want := range []string{
+		"checkout: sparse, not cone mode, leaving only packages/cli/package.json, docs",
+		"checkout: sparse, cone mode, leaving only src",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("the log does not say %q:\n%s", want, log)
+		}
+	}
+}

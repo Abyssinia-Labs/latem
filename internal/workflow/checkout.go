@@ -20,6 +20,10 @@ type checkoutSpec struct {
 	ref, token                string
 	persist, clean, fetchTags bool
 	depth                     int
+	// sparse is `sparse-checkout:` split into patterns, none for a whole
+	// tree; cone is `sparse-checkout-cone-mode:`.
+	sparse []string
+	cone   bool
 }
 
 // checkoutInputs are the `with:` names latem's checkout answers (A53). Each
@@ -81,16 +85,50 @@ var checkoutInputs = map[string]func(v string, sc expr.Scope) string{
 		}
 		return ""
 	},
-	"show-progress":      func(string, expr.Scope) string { return "" },
-	"set-safe-directory": func(string, expr.Scope) string { return "" },
+	// A sparse checkout narrows the working tree, nothing more: the workspace
+	// already holds every object (A53), so there is no partial clone to make.
+	"sparse-checkout": func(v string, sc expr.Scope) string {
+		s, why := staticInput(v, sc)
+		if why != "" {
+			return why
+		}
+		if strings.ContainsRune(s, 0) {
+			return "holds a NUL, which no path can"
+		}
+		return ""
+	},
+	"sparse-checkout-cone-mode": boolInput,
+	"show-progress":             func(string, expr.Scope) string { return "" },
+	"set-safe-directory":        func(string, expr.Scope) string { return "" },
 }
 
 // staticInput evaluates a `with:` value that has to be known when the job is
 // compiled.
+//
+// A late context is refused by name, not by what it evaluates to: here
+// `steps.x.outputs.paths` is empty rather than an error, and empty is a value
+// every input takes — the whole tree for `sparse-checkout:`, the default for
+// a boolean — so it would pass as something the workflow never asked for.
 func staticInput(v string, sc expr.Scope) (string, string) {
+	const late = "is only known once the job runs, and this input is needed before"
+	if expr.Has(v) {
+		spans, err := expr.Spans(v)
+		if err != nil {
+			return "", late
+		}
+		for _, sp := range spans {
+			w, err := classify(sp.Prog, sc)
+			if err != nil {
+				return "", "cannot be evaluated: " + err.Error()
+			}
+			if w == whenLate {
+				return "", late
+			}
+		}
+	}
 	s, err := expr.EvalString(v, sc)
 	if err != nil {
-		return "", "is only known once the job runs, and this input is needed before"
+		return "", late
 	}
 	return s, ""
 }
@@ -155,7 +193,7 @@ func checkoutShim(st Step, sc expr.Scope) (*checkoutSpec, bool, error) {
 			st.Uses, strings.Join(refused, "; "))
 	}
 
-	spec := &checkoutSpec{persist: true, clean: true, depth: 1}
+	spec := &checkoutSpec{persist: true, clean: true, depth: 1, cone: true}
 	for name, v := range with {
 		switch strings.ToLower(name) {
 		case "ref":
@@ -174,9 +212,28 @@ func checkoutShim(st Step, sc expr.Scope) (*checkoutSpec, bool, error) {
 		case "fetch-depth":
 			s, _ := staticInput(v, sc)
 			spec.depth, _ = strconv.Atoi(strings.TrimSpace(s))
+		case "sparse-checkout":
+			s, _ := staticInput(v, sc)
+			spec.sparse = sparsePatterns(s)
+		case "sparse-checkout-cone-mode":
+			s, _ := staticInput(v, sc)
+			spec.cone = truthy(strings.TrimSpace(s))
 		}
 	}
 	return spec, true, nil
+}
+
+// sparsePatterns splits `sparse-checkout:` as GitHub's checkout reads it, one
+// pattern a line with the whitespace around each trimmed. A blank line is no
+// pattern, so a value with none is no sparse checkout at all.
+func sparsePatterns(s string) []string {
+	var out []string
+	for line := range strings.Lines(s) {
+		if p := strings.TrimSpace(line); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // compileCheckout turns a checkout's `with:` into what the run loop performs.
@@ -191,6 +248,8 @@ func compileCheckout(spec *checkoutSpec, sc expr.Scope, where string) (*registry
 		Clean:              spec.clean,
 		FetchDepth:         spec.depth,
 		FetchTags:          spec.fetchTags,
+		Sparse:             spec.sparse,
+		SparseCone:         spec.cone,
 	}
 	if strings.TrimSpace(spec.ref) != "" {
 		late, err := withValue("ref", spec.ref, sc, where)
