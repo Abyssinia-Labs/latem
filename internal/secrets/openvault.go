@@ -443,7 +443,7 @@ type OpenVaultError struct {
 func (e *OpenVaultError) Error() string {
 	switch {
 	case e.NotRunning:
-		return "openvault: the service is not running; start it with `openvault service`"
+		return "openvault: the service is not running; `openvault service install` keeps it running, or start `openvault service`"
 	case e.Refused:
 		return fmt.Sprintf("openvault: the service refused %s (error 0x%02x)", e.Op, e.Code)
 	case errors.Is(e.Err, context.DeadlineExceeded):

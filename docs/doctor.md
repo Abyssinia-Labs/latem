@@ -56,7 +56,8 @@ Among the checks worth knowing about:
 - **Whether the OpenVault service answers**, when `[secrets] openvault = true`,
   and which configured repositories this machine holds no collection for, by
   name. A stopped service fails every job that needs a value only it holds,
-  and a passphrase-protected key stops it at every reboot.
+  and a passphrase-protected key stops it at every reboot. The fix it names is
+  `openvault service install`, which keeps the service running.
 - **The locale a step's shell actually resolves to.** The agent sets
   `LANG=en_US.UTF-8`, and a login shell's profile can still overrule it, so
   `doctor` asks the shell rather than trusting the executor. Without it

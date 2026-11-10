@@ -147,8 +147,11 @@ sits in the agent's environment. latem never runs the `openvault` command,
 which can stop to ask for a passphrase. **If the service is not running, a
 job that needs a value from it fails with `E_SECRET_BACKEND` and can be
 retried**, as for a locked Keychain. It does not read as unset: a deploy
-should not run without its token. On a machine whose key opens with a
-passphrase, start `openvault service` after each reboot. A job that reads only
+should not run without its token. `openvault service install` (OpenVault 0.2.2
+and later) has the system start the service at login, and again if it stops. It
+needs a key that opens with nobody there: on a machine whose key file has a
+passphrase, remove it with `openvault keys passphrase --remove`, or start
+`openvault service` by hand after each reboot. A job that reads only
 machine-wide names never asks OpenVault.
 
 `latem doctor` says whether the service answers and which repositories this

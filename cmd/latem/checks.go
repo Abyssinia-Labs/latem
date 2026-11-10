@@ -1177,10 +1177,13 @@ func (d *doctor) checkOpenVault(ctx context.Context) []check {
 	}
 	have, err := ov.Collections(ctx)
 	if err != nil {
-		c := fail("openvault.service", "OpenVault service", err.Error(), "openvault service").
+		c := fail("openvault.service", "OpenVault service", err.Error(), "openvault service install").
 			withNotes("A job reading a secret that no store before OpenVault holds fails with " +
-				"E_SECRET_BACKEND until the service answers, and is retried. On a machine whose key " +
-				"opens with a passphrase, the service waits for it after every reboot.")
+				"E_SECRET_BACKEND until the service answers, and is retried. `openvault service " +
+				"install` (OpenVault 0.2.2 and later) has the system start it at login and again if " +
+				"it stops. It refuses a key that opens with a passphrase, which nobody would be there " +
+				"to type: remove it with `openvault keys passphrase --remove`, or start `openvault " +
+				"service` by hand after every reboot.")
 		if diag := backendDiagnostic(err); diag != "" {
 			c.Notes = append(c.Notes, diag)
 		}
