@@ -75,7 +75,7 @@ func TestDoctorOpenVault_AStoppedServiceFailsWithTheCommandThatStartsIt(t *testi
 	if c == nil || c.Level != levelFail {
 		t.Fatalf("checks = %+v, want openvault.service failing", got)
 	}
-	if !slices.Contains(c.Fix, "openvault service") {
+	if !slices.Contains(c.Fix, "openvault service install") {
 		t.Errorf("fix = %q, want the command that starts it", c.Fix)
 	}
 	if !strings.Contains(strings.Join(c.Notes, "\n"), "service.sock") {
