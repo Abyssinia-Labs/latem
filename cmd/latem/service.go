@@ -300,25 +300,37 @@ func newServiceStatusCommand() *cobra.Command {
 	}
 }
 
+// installedPath is the path that names this latem from outside it: in a
+// service, or on the command line ssh runs for `latem mcp`.
+//
+// For a Homebrew install it is Homebrew's link at the installed version, not
+// the keg it leads to: `brew upgrade` deletes the keg, and a service pointing
+// at it would start nothing at the next boot. The link moves with each
+// upgrade, and the agent follows it (A78).
+//
+// Otherwise it is the running binary, resolved through symlinks. Installing a
+// service that points at a symlink an operator later replaces is how a
+// machine silently keeps running an old agent.
+func installedPath() (string, error) {
+	if link, ok := homebrewLink(); ok {
+		return link, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locating this binary: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return exe, nil
+}
+
 // serviceSpec builds the service definition from this machine and this config.
 func serviceSpec(sys *system.System, execPath string) (system.ServiceSpec, error) {
-	if link, ok := homebrewLink(); execPath == "" && ok {
-		// Homebrew's link at the installed version, not the keg it leads to:
-		// `brew upgrade` deletes the keg, and a service pointing at it would
-		// start nothing at the next boot. The link moves with each upgrade,
-		// and the agent follows it (A78).
-		execPath = link
-	}
 	if execPath == "" {
-		// The running binary, resolved through symlinks. Installing a service
-		// that points at a symlink an operator later replaces is how a machine
-		// silently keeps running an old agent.
-		exe, err := os.Executable()
+		exe, err := installedPath()
 		if err != nil {
-			return system.ServiceSpec{}, fmt.Errorf("locating this binary: %w", err)
-		}
-		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-			exe = resolved
+			return system.ServiceSpec{}, err
 		}
 		execPath = exe
 	}

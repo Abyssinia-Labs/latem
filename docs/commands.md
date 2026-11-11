@@ -106,8 +106,15 @@ machine** through `latem mcp`, which speaks the Model Context Protocol on stdin
 and stdout. The agent's client starts it over ssh, so the machine opens no port:
 
 ```console
-$ claude mcp add --scope user mini -- ssh mini latem mcp
+$ claude mcp add --scope user mini -- ssh mini .local/bin/latem mcp
 ```
+
+latem is named by its path because ssh runs a command with a short `PATH` (on
+a Mac, `/usr/bin:/bin:/usr/sbin:/sbin`), which has neither `~/.local/bin` nor
+Homebrew's bin, so `ssh mini latem mcp` is `command not found`.
+`.local/bin/latem` is where `install.sh` puts it, relative to the ssh login's
+home. With Homebrew on a Mac with Apple silicon it is `/opt/homebrew/bin/latem`.
+`latem mcp --help` on the build machine prints the line with its own path.
 
 Then `/mcp` in Claude Code lists `mini` and its tools. `ssh mini` must log in
 without a prompt — a key, and the host already in `known_hosts` — because
