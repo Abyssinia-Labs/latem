@@ -167,6 +167,7 @@ func newRootCommand() *cobra.Command {
 		newWorkflowsCommand(),
 		newStoreCommand(),
 		newDoctorCommand(),
+		newMCPCommand(),
 		newCacheCommand(),
 		newServiceCommand(),
 		newUpdateCommand(),

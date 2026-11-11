@@ -542,3 +542,67 @@ func TestWorkflowRunJobs(t *testing.T) {
 		t.Errorf("the lookup does not use runs_workflow_run_idx:\n%s", detail.String())
 	}
 }
+
+// An agent asks what this machine built of the commit it pushed (A87): a run
+// whose ref resolved to it, and a workflow job of it still in the queue, whose
+// sha is not on the row yet — newest first, and nothing of another commit,
+// through an index rather than a scan of every run kept.
+func TestList_ByCommit(t *testing.T) {
+	d := newTestDB(t)
+	at := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	const other = "fedcba9876543210fedcba9876543210fedcba98"
+	add := func(id, runSHA, workflowSHA string, minute int) {
+		r := testRun(id, protocol.StateSucceeded)
+		r.SHA, r.CreatedAt = runSHA, at.Add(time.Duration(minute)*time.Minute)
+		if workflowSHA != "" {
+			r.State = protocol.StateQueued
+			r.Workflow = &WorkflowRun{Workflow: ".github/workflows/checks.yml", SHA: workflowSHA, WorkflowRunID: "wr-" + id,
+				Event: protocol.Event{Name: "push", Ref: "refs/heads/main", SHA: workflowSHA}}
+		}
+		mustCreate(t, d, r)
+	}
+	add("r-resolved", sha, "", 0)
+	add("r-queued-job", "", sha, 1) // its ref not resolved yet
+	add("r-other", other, "", 2)
+	add("r-other-job", "", other, 3)
+	add("r-unresolved", "", "", 4) // a jobs.yaml run still in the queue has no commit
+
+	got, err := d.List(t.Context(), Filter{SHA: sha})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.ID)
+	}
+	if !slices.Equal(ids, []string{"r-queued-job", "r-resolved"}) {
+		t.Errorf("got %v, want the two runs of %s, newest first", ids, sha)
+	}
+	if got, _ := d.List(t.Context(), Filter{SHA: sha, Repo: "elsewhere"}); len(got) != 0 {
+		t.Errorf("another repository's filter returned %d", len(got))
+	}
+	if got, _ := d.List(t.Context(), Filter{SHA: sha, States: []protocol.RunState{protocol.StateQueued}}); len(got) != 1 {
+		t.Errorf("queued runs of %s: got %d, want 1", sha, len(got))
+	}
+
+	var detail strings.Builder
+	rows, err := d.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN SELECT id FROM runs
+	 WHERE coalesce(sha, json_extract(workflow_json, '$.sha')) = ?
+	 ORDER BY created_at DESC, id DESC LIMIT ?`, sha, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, parent, notused int
+		var s string
+		if err := rows.Scan(&id, &parent, &notused, &s); err != nil {
+			t.Fatal(err)
+		}
+		detail.WriteString(s + "\n")
+	}
+	if !strings.Contains(detail.String(), "runs_commit_idx") {
+		t.Errorf("the lookup does not use runs_commit_idx:\n%s", detail.String())
+	}
+}

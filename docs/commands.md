@@ -98,3 +98,27 @@ queued (RUNNER_SPEC §7.3, A81).
 
 `latem logs` also exits `0` for a run that failed — it succeeded in printing the
 logs. The state is in the output, not the status.
+
+## `latem mcp`: an agent on another machine
+
+**An agent working on your laptop can watch and drive the builds on a build
+machine** through `latem mcp`, which speaks the Model Context Protocol on stdin
+and stdout. The agent's client starts it over ssh, so the machine opens no port:
+
+```console
+$ claude mcp add --scope user mini -- ssh mini latem mcp
+```
+
+Then `/mcp` in Claude Code lists `mini` and its tools. `ssh mini` must log in
+without a prompt — a key, and the host already in `known_hosts` — because
+nobody is at the terminal to answer one. Add one server per machine.
+
+The tools are the commands an operator would type over ssh: `listRuns` (by
+repository, state, or the commit an agent just pushed), `getRun`,
+`getRunLogs`, `waitForRun`, `startRun` (a `.latem/jobs.yaml` job, as
+`latem run`), `cancelRun`, and `checkWorkflows` (as
+`latem workflows check --repo`).
+
+**It never approves.** A run held for approval waits for a person at the
+machine to run `latem approve`, and the agent is told so. `latem try`, secrets,
+vars, repositories and the service are not offered either (amendment A87).

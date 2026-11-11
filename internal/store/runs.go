@@ -275,6 +275,11 @@ func (d *DB) List(ctx context.Context, f Filter) ([]Run, error) {
 		}
 		where = append(where, "state IN ("+strings.Join(holders, ",")+")")
 	}
+	if f.SHA != "" {
+		// Spelled as runs_commit_idx spells it, so that SQLite uses it.
+		where = append(where, "coalesce(sha, json_extract(workflow_json, '$.sha')) = ?")
+		args = append(args, f.SHA)
+	}
 
 	limit := f.Limit
 	if limit <= 0 {
