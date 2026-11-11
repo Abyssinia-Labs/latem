@@ -162,7 +162,10 @@ const (
 type Filter struct {
 	Repo   string
 	States []protocol.RunState
-	Limit  int
+	// SHA is the full commit a run builds: its resolved sha, or a workflow
+	// job's own before its ref resolves (A87). runs_commit_idx answers it.
+	SHA   string
+	Limit int
 }
 
 // Store persists runs, the local queue, artifacts, and cache metadata.

@@ -86,6 +86,8 @@ func TestEverySpecCommandExists(t *testing.T) {
 		"store",
 		// A76.
 		"try",
+		// A87.
+		"mcp",
 	} {
 		if !have[want] {
 			t.Errorf("§19 command %q is missing", want)

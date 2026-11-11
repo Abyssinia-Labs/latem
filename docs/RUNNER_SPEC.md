@@ -1310,6 +1310,7 @@ latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars]
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
+latem mcp                            This machine's builds to an agent over MCP, on stdin and stdout, started by ssh; never approves (A87)
 latem cache ls | prune | rm <name>
 latem update [--check]               Install the latest release; the agent moves onto it when idle (A56). Refused for a Homebrew install, which `brew upgrade latem` updates (A78)
 latem version
@@ -4111,3 +4112,47 @@ with the number of entries and not with their size.
 temporary path for the job. OpenVault calls that M4. Variables (`vars.*`) from OpenVault, which
 would end A68's per-machine mismatches. A machine-wide collection. Writing to OpenVault from
 `latem secrets set`.
+
+### Amendment from an agent on another machine
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A87 | §19, §22, INV-1, INV-2, INV-5 | **`latem mcp` serves this machine's builds over the Model Context Protocol, on stdin and stdout, to an agent that starts it over ssh. Its tools are `latem list` (and by commit), one run, its log, a wait for it to settle, `latem run`, `latem cancel`, and `latem workflows check --repo`. It never approves: neither `latem approve` nor `latem try` is a tool, nor are secrets, vars, repositories, the service, setup or update. The runs table gains `runs_commit_idx`, on a run's commit as its row has it, or before its ref resolves as its workflow job does** | An agent working in another project, on a laptop, builds on these machines and needs to know exactly when a build has finished and how. latem-cloud's MCP server answers that through the control plane. A machine without one had only ssh and the commands, which an agent drives by parsing columns laid out for a person. And "what did this machine build of the commit I pushed" had no answer but a scan of every run kept |
+
+**How it is reached.** `claude mcp add --scope user mini -- ssh mini latem mcp`. The agent's client
+starts ssh, ssh starts `latem mcp`, and the two speak newline-delimited JSON-RPC 2.0, MCP's stdio
+transport, until the client closes stdin. It listens on nothing, so INV-1 is untouched: the machine
+is reached as its operator reaches it, by the ssh login they already allow, and no port opens. It
+runs as that login's user and reads and writes what that user's `latem` commands would. Nothing but
+the protocol is written to stdout.
+
+**What it does.** Each tool is a command and goes through the command's code. The reads are from
+state.db and the log files. `startRun` and `cancelRun` go over the agent's socket, and queue or
+cancel in sqlite when no agent is up (§7.3). `checkWorkflows` is `workflows check --repo --json`,
+without `--fix`. `startRun` names a repository, a job, a ref and inputs, as `latem run` does. The job
+is read from `.latem/jobs.yaml` at the resolved commit, so INV-2 holds as it does for the command,
+and a ref outside the repository's allowed refs parks the run for approval as it would. Its origin
+is `cli`, and its actor is the user's name followed by `via latem mcp`.
+
+**What it does not do.** Approval stays a person's (INV-5). `latem approve` and `latem try` are not
+tools, and a held run says in its `waiting` that a person at the machine releases it. That is this
+server's choice and not a wall: it runs as a user who could type `latem approve` over the same ssh,
+and so could an agent given a shell. What the amendment adds is that latem never offers an agent
+the approval as a tool. Nor does it offer secrets, vars, `repo`, `service`, `setup` or `update`,
+which change what this machine builds and with what.
+
+**Bounds.** A list is at most 100 runs, and 20 unless asked. A log is read through once per call,
+line by line, and at most 1,000 lines come back, each cut at 4,000 bytes. A wait reads one row every
+500 ms, for a minute unless asked for up to ten, and answers at once when waiting cannot help: a run
+held for approval, or one queued with no agent to start it. Each call opens state as a command does
+and closes it, so a configuration reloaded while the session is open is what the next call sees.
+
+**The commit index.** A run's `sha` is NULL until gate 9 resolves its ref, but a workflow job's
+commit is in `workflow_json` from the moment it is queued. Migration 0007 indexes
+`coalesce(sha, json_extract(workflow_json, '$.sha'))` with `created_at`, and `store.Filter.SHA`
+spells the same expression, so the lookup reads the few runs of that commit, whatever their state.
+
+**Not in this amendment.** Re-running a workflow run, which is the control plane's, and which
+latem-cloud's MCP server offers. Letting an agent approve under a grant, as latem-cloud lets a
+person allow it per environment: a run held here is held by this machine's own policy, and there
+is no grant here to give. Following a log as it streams: an agent reads on with `after`.

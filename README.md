@@ -142,6 +142,7 @@ latem vars list [--repo R] [--env E]
 latem workflows check [path | --repo R] [--offline] [--json] [--fix] [-v]   which workflow jobs this machine can run, and the fix for the rest
 latem store check [path | --repo R] [--platform ios|android] [--json]   whether a preview would reach testers from this machine; read-only
 latem doctor [--secrets] [--fix]     check this machine and name the fix for anything wrong
+latem mcp                            this machine's builds to an agent over MCP, started by ssh; never approves
 latem cache ls | prune | rm <name>
 latem service install [--print] | uninstall | restart | reload | status
 latem update [--check]               install the latest release; the agent moves onto it when idle
