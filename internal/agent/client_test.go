@@ -50,7 +50,7 @@ func TestApproveQueuesAParkedRun(t *testing.T) {
 	}
 
 	now := time.Now()
-	approved, err := Approve(ctx, db, "r_parked", 48*time.Hour, now)
+	approved, err := Approve(ctx, db, "r_parked", parked.SHA, 48*time.Hour, now)
 	if err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -94,11 +94,11 @@ func TestApproveIsIdempotent(t *testing.T) {
 	db := openStore(t, cfg)
 	ctx := context.Background()
 
-	seedParkedRun(t, db, "r_twice")
-	if _, err := Approve(ctx, db, "r_twice", time.Hour, time.Now()); err != nil {
+	parked := seedParkedRun(t, db, "r_twice")
+	if _, err := Approve(ctx, db, "r_twice", parked.SHA, time.Hour, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Approve(ctx, db, "r_twice", time.Hour, time.Now()); err != nil {
+	if _, err := Approve(ctx, db, "r_twice", parked.SHA, time.Hour, time.Now()); err != nil {
 		t.Errorf("a second approve should succeed: %v", err)
 	}
 }
@@ -112,7 +112,7 @@ func TestApproveRefusesWhatItCannotApprove(t *testing.T) {
 	seedRun(t, db, "r_done", protocol.StateSucceeded)
 
 	for _, id := range []string{"r_running", "r_done"} {
-		_, err := Approve(ctx, db, id, time.Hour, time.Now())
+		_, err := Approve(ctx, db, id, someSHA, time.Hour, time.Now())
 		if !errors.Is(err, ErrNotAwaitingApproval) {
 			t.Errorf("Approve(%s) = %v, want ErrNotAwaitingApproval", id, err)
 		}
@@ -122,15 +122,41 @@ func TestApproveRefusesWhatItCannotApprove(t *testing.T) {
 	// A27 left behind. There is nothing to pin, and pinning nothing would mean
 	// approving whatever the ref points at when the build starts.
 	seedRun(t, db, "r_nocommit", protocol.StateAwaitingApproval)
-	if _, err := Approve(ctx, db, "r_nocommit", time.Hour, time.Now()); !errors.Is(err, ErrNoCommit) {
+	if _, err := Approve(ctx, db, "r_nocommit", someSHA, time.Hour, time.Now()); !errors.Is(err, ErrNoCommit) {
 		t.Errorf("Approve(r_nocommit) = %v, want ErrNoCommit", err)
 	}
 
-	if _, err := Approve(ctx, db, "r_missing", time.Hour, time.Now()); err == nil {
+	if _, err := Approve(ctx, db, "r_missing", someSHA, time.Hour, time.Now()); err == nil {
 		t.Error("approving a run that does not exist should fail")
 	}
 	// An id that cannot name a run must be refused before it names a path.
-	if _, err := Approve(ctx, db, "../../etc/passwd", time.Hour, time.Now()); err == nil {
+	if _, err := Approve(ctx, db, "../../etc/passwd", someSHA, time.Hour, time.Now()); err == nil {
 		t.Error("approving a traversal id should fail at validation (INV-3, A6)")
+	}
+}
+
+// someSHA is a commit no run in these tests is held at.
+const someSHA = "fedcba9876543210fedcba9876543210fedcba98"
+
+// An approval names the commit the person was shown and typed (A89). A run
+// held at any other commit stays held: that one nobody has looked at.
+func TestApprovePinsOnlyTheCommitItNames(t *testing.T) {
+	cfg := newConfigDir(t, configOptions{})
+	db := openStore(t, cfg)
+	ctx := context.Background()
+
+	parked := seedParkedRun(t, db, "r_other")
+	if _, err := Approve(ctx, db, "r_other", someSHA, time.Hour, time.Now()); !errors.Is(err, ErrCommitChanged) {
+		t.Fatalf("approving %s for a run held at %s = %v, want ErrCommitChanged", someSHA, parked.SHA, err)
+	}
+	r, err := db.Get(ctx, "r_other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != protocol.StateAwaitingApproval || r.ApprovedSHA != "" || r.ApprovedAt != nil {
+		t.Errorf("a refused approval wrote something: state %s, approved %q at %v", r.State, r.ApprovedSHA, r.ApprovedAt)
+	}
+	if _, err := Approve(ctx, db, "r_other", "", time.Hour, time.Now()); err == nil {
+		t.Error("an approval that names no commit should fail")
 	}
 }

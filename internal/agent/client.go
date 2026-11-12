@@ -48,8 +48,13 @@ func NewRunID() (string, error) {
 // store do all of it in one transaction. The narrowing is the point: a CLI that
 // could read a commit and then write it back as approved would have a window
 // between the two, and that window is the one a force-push exploits.
+//
+// Since A89 `latem approve` shows a person the commit and has them type it
+// before it approves, so the CLI does read the commit first. The window is
+// closed the other way round: the store is told which commit the person typed,
+// and pins that one or nothing, in the same transaction.
 type ApprovalStore interface {
-	Approve(ctx context.Context, runID string, approvedAt, expiresAt time.Time) (store.Run, error)
+	ApproveCommit(ctx context.Context, runID, sha string, approvedAt, expiresAt time.Time) (store.Run, error)
 }
 
 // ErrNotAwaitingApproval means the run was not parked for a human.
@@ -61,6 +66,10 @@ var ErrNotAwaitingApproval = store.ErrNotAwaitingApproval
 
 // ErrNoCommit means the run has no resolved commit for the approval to pin.
 var ErrNoCommit = store.ErrNoCommit
+
+// ErrCommitChanged means the run is held at another commit than the one the
+// approval names, and nothing was approved (A89).
+var ErrCommitChanged = store.ErrCommitChanged
 
 // Approve records a local approval and moves the run back into the queue
 // (§11, INV-5).
@@ -91,10 +100,15 @@ var ErrNoCommit = store.ErrNoCommit
 // Approving a run that is already queued succeeds. Approving twice is
 // something a person does, and the second one should not read as an error.
 //
+// sha is the commit the person approving was shown and typed (A89). A run held
+// at any other is [ErrCommitChanged] and stays held: the commit on the row can
+// change only if the run was approved by someone else, built, and held again
+// with its ref moved, and nobody has looked at that one.
+//
 // It returns the run as it now stands, so the caller can say which commit it
 // just approved.
 func Approve(
-	ctx context.Context, st ApprovalStore, runID string, queueTTL time.Duration, now time.Time,
+	ctx context.Context, st ApprovalStore, runID, sha string, queueTTL time.Duration, now time.Time,
 ) (store.Run, error) {
 	if err := protocol.ValidateID(runID); err != nil {
 		return store.Run{}, fmt.Errorf("agent: approve: %w", err)
@@ -107,7 +121,7 @@ func Approve(
 	// alone (amendment A8): an approved run still carrying its approval_ttl
 	// would be swept as an expired queue entry by the very next ticker,
 	// minutes after a human said yes to it.
-	r, err := st.Approve(ctx, runID, now, now.Add(queueTTL))
+	r, err := st.ApproveCommit(ctx, runID, sha, now, now.Add(queueTTL))
 	if err != nil {
 		return store.Run{}, fmt.Errorf("agent: approve %s: %w", runID, err)
 	}

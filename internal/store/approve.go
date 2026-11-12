@@ -25,6 +25,12 @@ var ErrNotAwaitingApproval = errors.New("store: run is not awaiting approval")
 // this whole mechanism exists to close.
 var ErrNoCommit = errors.New("store: run has no resolved commit to approve")
 
+// ErrCommitChanged means the run is held at a commit other than the one the
+// approver was shown. It can only have been approved, built and held again in
+// between, with its ref moved, and the commit it is held at now is one nobody
+// has looked at (A89).
+var ErrCommitChanged = errors.New("store: run is held at another commit than the one approved")
+
 // Approve records a local approval and queues the run (INV-5, amendment A27).
 //
 // The transaction is the security property, not a tidiness preference. Reading
@@ -45,7 +51,31 @@ var ErrNoCommit = errors.New("store: run has no resolved commit to approve")
 // Approving twice is something a person does — the second `latem approve`
 // should not read as an error — and the first one already pinned the commit, so
 // there is nothing a second could add.
+//
+// It pins whatever commit the row holds. `latem approve` shows the commit to a
+// person before it approves, so it calls [DB.ApproveCommit] instead, which
+// pins that one or nothing.
 func (d *DB) Approve(ctx context.Context, runID string, approvedAt, expiresAt time.Time) (Run, error) {
+	return d.approve(ctx, runID, "", approvedAt, expiresAt)
+}
+
+// ApproveCommit is [DB.Approve] for one commit: the one the approver was shown
+// and typed (A89). A run held at any other is [ErrCommitChanged], and nothing
+// is written.
+//
+// The comparison is inside the transaction for the reason Approve's doc gives.
+// A person reads the commit before this is called, and only the transaction
+// can say the commit pinned is still the one they read.
+func (d *DB) ApproveCommit(ctx context.Context, runID, sha string, approvedAt, expiresAt time.Time) (Run, error) {
+	if sha == "" {
+		return Run{}, fmt.Errorf("%w: run %s: no commit was named", ErrNoCommit, runID)
+	}
+	return d.approve(ctx, runID, sha, approvedAt, expiresAt)
+}
+
+// approve is Approve and ApproveCommit. want is the commit to pin, or "" for
+// whatever the row holds.
+func (d *DB) approve(ctx context.Context, runID, want string, approvedAt, expiresAt time.Time) (Run, error) {
 	var out Run
 	err := d.tx(ctx, func(t *sql.Tx) error {
 		var (
@@ -76,6 +106,9 @@ func (d *DB) Approve(ctx context.Context, runID string, approvedAt, expiresAt ti
 
 		if sha.String == "" {
 			return fmt.Errorf("%w: run %s", ErrNoCommit, runID)
+		}
+		if want != "" && sha.String != want {
+			return fmt.Errorf("%w: run %s is held at %s, not %s", ErrCommitChanged, runID, sha.String, want)
 		}
 
 		// expires_at is set here rather than left to the caller for the reason

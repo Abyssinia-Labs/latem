@@ -29,6 +29,11 @@ const (
 	// ExitAgentDown is protocol.ErrAgentDown: no agent is listening on the
 	// local socket (§7.3, §21).
 	ExitAgentDown = 3
+	// ExitNoTerminal is a command only a person may run, run without a
+	// terminal on its stdin and stdout: `latem approve` (A89). Its own number
+	// because an agent or a script that meets it has to stop and hand the
+	// decision to a person, not retry and not read it as a failed approval.
+	ExitNoTerminal = 4
 )
 
 // ExitError carries the exit code a failure should produce.

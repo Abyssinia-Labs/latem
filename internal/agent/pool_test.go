@@ -261,7 +261,7 @@ func TestARefOutsidePolicyIsParkedAndRunsOnceApproved(t *testing.T) {
 	}
 
 	approved, err := Approve(context.Background(), openStore(t, cfg),
-		"r_parked", 72*time.Hour, time.Now())
+		"r_parked", sideshow, 72*time.Hour, time.Now())
 	if err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestAnApprovalDoesNotCoverACommitThatArrivedAfterIt(t *testing.T) {
 	}
 
 	if _, err := Approve(context.Background(), openStore(t, cfg),
-		"r_moved", 72*time.Hour, time.Now()); err != nil {
+		"r_moved", first, 72*time.Hour, time.Now()); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 
@@ -349,7 +349,7 @@ func TestAnApprovalDoesNotCoverACommitThatArrivedAfterIt(t *testing.T) {
 
 	// And approving what is now on the branch builds it, so the mechanism is a
 	// question that can be answered rather than a dead end.
-	approved, err := Approve(context.Background(), db, "r_moved", 72*time.Hour, time.Now())
+	approved, err := Approve(context.Background(), db, "r_moved", second, 72*time.Hour, time.Now())
 	if err != nil {
 		t.Fatalf("second Approve: %v", err)
 	}

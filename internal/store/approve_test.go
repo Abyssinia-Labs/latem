@@ -220,3 +220,39 @@ func TestCreate_RoundTripsApproval(t *testing.T) {
 		t.Errorf("approved_at = %v, want %v", got.ApprovedAt, at)
 	}
 }
+
+// ApproveCommit pins the commit it names or nothing (A89). `latem approve`
+// shows a person the commit before it approves, and the run can be held at
+// another by then only if somebody else approved it, it built, and its ref
+// moved: that commit nobody has looked at.
+func TestApproveCommit_PinsOnlyTheCommitItNames(t *testing.T) {
+	d := newTestDB(t)
+	parked := parkedRun(t, d, "r_park", shaA)
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+
+	if _, err := d.ApproveCommit(t.Context(), parked.ID, shaB, now, now.Add(time.Hour)); !errors.Is(err, ErrCommitChanged) {
+		t.Fatalf("approving %s for a run held at %s = %v, want ErrCommitChanged", shaB, shaA, err)
+	}
+	r, err := d.Get(t.Context(), parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != protocol.StateAwaitingApproval || r.ApprovedSHA != "" || r.ApprovedAt != nil {
+		t.Fatalf("a refused approval wrote the row: state %s, approved %q at %v", r.State, r.ApprovedSHA, r.ApprovedAt)
+	}
+	if _, err := d.ClaimNext(t.Context(), nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a refused approval queued the run: ClaimNext = %v", err)
+	}
+
+	if _, err := d.ApproveCommit(t.Context(), parked.ID, "", now, now.Add(time.Hour)); err == nil {
+		t.Error("an approval that names no commit succeeded")
+	}
+
+	got, err := d.ApproveCommit(t.Context(), parked.ID, shaA, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ApproveCommit of the commit it is held at: %v", err)
+	}
+	if got.State != protocol.StateQueued || got.ApprovedSHA != shaA {
+		t.Errorf("state %s, approved %q; want queued at %s", got.State, got.ApprovedSHA, shaA)
+	}
+}

@@ -109,6 +109,7 @@ Exit codes:
   1  failure — a check failed, a run failed, an operation did not complete
   2  usage — an unknown flag, a missing argument, an unknown subcommand
   3  no agent is listening (E_AGENT_DOWN); see ` + "`latem agent`" + `
+  4  ` + "`latem approve`" + ` needs a person at a terminal, and stdin or stdout is not one
 
 Start here:
   latem setup                  config, registration, service and doctor, in one
