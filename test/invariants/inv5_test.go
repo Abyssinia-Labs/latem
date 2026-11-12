@@ -303,7 +303,7 @@ func TestINV5_ApprovalIsLocalOnlyAndPinnedToACommit(t *testing.T) {
 	}
 
 	// --- 3. a local approval, of shaA ---------------------------------------
-	approved, err := agent.Approve(context.Background(), m.db, "r_park",
+	approved, err := agent.Approve(context.Background(), m.db, "r_park", shaA,
 		m.cfg.Agent.QueueTTL.Duration(), time.Now())
 	if err != nil {
 		t.Fatalf("latem approve: %v", err)
@@ -335,8 +335,15 @@ func TestINV5_ApprovalIsLocalOnlyAndPinnedToACommit(t *testing.T) {
 		t.Fatalf("the run built %q on an approval that named a different commit (INV-5)", got)
 	}
 
+	// An approval names the commit the person was shown and typed (A89). The
+	// one they were shown is not the one held now, so it approves nothing.
+	if _, err := agent.Approve(context.Background(), m.db, "r_park", shaA,
+		m.cfg.Agent.QueueTTL.Duration(), time.Now()); !errors.Is(err, agent.ErrCommitChanged) {
+		t.Fatalf("approving %s for a run held at %s = %v, want ErrCommitChanged", shaA, shaB, err)
+	}
+
 	// --- 5. approving what arrived builds it --------------------------------
-	again, err := agent.Approve(context.Background(), m.db, "r_park",
+	again, err := agent.Approve(context.Background(), m.db, "r_park", shaB,
 		m.cfg.Agent.QueueTTL.Duration(), time.Now())
 	if err != nil {
 		t.Fatalf("second approval: %v", err)
@@ -377,7 +384,7 @@ func TestINV5_ApproveRefusesARunWithNoCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := agent.Approve(ctx, m.db, "r_nocommit", time.Hour, time.Now())
+	_, err := agent.Approve(ctx, m.db, "r_nocommit", strings.Repeat("a", 40), time.Hour, time.Now())
 	if !errors.Is(err, agent.ErrNoCommit) {
 		t.Fatalf("approving a run with no sha returned %v, want ErrNoCommit", err)
 	}
@@ -389,7 +396,7 @@ func TestINV5_ApproveRefusesARunWithNoCommit(t *testing.T) {
 	if err := m.db.Create(ctx, row); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agent.Approve(ctx, m.db, "r_hascommit", time.Hour, time.Now()); err != nil {
+	if _, err := agent.Approve(ctx, m.db, "r_hascommit", row.SHA, time.Hour, time.Now()); err != nil {
 		t.Fatalf("approving a run that does have a commit failed: %v", err)
 	}
 }

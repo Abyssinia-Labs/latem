@@ -178,7 +178,8 @@ func TestWiredCommandsFailOnAMissingConfig(t *testing.T) {
 		{"list", []string{"list"}},
 		{"logs", []string{"logs", "run-1"}},
 		{"cancel", []string{"cancel", "run-1"}},
-		{"approve", []string{"approve", "run-1"}},
+		// approve is not here: with no terminal it refuses before it reads
+		// the config (A89, TestApprove_RefusesWithoutATerminal).
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := newRootCommand()

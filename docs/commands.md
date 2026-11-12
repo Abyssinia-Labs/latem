@@ -65,10 +65,12 @@ Exit codes are contract:
 | `1` | failure — a check failed, a run failed, an operation did not complete |
 | `2` | usage — an unknown flag, a missing argument, an unknown subcommand |
 | `3` | no agent is listening (`E_AGENT_DOWN`) |
+| `4` | `latem approve` needs a person at a terminal, and stdin or stdout is not one |
 
 Three is the interesting one. A `latem run` finding no agent to wait for is
 not the same event as a build that failed, and a script has to be able to tell
-them apart without parsing English.
+them apart without parsing English. Four is the same kind of answer: nothing
+was tried, and the next step is a person's.
 
 ## `latem run`: following, waiting, and queueing
 
@@ -99,6 +101,48 @@ queued (RUNNER_SPEC §7.3, A81).
 `latem logs` also exits `0` for a run that failed — it succeeded in printing the
 logs. The state is in the output, not the status.
 
+## `latem approve`: a person, at a terminal
+
+A run waits in `awaiting_approval` when its ref is outside `allowed_refs`, or
+when it is a pull request's job that asks for one of the machine's secrets or
+would run on a native runner (A85). **`latem approve <run-id>` releases it, and
+only a person at a terminal can run it.** It shows the commit the run would
+build and why it is held, then asks for the commit's short sha:
+
+```console
+$ latem approve r_6f1c0e2a9b7d4c3e8a5f1b2d
+A run is waiting for your approval
+
+  run       r_6f1c0e2a9b7d4c3e8a5f1b2d  myapp / deploy
+  ref       refs/pull/7/merge
+  commit    0123456789abcdef0123456789abcdef01234567
+  workflow  .github/workflows/deploy.yml, on pull_request
+  from      remote by octocat
+  held      a pull request's job asks for secrets DEPLOY_KEY of environment production; …
+  expires   2026-11-13 09:00, in 23h
+
+Its log so far: latem logs r_6f1c0e2a9b7d4c3e8a5f1b2d
+
+To approve this commit, type its short sha (Enter leaves it held): 0123456
+approved r_6f1c0e2a9b7d4c3e8a5f1b2d at 0123456789ab (refs/pull/7/merge) — it is queued
+```
+
+Seven characters or more of the commit, from the start, in either case: what
+`git log --oneline` or the pull request's page shows, or latem's twelve.
+Anything else, or Enter, leaves the run held and exits `1`. What was typed
+before the question is thrown away. What you approve is that commit and no
+other. If the run is held again at another commit while you answer, nothing is
+approved, and running the command again shows the new one.
+
+**Without a terminal on stdin and stdout it refuses, with exit `4`**, before it
+reads anything, and no flag skips the question. That is what keeps an agent
+from approving in the course of its work: Claude Code's shell, `ssh host
+latem …` with no `-t` (which is how `latem mcp` is reached), a script and a
+pipe have no terminal. It does not stop an agent that makes a terminal for
+itself with `ssh -tt` or `script`. It is a guard against an agent approving,
+not a wall against whoever holds the account, who could edit `config.toml`
+instead (RUNNER_SPEC A89). Over ssh, log in and run it at the prompt.
+
 ## `latem mcp`: an agent on another machine
 
 **An agent working on your laptop can watch and drive the builds on a build
@@ -128,4 +172,6 @@ repository, state, or the commit an agent just pushed), `getRun`,
 
 **It never approves.** A run held for approval waits for a person at the
 machine to run `latem approve`, and the agent is told so. `latem try`, secrets,
-vars, repositories and the service are not offered either (amendment A87).
+vars, repositories and the service are not offered either (amendment A87). Nor
+can the agent run `latem approve` over the same ssh: with no terminal it refuses
+(A89).

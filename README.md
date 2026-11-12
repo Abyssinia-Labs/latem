@@ -132,7 +132,7 @@ latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f] [-n N]
 latem artifacts <run-id>             what a run collected, with each file's path on this machine; reads no content
 latem cancel <run-id> [--reason R]
-latem approve <run-id>               local only; pins that run's commit (INV-5)
+latem approve <run-id>               local only, at a terminal: you type the commit it pins (INV-5)
 latem register [--url U] [--token-file F]   no token: approve this machine in the browser
 latem repo add <owner/name> | list | remove <key|owner/name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt

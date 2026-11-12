@@ -253,7 +253,7 @@ Two consequences worth stating because they are the point of the rule. `refs/hea
 
 #### Approval
 
-Runs on non-matching refs enter `awaiting_approval` and require a local `latem approve <run-id>`. Approval is a local action only; a broker cannot grant it, and no inbound command kind can express it (INV-2).
+Runs on non-matching refs enter `awaiting_approval` and require a local `latem approve <run-id>`. Approval is a local action only; a broker cannot grant it, and no inbound command kind can express it (INV-2). It is a person's: `latem approve` refuses without a terminal on its stdin and stdout, and at one it shows the commit and approves only when the person types it (A89).
 
 `latem try` (A76) is the other local approval: the run it queues is a commit it has just made from the operator's working tree, and it is created approved for exactly that commit, in the row, where no broker can write.
 
@@ -1300,7 +1300,7 @@ latem list [--state S] [--repo R]
 latem logs <run-id> [-f]
 latem artifacts <run-id>             A run's recorded artifacts and their local paths; reads no content (§17)
 latem cancel <run-id>
-latem approve <run-id>               Local-only; pins the run's commit (INV-5)
+latem approve <run-id>               Local-only, at a terminal: shows the commit and pins it once a person types it (INV-5, A89)
 latem register [--url U] [--token-file F]   Write config + machine token, verify connectivity; no token: approve in the browser (A54)
 latem service reload                 Apply config.toml to the running agent (SIGHUP, A54)
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
@@ -1400,7 +1400,7 @@ Stable codes; the web app maps them to human copy, and they appear in `Update.Er
 
 Retryable errors are safe for the control plane to offer as a one-click retry. Non-retryable ones need a human or a commit.
 
-One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what a `latem run` that follows or waits exits with (exit 3) when no agent is listening (§7.3, A81). It is a CLI condition, not a run outcome.
+One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what a `latem run` that follows or waits exits with (exit 3) when no agent is listening (§7.3, A81). It is a CLI condition, not a run outcome. So is exit 4, `latem approve` with no terminal on stdin or stdout (A89).
 
 ---
 
@@ -4145,6 +4145,9 @@ and so could an agent given a shell. What the amendment adds is that latem never
 the approval as a tool. Nor does it offer secrets, vars, `repo`, `service`, `setup` or `update`,
 which change what this machine builds and with what.
 
+*A89: `latem approve` now refuses without a terminal, so an agent with a shell and none, `latem
+mcp`'s own ssh among them, is refused too. One that makes a terminal for itself is not.*
+
 **Bounds.** A list is at most 100 runs, and 20 unless asked. A log is read through once per call,
 line by line, and at most 1,000 lines come back, each cut at 4,000 bytes. A wait reads one row every
 500 ms, for a minute unless asked for up to ten, and answers at once when waiting cannot help: a run
@@ -4181,3 +4184,58 @@ Play service account and the `.p8` as values, by their names in §18; a reposito
 files keeps those values until they learn files too. A docker executor whose temporary files are
 private to the step's user. Files for jobs.yaml jobs, which read no OpenVault entries at all.
 
+### Amendment from an agent that could approve over ssh
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A89 | §5 INV-5, §19, §21, A27, A85, A87 | **`latem approve` asks for a person at a terminal. When stdin or stdout is not a terminal it refuses with exit 4, before it reads the config or the run. At a terminal it shows the run's commit and why the run is held, which for a pull request's job is what it asks for (A85). It discards what was typed ahead and asks for the commit's short sha, and approves only if what is typed is the start of the commit, 7 characters or more. The store then pins that commit or nothing. No flag skips the question** | A85 holds a pull request's job until `latem approve` lets it reach the machine's secrets, and A87's `latem mcp` never offers an agent the approval. But `latem mcp` is reached as `ssh mini .local/bin/latem mcp`, and an agent holding that ssh can run `ssh mini .local/bin/latem approve <id>` just as easily. Nothing asked who was there. A87 said so, and so did the pull request that added it |
+
+**What counts as a terminal.** The question isatty(3) asks: the terminal driver answers for the
+file with its settings (`TIOCGETA` on darwin, `TCGETS` on Linux). A character device is not enough.
+`/dev/null` and `/dev/zero` are character devices, and nobody types into either. Both files are
+asked: stdin, where the answer comes from, and stdout, where the commit is shown. The check comes
+first, so a caller without a terminal learns that it cannot approve and nothing else: not whether
+the run exists, and not whether there is a config.
+
+**What it stops.** An agent running commands as an agent ordinarily does, without a terminal:
+Claude Code's shell, ssh with a command and no `-t` (which is how `latem mcp` is reached), a
+script, a pipe. Each gets exit 4 and a message telling it to ask the person who runs the machine.
+Exit 4 is a number of its own so that an agent or a script stops there. It should neither retry
+nor read the refusal as a failed approval.
+
+**What it does not stop.** An agent that makes a terminal for itself, with `ssh -tt`, script(1)
+or a pseudo-terminal of its own, and types a sha it read from `latem list`. Because type-ahead is
+discarded, it has to wait for the question first, and an expect script does. So this is a guard
+that keeps an agent from approving in the course of its work. It is not a boundary against
+someone who holds the account and means to approve: a user who can run `latem approve` can also
+edit `allowed_refs` in `config.toml`, write `state.db`, or read `secrets.env`. INV-5's boundary is
+unchanged: no broker can approve, and no inbound command kind can express an approval (INV-2).
+This amendment makes the local approval a person's.
+
+**The commit typed is the commit pinned.** A27 pinned whatever commit the row held, in one
+transaction, so the commit could not change between the read and the pin. Showing the commit
+first opens a window between the screen and the answer. In it, another approval, a build and a
+moved ref could hold the run again at a new commit. `store.ApproveCommit` takes the commit that
+was shown and pins it or nothing, in the same transaction. A run held at another commit is
+`ErrCommitChanged` and stays held, and `latem approve` says to run it again to see the new one.
+`agent.Approve`, which `latem approve` calls, now takes the commit.
+
+**Why the short sha.** It is what a person compares by eye with the pull request's page or
+`git log --oneline`. Those show 7 characters and latem shows 12. Any prefix of 7 or more, in either
+case, names the commit. Typing the run id would not do, since the agent has it already, and
+neither would `y`. Typing the commit means the person read the line the approval rests on.
+
+**Platforms.** macOS, and Linux on amd64 and arm64, which is what a release is built for. The
+ioctls are made through `syscall`, with no new dependency (§3). On any other platform nothing is a
+terminal to `latem approve`, and it always refuses.
+
+**Unchanged.** `latem try` (A76) creates its run already approved for the commit it has just made,
+in the row, and asks nothing: the operator runs it at their own working tree. latem-cloud lets an
+agent approve only environments a person granted, and never a run held on its machine, which only
+`latem approve` releases. `latem mcp` still offers no approval.
+
+**Not in this amendment.** Reading the answer from `/dev/tty`, as sudo does. It refuses the same
+callers and adds nothing against `ssh -tt`. Looking at the parent process or the session, such as
+`SSH_TTY` or a login shell: what an agent can set is no evidence, and a person in tmux has neither.
+A second factor or a signed approval, which would make this a boundary. The case here is an agent
+being helpful, not someone holding the account who means harm.

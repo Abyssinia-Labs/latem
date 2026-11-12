@@ -13,7 +13,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -198,6 +197,17 @@ only: a broker cannot grant it, and no inbound command kind can express it —
 the command set is closed at run and cancel, and a third kind is a security
 review rather than a feature (INV-2).
 
+A person approves, at a terminal (A89). This command shows the run's commit
+and why it is held, which for a pull request's job is what it asks for, then
+asks you to type the commit's short sha: at least 7 characters of it, as
+` + "`git log --oneline`" + ` or the pull request's page shows them. It approves only if
+they match. With no terminal on stdin and stdout it refuses, with exit 4,
+before it reads anything, and no flag skips the question. That stops an agent
+approving in the course of its work: Claude Code's shell, ` + "`latem mcp`" + `'s ssh
+and a script have no terminal. It does not stop one that makes a terminal for
+itself, with ` + "`ssh -tt`" + ` or script(1): it is a guard, not a wall against
+whoever holds this account.
+
 What you approve is a commit, not a ref. The run was parked with the commit
 its ref resolved to — ` + "`latem list`" + ` shows the normalized ref, and this command
 prints the commit it pinned — and that is the only commit it will build. If
@@ -210,10 +220,11 @@ An unapproved run is rejected with E_APPROVAL_EXPIRED after approval_ttl,
 24 hours by default, so this is a decision with a deadline.
 
 Exit codes:
-  0  approved
-  1  no such run, it was not awaiting approval, or it has no resolved commit
+  0  approved, or already approved and queued
+  1  no such run, it was not awaiting approval, it has no resolved commit,
+     or what was typed was not its commit
   2  usage
-  3  no agent is listening`,
+  4  stdin or stdout is not a terminal, so no person can answer`,
 		Args: runIDArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return approveRun(cmd, args[0])
@@ -590,52 +601,6 @@ func cancelRun(cmd *cobra.Command, runID, reason string) error {
 		return st.agentDown(err)
 	}
 	printf(cmd.ErrOrStderr(), "cancelled %s\n", runID)
-	return nil
-}
-
-// approveRun releases a run parked by INV-5's ref policy.
-//
-// The commit is printed rather than only the run id. Approval pins one commit,
-// so the line an operator sees afterwards should be the same fact the security
-// property rests on — and if it is not the commit they expected, that is
-// exactly when they want to know.
-func approveRun(cmd *cobra.Command, runID string) error {
-	ctx := cmd.Context()
-	st, closeState, err := openState(ctx)
-	if err != nil {
-		return err
-	}
-	defer closeState()
-
-	r, err := agent.Approve(ctx, st.db, runID, st.queueTTL(), time.Now())
-	switch {
-	case isNotFound(err):
-		return noSuchRun(runID)
-	case errors.Is(err, agent.ErrNoCommit):
-		// A run parked before the agent recorded commits, or one whose park
-		// never got that far. Nothing can be pinned, so nothing is approved.
-		return fmt.Errorf(
-			"%s has no resolved commit to approve — cancel it and submit the run again", runID)
-	case err != nil:
-		return err
-	}
-
-	if r.ApprovedSHA == "" {
-		// The idempotent case, reached by approving a run that is already in
-		// the queue. Saying "approved ... at " with an empty commit would be
-		// worse than saying nothing: the commit is the fact this command
-		// exists to establish.
-		printf(cmd.ErrOrStderr(), "%s is already queued; nothing was waiting on an approval\n", runID)
-		return nil
-	}
-	printf(cmd.ErrOrStderr(), "approved %s at %s (%s) — it is queued\n",
-		runID, shortSHA(r.ApprovedSHA), refOf(r))
-	if !st.client.AgentRunning(ctx) {
-		// Not an error. Approval is a store transition, so it holds whether or
-		// not an agent is up; saying nothing would leave the user watching a
-		// queue that nothing is draining.
-		printf(cmd.ErrOrStderr(), "no agent is running, so it starts when one does: `latem agent`\n")
-	}
 	return nil
 }
 
