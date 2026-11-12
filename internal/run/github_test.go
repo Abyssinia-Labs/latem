@@ -284,6 +284,92 @@ jobs:
 	}
 }
 
+// fileStore is a scoped store that holds files too, as OpenVault does (A88).
+type fileStore struct {
+	*partsStore
+	files map[string]secrets.File
+}
+
+func (s *fileStore) ResolveFileIn(_ context.Context, scope []string, name string) (secrets.File, error) {
+	if f, ok := s.files[strings.Join(append(slices.Clone(scope), name), "/")]; ok {
+		return secrets.File{Name: f.Name, Data: append(secrets.Value(nil), f.Data...)}, nil
+	}
+	return secrets.File{}, secrets.ErrNotFound
+}
+
+// fileJob is a workflow job that reads a keystore, an OpenVault file, and its
+// password, a secret.
+const fileJob = `
+on: [workflow_dispatch]
+jobs:
+  build:
+    runs-on: [linux]
+    environment: production
+    steps:
+      - run: ./build.sh
+        env:
+          UPLOAD_JKS: ${{ secrets.UPLOAD_JKS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+`
+
+func fileHarness(t *testing.T, executor string) *harness {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.exec.name = executor
+	h.provider = secrets.NewChain(&fileStore{
+		partsStore: &partsStore{values: map[string]string{"app/production/KEYSTORE_PASSWORD": "a password"}},
+		files: map[string]secrets.File{
+			"app/production/UPLOAD_JKS": {Name: "upload.jks", Data: secrets.Value("\x00\xfekeystore\x00bytes")},
+		},
+	}, h.secret)
+	return h
+}
+
+// A88: a secret that is an OpenVault file reaches a step as the path of a
+// copy in the job's temporary directory, written before the first step, and
+// never as its bytes.
+func TestExecute_AFileSecretReachesAStepAsThePathOfItsCopy(t *testing.T) {
+	h := fileHarness(t, "native")
+	o := h.build()
+	req := h.request("build")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/build.yml", fileJob)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil || res.State != protocol.StateSucceeded {
+		t.Fatalf("Execute = %s/%s (%s), %v; want succeeded", res.State, res.ErrorCode, res.ErrorMsg, err)
+	}
+	env := h.env.executed()[0].Env
+	if env["UPLOAD_JKS"] != "/tmp/latem/temp/latem-secret-upload.jks" || env["KEYSTORE_PASSWORD"] != "a password" {
+		t.Errorf("UPLOAD_JKS = %q, KEYSTORE_PASSWORD = %q", env["UPLOAD_JKS"], env["KEYSTORE_PASSWORD"])
+	}
+	h.env.mu.Lock()
+	copied := string(h.env.puts["latem-secret-upload.jks"])
+	h.env.mu.Unlock()
+	if copied != "\x00\xfekeystore\x00bytes" {
+		t.Errorf("the copy holds %q", copied)
+	}
+}
+
+// A88: a runner whose temporary files other users can read gets no file
+// secret: the job fails before its environment starts, saying why.
+func TestExecute_AFileSecretIsRefusedWhereItsCopyWouldNotBePrivate(t *testing.T) {
+	h := fileHarness(t, "docker")
+	o := h.build()
+	req := h.request("build")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/build.yml", fileJob)
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != protocol.ErrMissingSecret || !strings.Contains(res.ErrorMsg, "native runner") {
+		t.Errorf("Execute = %s/%s (%s); want E_MISSING_SECRET naming the native runner", res.State, res.ErrorCode, res.ErrorMsg)
+	}
+	if len(h.env.executed()) > 0 || h.exec.prepared > 0 {
+		t.Error("the job's environment was prepared, or a step ran")
+	}
+}
+
 // A51: a workflow job gets its runner's tool cache — a volume for docker, a
 // directory under the agent's state on the host — and a jobs.yaml job none.
 func TestToolCacheIsTheRunners(t *testing.T) {

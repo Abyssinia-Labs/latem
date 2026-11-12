@@ -75,6 +75,12 @@ Store as `ANDROID_KEYSTORE_B64` via §15 — the macOS Keychain or a
 mode-`0600` `~/.latem/secrets.env`. `ci/android/build.sh` decodes it into a
 mode-`0700` temp directory and removes it on every exit path.
 
+With OpenVault, the keystore can be the file itself (A88): `openvault import
+release.jks --collection app --into production`, and the job reads
+`secrets.RELEASE_JKS` as the path of a private copy, with nothing to decode
+(see [secrets.md, files](secrets.md#files)). `latem store check` still reads
+`ANDROID_KEYSTORE_B64`, so keep it until it learns files too.
+
 Required by the job, per §18.2:
 
 | Secret | What it is |

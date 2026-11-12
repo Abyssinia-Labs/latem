@@ -21,6 +21,9 @@ import (
 type ovRequest struct {
 	typ    byte
 	fields []string
+	// raw is the body after the type, for a request whose fields are not all
+	// strings: a chunk's epoch and id.
+	raw []byte
 }
 
 // fakeVault is an OpenVault service on a real Unix socket, speaking
@@ -87,8 +90,8 @@ func (v *fakeVault) handle(conn net.Conn) {
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
 	}
-	req := ovRequest{typ: buf[0]}
-	for rest := buf[1:]; len(rest) >= 2; {
+	req := ovRequest{typ: buf[0], raw: slices.Clone(buf[1:])}
+	for rest := buf[1:]; len(rest) >= 2 && req.typ != ovReadChunk; {
 		n := int(binary.BigEndian.Uint16(rest))
 		req.fields = append(req.fields, string(rest[2:2+n]))
 		rest = rest[2+n:]
@@ -137,8 +140,60 @@ func ovListingOf(entries map[string]byte) []byte {
 		}
 	}) {
 		b = append(append(b, ovStr(name)...), entries[name])
+		if entries[name] == ovFile {
+			// A file's size and its chunks not here, as OpenVault 0.4 lists them.
+			b = binary.BigEndian.AppendUint64(b, 0)
+			b = binary.BigEndian.AppendUint32(b, 0)
+		}
 	}
 	return b
+}
+
+// ovFileListed is a file as a listing gives it.
+type ovFileListed struct {
+	name    string
+	size    uint64
+	missing uint32
+}
+
+// ovListingWithFiles is a listing of secrets and of files with their sizes.
+func ovListingWithFiles(secrets []string, files ...ovFileListed) []byte {
+	b := binary.BigEndian.AppendUint32([]byte{ovListing}, uint32(len(secrets)+len(files)))
+	for _, name := range secrets {
+		b = append(append(b, ovStr(name)...), ovSecret)
+	}
+	for _, f := range files {
+		b = append(append(b, ovStr(f.name)...), ovFile)
+		b = binary.BigEndian.AppendUint64(b, f.size)
+		b = binary.BigEndian.AppendUint32(b, f.missing)
+	}
+	return b
+}
+
+// ovInlineManifest is the manifest of a file kept in its record.
+func ovInlineManifest(data string) string {
+	b := []byte{0x01}
+	b = binary.BigEndian.AppendUint64(b, uint64(len(data)))
+	b = append(b, 0)                        // mode
+	b = binary.BigEndian.AppendUint64(b, 0) // mtime
+	b = append(b, 0x00)                     // inline
+	return string(append(b, data...))
+}
+
+// ovChunkedManifest is the manifest of a file of size bytes in chunks ids,
+// sealed under epoch.
+func ovChunkedManifest(size uint64, epoch uint32, ids ...[32]byte) string {
+	b := []byte{0x01}
+	b = binary.BigEndian.AppendUint64(b, size)
+	b = append(b, 0)
+	b = binary.BigEndian.AppendUint64(b, 0)
+	b = append(b, 0x01)
+	b = binary.BigEndian.AppendUint32(b, epoch)
+	b = binary.BigEndian.AppendUint32(b, uint32(len(ids)))
+	for _, id := range ids {
+		b = append(b, id[:]...)
+	}
+	return string(b)
 }
 
 func ovRefusal(msg string) []byte { return append([]byte{ovError, 0x01}, ovStr(msg)...) }
@@ -375,7 +430,6 @@ func TestOpenVault_AnAnswerThatDoesNotParseIsABackendFailure(t *testing.T) {
 		"truncated value": {ovEntry, 1, ovSecret, 0, 0, 0, 9, 'x'},
 		"trailing bytes":  append(ovFound(ovSecret, "value-0123456789"), 0),
 		"unknown type":    {0x99},
-		"a file":          ovFound(0x03, "manifest"),
 		"found is 2":      {ovEntry, 2},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -479,7 +533,8 @@ func TestOpenVault_NamesAreTheScopedNamesARunLooksUpAndOnlyForTheRepositoriesAsk
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"app__NPM_TOKEN", "app__production__DEPLOY", "app__staging__SITE_URL"}
+	// The file is listed by the name its path is read as (A88).
+	want := []string{"app__NPM_TOKEN", "app__production__DEPLOY", "app__release__UPLOAD_JKS", "app__staging__SITE_URL"}
 	if !slices.Equal(names, want) {
 		t.Errorf("names = %v, want %v", names, want)
 	}
@@ -511,3 +566,157 @@ func TestOpenVaultSocket(t *testing.T) {
 }
 
 func ovRequestEqual(a, b ovRequest) bool { return a.typ == b.typ && slices.Equal(a.fields, b.fields) }
+
+func ovChunkOf(data string) []byte {
+	b := binary.BigEndian.AppendUint32([]byte{ovChunk}, uint32(len(data)))
+	return append(b, data...)
+}
+
+// A file is read by the name its path is set in, OpenVault's rule for
+// `openvault run` (A88): anywhere in the job's environment folder, or at the
+// top of the repository's collection. As a value it is a miss, even by its
+// very name, so that the file lookup is the one that answers.
+func TestOpenVault_AFileIsReadByTheNameItsPathIsSetIn(t *testing.T) {
+	jks := "\x00\xfekeystore\x00bytes"
+	v := newFakeVault(t, func(r ovRequest) []byte {
+		switch {
+		case r.typ == ovList && r.fields[0] == "app":
+			return ovListingWithFiles([]string{"production/DEPLOY"},
+				ovFileListed{name: "production/upload.jks", size: uint64(len(jks))},
+				ovFileListed{name: "production/ios/AuthKey_ABC.p8", size: 5},
+				ovFileListed{name: "production/KEYSTORE", size: 2},
+				ovFileListed{name: "staging/upload.jks", size: 3},
+				ovFileListed{name: "google-services.json", size: 2})
+		case r.typ == ovGet && r.fields[1] == "production/upload.jks":
+			return ovFound(ovFile, ovInlineManifest(jks))
+		case r.typ == ovGet && r.fields[1] == "production/ios/AuthKey_ABC.p8":
+			return ovFound(ovFile, ovInlineManifest("-----"))
+		case r.typ == ovGet && r.fields[1] == "production/KEYSTORE":
+			return ovFound(ovFile, ovInlineManifest("ks"))
+		case r.typ == ovGet && r.fields[1] == "google-services.json":
+			return ovFound(ovFile, ovInlineManifest("{}"))
+		}
+		return ovRefusal("unexpected")
+	})
+	p := NewOpenVaultProvider(v.socket, 0)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		scope      []string
+		name, file string
+		data       string
+	}{
+		{[]string{"app", "production"}, "UPLOAD_JKS", "upload.jks", jks},
+		{[]string{"app", "production"}, "AUTHKEY_ABC_P8", "AuthKey_ABC.p8", "-----"},
+		{[]string{"app"}, "GOOGLE_SERVICES_JSON", "google-services.json", "{}"},
+	} {
+		f, err := p.ResolveFileIn(ctx, tc.scope, tc.name)
+		if err != nil || f.Name != tc.file || string(f.Data) != tc.data {
+			t.Errorf("ResolveFileIn(%v, %s) = %q, %q, %v; want %s", tc.scope, tc.name, f.Name, f.Data, err, tc.file)
+		}
+	}
+	// Not a folder's file at the top, nor another folder's, nor any without a
+	// repository.
+	for _, tc := range []struct {
+		scope []string
+		name  string
+	}{
+		{[]string{"app"}, "UPLOAD_JKS"},
+		{[]string{"app", "staging"}, "AUTHKEY_ABC_P8"},
+		{nil, "UPLOAD_JKS"},
+	} {
+		if f, err := p.ResolveFileIn(ctx, tc.scope, tc.name); !errors.Is(err, ErrNotFound) {
+			t.Errorf("ResolveFileIn(%v, %s) = %q, %v; want ErrNotFound", tc.scope, tc.name, f.Name, err)
+		}
+	}
+	if got, err := p.ResolveIn(ctx, []string{"app", "production"}, "KEYSTORE"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ResolveIn(KEYSTORE), a file = %q, %v; want ErrNotFound", got, err)
+	}
+}
+
+// A file in chunks has the ones not on this machine fetched first, then is
+// read a chunk at a time, under the epoch its manifest names (files.md).
+func TestOpenVault_AChunkedFileIsFetchedThenReadChunkByChunk(t *testing.T) {
+	first, last := strings.Repeat("a", 1<<20), "the end"
+	size := uint64(len(first) + len(last))
+	v := newFakeVault(t, func(r ovRequest) []byte {
+		switch r.typ {
+		case ovList:
+			return ovListingWithFiles(nil, ovFileListed{name: "release/app.aab", size: size, missing: 1})
+		case ovGet:
+			return ovFound(ovFile, ovChunkedManifest(size, 3, [32]byte{1}, [32]byte{2}))
+		case ovFetch:
+			return binary.BigEndian.AppendUint64([]byte{ovFetched}, 0)
+		case ovReadChunk:
+			rest := r.raw[2+int(binary.BigEndian.Uint16(r.raw)):]
+			if binary.BigEndian.Uint32(rest[:4]) != 3 {
+				return ovRefusal("not the manifest's epoch")
+			}
+			if rest[4] == 1 {
+				return ovChunkOf(first)
+			}
+			return ovChunkOf(last)
+		}
+		return ovRefusal("unexpected")
+	})
+	f, err := NewOpenVaultProvider(v.socket, 0).ResolveFileIn(context.Background(), []string{"app", "release"}, "APP_AAB")
+	if err != nil || f.Name != "app.aab" || string(f.Data) != first+last {
+		t.Fatalf("ResolveFileIn = %q, %d bytes, %v", f.Name, len(f.Data), err)
+	}
+	var asked []byte
+	for _, r := range v.got() {
+		asked = append(asked, r.typ)
+	}
+	if want := []byte{ovList, ovGet, ovFetch, ovReadChunk, ovReadChunk}; !slices.Equal(asked, want) {
+		t.Errorf("requests = %x, want %x", asked, want)
+	}
+}
+
+// What can't be read is a failure, not a miss: a run that needs the file
+// should not carry on as though it were unset.
+func TestOpenVault_AFileThatCannotBeReadIsAFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		files  []ovFileListed
+		answer func(r ovRequest) []byte
+		says   string
+	}{
+		"two files set the name": {
+			files: []ovFileListed{{name: "production/upload.jks"}, {name: "production/old/upload.jks"}},
+			says:  "would both set UPLOAD_JKS",
+		},
+		"no device had its chunks": {
+			files: []ovFileListed{{name: "production/upload.jks", size: 3 << 20, missing: 2}},
+			answer: func(r ovRequest) []byte {
+				if r.typ == ovFetch {
+					return binary.BigEndian.AppendUint64([]byte{ovFetched}, 2)
+				}
+				return ovFound(ovFile, ovChunkedManifest(3<<20, 0, [32]byte{1}, [32]byte{2}, [32]byte{3}))
+			},
+			says: "2 chunk(s)",
+		},
+		"a manifest that does not parse": {
+			files:  []ovFileListed{{name: "production/upload.jks", size: 3}},
+			answer: func(ovRequest) []byte { return ovFound(ovFile, "\x02not a manifest at all, no") },
+			says:   "manifest",
+		},
+		"larger than a run reads": {
+			files: []ovFileListed{{name: "production/upload.jks", size: openVaultMaxFile + 1}},
+			says:  "openvault run",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := newFakeVault(t, func(r ovRequest) []byte {
+				if r.typ == ovList {
+					return ovListingWithFiles(nil, tc.files...)
+				}
+				if tc.answer != nil {
+					return tc.answer(r)
+				}
+				return ovRefusal("unexpected")
+			})
+			_, err := NewOpenVaultProvider(v.socket, 0).ResolveFileIn(context.Background(), []string{"app", "production"}, "UPLOAD_JKS")
+			if err == nil || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), tc.says) {
+				t.Errorf("ResolveFileIn = %v; want a failure that says %q", err, tc.says)
+			}
+		})
+	}
+}

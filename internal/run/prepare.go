@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -108,6 +109,16 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 	if err != nil {
 		return secretOutcome(err), false
 	}
+	// A file reaches a step as a copy in the job's temporary directory, which
+	// only the native executor keeps to the job's user: docker's is readable by
+	// every user in its container (A88). Refused before anything starts.
+	if files := fileSecrets(set); len(files) > 0 && executorName(x.runner) != "native" {
+		set.Zero()
+		return fail(fmt.Errorf("%s %s an OpenVault file, which reaches a step only on a native runner: "+
+			"the %s executor's temporary files are readable by every user in its container",
+			strings.Join(files, ", "), plural(len(files), "is", "are"), executorName(x.runner)),
+			protocol.ErrMissingSecret), false
+	}
 	x.sec = set
 	for _, w := range set.Warnings() {
 		x.note("secret %s", w)
@@ -129,6 +140,60 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 		x.note("resolved %d secret(s): %v", set.Len(), set.Names())
 	}
 	return outcome{}, true
+}
+
+// fileSecrets is the names in set that resolved to files (A88).
+func fileSecrets(set *secrets.Set) []string {
+	var out []string
+	for _, name := range set.Names() {
+		if _, ok := set.FileName(name); ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// putSecretFiles writes each secret that is a file into the job's temporary
+// directory, once its environment is up and before its first step, and keeps
+// where (A88). Each copy is the job user's alone, under the file's own name
+// after a prefix that keeps it apart from the checkout's files, and goes when
+// the environment does.
+func (x *execution) putSecretFiles(ctx context.Context) error {
+	if x.sec == nil {
+		return nil
+	}
+	written := map[string]bool{}
+	for _, name := range fileSecrets(x.sec) {
+		file, _ := x.sec.FileName(name)
+		temp := "latem-secret-" + file
+		if written[temp] {
+			// Two names read files of the same name, which a called
+			// workflow's mapping can do.
+			temp = "latem-secret-" + name + "-" + file
+		}
+		written[temp] = true
+		data, _ := x.sec.Value(name)
+		path, err := x.env.PutTemp(ctx, temp, data)
+		if err != nil {
+			return fmt.Errorf("writing secret %s, an OpenVault file: %w", name, err)
+		}
+		if x.secretPaths == nil {
+			x.secretPaths = map[string]string{}
+		}
+		x.secretPaths[name] = path
+	}
+	if len(x.secretPaths) > 0 {
+		x.note("wrote %d file secret(s) into the job's temporary directory: %v",
+			len(x.secretPaths), slices.Sorted(maps.Keys(x.secretPaths)))
+	}
+	return nil
 }
 
 // secretLookup is the names a workflow job's secret is looked up as, most

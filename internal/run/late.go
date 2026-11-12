@@ -129,6 +129,14 @@ func (x *execution) workflowSecrets() map[string]string {
 	out := map[string]string{}
 	if x.sec != nil {
 		for _, name := range x.sec.Names() {
+			// A file reads as the path of its copy, never as its bytes (A88).
+			if path, ok := x.secretPaths[name]; ok {
+				out[name] = path
+				continue
+			}
+			if _, ok := x.sec.FileName(name); ok {
+				continue
+			}
 			if v, ok := x.sec.Value(name); ok {
 				out[name] = string(v)
 			}
