@@ -160,3 +160,35 @@ repositories, OpenVault simply holds nothing, and the stores after it answer.
 
 A pull request's job asks OpenVault nothing until its commit is approved, as
 for every other store; see [Pull requests](#pull-requests).
+
+### Files
+
+An OpenVault file (OpenVault 0.4 and later), such as a keystore, a `.p8` or a
+service account's JSON, reaches a step as the path of a private copy in the
+job's temporary directory, never as its bytes (A88). A workflow reads it by
+the name `openvault run` gives it: the last part of its name, upper-cased,
+with everything but A–Z and 0–9 turned into `_`.
+
+| A job of repo `R` reads | It is |
+|---|---|
+| `secrets.UPLOAD_JKS`, in environment `E` | a file such as `E/upload.jks`, or `E/android/upload.jks`, anywhere in folder `E` |
+| `secrets.GOOGLE_SERVICES_JSON` | a file `google-services.json` at the top of collection `R` |
+
+```console
+$ openvault import upload.jks --collection app --into production
+```
+
+```yaml
+    environment: production
+    steps:
+      - run: ./gradlew bundleRelease -Pandroid.injected.signing.store.file="$UPLOAD_JKS"
+        env:
+          UPLOAD_JKS: ${{ secrets.UPLOAD_JKS }}
+```
+
+The copy is written before the first step, readable only by the job's user,
+and goes with the job. A secret or variable of the same name comes first. Only
+a native runner gets files: a docker job that reads one fails with
+`E_MISSING_SECRET`, because a docker job's temporary files can be read by
+every user in its container. A file larger than 16 MiB is refused; read those
+with `openvault run`.

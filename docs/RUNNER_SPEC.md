@@ -1101,7 +1101,7 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 Resolution chain, first hit wins. Only names declared in the job's `secrets:` block are looked up.
 
 1. `LATEM_SECRET_<NAME>` in the agent's own environment
-2. OpenVault, with `[secrets] openvault = true` — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86)
+2. OpenVault, with `[secrets] openvault = true` — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86); a name that is no secret or variable there may be a file, which a step reads as the path of a private copy (A88)
 3. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
 4. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
 5. `pass` / `gopass`, if configured
@@ -4156,3 +4156,24 @@ spells the same expression, so the lookup reads the few runs of that commit, wha
 latem-cloud's MCP server offers. Letting an agent approve under a grant, as latem-cloud lets a
 person allow it per environment: a run held here is held by this machine's own policy, and there
 is no grant here to give. Following a log as it streams: an agent reads on with `after`.
+
+### Amendment from a keystore in the vault
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A88 | §15, A53, A86, INV-4 | **An OpenVault file entry is a secret a workflow job reads as a path. A name that is no secret or variable in a scope is looked up there as a file: one whose last name part, upper-cased with every character but `A`–`Z` and `0`–`9` turned into `_`, is the name, which is OpenVault's rule for `openvault run`. For environment `E` that is a file anywhere in folder `E`; for the repository, one at the top of collection `R`. Its bytes are read as the job starts, a file in chunks having any not on the machine fetched first, and are held in the run's secret set and zeroed with it. Before the first step they are written with `PutTemp` into the job's temporary directory as `latem-secret-<its file name>`, and `${{ secrets.NAME }}` reads as that path. Only a native runner gets one: on any other the job fails before its environment starts, with `E_MISSING_SECRET`, since docker's temporary files are readable by every user in its container. A text file's bytes are registered with the redactor; a binary file's are not, since they reach no environment and no log. A file over 16 MiB, or two files that would set one name, are refused. Listings read a file's size and missing chunks (OpenVault 0.4), and `latem secrets list` shows a file by the name it is read as** | The Android keystore travelled as `ANDROID_KEYSTORE_B64`, in base64 because the chain carries strings, and each job's script decoded it into a temporary directory. The Play service account's JSON and the App Store Connect `.p8` were pasted in as values, and the scripts wrote them back into files. OpenVault 0.4 keeps files, encrypted in chunks and synced like any entry, so the keystore can be the file itself. Since 0.4, too, a listing carries two more fields after a file's kind, so a collection with one file in it failed `latem secrets list`, `workflows check` and the heartbeat's missing secrets with "a listing that does not parse" |
+
+**Why a path, not the bytes.** A keystore is binary, and an environment variable cannot hold a NUL.
+A path is also what the tools take: Gradle's `signing.store.file`, fastlane's `json_key`. The copy is
+written by `PutTemp` (A53), into the directory only the job's user can open, and goes when the
+environment does; nothing else on the machine holds the plaintext.
+
+**Why that name.** `openvault run --env E` already sets each of folder `E`'s files' paths in a
+variable named this way, so a build script reads `$UPLOAD_JKS` the same under `openvault run` and
+under latem. A secret or variable of the same name in the same scope comes first.
+
+**Not in this amendment.** `latem store check` and `latem doctor` still read the keystore, the
+Play service account and the `.p8` as values, by their names in §18; a repository that moves them to
+files keeps those values until they learn files too. A docker executor whose temporary files are
+private to the step's user. Files for jobs.yaml jobs, which read no OpenVault entries at all.
+

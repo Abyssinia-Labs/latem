@@ -55,10 +55,13 @@ func (w Warning) String() string {
 // package, when the orchestrator builds the executor's environment map — and
 // that map is dropped with the run (§15, finding F10).
 type Set struct {
-	mu       sync.RWMutex
-	names    []string
-	values   map[string]Value
-	sources  map[string]string
+	mu      sync.RWMutex
+	names   []string
+	values  map[string]Value
+	sources map[string]string
+	// files is the file name each name that resolved to a file goes by
+	// (A88). Its bytes are in values, and are zeroed with them.
+	files    map[string]string
 	warnings []Warning
 	zeroed   bool
 }
@@ -87,6 +90,15 @@ func (s *Set) Value(name string) (Value, bool) {
 	defer s.mu.RUnlock()
 	v, ok := s.values[name]
 	return v, ok
+}
+
+// FileName is the name of the file name resolved to, when it is a file (A88):
+// a step gets the path of a copy by that name instead of the bytes.
+func (s *Set) FileName(name string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	file, ok := s.files[name]
+	return file, ok
 }
 
 // Source returns which provider answered for name — "env", "file", "keychain",

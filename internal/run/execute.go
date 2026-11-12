@@ -58,7 +58,10 @@ type execution struct {
 	// runner, for the note that they changed under it (A64).
 	xcodeAtStart *string
 	sec          *secrets.Set
-	env          executor.Env
+	// secretPaths is where each secret that is a file was written, in the
+	// job's temporary directory, which ${{ secrets.X }} reads as (A88).
+	secretPaths map[string]string
+	env         executor.Env
 	// stepArtifacts are what upload-artifact steps collected as they ran
 	// (A49), reported with the run alongside §17's end-of-job collection.
 	stepArtifacts []protocol.ArtifactRef
@@ -261,6 +264,9 @@ func (x *execution) drive(ctx context.Context) Result {
 	}
 
 	if err := x.prepareEnv(jobCtx, mounts); err != nil {
+		return x.finish(ctx, fail(err, protocol.ErrExecutor))
+	}
+	if err := x.putSecretFiles(jobCtx); err != nil {
 		return x.finish(ctx, fail(err, protocol.ErrExecutor))
 	}
 

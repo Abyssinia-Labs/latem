@@ -91,7 +91,7 @@ func ResolveScoped(
 func ResolveAs(
 	ctx context.Context, p Provider, reg logstream.Registrar, names []string, lookup func(name string) []Lookup,
 ) (set *Set, missing []string, err error) {
-	set = &Set{values: make(map[string]Value), sources: make(map[string]string)}
+	set = &Set{values: make(map[string]Value), sources: make(map[string]string), files: make(map[string]string)}
 	if len(names) == 0 {
 		return set, nil, nil
 	}
@@ -121,6 +121,18 @@ func ResolveAs(
 		for _, l := range lookup(name) {
 			candidate := l.String()
 			value, source, rerr := resolveLookup(ctx, p, l)
+			// No secret or variable by that name in this scope: a file that
+			// sets it, perhaps, before the next, wider scope is asked (A88).
+			file := ""
+			if errors.Is(rerr, ErrNotFound) {
+				f, fsource, ferr := resolveFileLookup(ctx, p, l)
+				switch {
+				case ferr == nil:
+					value, source, rerr, file = f.Data, fsource, nil, f.Name
+				case !errors.Is(ferr, ErrNotFound):
+					rerr = ferr
+				}
+			}
 			switch {
 			case rerr == nil:
 			case errors.Is(rerr, ErrNotFound):
@@ -136,12 +148,20 @@ func ResolveAs(
 				continue
 			}
 
-			reg.Register(value)
-			if logstream.TooShort(value) {
-				set.warnings = append(set.warnings, Warning{Name: name, Kind: WarnTooShort})
+			// A file reaches a step as a path, never in its environment or its
+			// log, so only a text file's bytes are worth matching: a keystore's
+			// would be cut into meaningless lines (A88).
+			if file == "" || redactableFile(value) {
+				reg.Register(value)
+				if logstream.TooShort(value) {
+					set.warnings = append(set.warnings, Warning{Name: name, Kind: WarnTooShort})
+				}
 			}
 			set.names = append(set.names, name)
 			set.values[name] = value
+			if file != "" {
+				set.files[name] = file
+			}
 			if candidate != name && !strings.Contains(source, " as ") {
 				source += " as " + candidate
 			}

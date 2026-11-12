@@ -32,15 +32,26 @@ const (
 	ovCollections byte = 0x01
 	ovGet         byte = 0x03
 	ovList        byte = 0x06
+	ovReadChunk   byte = 0x1a
+	ovFetch       byte = 0x1c
 
 	ovNames   byte = 0x81
 	ovEntry   byte = 0x82
 	ovListing byte = 0x84
+	ovChunk   byte = 0x95
+	ovFetched byte = 0x97
 	ovError   byte = 0x7f
 
 	ovSecret byte = 0x01
 	ovVar    byte = 0x02
+	ovFile   byte = 0x03
 )
+
+// openVaultMaxFile is the largest file a run reads as a secret (A88). It is
+// held whole while the run is prepared and written into the job's temporary
+// directory, which suits a keystore or a key; a larger file is for
+// `openvault run` or `openvault get -o`.
+const openVaultMaxFile = 16 << 20
 
 // openVaultCollection is OpenVault's rule for a collection name, so a
 // repository key it could never hold is turned away here rather than as an
@@ -167,6 +178,11 @@ func (p *OpenVaultProvider) ResolveIn(ctx context.Context, scope []string, name 
 		if r.err != nil || !r.done() {
 			return nil, p.protocolError("get", "an entry that does not parse")
 		}
+		if kind == ovFile {
+			// A file by that very name is read as a file, by the name its path
+			// is set in, not as a value (A88).
+			return nil, fmt.Errorf("openvault: %s/%s is a file, read by its path: %w", collection, entry, ErrNotFound)
+		}
 		if kind != ovSecret && kind != ovVar {
 			return nil, fmt.Errorf("openvault: %s/%s is a kind of entry a secret cannot be read from", collection, entry)
 		}
@@ -226,8 +242,10 @@ func (p *OpenVaultProvider) Collections(ctx context.Context) ([]string, error) {
 // NAME as R__NAME. Absent are the repositories this machine has no collection
 // for, sorted. Nothing is decrypted: OpenVault lists from its index.
 //
-// An entry deeper than one folder, a file, or one whose last part is not a
-// secret's name is left out, because no lookup could reach it.
+// A file is listed by the name its path is set in (A88), [FileVariable] of its
+// name, under the folder it is in. A secret or variable deeper than one
+// folder, or a name that is not a secret's, is left out, because no lookup
+// could reach it.
 func (p *OpenVaultProvider) Names(ctx context.Context, repos []string) (names, absent []string, err error) {
 	have, err := p.Collections(ctx)
 	if err != nil {
@@ -238,12 +256,19 @@ func (p *OpenVaultProvider) Names(ctx context.Context, repos []string) (names, a
 			absent = append(absent, repo)
 			continue
 		}
-		entries, err := p.list(ctx, repo)
+		entries, err := p.listing(ctx, repo)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, e := range entries {
-			if n, ok := scopedEntryName(repo, e); ok {
+			n, ok := "", false
+			switch e.kind {
+			case ovSecret, ovVar:
+				n, ok = scopedEntryName(repo, e.name)
+			case ovFile:
+				n, ok = scopedFileName(repo, e.name)
+			}
+			if ok {
 				names = append(names, n)
 			}
 		}
@@ -266,8 +291,31 @@ func scopedEntryName(repo, entry string) (string, bool) {
 	return ScopedName(name, repo, env), true
 }
 
-// list is the names of a collection's secrets and variables.
-func (p *OpenVaultProvider) list(ctx context.Context, collection string) ([]string, error) {
+// scopedFileName is the scoped name a file's path is read as: its
+// [FileVariable], under its first folder if it has one, as `openvault run
+// --env` gives a folder's files at any depth.
+func scopedFileName(repo, entry string) (string, bool) {
+	variable := FileVariable(entry)
+	if validName(variable) != nil {
+		return "", false
+	}
+	if env, _, nested := strings.Cut(entry, "/"); nested {
+		return ScopedName(variable, repo, env), true
+	}
+	return ScopedName(variable, repo), true
+}
+
+// ovListed is one entry of a collection's listing: a file's size and how many
+// of its chunks are not on this machine come with it.
+type ovListed struct {
+	name    string
+	kind    byte
+	size    uint64
+	missing uint32
+}
+
+// listing is every current entry of a collection, from its index.
+func (p *OpenVaultProvider) listing(ctx context.Context, collection string) ([]ovListed, error) {
 	typ, body, err := p.request(ctx, ovList, ovStr(collection))
 	if err != nil {
 		return nil, err
@@ -276,12 +324,15 @@ func (p *OpenVaultProvider) list(ctx context.Context, collection string) ([]stri
 	case ovListing:
 		r := ovReader{b: body}
 		n := r.u32()
-		var out []string
+		var out []ovListed
 		for i := uint32(0); i < n && r.err == nil; i++ {
-			name, kind := r.str(), r.u8()
-			if kind == ovSecret || kind == ovVar {
-				out = append(out, name)
+			e := ovListed{name: r.str(), kind: r.u8()}
+			// Since OpenVault 0.4, a file's size and its chunks not here
+			// follow its kind (service.md, files).
+			if e.kind == ovFile {
+				e.size, e.missing = r.u64(), r.u32()
 			}
+			out = append(out, e)
 		}
 		if r.err != nil || !r.done() {
 			return nil, p.protocolError("list", "a listing that does not parse")
@@ -291,6 +342,228 @@ func (p *OpenVaultProvider) list(ctx context.Context, collection string) ([]stri
 		return nil, p.serviceError("list", body)
 	}
 	return nil, p.protocolError("list", fmt.Sprintf("message type 0x%02x", typ))
+}
+
+// ResolveFileIn is the file under scope whose [FileVariable] is name (A88):
+// for [R, E], a file anywhere in folder E of collection R, as `openvault run
+// --env E` gives them; for [R], one at the top of R. Two files that would set
+// the same name are refused, as `openvault run` refuses them. Its chunks are
+// fetched from the machine's other devices first if any are missing.
+func (p *OpenVaultProvider) ResolveFileIn(ctx context.Context, scope []string, name string) (File, error) {
+	if len(scope) == 0 {
+		return File{}, fmt.Errorf("openvault: files are read for a repository: %w", ErrNotFound)
+	}
+	collection := scope[0]
+	if !openVaultCollection.MatchString(collection) {
+		return File{}, fmt.Errorf("openvault: %q is not a collection name: %w", collection, ErrNotFound)
+	}
+	entries, err := p.listing(ctx, collection)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return File{}, err
+		}
+		// A machine never scoped to the collection holds no files from it.
+		var ove *OpenVaultError
+		if errors.As(err, &ove) && ove.Refused {
+			if names, cerr := p.Collections(ctx); cerr == nil && !slices.Contains(names, collection) {
+				return File{}, fmt.Errorf("openvault: %s: %w", collection, ErrNoCollection)
+			}
+		}
+		return File{}, err
+	}
+	var found []ovListed
+	for _, e := range entries {
+		if e.kind != ovFile || FileVariable(e.name) != name {
+			continue
+		}
+		folder, _, nested := strings.Cut(e.name, "/")
+		switch {
+		case len(scope) == 1 && !nested:
+		case len(scope) == 2 && nested && folder == scope[1]:
+		default:
+			continue
+		}
+		found = append(found, e)
+	}
+	switch {
+	case len(found) == 0:
+		return File{}, fmt.Errorf("openvault: no file in %s sets %s: %w", strings.Join(scope, "/"), name, ErrNotFound)
+	case len(found) > 1:
+		return File{}, fmt.Errorf("openvault: %s/%s and %s/%s would both set %s",
+			collection, found[0].name, collection, found[1].name, name)
+	}
+	e := found[0]
+	if e.size > openVaultMaxFile {
+		return File{}, fmt.Errorf("openvault: %s/%s is %d bytes; a run reads files of at most %d as secrets, "+
+			"and `openvault run` reads larger ones", collection, e.name, e.size, openVaultMaxFile)
+	}
+	data, err := p.readFile(ctx, collection, e)
+	if err != nil {
+		return File{}, err
+	}
+	return File{Name: e.name[strings.LastIndexByte(e.name, '/')+1:], Data: data}, nil
+}
+
+// WhereFile is the entry a file was read from, as OpenVault's CLI names it.
+func (p *OpenVaultProvider) WhereFile(scope []string, f File) string {
+	if len(scope) == 2 {
+		return scope[0] + "/" + scope[1] + "/…/" + f.Name
+	}
+	if len(scope) == 1 {
+		return scope[0] + "/" + f.Name
+	}
+	return ""
+}
+
+// readFile is a file's bytes: its manifest's, for a file of up to 64 KiB, or
+// its chunks', fetched first when the listing says some are not here and read
+// one request at a time (files.md, manifest).
+func (p *OpenVaultProvider) readFile(ctx context.Context, collection string, e ovListed) (Value, error) {
+	typ, body, err := p.request(ctx, ovGet, ovStr(collection), ovStr(e.name))
+	if err != nil {
+		return nil, err
+	}
+	defer zero(body)
+	if typ == ovError {
+		return nil, p.serviceError("get", body)
+	}
+	r := ovReader{b: body}
+	found, kind, manifest := r.u8(), r.u8(), r.bytes()
+	if typ != ovEntry || r.err != nil || !r.done() || found != 1 || kind != ovFile {
+		return nil, p.protocolError("get", "a file that does not parse")
+	}
+	m, err := parseManifest(manifest)
+	if err != nil {
+		return nil, p.protocolError("get", "a file manifest that does not parse: "+err.Error())
+	}
+	if m.inline != nil {
+		return append(Value(nil), m.inline...), nil
+	}
+	if e.missing > 0 {
+		if err := p.fetch(ctx, collection, e.name); err != nil {
+			return nil, err
+		}
+	}
+	out := make(Value, 0, m.size)
+	for _, id := range m.ids {
+		chunk, err := p.readChunk(ctx, collection, m.epoch, id)
+		if err != nil {
+			out.Zero()
+			return nil, err
+		}
+		out = append(out, chunk...)
+		zero(chunk)
+	}
+	if uint64(len(out)) != m.size {
+		out.Zero()
+		return nil, p.protocolError("read chunk", "chunks that do not add up to the file's size")
+	}
+	return out, nil
+}
+
+// fetch asks the service to get a file's missing chunks from the devices
+// that read its collection, and waits until it has.
+func (p *OpenVaultProvider) fetch(ctx context.Context, collection, entry string) error {
+	typ, body, err := p.request(ctx, ovFetch, ovStr(collection), ovStr(entry))
+	if err != nil {
+		return err
+	}
+	switch typ {
+	case ovFetched:
+		r := ovReader{b: body}
+		missing := r.u64()
+		if r.err != nil || !r.done() {
+			return p.protocolError("fetch", "an answer that does not parse")
+		}
+		if missing > 0 {
+			return fmt.Errorf("openvault: %d chunk(s) of %s/%s are not on this machine, and none of its other "+
+				"devices that could be reached had them", missing, collection, entry)
+		}
+		return nil
+	case ovError:
+		return p.serviceError("fetch", body)
+	}
+	return p.protocolError("fetch", fmt.Sprintf("message type 0x%02x", typ))
+}
+
+// readChunk is one of a file's chunks, opened by the service.
+func (p *OpenVaultProvider) readChunk(ctx context.Context, collection string, epoch uint32, id [32]byte) ([]byte, error) {
+	var e [4]byte
+	binary.BigEndian.PutUint32(e[:], epoch)
+	typ, body, err := p.request(ctx, ovReadChunk, ovStr(collection), e[:], id[:])
+	if err != nil {
+		return nil, err
+	}
+	defer zero(body)
+	switch typ {
+	case ovChunk:
+		r := ovReader{b: body}
+		data := r.bytes()
+		if r.err != nil || !r.done() {
+			return nil, p.protocolError("read chunk", "a chunk that does not parse")
+		}
+		return append([]byte(nil), data...), nil
+	case ovError:
+		return nil, p.serviceError("read chunk", body)
+	}
+	return nil, p.protocolError("read chunk", fmt.Sprintf("message type 0x%02x", typ))
+}
+
+// ovManifest is a file entry's value (OpenVault files.md, manifest): the
+// file's bytes when it is small enough to be inline, or the chunks it is in.
+type ovManifest struct {
+	size   uint64
+	inline []byte
+	epoch  uint32
+	ids    [][32]byte
+}
+
+// parseManifest reads a manifest with OpenVault's own checks: format 1, no
+// mode bits but the executable one, inline bytes of at most 64 KiB that are
+// the file's size, or as many 1 MiB chunks as its size needs.
+func parseManifest(b []byte) (ovManifest, error) {
+	const (
+		maxInline = 64 << 10
+		chunkSize = 1 << 20
+	)
+	if len(b) < 19 {
+		return ovManifest{}, errors.New("too short")
+	}
+	if b[0] != 0x01 {
+		return ovManifest{}, errors.New("an unknown format")
+	}
+	m := ovManifest{size: binary.BigEndian.Uint64(b[1:9])}
+	if b[9]&^0x01 != 0 {
+		return ovManifest{}, errors.New("unknown mode bits")
+	}
+	rest := b[19:]
+	switch b[18] {
+	case 0x00:
+		if len(rest) > maxInline || uint64(len(rest)) != m.size {
+			return ovManifest{}, errors.New("inline bytes that are not its size")
+		}
+		m.inline = rest
+		if m.inline == nil {
+			m.inline = []byte{}
+		}
+	case 0x01:
+		if len(rest) < 8 {
+			return ovManifest{}, errors.New("too short")
+		}
+		m.epoch = binary.BigEndian.Uint32(rest[0:4])
+		count := binary.BigEndian.Uint32(rest[4:8])
+		if uint64(count) != (m.size+chunkSize-1)/chunkSize || len(rest)-8 != 32*int(count) {
+			return ovManifest{}, errors.New("a chunk count that is not its size's")
+		}
+		for i := range int(count) {
+			var id [32]byte
+			copy(id[:], rest[8+32*i:])
+			m.ids = append(m.ids, id)
+		}
+	default:
+		return ovManifest{}, errors.New("an unknown layout")
+	}
+	return m, nil
 }
 
 // OpenVaultEntry is the collection and entry a scoped name reads as in
@@ -414,6 +687,10 @@ func ovOpName(typ byte) string {
 		return "get"
 	case ovList:
 		return "list"
+	case ovReadChunk:
+		return "read chunk"
+	case ovFetch:
+		return "fetch"
 	}
 	return fmt.Sprintf("0x%02x", typ)
 }
@@ -513,6 +790,13 @@ func (r *ovReader) u8() byte {
 func (r *ovReader) u32() uint32 {
 	if b := r.take(4); b != nil {
 		return binary.BigEndian.Uint32(b)
+	}
+	return 0
+}
+
+func (r *ovReader) u64() uint64 {
+	if b := r.take(8); b != nil {
+		return binary.BigEndian.Uint64(b)
 	}
 	return 0
 }
