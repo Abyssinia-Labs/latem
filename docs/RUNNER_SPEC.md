@@ -4119,12 +4119,16 @@ would end A68's per-machine mismatches. A machine-wide collection. Writing to Op
 |---|---|---|---|
 | A87 | §19, §22, INV-1, INV-2, INV-5 | **`latem mcp` serves this machine's builds over the Model Context Protocol, on stdin and stdout, to an agent that starts it over ssh. Its tools are `latem list` (and by commit), one run, its log, a wait for it to settle, `latem run`, `latem cancel`, and `latem workflows check --repo`. It never approves: neither `latem approve` nor `latem try` is a tool, nor are secrets, vars, repositories, the service, setup or update. The runs table gains `runs_commit_idx`, on a run's commit as its row has it, or before its ref resolves as its workflow job does** | An agent working in another project, on a laptop, builds on these machines and needs to know exactly when a build has finished and how. latem-cloud's MCP server answers that through the control plane. A machine without one had only ssh and the commands, which an agent drives by parsing columns laid out for a person. And "what did this machine build of the commit I pushed" had no answer but a scan of every run kept |
 
-**How it is reached.** `claude mcp add --scope user mini -- ssh mini latem mcp`. The agent's client
-starts ssh, ssh starts `latem mcp`, and the two speak newline-delimited JSON-RPC 2.0, MCP's stdio
-transport, until the client closes stdin. It listens on nothing, so INV-1 is untouched: the machine
-is reached as its operator reaches it, by the ssh login they already allow, and no port opens. It
-runs as that login's user and reads and writes what that user's `latem` commands would. Nothing but
-the protocol is written to stdout.
+**How it is reached.** `claude mcp add --scope user mini -- ssh mini .local/bin/latem mcp`. The
+agent's client starts ssh, ssh starts `latem mcp`, and the two speak newline-delimited JSON-RPC 2.0,
+MCP's stdio transport, until the client closes stdin. latem is named by its path because ssh runs a
+command with a short `PATH` (on macOS `/usr/bin:/bin:/usr/sbin:/sbin`), which has neither
+`~/.local/bin`, where `install.sh` puts it, nor Homebrew's bin. `latem mcp --help` prints the line
+with the running binary's path, chosen as `latem service install` chooses it: Homebrew's link at
+the installed version (A78), or else the binary resolved through symlinks. It listens on nothing,
+so INV-1 is untouched: the machine is reached as its operator reaches it, by the ssh login they
+already allow, and no port opens. It runs as that login's user and reads and writes what that
+user's `latem` commands would. Nothing but the protocol is written to stdout.
 
 **What it does.** Each tool is a command and goes through the command's code. The reads are from
 state.db and the log files. `startRun` and `cancelRun` go over the agent's socket, and queue or

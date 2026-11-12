@@ -160,6 +160,49 @@ func TestMCPInitializeAndTools(t *testing.T) {
 	}
 }
 
+// `latem mcp --help` gives the line that adds this machine with latem named
+// by its path. ssh runs the command with a short PATH, which has neither
+// ~/.local/bin nor Homebrew's bin, so `ssh HOST latem mcp` is "command not
+// found". A Homebrew latem is named by the link each upgrade moves, never by
+// the keg an upgrade deletes.
+func TestMCPHelpNamesLatemByItsPath(t *testing.T) {
+	help := func() string {
+		t.Helper()
+		root := newRootCommand()
+		var out strings.Builder
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"mcp", "--help"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("mcp --help: %v", err)
+		}
+		return out.String()
+	}
+
+	asHomebrews(t, "")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if got, want := help(), "  claude mcp add --scope user HOST -- ssh HOST "+shellWord(shellWord(exe))+" mcp\n"; !strings.Contains(got, want) {
+		t.Errorf("the help does not name this binary:\n%s\nwant the line %q", got, want)
+	}
+
+	asHomebrews(t, "/opt/homebrew/opt/latem/bin/latem")
+	if got, want := help(), " -- ssh HOST /opt/homebrew/opt/latem/bin/latem mcp\n"; !strings.Contains(got, want) {
+		t.Errorf("the help does not name Homebrew's link:\n%s\nwant %q", got, want)
+	}
+
+	// Quoted once for the shell the line is pasted into, and again for the
+	// one ssh hands it to, so a path with a space arrives as one word.
+	if got, want := mcpHelp("/Users/a b/.local/bin/latem"), ` -- ssh HOST ''\''/Users/a b/.local/bin/latem'\''' mcp`+"\n"; !strings.Contains(got, want) {
+		t.Errorf("a path with a space is not quoted for both shells:\n%s\nwant %q", got, want)
+	}
+}
+
 // What is not a request is answered as JSON-RPC says, a notification gets no
 // answer, and the server goes on.
 func TestMCPProtocolErrors(t *testing.T) {

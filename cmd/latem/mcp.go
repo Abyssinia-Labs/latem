@@ -16,8 +16,10 @@ import (
 
 // `latem mcp` serves this machine's builds to an agent over the Model Context
 // Protocol, on stdin and stdout (A87). It is meant to be reached by ssh from
-// the machine the agent works on — `ssh mini latem mcp` — so it listens on
-// nothing (INV-1) and is exactly as trusted as the ssh login that started it.
+// the machine the agent works on — `ssh mini .local/bin/latem mcp` — so it
+// listens on nothing (INV-1) and is exactly as trusted as the ssh login that
+// started it. ssh runs that command with a short PATH, which has neither
+// ~/.local/bin nor Homebrew's bin, so latem is named by its path.
 //
 // It speaks newline-delimited JSON-RPC 2.0, MCP's stdio transport, written
 // here rather than taken from a library: it is four methods and a framing the
@@ -25,15 +27,51 @@ import (
 // short. The tools are in mcp_tools.go.
 
 func newMCPCommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Serve this machine's builds to an agent over MCP, on stdin and stdout",
-		Long: `Serve this machine's builds to an agent over MCP, on stdin and stdout.
+		Long:  mcpHelp(".local/bin/latem"),
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			if f, ok := out.(*os.File); ok && f == os.Stdout {
+				// The protocol owns stdout. Anything else that would write
+				// there — a stray print deep in a package — goes to stderr
+				// instead of corrupting the stream an agent is reading.
+				os.Stdout = os.Stderr
+				defer func() { os.Stdout = f }()
+			}
+			return newMCPServer(mcpTools()).serve(cmd.Context(), cmd.InOrStdin(), out)
+		},
+	}
+	// The help names this binary by its path, looked up only when it is
+	// asked for, so a person can copy the line as it is.
+	help := cmd.HelpFunc()
+	cmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if exe, err := installedPath(); err == nil {
+			c.Long = mcpHelp(exe)
+		}
+		help(c, args)
+	})
+	return cmd
+}
+
+// mcpHelp is `latem mcp --help`, naming latem by exe in the line that adds
+// this machine to an agent. The path passes through two shells, the one the
+// line is pasted into and the one ssh runs it with here, so it is quoted for
+// both.
+func mcpHelp(exe string) string {
+	return `Serve this machine's builds to an agent over MCP, on stdin and stdout.
 
 An agent working on another machine adds this one as a server it starts over
-ssh, and reads and drives the builds here the way the commands below do:
+ssh, and reads and drives the builds here the way the commands below do. For
+Claude Code, run this there:
 
-  claude mcp add --scope user mini -- ssh mini latem mcp
+  claude mcp add --scope user HOST -- ssh HOST ` + shellWord(shellWord(exe)) + ` mcp
+
+HOST is anything ssh takes, an alias from ~/.ssh/config included. latem is
+named by its path because ssh runs a command with a short PATH, which has
+neither ~/.local/bin, where install.sh puts latem, nor Homebrew's bin.
 
 Its tools list runs (by repository, state or commit), show one, read its log,
 wait for it to finish, start a .latem/jobs.yaml job, cancel a run, and check
@@ -48,20 +86,7 @@ stdout, and stops when stdin closes. Nothing else is written to stdout.
 
 Exit codes:
   0  stdin closed
-  1  stdin or stdout failed`,
-		Args: noArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			out := cmd.OutOrStdout()
-			if f, ok := out.(*os.File); ok && f == os.Stdout {
-				// The protocol owns stdout. Anything else that would write
-				// there — a stray print deep in a package — goes to stderr
-				// instead of corrupting the stream an agent is reading.
-				os.Stdout = os.Stderr
-				defer func() { os.Stdout = f }()
-			}
-			return newMCPServer(mcpTools()).serve(cmd.Context(), cmd.InOrStdin(), out)
-		},
-	}
+  1  stdin or stdout failed`
 }
 
 // mcpVersions are the protocol revisions this server answers to, newest
