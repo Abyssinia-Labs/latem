@@ -4535,3 +4535,35 @@ until then `::error file=…::` is how a script says it. Kotlin and Gradle, jest
 test failures, which need their own readers. Coverage, and which tests ran: ANVerS's risk score
 asks for both (ADR-0009), and neither is in a log in a form worth trusting.
 
+
+### Amendment from the first build v0.9.0 read
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A93 | A92 | **The biome reader takes every diagnostic biome prints, not only the linter's: a syntax error (`a.ts:2:10 parse`), imports out of order (`assist/source/organizeImports`), and a file the formatter would change, whose header has a file and no line (`data.json format`), so its problem has none. A terminal hyperlink is dropped before a line is read, as a colour is; `biome ci` writes one around each rule's name, into a pipe too. And a problem a step names with a workflow command, which a reader also finds in the step's output, is one problem: the reader's** | The first build a machine took on v0.9.0 failed on `biome check`, over one JSON file that was not formatted, and its result said the step failed with 0 errors. A92's reader wanted `file:line:col` and a category of two words or more. Biome's formatter prints a file and one word, and its parser a place and one word, so neither was read. Capturing every form to fix that showed two more gaps. `biome ci` colours its output unasked, and the link's escape sat inside the header. And where `GITHUB_ACTIONS` is set, which is every workflow job, it writes `::error` commands and then its own report, so reading the report as well would have counted each problem twice |
+
+**A problem can have a file and no line.** `line` and `column` were optional in the document from
+the start, and until now every reader set them. A file that is not formatted is wrong as a whole,
+and biome says so: `data.json format ━━━`. Its problem is `{"severity": "error", "file":
+"data.json", "code": "format", "tool": "biome", "message": "Formatter would have printed the
+following content:"}`, in biome's words, which differ between `biome check` and `biome ci`. A
+caller that maps problems to places must take a file alone. The line a biome run ends with,
+`check ━━━` and then "Some errors were emitted", names no file and is not a problem.
+
+**One problem said twice is one.** A step's own `::error` and a reader's problem are the same when
+they have the same file and severity, the same line where both give one, and either the same
+message or the same code. The reader's is kept, because it has the tool's name and its fix. The
+step's own is kept whenever no reader's matches it: the step passed, so the readers' errors were
+dropped (A92), or nothing reads that tool. Biome's command puts a formatter's problem on line 1
+and its report gives it none, which is why a line on one side only is no difference. On four files
+with seven errors and one warning, `biome ci` wrote seven commands and a report of eight
+diagnostics, since the formatting a syntax error stopped has no command, and the result has seven
+errors and one warning, each once.
+
+**Measured.** The log of the build that showed this, read again by the new reader: one error,
+`format`, at the JSON file. The captures are biome 2.5.11's, in `internal/result/testdata` as
+`biome-check.txt`, `biome-ci.txt` and `biome-ci-github.txt`.
+
+**Not in this amendment.** A path in a workflow command is still as the step wrote it, not made
+relative to the workspace as a reader's is. A tool that says a problem twice in different words
+and under no code is still two.

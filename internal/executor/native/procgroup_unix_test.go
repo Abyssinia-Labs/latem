@@ -209,7 +209,32 @@ func TestGroupRecord_OutlivesTheAgentAndTheLeader(t *testing.T) {
 	if alive := waitForExit(child, 10*time.Second); alive {
 		t.Fatalf("child %d survived SIGKILL to its group", child)
 	}
+	// The step left two processes behind, not one: the sleep it backgrounded,
+	// which child.pid names, and the sleep its shell was waiting on. Both
+	// inherited the descriptor, and SIGKILL reaches each in its own time, so
+	// the first being gone says nothing about the second. Until this waited
+	// for the group, the assertion below was a race the second sleep usually
+	// lost: it failed on a loaded macOS runner, and 1 time in 300 here under
+	// load, with "groupRecordHeld = true".
+	if !waitForGroupGone(pgid, 10*time.Second) {
+		t.Fatalf("process group %d still has a member after SIGKILL", pgid)
+	}
 	assertHeld(t, g.path, false, "once every process from the step is gone")
+}
+
+// waitForGroupGone waits until no process is left in the group, and reports
+// whether that happened in time. A process's descriptors are closed before it
+// is a zombie, and a zombie is still in its group, so an empty group has
+// released everything it held.
+func waitForGroupGone(pgid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pgidGone(pgid) {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return pgidGone(pgid)
 }
 
 // The pid reuse defence, from the wrong end: a record naming a live process

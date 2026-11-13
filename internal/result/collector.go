@@ -2,6 +2,7 @@ package result
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -176,7 +177,7 @@ func (c *Collector) StepEnd(outcome string, forgiven bool, exitCode *int, reason
 	step.Outcome, step.Forgiven, step.ExitCode, step.Reason = outcome, forgiven, exitCode, reason
 	step.DurationMs = c.now().Sub(c.started).Milliseconds()
 
-	found := append([]Problem(nil), c.direct...)
+	var read []Problem
 	for _, stream := range []protocol.Stream{protocol.StreamStderr, protocol.StreamStdout} {
 		if sc := c.scans[stream]; sc != nil {
 			sc.flush()
@@ -184,10 +185,22 @@ func (c *Collector) StepEnd(outcome string, forgiven bool, exitCode *int, reason
 				if outcome == OutcomeSuccess && p.Severity == SeverityError {
 					continue
 				}
-				found = append(found, p)
+				read = append(read, p)
 			}
 		}
 	}
+	// A tool that writes workflow commands where it finds GITHUB_ACTIONS set
+	// prints its own report as well: `biome ci` does both. That is one
+	// problem said twice, and the tool's own telling is the one kept, because
+	// it has the fix and the reader's name. With no reader's telling to match
+	// (the step passed, or nothing reads that tool) the step's own stays.
+	var found []Problem
+	for _, d := range c.direct {
+		if !restated(d, read) {
+			found = append(found, d)
+		}
+	}
+	found = append(found, read...)
 	for _, p := range found {
 		p.Step = step.Name
 		p.Message = cut(p.Message, MaxMessageBytes)
@@ -202,6 +215,30 @@ func (c *Collector) StepEnd(outcome string, forgiven bool, exitCode *int, reason
 	c.step, c.scans, c.direct = nil, nil, nil
 	c.mu.Unlock()
 	_ = c.flush()
+}
+
+// restated reports whether one of read is the problem d, which a step named
+// itself: the same file and severity, the same line where both give one, and
+// either the same words or the same code. A formatter's problem has no line
+// in the tool's report and line 1 in its workflow command, which is why a
+// line on one side only is no difference.
+func restated(d Problem, read []Problem) bool {
+	if d.File == "" {
+		return false
+	}
+	file := strings.TrimPrefix(d.File, "./")
+	for _, p := range read {
+		if p.Severity != d.Severity || strings.TrimPrefix(p.File, "./") != file {
+			continue
+		}
+		if p.Line != 0 && d.Line != 0 && p.Line != d.Line {
+			continue
+		}
+		if p.Message == d.Message || (d.Code != "" && p.Code == d.Code) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Collector) keep(step *Step, p Problem) {

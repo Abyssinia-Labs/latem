@@ -125,6 +125,85 @@ func TestCollectorAStepThatPassedHasNoErrorsButItsOwn(t *testing.T) {
 	}
 }
 
+// Where GITHUB_ACTIONS is set, which is every workflow job, `biome ci` says
+// each problem twice: as a workflow command and in its own report. The
+// result has each once, as biome's report tells it, with the fix. Captured
+// on 2026-11-12 from biome 2.5.11; the report has one problem the commands
+// do not, the format that a syntax error stopped.
+func TestCollectorAProblemAStepNamesAndItsToolPrintsIsOne(t *testing.T) {
+	c, dir := newCollector(t)
+	c.StepStart("lint")
+	commands := 0
+	for _, line := range fileLines(t, "biome-ci-github.txt") {
+		level, rest, ok := strings.Cut(strings.TrimPrefix(line, "::"), " ")
+		if !strings.HasPrefix(line, "::") || !ok {
+			_ = c.Write(frames(protocol.StreamStdout, line))
+			continue
+		}
+		head, message, _ := strings.Cut(rest, "::")
+		params := map[string]string{}
+		for _, kv := range strings.Split(head, ",") {
+			k, v, _ := strings.Cut(kv, "=")
+			params[k] = v
+		}
+		c.Annotate(level, message, params)
+		commands++
+	}
+	c.StepEnd(OutcomeFailure, false, exit(1), "")
+	_ = c.Finish(protocol.StateFailed, protocol.ErrStep, "", exit(1))
+
+	r, err := Read(dir, testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commands != 7 {
+		t.Fatalf("the capture has %d workflow commands, want 7", commands)
+	}
+	if r.Errors != 7 || r.Warnings != 1 || len(r.Problems) != 8 {
+		t.Fatalf("%d errors, %d warnings:\n%s", r.Errors, r.Warnings, show(r.Problems))
+	}
+	for _, p := range r.Problems {
+		if p.Tool != "biome" {
+			t.Errorf("kept the step's own telling of a problem biome's report has: %+v", p)
+		}
+	}
+	if got := r.Problems[len(r.Problems)-1]; got.Help != "Use const instead." {
+		t.Errorf("the warning lost biome's fix: %+v", got)
+	}
+}
+
+// What a step names itself stays when no reader's problem is the same one:
+// another line, another severity, or other words under another code.
+func TestCollectorKeepsWhatAStepNamesThatNoToolRestates(t *testing.T) {
+	c, dir := newCollector(t)
+	c.StepStart("build")
+	_ = c.Write(frames(protocol.StreamStderr, "src/a.c:3:1: error: expected ';'"))
+	c.Annotate("error", "expected ';'", map[string]string{"file": "./src/a.c", "line": "3"})      // the same: dropped
+	c.Annotate("error", "expected ';'", map[string]string{"file": "src/a.c", "line": "9"})        // another line
+	c.Annotate("warning", "expected ';'", map[string]string{"file": "src/a.c", "line": "3"})      // another severity
+	c.Annotate("error", "the header is stale", map[string]string{"file": "src/a.c", "line": "3"}) // other words
+	c.Annotate("error", "expected ';'", map[string]string{"line": "3"})                           // no file
+	c.StepEnd(OutcomeFailure, false, exit(1), "")
+	_ = c.Finish(protocol.StateFailed, protocol.ErrStep, "", exit(1))
+
+	r, err := Read(dir, testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Errors != 4 || r.Warnings != 1 {
+		t.Fatalf("%d errors, %d warnings, want 4 and 1:\n%s", r.Errors, r.Warnings, show(r.Problems))
+	}
+	own := 0
+	for _, p := range r.Problems {
+		if p.Tool == "annotation" {
+			own++
+		}
+	}
+	if own != 4 {
+		t.Errorf("kept %d of the step's own, want 4:\n%s", own, show(r.Problems))
+	}
+}
+
 // A build that prints ten thousand errors has its first hundred kept and the
 // rest counted, and one of any length is cut.
 func TestCollectorBoundsWhatItKeeps(t *testing.T) {

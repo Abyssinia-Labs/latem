@@ -169,8 +169,10 @@ go's compiler, vet and `go test`, tsc, `bun test`, vitest, biome, pytest, and
 anything that prints `file:line:col: error:` the way clang and xcodebuild do.
 A script of your own names a problem with
 `echo "::error file=src/x.c,line=3::what is wrong"`. A suggested fix is shown
-when the tool printed one, and is the tool's. It exits 0 whatever the run's
-state, as `latem logs` does (amendment A92).
+when the tool printed one, and is the tool's. A problem has a line when the
+tool gave one: a file a formatter would change has only the file. A problem a
+step names with `::error` and its tool also prints is shown once (A93). It
+exits 0 whatever the run's state, as `latem logs` does (amendment A92).
 
 ## `latem mcp`: an agent on another machine
 

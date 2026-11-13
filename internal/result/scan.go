@@ -55,7 +55,10 @@ type bunState struct {
 }
 
 var (
-	ansi = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	// What a terminal reads and a person does not: colours (CSI), and the
+	// hyperlink (OSC 8) biome puts around a rule's name when it prints in
+	// colour, which `biome ci` does into a pipe too.
+	ansi = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 
 	rustHeader = regexp.MustCompile(`^(error|warning)(?:\[([A-Za-z0-9_:]+)\])?: (.+)$`)
 	rustPlace  = regexp.MustCompile(`^\s*--> (.+?):(\d+):(\d+)\s*$`)
@@ -95,7 +98,10 @@ var (
 	vitestError = regexp.MustCompile(`^([A-Za-z]*Error): (.+)$`)
 	vitestPlace = regexp.MustCompile(`^\s*❯ (\S+?):(\d+):(\d+)$`)
 
-	biomeHeader = regexp.MustCompile(`^(\S+?):(\d+):(\d+) ([a-z][A-Za-z]*(?:/[A-Za-z0-9]+)+)\b.*━`)
+	// path[:line:col] category [TAG…] ━━━. The category is one word (parse,
+	// format) or a path of them (lint/style/useConst), and the rule of ━ is
+	// what tells the line from any other that starts with a file's name.
+	biomeHeader = regexp.MustCompile(`^(.+?)(?::(\d+):(\d+))? ([a-z][A-Za-z]*(?:/[A-Za-z0-9]+)*)(?:\s+[A-Z]+)*\s+━+$`)
 	biomeText   = regexp.MustCompile(`^\s+([!×✖✘⚠]) (.+)$`)
 	biomeFix    = regexp.MustCompile(`^\s+[iℹ] (?:Safe|Unsafe) fix: (.+)$`)
 )
@@ -448,7 +454,7 @@ func (s *scanner) endVitest() {
 	s.vitest = nil
 }
 
-// biomeLint reads a biome diagnostic:
+// biomeLint reads a biome diagnostic, whichever part of biome wrote it:
 //
 //	a.ts:2:3 lint/style/useConst  FIXABLE  ━━━━━━━━━━
 //
@@ -456,12 +462,23 @@ func (s *scanner) endVitest() {
 //	  …
 //	  i Safe fix: Use const instead.
 //
-// `!` is a warning and `×` an error, as biome marks them.
+// `!` is a warning and `×` an error, as biome marks them. The linter, the
+// parser (`a.ts:2:10 parse ━━`) and the import sorter put a line and column
+// after the file. The formatter does not (`data.json format ━━`): a file that
+// is not formatted is wrong as a whole, and its problem has a file and no
+// line. The line that ends a run (`check ━━`) names no file and is no
+// problem: it says only that there were some.
 func (s *scanner) biomeLint(text string) {
-	if m := biomeHeader.FindStringSubmatch(text); m != nil {
-		s.endBiome()
-		s.biome = &Problem{File: m[1], Line: atoi(m[2]), Column: atoi(m[3]), Code: m[4], Tool: "biome"}
-		return
+	// Every line of every step comes through here, and the header's pattern
+	// begins with a file's name, which is anything. So the rule it ends with
+	// is looked for first: one comparison, and no pattern is run on a line
+	// that is not a header.
+	if strings.HasSuffix(text, "━") {
+		if m := biomeHeader.FindStringSubmatch(text); m != nil && (m[2] != "" || isSourcePath(m[1])) {
+			s.endBiome()
+			s.biome = &Problem{File: m[1], Line: atoi(m[2]), Column: atoi(m[3]), Code: m[4], Tool: "biome"}
+			return
+		}
 	}
 	p := s.biome
 	if p == nil {
