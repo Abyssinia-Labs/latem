@@ -148,8 +148,10 @@ instead (RUNNER_SPEC A89). Over ssh, log in and run it at the prompt.
 `latem setup --json` says what stands in the way of each kind of build and how
 each thing closes. **`latem setup apply <id>...` closes them as the setup
 screen would**, for an agent with a shell on the machine, or a script, and no
-screen. `--kind K` is every item of the kind and then the kind itself: its
-label goes on its runner once its check passes in a step's environment.
+screen. `--kind K` alone is every item of the kind and then the kind itself:
+its label goes on its runner once its check passes in a step's environment.
+With ids, `--kind K` only says to find them in K, since one id can be in more
+than one kind.
 
 ```console
 $ latem setup apply java-home android-home

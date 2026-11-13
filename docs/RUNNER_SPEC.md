@@ -4593,8 +4593,10 @@ itself, as the screen's space bar does. An item that appears only once another c
 platform-tools does once there is an SDK, is for the next run. K itself is its label on its runner,
 written only with nothing in the way and after `proveKind` passes. That is the proof run with the
 service's PATH and the runner's env and nothing from the shell apply was started in. A proof that
-fails exits 1 with what its probe printed, and no label is written. Ids with `--kind` are those
-items of K, then K. A kind with no label, such as iOS, comes with a runner's `xcode` and `macos`
+fails exits 1 with what its probe printed, and no label is written. Ids with `--kind` are looked
+up in K alone, because one id can be in several kinds (a repository's secrets are an item of each
+kind its jobs are), and K is not switched on: an agent closing one item of several is not told the
+kind failed because the rest are still there. `--kind K` alone switches it. A kind with no label, such as iOS, comes with a runner's `xcode` and `macos`
 labels, and which labels a runner carries is the person's to say, so apply says so and exits 4. One
 that needs another operating system exits 1. Apply never takes a label away.
 

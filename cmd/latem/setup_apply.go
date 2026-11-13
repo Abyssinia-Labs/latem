@@ -42,7 +42,9 @@ this machine, or a script.
 Each id is an item's, from the plan. --kind K is every item of the kind K,
 and then the kind itself: once nothing is in the way, its check runs in a
 step's environment, and the runner gains the kind's label only if the check
-passes. With ids as well, it is those items of K, and then K.
+passes. With ids as well, --kind K only says to find them in K, since an id
+can be in more than one kind, and K is not switched on: --kind K alone does
+that, once its items are closed.
 
 An item closes as the screen would close it:
   run      each command, as an argv, with stdin closed and in a session of
@@ -77,7 +79,7 @@ Exit codes:
 			return runSetupApply(cmd, args, f, newSetupDeps())
 		},
 	}
-	cmd.Flags().StringVar(&f.kind, "kind", "", "every item of the kind `K`, then K itself, on with its label once its check passes")
+	cmd.Flags().StringVar(&f.kind, "kind", "", "alone: every item of the kind `K`, then K itself, on with its label once its check passes; with ids: find them in K")
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the plan afterwards, as setup --json does")
 	return cmd
 }
@@ -187,11 +189,14 @@ func applyTargets(plan readiness.Plan, ids []string, kind string) ([]applyTarget
 		}
 		out = append(out, applyTarget{id: id, kind: where})
 	}
-	if scope != nil {
-		if len(ids) == 0 {
-			for _, it := range scope.Items {
-				out = append(out, applyTarget{id: it.ID, kind: where})
-			}
+	// --kind alone is the kind: its items, then its switch. With ids it only
+	// says where to find them, since one id can be in several kinds (a
+	// repository's secrets are in each kind its jobs are), and switching the
+	// kind on is left for --kind alone. An agent closing one item of several
+	// should not be told the kind failed because the others are still there.
+	if scope != nil && len(ids) == 0 {
+		for _, it := range scope.Items {
+			out = append(out, applyTarget{id: it.ID, kind: where})
 		}
 		out = append(out, applyTarget{id: scope.Name, kind: where, on: true})
 	}

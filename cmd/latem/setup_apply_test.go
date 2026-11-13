@@ -169,6 +169,29 @@ func TestSetupApply_AndroidFromTwoSettingsToOn(t *testing.T) {
 	}
 }
 
+// An id with --kind is found in that kind, and the kind is not switched on:
+// an agent closing one item of two is not told the kind failed because the
+// other is still in its way.
+func TestSetupApply_IDsWithKindDoNotSwitchIt(t *testing.T) {
+	dir, _, jdk, _ := macBookAndroid(t, 0)
+	noAgentRunning(t)
+
+	_, stderr, err := applyIn(t, dir, "java-home", "--kind", "android")
+	if err != nil {
+		t.Fatalf("exit %d (%v)\n%s", exitCode(err), err, stderr)
+	}
+	r, _ := loadConfigIn(t, dir).Runner("macos")
+	if r.NativeEnv()["JAVA_HOME"] != jdk {
+		t.Errorf("env = %v", r.NativeEnv())
+	}
+	if slices.Contains(r.Labels, readiness.LabelAndroid) {
+		t.Errorf("a label went on: %q", r.Labels)
+	}
+	if strings.Contains(stderr, "android: off") {
+		t.Errorf("the kind was tried:\n%s", stderr)
+	}
+}
+
 // A check that fails writes no label, says what the probe printed, and exits
 // 1: a kind that does not work in a step's environment is sent no jobs.
 func TestSetupApply_AFailingProofWritesNoLabel(t *testing.T) {
