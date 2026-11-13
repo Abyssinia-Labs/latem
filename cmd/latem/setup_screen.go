@@ -193,9 +193,8 @@ func (s *setupScreen) openShell(title string, lines []string) {
 // toggle switches a kind on or off, which is a label on a runner and nothing
 // more. It goes on only with nothing in the way and the proof passed.
 func (s *setupScreen) toggle(k readiness.Kind) {
-	change := func(what, verb string) {
-		s.change([]readiness.Change{{What: what, Runner: k.Runner, Value: k.Label,
-			Line: fmt.Sprintf("the %s runner %s the label %s", k.Runner, verb, k.Label)}}, "Written to config.toml.")
+	change := func(what string) {
+		s.change([]readiness.Change{kindLabel(k, what)}, "Written to config.toml.")
 	}
 	switch {
 	case k.State == readiness.Impossible:
@@ -204,7 +203,7 @@ func (s *setupScreen) toggle(k readiness.Kind) {
 		s.status = fmt.Sprintf("%s comes with the %s runner's labels; config.toml is where to change them.", k.Title, orDash(k.Runner))
 	case k.Labelled:
 		s.ask = &screenAsk{lines: []string{fmt.Sprintf("Stop taking %s jobs here? The %s runner loses the label %s.", k.Title, k.Runner, k.Label)},
-			yes: func() { change(readiness.ChangeLabelDrop, "loses") }}
+			yes: func() { change(readiness.ChangeLabelDrop) }}
 	case k.Blocking() > 0:
 		s.status = fmt.Sprintf("%d to do before this machine can take %s jobs.", k.Blocking(), k.Title)
 	default:
@@ -213,8 +212,19 @@ func (s *setupScreen) toggle(k readiness.Kind) {
 			return
 		}
 		lines := []string{fmt.Sprintf("The tools work in a step's environment. Add the label %s to the %s runner?", k.Label, k.Runner)}
-		s.ask = &screenAsk{lines: append(lines, k.Notes...), yes: func() { change(readiness.ChangeLabelAdd, "gains") }}
+		s.ask = &screenAsk{lines: append(lines, k.Notes...), yes: func() { change(readiness.ChangeLabelAdd) }}
 	}
+}
+
+// kindLabel is the change that switches k on or off: its label, on its
+// runner. The screen's space bar and `latem setup apply --kind` write it.
+func kindLabel(k readiness.Kind, what string) readiness.Change {
+	verb := "gains"
+	if what == readiness.ChangeLabelDrop {
+		verb = "loses"
+	}
+	return readiness.Change{What: what, Runner: k.Runner, Value: k.Label,
+		Line: fmt.Sprintf("the %s runner %s the label %s", k.Runner, verb, k.Label)}
 }
 
 func yoursTitle(it readiness.Item) string {

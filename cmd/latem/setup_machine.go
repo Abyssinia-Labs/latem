@@ -143,7 +143,13 @@ func runSetupPlan(cmd *cobra.Command, deps setupDeps) error {
 	if err != nil {
 		return err
 	}
-	enc := json.NewEncoder(cmd.OutOrStdout())
+	return writePlan(cmd.OutOrStdout(), plan)
+}
+
+// writePlan is the document `latem setup --json` prints, and `latem setup
+// apply --json` after it (A94): the plan, indented, and nothing else.
+func writePlan(w io.Writer, plan readiness.Plan) error {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 	return enc.Encode(plan)
@@ -332,7 +338,8 @@ func runItem(ctx context.Context, w io.Writer, it readiness.Item, runner string,
 
 // proveKind runs a kind's proof with what a step would have: the service's
 // PATH, the runner's env, and nothing from the shell setup was started in. A
-// tool that works only from a person's profile fails here, as in a job.
+// tool that works only from a person's profile fails here, as in a job. A
+// probe that fails is a [*proofFailed].
 func proveKind(ctx context.Context, stepPath string, k readiness.Kind) error {
 	for _, p := range k.Proof {
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -344,12 +351,27 @@ func proveKind(ctx context.Context, stepPath string, k readiness.Kind) error {
 		out, err := c.CombinedOutput()
 		cancel()
 		if err != nil {
-			first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-			return errors.Join(fmt.Errorf("%s: %w", p.Title, err), textError(first))
+			return &proofFailed{title: p.Title, err: err, output: strings.TrimSpace(string(out))}
 		}
 	}
 	return nil
 }
+
+// proofFailed is a probe of a kind's proof that did not pass, with all it
+// printed. Its message is the probe, why, and the first line of that, which
+// is what the screen's status line has room for; `setup apply` shows the rest.
+type proofFailed struct {
+	title  string
+	err    error
+	output string
+}
+
+func (e *proofFailed) Error() string {
+	first, _, _ := strings.Cut(e.output, "\n")
+	return errors.Join(fmt.Errorf("%s: %w", e.title, e.err), textError(first)).Error()
+}
+
+func (e *proofFailed) Unwrap() error { return e.err }
 
 func textError(s string) error {
 	if s == "" {
@@ -388,31 +410,48 @@ var switchWait = 15 * time.Second
 // and a setup left before it was a machine whose screen said Android was on
 // and whose agent never sent it an Android job.
 func takeConfig(paths config.Paths) string {
+	return tellAgent(paths).line
+}
+
+// agentHeard is what came of telling the agent: the line takeConfig says,
+// what its reload left for a restart, and whether there was no agent at all.
+type agentHeard struct {
+	line     string
+	deferred []string
+	none     bool
+}
+
+// tellAgent is takeConfig's work, for a caller with room to say more than a
+// line: `latem setup apply` names what was deferred (A94).
+func tellAgent(paths config.Paths) agentHeard {
 	st, err := signalReload(paths, agent.DefaultReloadWait)
 	switch {
 	case errors.Is(err, agent.ErrNoAgent):
-		return "No agent is running; the next to start reads it."
+		return agentHeard{line: "No agent is running; the next to start reads it.", none: true}
 	case errors.Is(err, agent.ErrCannotReload):
-		return "The running agent cannot reload; `latem service restart` applies it."
+		return agentHeard{line: "The running agent cannot reload; `latem service restart` applies it."}
 	case err != nil:
-		return fmt.Sprintf("The agent was not told (%v); `latem service restart` applies it.", err)
+		return agentHeard{line: fmt.Sprintf("The agent was not told (%v); `latem service restart` applies it.", err)}
 	case st.Error != "":
-		return "The agent refused it and kept the config it had: " + st.Error
+		return agentHeard{line: "The agent refused it and kept the config it had: " + st.Error}
 	case len(st.Deferred) == 0:
-		return "The agent has it."
+		return agentHeard{line: "The agent has it."}
 	}
+	heard := agentHeard{deferred: st.Deferred}
 	sw, err := signalSwitch(paths, st.Version, switchWait)
 	switch {
 	case errors.Is(err, agent.ErrCannotSwitch):
-		return "The running agent cannot restart itself; `latem service restart` applies it."
+		heard.line = "The running agent cannot restart itself; `latem service restart` applies it."
 	case err != nil:
-		return "The agent was asked to restart for it once nothing is running."
+		heard.line = "The agent was asked to restart for it once nothing is running."
 	case sw.Switch != nil && sw.Switch.State == agent.SwitchWaiting:
-		return fmt.Sprintf("The agent restarts for it once %d run%s finish.", sw.Switch.Runs, plural(sw.Switch.Runs))
+		heard.line = fmt.Sprintf("The agent restarts for it once %d run%s finish.", sw.Switch.Runs, plural(sw.Switch.Runs))
 	case sw.Switch != nil && sw.Switch.State == agent.SwitchFailed:
-		return "The agent did not restart for it: " + sw.Switch.Error
+		heard.line = "The agent did not restart for it: " + sw.Switch.Error
+	default:
+		heard.line = "The agent restarted with it."
 	}
-	return "The agent restarted with it."
+	return heard
 }
 
 func applyChange(body string, cfg *config.Config, c readiness.Change) (string, error) {

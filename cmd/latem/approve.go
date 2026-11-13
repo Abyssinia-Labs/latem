@@ -114,24 +114,34 @@ func approveRun(cmd *cobra.Command, runID string) error {
 // from approving in the course of its work, not a boundary against someone
 // who holds this account and means to.
 func personAtTerminal(cmd *cobra.Command, runID string) (in, out *os.File, err error) {
-	in, _ = cmd.InOrStdin().(*os.File)
-	out, _ = cmd.OutOrStdout().(*os.File)
-	inOK, outOK := isTTY(in), isTTY(out)
-	if inOK && outOK {
+	in, out, which := terminalPair(cmd)
+	if which == "" {
 		return in, out, nil
-	}
-	which := "neither stdin nor stdout is one"
-	switch {
-	case inOK:
-		which = "stdout is not one"
-	case outOK:
-		which = "stdin is not one"
 	}
 	return nil, nil, &ExitError{Code: ExitNoTerminal, Err: fmt.Errorf(
 		"approving needs a person at a terminal, and %s (A89).\n\n"+
 			"A held run is released by the person who runs this machine, after reading the commit it would "+
 			"build and typing it here. If that is you, run `latem approve %s` in a terminal on this machine. "+
 			"An agent cannot approve a run: ask that person to", which, runID)}
+}
+
+// terminalPair returns cmd's stdin and stdout when both are terminals, the
+// question isatty(3) asks (A89), and otherwise says which is not. `latem
+// approve` and the two settings `latem setup apply` writes only for a person
+// (A94) ask it.
+func terminalPair(cmd *cobra.Command) (in, out *os.File, notOne string) {
+	in, _ = cmd.InOrStdin().(*os.File)
+	out, _ = cmd.OutOrStdout().(*os.File)
+	inOK, outOK := isTTY(in), isTTY(out)
+	switch {
+	case inOK && outOK:
+		return in, out, ""
+	case inOK:
+		return nil, nil, "stdout is not one"
+	case outOK:
+		return nil, nil, "stdin is not one"
+	}
+	return nil, nil, "neither stdin nor stdout is one"
 }
 
 // showHeld prints what a person approving r is asked about: the commit, and

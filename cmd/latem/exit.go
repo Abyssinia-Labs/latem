@@ -33,6 +33,8 @@ const (
 	// terminal on its stdin and stdout: `latem approve` (A89). Its own number
 	// because an agent or a script that meets it has to stop and hand the
 	// decision to a person, not retry and not read it as a failed approval.
+	// `latem setup apply` answers it too, for an item that is a person's to
+	// do, at a terminal or not (A94).
 	ExitNoTerminal = 4
 )
 

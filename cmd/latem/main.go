@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -207,13 +208,14 @@ func markUnknownArgsAsUsageErrors(c *cobra.Command) {
 }
 
 // commandPath finds the deepest command cobra was executing, so the "run
-// `latem X --help`" hint names the subcommand rather than the root.
+// `latem X --help`" hint names the subcommand rather than the root: all of
+// it, `setup apply` and not `apply`.
 func commandPath(root *cobra.Command) string {
 	cmd, _, err := root.Find(os.Args[1:])
 	if err != nil || cmd == nil || cmd == root {
 		return ""
 	}
-	return cmd.Name()
+	return strings.TrimPrefix(cmd.CommandPath(), root.CommandPath()+" ")
 }
 
 // exactArgs is cobra.ExactArgs with a usage exit code attached.

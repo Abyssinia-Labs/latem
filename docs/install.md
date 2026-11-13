@@ -135,6 +135,19 @@ $ latem secrets set --repo myapp DEPLOY_TOKEN
 
 `latem register --token-file F` still takes a token you already have.
 
+**Driving step 3 from an agent.** An agent with a shell on the machine, such
+as Claude Code on it or over `ssh`, has no screen to drive. It reads
+`latem setup --json` and closes each item with
+`latem setup apply <id>`, or a whole kind with `latem setup apply --kind
+android`, which ends by turning the kind on once its check passes. Each
+command is one the agent's harness shows you before it runs. Apply does what
+the screen would, and refuses what is yours with exit `4`, printing what you
+would type: anything with sudo, a licence, Xcode, a secret's value, and the
+two settings that give something up (`allow_unisolated` and
+`require_pinned = false`), which only you, at a terminal, can write. The agent
+then stops and asks you. [Commands](commands.md#latem-setup-apply-closing-what-is-in-the-way-from-a-shell)
+has a transcript.
+
 ## Verify what you installed
 
 `install.sh` does both checks below before it writes anything. By hand, for a
