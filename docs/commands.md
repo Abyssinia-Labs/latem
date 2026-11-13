@@ -198,8 +198,15 @@ nobody is at the terminal to answer one. Add one server per machine.
 The tools are the commands an operator would type over ssh: `listRuns` (by
 repository, state, or the commit an agent just pushed), `getRun`,
 `getRunLogs`, `waitForRun`, `startRun` (a `.latem/jobs.yaml` job, as
-`latem run`), `cancelRun`, and `checkWorkflows` (as
-`latem workflows check --repo`).
+`latem run`), `cancelRun`, `checkWorkflows` (as
+`latem workflows check --repo`), and `getReadiness` (as `latem setup --json`,
+with `repo` to keep only that repository's kinds).
+
+**`getReadiness` reads; nothing here applies.** It says what this machine can
+build and what stands in the way of the rest, each thing with how it closes.
+What latem can close is closed in a shell on the machine with
+`latem setup apply <id>`, and the rest is for the person who runs it
+(amendment A95).
 
 **`waitForRun` is one call, and it answers with the result.** It waits up to
 ten minutes for the run to settle and returns it with what `latem result`

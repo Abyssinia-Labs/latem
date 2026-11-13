@@ -11,8 +11,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -146,16 +148,20 @@ func TestMCPInitializeAndTools(t *testing.T) {
 			t.Errorf("%s's inputSchema is not an object", name)
 		}
 	}
-	want := []string{"listRuns", "getRun", "getRunLogs", "waitForRun", "startRun", "cancelRun", "checkWorkflows"}
+	want := []string{"listRuns", "getRun", "getRunLogs", "waitForRun", "startRun", "cancelRun", "checkWorkflows", "getReadiness"}
 	if !slices.Equal(names, want) {
 		t.Errorf("tools = %v, want %v", names, want)
 	}
+	// Nor anything that changes what this machine builds: setup's plan is
+	// read here and applied in a shell on the machine (A95).
 	for _, n := range names {
-		if l := strings.ToLower(n); strings.Contains(l, "approve") || strings.Contains(l, "try") || strings.Contains(l, "secret") {
-			t.Errorf("%s is offered", n)
+		for _, word := range []string{"approve", "try", "secret", "apply", "setup", "service", "install"} {
+			if strings.Contains(strings.ToLower(n), word) {
+				t.Errorf("%s is offered", n)
+			}
 		}
 	}
-	if readOnly["startRun"] || readOnly["cancelRun"] || !readOnly["listRuns"] || !readOnly["waitForRun"] {
+	if readOnly["startRun"] || readOnly["cancelRun"] || !readOnly["listRuns"] || !readOnly["waitForRun"] || !readOnly["getReadiness"] {
 		t.Errorf("readOnlyHint is wrong: %v", readOnly)
 	}
 }
@@ -433,5 +439,148 @@ func TestMCPCheckWorkflowsNeedsAKnownRepository(t *testing.T) {
 	}
 	if _, msg := c.tool("checkWorkflows", map[string]any{"repo": "nope", "offline": true}); !strings.Contains(msg, `no repo "nope"`) {
 		t.Errorf("an unknown repository: %q", msg)
+	}
+}
+
+// readinessMachine is a Mac with two repositories, an Xcode app and a Go
+// service, each read from its own files, and xcodegen not installed.
+func readinessMachine(t *testing.T) (dir string, rec *setupRecorder) {
+	t.Helper()
+	dir, rec = setupMachine(t, macRepo)
+	rec.machine.dirs["xcodegen"], rec.machine.dirs["ruby"] = "/nowhere", "/nowhere"
+	path := filepath.Join(dir, "config.toml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, "\n[repos.site]\nurl = \"https://github.com/me/site.git\"\nallowed_refs = [\"main\"]\n"...)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]fstest.MapFS{
+		"app": macRepo,
+		"site": {".github/workflows/ci.yml": {Data: []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n" +
+			"    steps:\n      - run: go test ./...\n")}},
+	}
+	prev := readRepo
+	readRepo = func(_ context.Context, _ *config.Config, key string, _ treeSource) (*repoFiles, error) {
+		return &repoFiles{fsys: files[key], sha: strings.Repeat("ab", 20), where: "the files of " + key, close: func() {}}, nil
+	}
+	t.Cleanup(func() { readRepo = prev })
+	useConfigDir(t, dir)
+	return dir, rec
+}
+
+func planKinds(t *testing.T, v map[string]any) []string {
+	t.Helper()
+	var out []string
+	for _, k := range v["kinds"].([]any) {
+		out = append(out, k.(map[string]any)["name"].(string))
+	}
+	return out
+}
+
+// getReadiness is `latem setup --json` through the protocol: the plan, as
+// text and as structured content, and with repo only that repository's
+// kinds. It changes nothing (A95).
+func TestMCPGetReadiness(t *testing.T) {
+	dir, rec := readinessMachine(t)
+	before := readConfigFile(t, dir)
+	c := startMCP(t)
+
+	all, msg := c.tool("getReadiness", map[string]any{})
+	if msg != "" {
+		t.Fatalf("getReadiness: %s", msg)
+	}
+	if got := planKinds(t, all); !slices.Equal(got, []string{"ios", "xcode", "android", "linux"}) {
+		t.Errorf("kinds = %v", got)
+	}
+	// The same document `latem setup --json` prints.
+	setupOut, err := latemIn(t, dir, "", "setup", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want map[string]any
+	if err := json.Unmarshal([]byte(setupOut), &want); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(all) != fmt.Sprint(want) {
+		t.Errorf("getReadiness is not setup --json:\n%v\nvs\n%v", all, want)
+	}
+
+	// Structured content, beside the text every client shows.
+	res := c.call("tools/call", map[string]any{"name": "getReadiness", "arguments": map[string]any{"repo": "app"}})["result"].(map[string]any)
+	structured, ok := res["structuredContent"].(map[string]any)
+	if !ok || res["isError"] == true {
+		t.Fatalf("result = %v", res)
+	}
+	if got := planKinds(t, structured); !slices.Equal(got, []string{"xcode"}) {
+		t.Errorf("app's kinds = %v", got)
+	}
+	xcode := structured["kinds"].([]any)[0].(map[string]any)
+	var ids []string
+	for _, it := range xcode["items"].([]any) {
+		ids = append(ids, it.(map[string]any)["id"].(string))
+	}
+	if !slices.Equal(ids, []string{"ruby", "xcodegen"}) {
+		t.Errorf("xcode's items = %v", ids)
+	}
+
+	site, msg := c.tool("getReadiness", map[string]any{"repo": "site"})
+	if msg != "" || !slices.Equal(planKinds(t, site), []string{"linux"}) {
+		t.Errorf("site: %v %s", site, msg)
+	}
+
+	if _, msg := c.tool("getReadiness", map[string]any{"repo": "nope"}); !strings.Contains(msg, `this machine builds no repository "nope": it builds app, site`) {
+		t.Errorf("an unknown repository: %q", msg)
+	}
+	if _, msg := c.tool("getReadiness", map[string]any{"repo": "app", "apply": true}); !strings.Contains(msg, "unknown field") {
+		t.Errorf("an argument it does not take: %q", msg)
+	}
+
+	if readConfigFile(t, dir) != before || len(rec.machine.installs) != 0 {
+		t.Errorf("getReadiness changed something: installs %q", rec.machine.installs)
+	}
+}
+
+// A look that runs past its bound is stopped and says why, rather than
+// answering with a machine read in part.
+func TestMCPGetReadinessIsBounded(t *testing.T) {
+	readinessMachine(t)
+	readRepo = func(ctx context.Context, _ *config.Config, _ string, _ treeSource) (*repoFiles, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	prev := mcpReadinessWait
+	mcpReadinessWait = 50 * time.Millisecond
+	t.Cleanup(func() { mcpReadinessWait = prev })
+
+	c := startMCP(t)
+	if _, msg := c.tool("getReadiness", map[string]any{}); !strings.Contains(msg, "took longer than 50ms") {
+		t.Errorf("msg = %q", msg)
+	}
+}
+
+// Nor is a look the caller cancelled: a client that closes stdin while it
+// runs gets an error, never what was read before the stop.
+func TestMCPGetReadinessCancelled(t *testing.T) {
+	readinessMachine(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	readRepo = func(context.Context, *config.Config, string, treeSource) (*repoFiles, error) {
+		cancel()
+		return nil, context.Canceled
+	}
+	v, err := mcpGetReadiness(ctx, json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "cancelled before this machine was read") {
+		t.Errorf("got %v, %v", v, err)
+	}
+}
+
+func TestMCPGetReadinessWithNoConfig(t *testing.T) {
+	fakeSetup(t, true)
+	useConfigDir(t, filepath.Join(privateTempDir(t), "none"))
+	c := startMCP(t)
+	if _, msg := c.tool("getReadiness", map[string]any{}); !strings.Contains(msg, "no config yet") {
+		t.Errorf("msg = %q", msg)
 	}
 }

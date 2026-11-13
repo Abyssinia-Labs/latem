@@ -1315,7 +1315,7 @@ latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars]
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
-latem mcp                            This machine's builds to an agent over MCP, on stdin and stdout, started by ssh; never approves (A87)
+latem mcp                            This machine's builds to an agent over MCP, on stdin and stdout, started by ssh; never approves (A87). Its getReadiness tool reads what `setup --json` says and applies nothing (A95)
 latem cache ls | prune | rm <name>
 latem update [--check]               Install the latest release; the agent moves onto it when idle (A56). Refused for a Homebrew install, which `brew upgrade latem` updates (A78)
 latem version
@@ -4567,3 +4567,41 @@ errors and one warning, each once.
 **Not in this amendment.** A path in a workflow command is still as the step wrote it, not made
 relative to the workspace as a reader's is. A tool that says a problem twice in different words
 and under no code is still two.
+
+
+### Amendment from an agent that could see the runs and not the machine
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A95 | §19, A69, A70, A87 | **`latem mcp` gains `getReadiness`, a read-only tool that returns the plan `latem setup --json` prints, as structured content, through the same code. With `repo`, a `[repos.*]` key, it keeps only the kinds with a job from that repository. It has the two minutes the agent's own look has (A70). No tool applies the plan** | An agent reaching a machine through `latem mcp` over ssh (A87) saw its runs and not what the machine can build or what stands in the way. That answer is `latem setup --json`, a read like `workflows check --repo`, which A87 already offers as `checkWorkflows`. Without it, an agent setting a machine up, or asking why a job never comes here, needed a shell on the machine to read it |
+
+**What it returns.** `runSetupPlan` writes the plan into a buffer, as `checkWorkflows` runs `workflows
+check --json`, and the tool reads it back into `readiness.Plan` and returns that. The answer is the
+document `setup --json` prints: every kind, its state, runner and label, its items with their ids,
+`run`, `yours`, `config` and `manual`, its notes and its proof. It reads every repository from this
+machine's mirror, or else GitHub through a temporary clone, never writing a mirror, and probes the
+toolchains.
+
+**Narrowed to a repository.** `repo` keeps the kinds whose `repos` name it, each whole, with the jobs
+it could not classify and the repositories it could not read that are its own. A key that is not
+under `[repos]` is refused, with the keys there are, as `startRun` refuses one. An argument the tool
+does not take is refused, as every tool here refuses one.
+
+**What its description says.** What each state means, and how each item closes: `run` and `config`
+with `latem setup apply <id>` in a shell on the machine (A94), or `--kind <name>` for a kind's items
+and then the kind itself; `yours` and `manual` by the person, whom the agent asks; an item with a
+`warning` only by the person, at a terminal. And that this server applies nothing. The server's
+instructions at initialize say the same in a sentence, and `latem mcp --help` names the tool.
+
+**Bounded.** The look gets two minutes, `readinessTimeout` for the heartbeat's look (A70), so a
+Docker daemon that does not answer holds a call up by no more than that. A look that runs past it is
+refused with the bound and the command that reads with none, `latem setup --json` on the machine. So
+is one the client cancelled, or stopped by closing stdin while it ran. A look stopped part way still
+produces a plan: a repository it did not finish reading is `unread`, and a probe cut short finds no
+Xcode. That plan would be taken for the machine, so it is never returned. Each call opens what it
+reads and closes it, as A87's tools do, so a repository added mid-session is in the next answer.
+
+**What it does not do.** Apply anything. There is no tool for `setup apply`, `setup`, the service,
+secrets or `approve`, and A87's line stands: what changes what this machine builds, or with what, is
+a command in a shell on the machine, where an agent's harness shows the person each one first. It
+does not read state.db or the agent, and it touches no file but a temporary one of its own.
