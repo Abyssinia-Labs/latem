@@ -123,6 +123,7 @@ $ latem update                                     # the latest release (Homebre
 ```
 latem setup [--repo owner/name] [--url U] [--no-register] [--no-service] [--plain]   config, repositories, toolchains, registration, service and doctor; safe to run again
 latem setup --json                   what this machine builds and what is in the way; changes nothing
+latem setup apply <id>... [--kind K] [--json]   close what is in the way, as the setup screen would; a person's item exits 4
 latem setup android-sdk              Google's Android command-line tools in $ANDROID_HOME or ~/Android/Sdk, on Linux
 latem init --repo <name>=<url>       write a starting config.toml for this machine
 latem agent                          run the agent in the foreground (`latem service install` runs it at boot)

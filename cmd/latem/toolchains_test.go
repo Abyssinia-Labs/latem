@@ -29,10 +29,13 @@ type fakeMachine struct {
 	probes   []string
 	// brewOwner, when set, is the other user whose Homebrew this is.
 	brewOwner string
+	// notInstalled are programs lookPath does not find.
+	notInstalled map[string]bool
 }
 
 func newFakeMachine() *fakeMachine {
-	return &fakeMachine{dirs: map[string]string{}, absent: map[string]bool{}, gives: map[string][2]string{}}
+	return &fakeMachine{dirs: map[string]string{}, absent: map[string]bool{}, gives: map[string][2]string{},
+		notInstalled: map[string]bool{}}
 }
 
 func (m *fakeMachine) deps() toolchainDeps {
@@ -59,7 +62,12 @@ func (m *fakeMachine) deps() toolchainDeps {
 			printf(w, "    (installed %s)\n", got[0])
 			return nil
 		},
-		lookPath: func(name string) (string, error) { return "/opt/homebrew/bin/" + name, nil },
+		lookPath: func(name string) (string, error) {
+			if m.notInstalled[name] {
+				return "", errors.New(name + ": not found")
+			}
+			return "/opt/homebrew/bin/" + name, nil
+		},
 		brewOwner: func(string) (string, bool) {
 			return m.brewOwner, m.brewOwner == ""
 		},

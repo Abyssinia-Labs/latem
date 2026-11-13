@@ -71,7 +71,9 @@ control plane connection is read only when the agent starts, so the other
 order would start the agent twice.
 
 --json prints what the screen shows and touches nothing: every kind, what is
-in the way of it, and what would close each thing.
+in the way of it, and what would close each thing. ` + "`latem setup apply <id>`" + `
+closes one of those things as the screen would, for an agent or a script with
+no screen (A94).
 
 Then:
   latem repo add <owner/name>         allow another repository
@@ -102,7 +104,7 @@ Exit codes:
 			return runSetup(cmd, f, newSetupDeps())
 		},
 	}
-	cmd.AddCommand(newSetupAndroidSDKCommand())
+	cmd.AddCommand(newSetupAndroidSDKCommand(), newSetupApplyCommand())
 	cmd.Flags().StringVar(&f.url, "url", registerURL, "control plane agent endpoint to register with")
 	cmd.Flags().StringVar(&f.name, "name", "", "machine name (default: this host's name)")
 	cmd.Flags().StringSliceVar(&f.repos, "repo", nil, "a GitHub repository this machine builds, as owner/name (repeatable)")

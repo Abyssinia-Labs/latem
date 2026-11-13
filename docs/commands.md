@@ -65,7 +65,7 @@ Exit codes are contract:
 | `1` | failure — a check failed, a run failed, an operation did not complete |
 | `2` | usage — an unknown flag, a missing argument, an unknown subcommand |
 | `3` | no agent is listening (`E_AGENT_DOWN`) |
-| `4` | `latem approve` needs a person at a terminal, and stdin or stdout is not one |
+| `4` | a person has to act: `latem approve` with no terminal on stdin or stdout, or `latem setup apply` naming something that is a person's to do |
 
 Three is the interesting one. A `latem run` finding no agent to wait for is
 not the same event as a build that failed, and a script has to be able to tell
@@ -142,6 +142,44 @@ pipe have no terminal. It does not stop an agent that makes a terminal for
 itself with `ssh -tt` or `script`. It is a guard against an agent approving,
 not a wall against whoever holds the account, who could edit `config.toml`
 instead (RUNNER_SPEC A89). Over ssh, log in and run it at the prompt.
+
+## `latem setup apply`: closing what is in the way, from a shell
+
+`latem setup --json` says what stands in the way of each kind of build and how
+each thing closes. **`latem setup apply <id>...` closes them as the setup
+screen would**, for an agent with a shell on the machine, or a script, and no
+screen. `--kind K` alone is every item of the kind and then the kind itself:
+its label goes on its runner once its check passes in a step's environment.
+With ids, `--kind K` only says to find them in K, since one id can be in more
+than one kind.
+
+```console
+$ latem setup apply java-home android-home
+java-home: wrote JAVA_HOME = /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home; closed
+android-home: wrote ANDROID_HOME = /Users/me/Library/Android/sdk; closed
+The agent has it.
+now android is off, ready to turn on
+
+$ latem setup apply --kind android
+android: the check passed (the JDK compiles, the SDK's tools run), and the macos runner gains the label android; on
+The agent restarted with it.
+now android is ready
+```
+
+An item's commands run as the screen runs them, with stdin closed and never
+with sudo. Its config.toml changes are written as the screen writes them, and
+the running agent is reloaded, or restarted once nothing is running when only
+a restart applies the change. `--json` prints the plan afterwards, as `setup
+--json` does, and the lines above go to stderr.
+
+**What is a person's exits `4`**, with what they would type: a command with
+sudo in it, a licence, Xcode, a secret's value. So do `unisolated` and
+`moving-refs`, which give something up, unless stdin and stdout are a
+terminal. Then it asks, and the answer defaults to no. Exit `1` is something
+that did not close: a command failed, the check failed (no label is written),
+or the answer was no. What came after it was not tried. An id the plan does
+not have is exit `2`, and the message lists the ids there are (RUNNER_SPEC
+A94).
 
 ## `latem result`: what broke, and where
 
