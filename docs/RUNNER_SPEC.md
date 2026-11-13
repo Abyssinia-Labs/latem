@@ -1298,6 +1298,7 @@ The original argument survives for what it did cover: the runner still invokes `
 
 ```
 latem setup [--url U] [--repo owner/name …] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57)
+latem setup apply <item-id>... [--kind K] [--json]   Close what `setup --json` says is in the way, as the setup screen would, without it; a person's item, or one of the two settings that give something up off a terminal, exits 4 (A94)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow | --wait | --detach]   Follows the run's log on a terminal and exits with its result; for a script, or with --detach, queues it and prints its id (A81)
 latem try [-C dir] [--workflow F] [--event E] [--input k=v] [--ref R] [--matrix k=v] [--repo R] [--detach] <job>   One workflow job from this working tree, uncommitted changes included; no push, no control plane (A76)
@@ -1405,7 +1406,7 @@ Stable codes; the web app maps them to human copy, and they appear in `Update.Er
 
 Retryable errors are safe for the control plane to offer as a one-click retry. Non-retryable ones need a human or a commit.
 
-One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what a `latem run` that follows or waits exits with (exit 3) when no agent is listening (§7.3, A81). It is a CLI condition, not a run outcome. So is exit 4, `latem approve` with no terminal on stdin or stdout (A89).
+One code never appears in `Update.ErrorCode` because it never belongs to a run: `E_AGENT_DOWN` is what a `latem run` that follows or waits exits with (exit 3) when no agent is listening (§7.3, A81). It is a CLI condition, not a run outcome. So is exit 4, `latem approve` with no terminal on stdin or stdout (A89), and `latem setup apply` naming an item that is a person's to do (A94).
 
 ---
 
@@ -4567,3 +4568,75 @@ errors and one warning, each once.
 **Not in this amendment.** A path in a workflow command is still as the step wrote it, not made
 relative to the workspace as a reader's is. A tool that says a problem twice in different words
 and under no code is still two.
+
+
+### Amendment from a plan an agent could read and not act on
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A94 | §19, §21, A60, A69, A74, A89 | **`latem setup apply <item-id>... [--kind K] [--json]` closes an item of `latem setup --json`'s plan as the setup screen would, without the screen. It runs an item's commands under A60's rules, writes its config.toml changes through the same edit and load gate, and then moves the running agent onto them as A74 does. `--kind K` is every item of K and then K itself, whose label goes on only once its proof passes in a step's environment. An item that is only a person's commands or words is refused with exit 4, and so are `allow_unisolated` and `require_pinned = false` when stdin or stdout is not a terminal. `--json` prints the plan afterwards** | `latem setup --json` (A69) tells an agent everything in the way of each kind of build, and how each thing closes. Nothing but the screen closed one, and the screen wants a person at a terminal. An agent setting a machine up could read the plan and act on it only by editing config.toml by hand, which A54 moved away from. On a MacBook, Android was off with two settings in its way, `JAVA_HOME` and `ANDROID_HOME` on the macos runner, and no command wrote them |
+
+**One code path.** Each id is looked up in a plan built afresh, as `setup --json` builds it. An item
+closes as the screen's Enter would close it, in the screen's order: its commands if it has any, a
+person's commands if it has those, its config changes, or words. Commands go through `runItem`, the
+screen's own. Each argv runs with stdin closed and in a session of its own, so nothing it starts can
+ask for a password. Homebrew runs with `HOMEBREW_NO_AUTO_UPDATE` and
+`HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`, and a keg-only install's `path_prepend` and env are written
+for the runner. A program that is not installed is said and not run, and so is a Homebrew this
+account cannot write. Config changes go through `applyChanges`, one `editConfig` at a time, which
+refuses an edit whose result would not load. After each item the machine is looked at again, and the
+item is closed when the new plan no longer has it. A command that succeeds and leaves the item in
+the way is a failure, and says what the machine has instead.
+
+**The switch.** `--kind K` takes every item of K, in the plan's order as apply starts, and then K
+itself, as the screen's space bar does. An item that appears only once another closes, as Android
+platform-tools does once there is an SDK, is for the next run. K itself is its label on its runner,
+written only with nothing in the way and after `proveKind` passes. That is the proof run with the
+service's PATH and the runner's env and nothing from the shell apply was started in. A proof that
+fails exits 1 with what its probe printed, and no label is written. Ids with `--kind` are looked
+up in K alone, because one id can be in several kinds (a repository's secrets are an item of each
+kind its jobs are), and K is not switched on: an agent closing one item of several is not told the
+kind failed because the rest are still there. `--kind K` alone switches it. A kind with no label, such as iOS, comes with a runner's `xcode` and `macos`
+labels, and which labels a runner carries is the person's to say, so apply says so and exits 4. One
+that needs another operating system exits 1. Apply never takes a label away.
+
+**A person's.** Exit 4, A89's number for "stop and ask the person who runs this machine". An item
+whose only fix is commands for a person, such as a JDK from a Linux distribution's package manager
+(sudo) or a secret's value, is refused at a terminal or not, and its commands are printed for the
+person to type. latem does not type them. An item that is only words, such as Xcode, is the same.
+`allow_unisolated = true` and `require_pinned = false` each give something up, and each is written
+only for a person at a terminal: stdin and stdout both, by A89's isatty(3) check. There it shows what
+the setting gives up, discards what was typed ahead, and asks `[y/N]`, which defaults to no, as the
+screen asks. A no exits 1, as `latem approve` does for Enter. Off a terminal the refusal prints the
+line the person types at one: `latem setup apply unisolated`.
+
+**The agent.** Once, after everything, when config.toml changed: a reload, and where the reload left
+something for a restart, such as a new runner or a runner's labels, SIGUSR2, so the agent restarts at
+its next idle moment (A74). Apply names what the reload deferred and what came of the restart. With
+no agent running it says so, and with no service installed it says that too, and goes on: the next
+agent to start reads the file.
+
+**What it says.** A line per item on stderr: what ran, what was written, what is left. Then each kind
+an item was in, where it stands, and each thing still in its way with how it closes. With `--json`,
+stdout is the plan afterwards, the bytes `setup --json` would print. Exit 0 when every item named was
+closed. Exit 1 when one was not: a command failed, a proof failed, or a person said no. What came
+after it is not tried, because the plan puts a JDK before what runs on it. Exit 2 for an id or a kind
+the plan does not have, before anything is done, listing the ids there are. Exit 4 when one is a
+person's, and when both happened, 1.
+
+**Measured.** On the MacBook's own config, copied to a scratch directory with its control plane off:
+`setup apply java-home android-home` wrote both settings and Android was off with nothing in the way.
+`setup apply --kind android` ran `javac -version` and `adb version` in a step's environment and added
+the label `android` to the macos runner, and Android was ready.
+
+**What it does not do.** It never runs sudo, accepts a licence or installs Xcode: those items are a
+person's commands or words, and are refused. It never writes `allow_unisolated` or
+`require_pinned = false` off a terminal. Nor does it set a secret: `latem secrets set` reads a value
+only a person has, and `latem secrets copy` (A73) moves one from another machine. It is not a tool on
+`latem mcp`, which A87 keeps to builds: applying stays a command in a shell on the machine, where an
+agent's harness shows the person each one before it runs. `readiness.Build` reads what it read.
+
+**Not a boundary.** The terminal check stops an agent that runs commands as agents ordinarily do,
+with no terminal. One that makes a terminal for itself, with `ssh -tt` or script(1), is asked the
+question and can answer it. As with A89, this keeps an agent from giving up isolation in the course
+of its work. It is no wall against whoever holds the account, who could edit config.toml.
