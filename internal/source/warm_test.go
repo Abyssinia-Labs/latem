@@ -154,6 +154,34 @@ func TestWarmCheckoutKeepsWhatIsIgnoredAndWritesOnlyWhatChanged(t *testing.T) {
 	_ = ws2.Remove()
 }
 
+// An ignore file the last commit had and this one does not is an untracked
+// file like any other, and what it ignored goes with it in the same run: what
+// survives is what this commit ignores.
+func TestWarmCheckoutObeysOnlyThisCommitsIgnoreFiles(t *testing.T) {
+	f := newWarmFixture(t)
+	f.up.commit(".gitignore", "build/\nlogs/.gitignore\n", "ignore build")
+	sha1 := f.up.commit("a.txt", "a\n", "a")
+	ws, _ := f.warm(run1, sha1)
+	write(t, filepath.Join(ws.Path, "build", "out.o"), "object code")
+	// One a step left, shielding a file beside it.
+	write(t, filepath.Join(ws.Path, "logs", ".gitignore"), "*.log\n")
+	write(t, filepath.Join(ws.Path, "logs", "run.log"), "a log")
+	_ = ws.Remove()
+
+	runGit(t, f.up.dir, "rm", "-q", ".gitignore")
+	sha2 := f.up.commit("a.txt", "b\n", "stop ignoring build")
+	ws, _ = f.warm(run2, sha2)
+	defer func() { _ = ws.Remove() }()
+	for _, gone := range []string{".gitignore", "build", "logs"} {
+		if exists(filepath.Join(ws.Path, gone)) {
+			t.Errorf("%s survived a commit that neither tracks nor ignores it", gone)
+		}
+	}
+	if got := runGit(t, ws.Path, "status", "--porcelain", "--ignored"); got != "" {
+		t.Errorf("the workspace holds what this commit does not account for:\n%s", got)
+	}
+}
+
 // A step that edits a tracked file and puts its size and timestamps back has
 // not hidden the edit: the comparison is by content.
 func TestWarmCheckoutComparesContentNotTimestamps(t *testing.T) {

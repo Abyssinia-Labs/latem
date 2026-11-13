@@ -191,8 +191,17 @@ func (mi *Mirror) ensureCommit(ctx context.Context, sha string) error {
 	fetch := []string{"-c", "protocol.version=2", "fetch", "--no-tags", "--no-write-fetch-head",
 		"--no-auto-maintenance", "--no-write-commit-graph", "--quiet", "--", mi.repo.URL, sha}
 	if _, err := mi.mgr.runRemote(ctx, mi.repo, mi.path, fetch...); err != nil {
-		return fmt.Errorf("%w: %s is not in this machine's mirror of %s, and fetching it from %s failed: %w",
-			ErrBaseMissing, sha, mi.repo.Key, mi.repo.URL, err)
+		// git's last word, not its whole argv: the caller is told which
+		// commit and which remote already.
+		why := err.Error()
+		var ge *gitError
+		if errors.As(err, &ge) && ge.stderr != "" {
+			lines := strings.Split(ge.stderr, "\n")
+			why = strings.TrimSpace(lines[len(lines)-1])
+		}
+		return fmt.Errorf("%w: %s is not in this machine's mirror of %s, and its remote would not give it by name (%s). "+
+			"A changes run goes on a commit the remote has: push the base first",
+			ErrBaseMissing, sha, mi.repo.Key, why)
 	}
 	return nil
 }

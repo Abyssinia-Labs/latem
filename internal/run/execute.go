@@ -11,6 +11,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
@@ -35,6 +36,8 @@ type execution struct {
 
 	red     logstream.Redactor
 	emitter *logstream.Emitter
+	// res builds the run's result from its log and its steps (A92).
+	res *result.Collector
 	// deferred holds notes produced before the emitter existed.
 	//
 	// The broker sinks themselves are not held here. Each one is owned by the
@@ -276,6 +279,7 @@ func (x *execution) drive(ctx context.Context) Result {
 	if err := x.putChangedFiles(jobCtx); err != nil {
 		return x.finish(ctx, fail(err, protocol.ErrExecutor))
 	}
+	x.describeResult()
 
 	// Gate 19: execute.
 	if err := x.to(jobCtx, protocol.StateRunning, protocol.Update{Runner: runner.Name}); err != nil {
@@ -658,6 +662,7 @@ func (x *execution) terminateWith(ctx context.Context, out outcome, refs []proto
 		return x.raced(err)
 	}
 	x.noteOutcome(out)
+	x.finishResult(out, u.ErrorMsg)
 
 	// §15: the buffers are zeroed the moment the run is terminal. The string
 	// copies in the executor's environment map cannot be zeroed — Go strings

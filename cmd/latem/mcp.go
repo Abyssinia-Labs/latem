@@ -73,9 +73,10 @@ HOST is anything ssh takes, an alias from ~/.ssh/config included. latem is
 named by its path because ssh runs a command with a short PATH, which has
 neither ~/.local/bin, where install.sh puts latem, nor Homebrew's bin.
 
-Its tools list runs (by repository, state or commit), show one, read its log,
-wait for it to finish, start a .latem/jobs.yaml job, cancel a run, and check
-which of a repository's workflow jobs this machine can run.
+Its tools list runs (by repository, state or commit), show one with its
+result — each step, and the errors its output named, by file and line — read
+its log, wait for it to finish, start a .latem/jobs.yaml job, cancel a run,
+and check which of a repository's workflow jobs this machine can run.
 
 It never approves. A run held for approval (INV-5) waits for a person at this
 machine to run ` + "`latem approve`" + `, and ` + "`latem try`" + `, which makes an approved run, is not
@@ -108,7 +109,7 @@ const mcpMaxMessage = 32 << 20
 // mcpInstructions is what the server tells an agent once, at initialize.
 const mcpInstructions = `This is one build machine running latem, reached over ssh. Every tool reads or acts on the builds of this machine only.
 
-To see whether a commit built here: listRuns with its repo and the full sha (git rev-parse HEAD), then waitForRun on any run that has not settled, then getRunLogs on one that failed — the end of the log says why.
+To see whether a commit built here: listRuns with its repo and the full sha (git rev-parse HEAD), then waitForRun on any run that has not settled. waitForRun answers with the run's result: each step and how it ended, and the errors its output named, each with a file and a line. getRunLogs is for what that leaves out — the end of the log says why.
 
 startRun starts a job from the repository's .latem/jobs.yaml; a workflow job comes from a push or a pull request through latem-cloud, not from here. To check a change before pushing it, give startRun changes: the commit you started from and the files you changed, whole. It runs only for a repository whose machine allows an agent's changes, and the refusal says so when it does not. A run whose ref is outside the repository's allowed refs is held for a person: it shows state awaiting_approval, and only a person at this machine can let it go (latem approve). Say so and stop; this server cannot approve.`
 
@@ -286,6 +287,9 @@ func (s *mcpServer) handle(ctx context.Context, req rpcRequest) (any, *rpcError)
 		var p struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
+			Meta      struct {
+				ProgressToken json.RawMessage `json:"progressToken"`
+			} `json:"_meta"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, &rpcError{rpcInvalidParams, "tools/call takes {name, arguments}"}
@@ -294,9 +298,42 @@ func (s *mcpServer) handle(ctx context.Context, req rpcRequest) (any, *rpcError)
 		if i < 0 {
 			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("there is no tool %q: tools/list names them", p.Name)}
 		}
+		if tok := p.Meta.ProgressToken; len(tok) > 0 && string(tok) != "null" {
+			ctx = context.WithValue(ctx, mcpProgressKey{}, s.progress(tok))
+		}
 		return toolResult(s.tools[i].call(ctx, p.Arguments)), nil
 	default:
 		return nil, &rpcError{rpcMethodNotFound, fmt.Sprintf("this server has no method %q", req.Method)}
+	}
+}
+
+type mcpProgressKey struct{}
+
+// mcpProgressOf is how a tool tells its caller what has happened so far, or
+// nil when the caller sent no progress token and so asked not to be told.
+func mcpProgressOf(ctx context.Context) func(string) {
+	fn, _ := ctx.Value(mcpProgressKey{}).(func(string))
+	return fn
+}
+
+// progress returns a function that sends one `notifications/progress` for
+// token each time it is called, counting up, as MCP asks. It is a tool that
+// waits saying what it has seen while it waits (A92); the answer still comes
+// as the call's result.
+func (s *mcpServer) progress(token json.RawMessage) func(string) {
+	var mu sync.Mutex
+	n := 0
+	return func(message string) {
+		mu.Lock()
+		n++
+		count := n
+		mu.Unlock()
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		_ = s.enc.Encode(map[string]any{
+			"jsonrpc": "2.0", "method": "notifications/progress",
+			"params": map[string]any{"progressToken": token, "progress": count, "message": message},
+		})
 	}
 }
 

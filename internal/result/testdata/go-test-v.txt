@@ -1,0 +1,17 @@
+=== RUN   TestAdd
+    a_test.go:6: a log line
+    a_test.go:8: Add(1, 1) = 2, want 3
+--- FAIL: TestAdd (0.00s)
+=== RUN   TestTable
+=== RUN   TestTable/ok
+=== RUN   TestTable/bad
+    a_test.go:16: subtest bad failed
+        with a second line
+--- FAIL: TestTable (0.00s)
+    --- PASS: TestTable/ok (0.00s)
+    --- FAIL: TestTable/bad (0.00s)
+=== RUN   TestPasses
+--- PASS: TestPasses (0.00s)
+FAIL
+FAIL	sample	0.100s
+FAIL

@@ -186,3 +186,33 @@ func TestPrune_HonoursCustomWindows(t *testing.T) {
 		t.Error("a custom retention window was ignored")
 	}
 }
+
+// A run's result is swept with its log: kept as long, never compressed, and
+// never removed under a run still going (A92).
+func TestPrune_ResultsGoWithTheirLogs(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	writeLog(t, dir, "fresh.result.json", `{"runId":"fresh"}`, time.Hour, now)
+	writeLog(t, dir, "stale.result.json", `{"runId":"stale"}`, 48*time.Hour, now)
+	writeLog(t, dir, "ancient.result.json", `{"runId":"ancient"}`, 30*24*time.Hour, now)
+	writeLog(t, dir, "live.result.json", `{"runId":"live"}`, 30*24*time.Hour, now)
+
+	report, err := Prune(dir, PruneOptions{}, now, func(id string) bool { return id == "live" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"fresh.result.json", "stale.result.json", "live.result.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s was removed or renamed: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ancient.result.json")); !os.IsNotExist(err) {
+		t.Error("a result older than the retention was kept")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "stale.result.json.gz")); !os.IsNotExist(err) {
+		t.Error("a result was compressed: a caller reads it by name")
+	}
+	if len(report.Compressed) != 0 || report.BytesFreed <= 0 {
+		t.Errorf("report = %+v", report)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -107,6 +108,10 @@ const (
 	// asks again. The only other process is a `latem cache prune`, which
 	// holds one for as long as a removal takes.
 	warmLockPoll = 50 * time.Millisecond
+	// warmCleanPasses bounds how many times a warm workspace is cleaned of
+	// untracked files: until a pass finds none, which is the second pass
+	// unless an ignore file was shielding another.
+	warmCleanPasses = 4
 )
 
 // warmPartPattern bounds what becomes a directory name under WarmDir. Runner
@@ -391,13 +396,26 @@ func (m *Manager) syncWarm(ctx context.Context, mi *Mirror, dir, runID, sha stri
 	// does not, or one a step left. -x is what is not here: ignored paths
 	// are the point of keeping the workspace. Twice -f, for a directory that
 	// is a repository of its own.
-	cleaned, err := m.run(ctx, tree, "clean", "-ffd")
-	if err != nil {
-		return 0, 0, gitErr(err, "removing untracked files from the warm workspace")
-	}
-	for line := range strings.Lines(cleaned) {
-		if strings.HasPrefix(line, "Removing ") {
-			removed++
+	//
+	// More than once, because git reads every .gitignore it finds, tracked
+	// or not. One the last commit had and this one does not is itself
+	// untracked: the first pass removes it, having obeyed it, and the next
+	// removes what it was shielding. So what survives is what this commit's
+	// own ignore files name.
+	for pass := 0; pass < warmCleanPasses; pass++ {
+		cleaned, err := m.run(ctx, tree, "clean", "-ffd")
+		if err != nil {
+			return 0, 0, gitErr(err, "removing untracked files from the warm workspace")
+		}
+		n := 0
+		for line := range strings.Lines(cleaned) {
+			if strings.HasPrefix(line, "Removing ") {
+				n++
+			}
+		}
+		removed += n
+		if n == 0 {
+			break
 		}
 	}
 	if _, err := m.run(ctx, tree, "remote", "set-url", "origin", "--", mi.repo.URL); err != nil {
@@ -418,12 +436,17 @@ func removeAllWritable(path string) error {
 	if err == nil {
 		return nil
 	}
-	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, walkErr error) error {
-		if walkErr == nil && d.IsDir() {
-			_ = os.Chmod(p, 0o700) // #nosec G302 -- a directory, about to be removed
-		}
-		return nil
-	})
+	// Through an os.Root, so a symbolic link a build left cannot turn "make
+	// this tree writable" into a chmod of something outside it.
+	if root, openErr := os.OpenRoot(path); openErr == nil {
+		_ = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr == nil && d.IsDir() {
+				_ = root.Chmod(p, 0o700)
+			}
+			return nil
+		})
+		_ = root.Close()
+	}
 	return os.RemoveAll(path)
 }
 

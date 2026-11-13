@@ -122,3 +122,35 @@ func TestCommandsInsideAPEMBlockAreSuppressed(t *testing.T) {
 		t.Errorf("nothing was registered, so the later line is plain: %q", sink.lines[len(sink.lines)-1])
 	}
 }
+
+// An error or warning a step writes as a workflow command is handed on with
+// its place, redacted as its line in the log is, so a run's result can keep
+// it without reading it back out of that line (A92).
+func TestAnnotationsAreHandedOnRedacted(t *testing.T) {
+	e, _ := newTestEmitter()
+	e.red.Register([]byte("hunter2hunter2"))
+	type told struct {
+		level, message string
+		params         map[string]string
+	}
+	var got []told
+	e.OnAnnotation(func(level, message string, params map[string]string) {
+		got = append(got, told{level, message, params})
+	})
+	e.Emit(protocol.StreamStdout, "::error file=src/a.rs,line=3,col=7,title=E1::the password is hunter2hunter2")
+	e.Emit(protocol.StreamStdout, "::warning::plain")
+	e.Emit(protocol.StreamStdout, "::debug::not handed on")
+	e.Emit(protocol.StreamStdout, "an ordinary line that says ::error:: in the middle")
+
+	if len(got) != 2 {
+		t.Fatalf("handed on %d annotations, want 2: %+v", len(got), got)
+	}
+	if got[0].level != "error" || strings.Contains(got[0].message, "hunter2") ||
+		got[0].params["file"] != "src/a.rs" || got[0].params["line"] != "3" ||
+		got[0].params["col"] != "7" || got[0].params["title"] != "E1" {
+		t.Errorf("the error was handed on as %+v", got[0])
+	}
+	if got[1].level != "warning" || got[1].message != "plain" {
+		t.Errorf("the warning was handed on as %+v", got[1])
+	}
+}

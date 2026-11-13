@@ -1,0 +1,10 @@
+--- FAIL: TestAdd (0.00s)
+    a_test.go:6: a log line
+    a_test.go:8: Add(1, 1) = 2, want 3
+--- FAIL: TestTable (0.00s)
+    --- FAIL: TestTable/bad (0.00s)
+        a_test.go:16: subtest bad failed
+            with a second line
+FAIL
+FAIL	sample	0.100s
+FAIL

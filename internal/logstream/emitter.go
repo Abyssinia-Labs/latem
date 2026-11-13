@@ -45,6 +45,21 @@ type Emitter struct {
 	// stopToken, when set, pauses workflow-command processing until a line
 	// reading `::<token>::` arrives. See [Emitter.command].
 	stopToken string
+	// annotated, when set, is told each error, warning and notice a step
+	// wrote as a workflow command. See [Emitter.OnAnnotation].
+	annotated func(level, message string, params map[string]string)
+}
+
+// OnAnnotation has fn told each `::error`, `::warning` and `::notice` a step
+// writes, with its message and its parameters (file, line, col, title), all
+// redacted as the log's own line is (A92). It is how a run's result takes a
+// problem a step named itself, without reading it back out of the sentence
+// the log renders it as. Set it before the first step; fn is called with the
+// emitter's lock held, so it must not emit.
+func (e *Emitter) OnAnnotation(fn func(level, message string, params map[string]string)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.annotated = fn
 }
 
 // NewEmitter builds a pipeline for one run.

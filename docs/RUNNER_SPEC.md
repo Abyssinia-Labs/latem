@@ -4320,6 +4320,28 @@ checkout writes every file, so a warm run writes less than a fresh one from its 
 run of any other job: nothing. On disk: one build tree per warm job per runner, bounded by the
 retention above.
 
+**Measured**, on 2026-11-12, on the MacBook's native runner, with the ANVerS repository's Rust
+workspace (cargo 1.99.1) and a build of this amendment's code as a second agent beside the
+installed one:
+
+| Job | First run, nothing kept | Same commit again | One file changed |
+|---|---|---|---|
+| `cargo test -p anvers-gate` (12 tests) | 9.0 s | 1.5 s | 1.7 to 2.2 s |
+| `cargo test --workspace --no-run` (ten crates) | 12.6 s | | 3.9 s |
+
+The first column is also what every run cost before, since a fresh clone is a first run every time.
+In the second, cargo found nothing to do: no file had been written, so no timestamp had moved. In
+the third, the changed file was in `anvers-oplog`, at the bottom of the workspace, and cargo
+compiled it and the six crates above it and none of their dependencies. The times are whole runs,
+from the command to the run's last state, and the changes in the third column were sent as A91's
+changed files. On the same Mac's docker runner a run of a small repository's warm job took 0.4 s.
+The two workspaces were 0.7 and 2.9 GiB.
+
+That docker run also found a hole in the first version of the cleanup. A commit that removed
+`.gitignore` left the old file behind, untracked, and `git clean` obeyed it once more before
+removing it, so a directory this commit did not ignore survived a run. The clean now repeats until
+a pass removes nothing.
+
 **Not in this amendment.** Workflow jobs. A warm workspace shared between jobs, or between runners.
 Several warm workspaces for one job, so that runs need not take turns. Submodules and git-lfs.
 
@@ -4423,4 +4445,93 @@ and one fetch. Nothing per tick, and nothing on a control plane.
 them. Changes on top of changes, except by sending the union against the base. A workflow's job
 for an agent, which would need the workflow file held as the registry is. An agent's changes on a
 machine reached through latem-cloud, which would carry code through the control plane (§17).
+
+### Amendment from a caller that is a program
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A92 | §16, §19, §22, A42, A87, INV-4 | **Every run leaves a result beside its log: each step and how it ended, and the problems the steps' output named, each with its severity, file, line, column, message, the tool's code for it and the tool's own suggested fix when it gave one. It is read off the log's frames, after the redactor, by readers that each know one tool's format: rustc and clippy, `cargo test`, the go compiler, vet and the linters built on them, `go test`, tsc, `bun test`, vitest, biome, pytest, and anything that prints `file:line:col: error:` as cc, clang, swiftc and xcodebuild do. A step names a problem itself with `::error file=…,line=…::`. `latem result <run-id>` prints it, `--json` for a program. `latem mcp`'s `waitForRun` and `getRun` return it with the run, and `waitForRun` tells a client that sent a progress token each state and each step as it ends** | ANVerS records each check as evidence: a status, and structured errors, each with what broke, where, and a likely fix (ANVerS spec §4, LAT-7). A run gave it a state and a log. Its own runner kept the last forty lines of output and called that the summary, and an agent handed forty lines of a test runner's epilogue has to go and find the compiler error above them. A87's `waitForRun` already waited in one call, for up to ten minutes; what it returned was a state |
+
+**What a problem is.** A line, or a few, in a step's output that a tool wrote to say something is
+wrong at a place:
+
+```json
+{"severity": "error", "file": "crates/anvers-gate/tests/gate.rs", "line": 458, "column": 5,
+ "test": "latem_e2e_fails", "tool": "cargo-test", "step": "test",
+ "message": "assertion `left == right` failed: the change broke arithmetic\n  left: 2\n right: 3"}
+```
+
+`code` is the tool's name for the kind of problem (`E0308`, `TS2322`, `clippy::ptr_arg`,
+`lint/style/useConst`), and `test` the failing test's name. `help` is the fix the tool suggested: a
+compiler's `help:`, with the corrected line when it printed one, or a linter's safe fix. latem
+never writes one of its own. A caller that wants a likely fix where the tool gave none has the
+message and the place, which is what a person would have. A path a tool wrote absolute, because it
+was given the workspace that way, is made relative to the workspace.
+
+**The readers do not guess.** Each was written against what its tool prints, kept in
+`internal/result/testdata` as the tool printed it on this project's machines, with the versions in
+the test. A line is a problem only when it names a place the way a tool that found something does.
+`error: could not compile`, a script's `error: something went wrong` and a timestamped log line
+that says `error:` are not problems. Neither is `main.go:12: starting`, which is what
+`log.Lshortfile` prints: the go reader wants a column, as the compiler gives one. What the readers
+miss is still in the log, and `getRunLogs` is still there. A format nobody has written a reader for
+yields a result with its steps and no problems, never a wrong one.
+
+**A step that passed has no errors.** The readers recognise shapes, and a step that exits 0 while
+printing the shape of an error was showing one: a compile-fail test's expected diagnostics, a tool
+listing what it fixed. So a successful step keeps the warnings found in it and loses the errors.
+What a step wrote itself with `::error` is its own statement and stays.
+
+**Where it comes from.** The collector is one more sink of §16's pipeline, beside the file, the
+ring and each broker's. It receives the frames the file sink writes, so every line it reads is
+redacted, and a problem's message holds nothing the log does not (INV-4). The run tells it where
+each step begins and ends; only a step's stdout and stderr are read, never the agent's own lines.
+Workflow commands never reach a sink as written, since the emitter renders them (A42), so the
+emitter hands an `::error`, `::warning` or `::notice` on with its parameters, redacted the same
+way.
+
+**The document.** `<logs>/<run-id>.result.json`, written by rename when each step ends and when the
+run does, so a reader mid-run sees whole steps and never part of a file. It carries the run (repo,
+job, ref, commit, a changes run's base, inputs, runner, whether the workspace was warm), its state
+and whether that is settled, its error code and message, its steps (name, outcome, exit code,
+duration, counts) and its problems, errors first, each kind in the order it was printed. At most
+100 errors and 50 warnings are kept, a message is cut at 2,000 bytes and a suggestion at 1,000,
+and `dropped` counts the rest: a build that prints ten thousand errors has one problem, and it is
+in the first hundred. A problem printed twice in a step, as cargo prints a library's warnings again
+for its tests, is one. Lists are `[]` when empty, never `null`. `inputs` is how a caller tells its
+own runs apart, a tier or an attempt, without latem knowing what those are.
+
+**Reading it.** `latem result <run-id>` is for a person: the run's ending, a table of steps, then
+each problem with its place, message and suggestion. `--json` is the document. Both exit 0 whatever
+the run's state, as `latem logs` does. A run with no stored result, because it never started a step
+or its log's retention removed it, answers from its row and says that is all there is. A run its
+agent did not see end takes its ending from the row, and says so.
+
+**Through MCP, with nothing to poll.** `waitForRun` returns the settled run with its result, so one
+call starts a run and one more has its evidence. `getRun` returns it too, for a run still going
+with the steps so far. A listing does not carry results. A client that sends `_meta.progressToken`
+with `waitForRun` receives a `notifications/progress` for each state the run enters and for each
+step as it ends, with its outcome, time and error count, before the call's answer: results as they
+arrive, on the one connection, for a client that wants them. The wait itself is unchanged from
+A87: it reads one sqlite row every 500 ms on the machine, and now one `stat` of the result file
+beside it for a client that asked for progress.
+
+**Retention and cost.** The result is swept with its log, after `agent.log_retention`, never
+compressed, since it is read by name, and never under a live run. Per line of output, a handful of
+anchored regular expressions on a line the pipeline has already split and redacted. Per step, one
+file write of a few kilobytes, bounded at well under a megabyte by the caps above. Nothing is
+added to a run's row, which the queue and every listing read, and nothing is sent to a control
+plane.
+
+**Measured**, in A90's setup, through `latem mcp` over stdio: a change to one test file of
+`anvers-gate`, sent as changed files, was built, run and answered in 2.2 s, as one `startRun` and
+one `waitForRun`. The failing test came back with its file, line 458, column 5, its name and the
+assertion's two values. A change that did not compile came back in 1.7 s as `E0308` at
+`crates/anvers-gate/src/lib.rs:22:5`.
+
+**Not in this amendment.** Sending results to a control plane, which is protocol work and belongs
+with latem-cloud's own MCP server. Problem matchers a repository declares for a tool of its own;
+until then `::error file=…::` is how a script says it. Kotlin and Gradle, jest, and xcodebuild's
+test failures, which need their own readers. Coverage, and which tests ran: ANVerS's risk score
+asks for both (ADR-0009), and neither is in a log in a form worth trusting.
 

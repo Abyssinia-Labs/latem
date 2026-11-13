@@ -44,6 +44,13 @@ func (e *Emitter) command(stream protocol.Stream, cmd ghcmd.Command) protocol.Lo
 		return e.emitLocked(protocol.StreamAgent, "[latem] ◀ end of group")
 
 	case "error", "warning", "notice", "debug":
+		if e.annotated != nil && cmd.Name != "debug" {
+			params := make(map[string]string, len(cmd.Params))
+			for k, v := range cmd.Params {
+				params[k] = e.red.Redact(v)
+			}
+			e.annotated(cmd.Name, e.red.Redact(cmd.Value), params)
+		}
 		return e.emitLocked(stream, e.red.Redact(annotate(cmd)))
 
 	case "echo":

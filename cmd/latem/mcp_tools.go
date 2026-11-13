@@ -19,6 +19,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
+	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -101,11 +102,13 @@ func mcpTools() []mcpTool {
 			call: mcpListRuns,
 		},
 		{
-			name:        "getRun",
-			title:       "Get a run",
-			description: "One run on this machine: its state, commit, exit code and error, its workflow run when it is a workflow job, its inputs, and what it waits for when it is held.",
-			input:       schemaObject([]string{"runId"}, map[string]any{"runId": runID}),
-			readOnly:    true, idempotent: true,
+			name:  "getRun",
+			title: "Get a run",
+			description: "One run on this machine: its state, commit, exit code and error, its workflow run when it is a workflow job, its inputs, and what it waits for when it is held. " +
+				"With it, its result: each step and how it ended, and the problems the steps' output named — a compiler's errors, a failed test — each with its file, line, message and the tool's own suggested fix when it gave one. " +
+				"A run still going shows the steps so far.",
+			input:    schemaObject([]string{"runId"}, map[string]any{"runId": runID}),
+			readOnly: true, idempotent: true,
 			call: mcpGetRun,
 		},
 		{
@@ -125,9 +128,11 @@ func mcpTools() []mcpTool {
 		{
 			name:  "waitForRun",
 			title: "Wait for a run to settle",
-			description: "Waits until a run settles — succeeded, failed, cancelled and the rest — and returns it. " +
+			description: "Waits until a run settles — succeeded, failed, cancelled and the rest — and returns it with its result: " +
+				"each step and how it ended, and the problems their output named, each with its file, line and message, so a failure rarely needs the log. " +
+				"One call waits up to ten minutes; there is nothing to poll. " +
 				"Returns sooner, with settled false, at the timeout, or when waiting cannot help: a run held for a person's approval, or one queued with no agent running here. " +
-				"Call it again for longer.",
+				"Call it again for longer. A client that sends a progress token is told each state and each step as it ends.",
 			input: schemaObject([]string{"runId"}, map[string]any{
 				"runId":          runID,
 				"timeoutSeconds": schemaInteger(fmt.Sprintf("How long to wait, %d seconds unless given", int(mcpDefaultWait.Seconds())), 1, int(mcpMaxWait.Seconds())),
@@ -270,11 +275,14 @@ type mcpRun struct {
 	Waiting string `json:"waiting,omitempty"`
 
 	// Shown by getRun, not in a list.
-	Inputs       map[string]string `json:"inputs,omitempty"`
-	CancelReason string            `json:"cancelReason,omitempty"`
-	ExpiresAt    *time.Time        `json:"expiresAt,omitempty"`
-	ApprovedAt   *time.Time        `json:"approvedAt,omitempty"`
-	ApprovedSHA  string            `json:"approvedSha,omitempty"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+	// Result is how the run went, step by step, with the problems its
+	// output named (A92). By getRun and waitForRun.
+	Result       *result.Result `json:"result,omitempty"`
+	CancelReason string         `json:"cancelReason,omitempty"`
+	ExpiresAt    *time.Time     `json:"expiresAt,omitempty"`
+	ApprovedAt   *time.Time     `json:"approvedAt,omitempty"`
+	ApprovedSHA  string         `json:"approvedSha,omitempty"`
 }
 
 type mcpChanges struct {
@@ -415,7 +423,24 @@ func mcpGetRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runView(r, true), nil
+	v := runView(r, true)
+	v.Result = mcpResultOf(st, r)
+	return v, nil
+}
+
+// mcpResultOf is a run's result (A92) for a run that has got far enough to
+// have one, and nil for one still waiting to start: there is nothing in it
+// the run does not already say.
+func mcpResultOf(st *state, r store.Run) *result.Result {
+	switch r.State {
+	case protocol.StateQueued, protocol.StateAwaitingApproval, protocol.StateClaimed:
+		return nil
+	}
+	res, err := runResult(st.cfg.Paths.Logs, r)
+	if err != nil {
+		return nil
+	}
+	return res
 }
 
 type mcpLogLine struct {
@@ -577,14 +602,17 @@ func mcpWaitForRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	defer deadline.Stop()
 	tick := time.NewTicker(mcpPoll)
 	defer tick.Stop()
+	told := mcpWaitProgress{report: mcpProgressOf(ctx), logs: st.cfg.Paths.Logs}
 	for {
 		r, err := mcpRunOf(ctx, st, a.RunID)
 		if err != nil {
 			return nil, err
 		}
 		v := runView(r, false)
+		told.tell(r)
 		switch {
 		case r.State.IsTerminal():
+			v.Result = mcpResultOf(st, r)
 			return answer{Settled: true, Run: v}, nil
 		case r.State == protocol.StateAwaitingApproval:
 			return answer{Run: v, Note: "held for a person's approval: waiting cannot settle it"}, nil
@@ -599,6 +627,56 @@ func mcpWaitForRun(ctx context.Context, raw json.RawMessage) (any, error) {
 		case <-tick.C:
 		}
 	}
+}
+
+// mcpWaitProgress tells a waiting client what has happened since it was last
+// told: a new state, and each step as it ends, read from the run's result
+// when that file changes (A92). A client that sent no progress token is told
+// nothing, and nothing is read for it.
+type mcpWaitProgress struct {
+	report func(string)
+	logs   string
+
+	state protocol.RunState
+	steps int
+	mtime time.Time
+}
+
+func (p *mcpWaitProgress) tell(r store.Run) {
+	if p.report == nil {
+		return
+	}
+	// The steps first: a run's last step ends before its state does, and is
+	// told in that order.
+	p.tellSteps(r.ID)
+	if r.State != p.state {
+		p.state = r.State
+		p.report(string(r.State))
+	}
+}
+
+func (p *mcpWaitProgress) tellSteps(runID string) {
+	path, err := result.Path(p.logs, runID)
+	if err != nil {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.ModTime().Equal(p.mtime) {
+		return
+	}
+	p.mtime = info.ModTime()
+	res, err := result.Read(p.logs, runID)
+	if err != nil {
+		return
+	}
+	for _, s := range res.Steps[min(p.steps, len(res.Steps)):] {
+		msg := fmt.Sprintf("step %s: %s in %s", s.Name, s.Outcome, shortMs(s.DurationMs))
+		if s.Errors > 0 {
+			msg += fmt.Sprintf(", %d error(s)", s.Errors)
+		}
+		p.report(msg)
+	}
+	p.steps = len(res.Steps)
 }
 
 func mcpStartRun(ctx context.Context, raw json.RawMessage) (any, error) {

@@ -125,7 +125,7 @@ func (cs *changeSet) toSource() (source.Changes, error) {
 		case f.Base64 != nil:
 			var err error
 			if data, err = base64.StdEncoding.DecodeString(*f.Base64); err != nil {
-				return source.Changes{}, fmt.Errorf("%s: base64 is not standard base64: %v", f.Path, err)
+				return source.Changes{}, fmt.Errorf("%s: base64 is not standard base64: %w", f.Path, err)
 			}
 		default:
 			return source.Changes{}, fmt.Errorf("%s has neither text nor base64: an empty file is \"text\": \"\", "+
@@ -254,8 +254,8 @@ func startChangesRun(ctx context.Context, st *state, id string, r changesRun, cs
 	if r.agent {
 		if !repoCfg.AgentChanges {
 			return changesQueued{}, fmt.Errorf("this machine does not run an agent's changes for %s. A person "+
-				"allows it there with `agent_changes = true` under [repos.%s] in its config.toml, then "+
-				"`latem service reload`. Until then, push the change and start the run on its branch", r.repo, r.repo)
+				"allows it there with `agent_changes = true` under [repos.%s] in its config.toml. "+
+				"Until then, push the change and start the run on its branch", r.repo, r.repo)
 		}
 		if !registry.MatchPolicy(r.ref, registry.ExpandPolicy(repoCfg.AllowedRefs)) {
 			return changesQueued{}, fmt.Errorf("%s is not a ref %s builds without a person's approval "+
