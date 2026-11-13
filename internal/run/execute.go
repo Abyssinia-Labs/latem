@@ -75,6 +75,10 @@ type execution struct {
 	// actionState is what each use of a JavaScript action saved through
 	// $GITHUB_STATE, by use (A51).
 	actionState map[string]map[string]string
+	// changed is the paths a changes run's commit differs from its base in,
+	// and changedPath where the job reads them (A91).
+	changed     []string
+	changedPath string
 	// credentialWritten is whether a checkout step put the job's token in
 	// the environment, for a later one that does not persist to take back
 	// (A53).
@@ -267,6 +271,9 @@ func (x *execution) drive(ctx context.Context) Result {
 		return x.finish(ctx, fail(err, protocol.ErrExecutor))
 	}
 	if err := x.putSecretFiles(jobCtx); err != nil {
+		return x.finish(ctx, fail(err, protocol.ErrExecutor))
+	}
+	if err := x.putChangedFiles(jobCtx); err != nil {
 		return x.finish(ctx, fail(err, protocol.ErrExecutor))
 	}
 

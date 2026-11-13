@@ -89,15 +89,6 @@ func warmHarness(t *testing.T) *harness {
 	return h
 }
 
-func logOf(t *testing.T, h *harness, runID string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(h.cfg.Paths.Logs, runID+".log"))
-	if err != nil {
-		t.Fatalf("reading the run's log: %v", err)
-	}
-	return string(b)
-}
-
 // A job that says `workspace: warm` builds in the directory its runner keeps
 // for it, and the run ending gives the directory back without removing it.
 func TestExecute_AWarmJobBuildsInItsKeptWorkspace(t *testing.T) {
@@ -130,7 +121,7 @@ func TestExecute_AWarmJobBuildsInItsKeptWorkspace(t *testing.T) {
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("the run ending removed the kept workspace: %v", err)
 	}
-	log := logOf(t, h, req.ID)
+	log := h.logContents(req.ID)
 	if !strings.Contains(log, "warm workspace: kept from run r_earlier at aaaaaaaaaaaa") ||
 		!strings.Contains(log, "3 tracked file(s) differed") {
 		t.Errorf("the log does not say what the warm workspace held:\n%s", log)
@@ -180,7 +171,7 @@ func TestExecute_AWarmJobFallsBackToAFreshCloneAndSaysWhy(t *testing.T) {
 			if len(h.source.checkedOut) != 1 {
 				t.Errorf("fresh checkouts = %v, want one", h.source.checkedOut)
 			}
-			if log := logOf(t, h, req.ID); !strings.Contains(log, tc.want) {
+			if log := h.logContents(req.ID); !strings.Contains(log, tc.want) {
 				t.Errorf("the log does not say why the build is not warm; want %q in:\n%s", tc.want, log)
 			}
 		})

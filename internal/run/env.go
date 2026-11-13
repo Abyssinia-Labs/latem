@@ -71,6 +71,10 @@ func (x *execution) buildEnv() map[string]string {
 		env[k] = v
 	}
 	env["LATEM_JOB"] = x.resolved.JobName
+	// A changes run's base: the commit its files were changed from (A91).
+	if base := x.run.ChangesBase(); base != "" {
+		env[BaseSHAVar] = base
+	}
 
 	// The run's own number, which the reference jobs use as the build number
 	// (amendment A36). App Store Connect refuses a build number it has already
@@ -131,6 +135,11 @@ func (x *execution) stepEnv(s registry.ResolvedStep) map[string]string {
 		if p := x.env.EnvFile(); p != "" {
 			env[LatemEnvVar] = p
 		}
+	}
+	// The agent's too, and for the same reason: where the list is depends on
+	// the executor, which answered when the file was written (A91).
+	if x.changedPath != "" {
+		env[ChangedFilesVar] = x.changedPath
 	}
 	return env
 }

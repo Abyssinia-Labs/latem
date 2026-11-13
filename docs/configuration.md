@@ -101,6 +101,25 @@ broken config does not fail at startup, it fails forty minutes into somebody's
 build. Disk floors are per runner — 40 GB for docker, 60 for native, 200 for
 tart — because a global 20 GB admits an iOS build the machine cannot finish.
 
+**`agent_changes = true` under a repository lets an agent build its own
+unpushed changes there**, through `latem mcp` (A91):
+
+```toml
+[repos.myapp]
+url           = "git@github.com:acme/myapp.git"
+allowed_refs  = ["main"]
+agent_changes = true
+```
+
+It is your approval, given once, of that repository's `.latem/jobs.yaml` jobs
+running on a commit of an allowed ref with an agent's files changed on top. The
+agent cannot change the registry that way, and cannot pick a base your
+`allowed_refs` do not hold. It can change every script and source file the job
+runs, and on a native runner a step runs as you, so give it for a repository
+whose jobs you would let that agent run. Without the line the tool refuses and
+names it. `latem run --changes`, typed by a person, needs no line: running it is
+the approval, as with `latem try`.
+
 `warm_retention` (7 days unless set) is how long a warm workspace, one a job
 keeps with `workspace: warm`, stays on disk with no run using it. It needs a
 restart to change.

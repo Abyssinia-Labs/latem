@@ -68,6 +68,8 @@ type fakeSource struct {
 	noMirror bool
 	// warm, when set, makes the mirror one that keeps workspaces (A90).
 	warm *fakeWarm
+	// changed is what Changed answers: the paths a changes run changed (A91).
+	changed []string
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -141,6 +143,13 @@ func (m *fakeMirror) FetchCommit(_ context.Context, sha string) error {
 	}
 	m.src.commits[sha] = false
 	return nil
+}
+
+// Changed lists what differs between two commits; the fake has one answer.
+func (m *fakeMirror) Changed(_ context.Context, _, _ string) ([]string, error) {
+	m.src.mu.Lock()
+	defer m.src.mu.Unlock()
+	return m.src.changed, nil
 }
 
 func (m *fakeMirror) IsAncestor(_ context.Context, ancestor, descendant string) (bool, error) {

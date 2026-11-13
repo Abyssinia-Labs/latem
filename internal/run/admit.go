@@ -112,10 +112,15 @@ func requestOf(r store.Run) protocol.RunRequest {
 	// A workflow run's job (A52), from the row like everything else. Not the
 	// token, which no row holds.
 	if w := r.Workflow; w != nil {
-		ev := w.Event
-		req.Workflow, req.SHA, req.Event, req.Needs = w.Workflow, w.SHA, &ev, w.Needs
-		req.WorkflowRunID, req.RunNumber, req.RunAttempt = w.WorkflowRunID, w.RunNumber, w.RunAttempt
-		req.Matrix = w.Matrix
+		req.SHA = w.SHA
+		// A changes run (A91) is pinned to a commit and is no workflow run's
+		// job: it has no file, event or needs, and runs as `latem run` would.
+		if w.Workflow != "" {
+			ev := w.Event
+			req.Workflow, req.Event, req.Needs = w.Workflow, &ev, w.Needs
+			req.WorkflowRunID, req.RunNumber, req.RunAttempt = w.WorkflowRunID, w.RunNumber, w.RunAttempt
+			req.Matrix = w.Matrix
+		}
 	}
 	return req
 }

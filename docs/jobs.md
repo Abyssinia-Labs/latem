@@ -108,6 +108,27 @@ only the paths it lists in the workspace, in cone mode unless
 runs inside the job's environment, so a docker image needs git, and `main`'s
 branch protection has to let the App push.
 
+**Build a change nobody has pushed, without a checkout.** `latem run REPO JOB
+--changes FILE` builds a commit this machine already has with files changed on
+top of it. `FILE` is JSON, the commit and the files, each whole:
+
+```json
+{"base": "0f3c… all 40 characters",
+ "files": [{"path": "src/lib.rs", "text": "…"},
+           {"path": "ci/test.sh", "text": "…", "mode": "755"},
+           {"path": "logo.png", "base64": "…"}],
+ "remove": ["src/old.rs"]}
+```
+
+The files become a commit on no ref, a child of the base, and the run is pinned
+to it, as `latem try` pins a working tree's. The job reads the base as
+`$LATEM_BASE_SHA` and the changed paths, one to a line, from the file
+`$LATEM_CHANGED_FILES` names, so a test job can run what the change touches.
+With `workspace: warm` (below) only the changed files are written before the
+build starts. An agent sends the same JSON through `latem mcp`'s `startRun`,
+for a repository whose config allows it; [configuration.md](configuration.md)
+has the line. RUNNER_SPEC A91 has the design.
+
 ## `.latem/jobs.yaml`
 
 ### Give the repository a job

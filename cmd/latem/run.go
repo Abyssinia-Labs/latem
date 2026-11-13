@@ -18,12 +18,13 @@ import (
 
 func newRunCommand() *cobra.Command {
 	var (
-		ref    string
-		inputs []string
-		follow bool
-		wait   bool
-		detach bool
-		actor  string
+		ref     string
+		inputs  []string
+		follow  bool
+		wait    bool
+		detach  bool
+		actor   string
+		changes string
 	)
 	cmd := &cobra.Command{
 		Use:   "run <repo> <job>",
@@ -38,6 +39,22 @@ from a broker, so a run is reproducible from the commit alone (INV-5).
 
 Inputs are declared in the job's inputs: block. An undeclared key is a hard
 rejection with E_BAD_INPUT, not a warning.
+
+--changes FILE builds a commit this machine has with files changed on top of
+it, with no push and no checkout (RUNNER_SPEC A91). FILE, or - for stdin, is
+JSON: the commit, the files to write whole, and the paths to remove.
+
+  {"base": "<the commit, all 40 characters>",
+   "files": [{"path": "src/lib.rs", "text": "…"},
+             {"path": "logo.png", "base64": "…"},
+             {"path": "ci/test.sh", "text": "…", "mode": "755"}],
+   "remove": ["src/old.rs"]}
+
+The files become a commit on no ref in the agent's mirror, a child of the
+base, and the run is pinned to it and approved for it, as ` + "`latem try`" + ` approves
+the commit of a working tree. --ref names the branch the run is for. The job
+reads the base as $LATEM_BASE_SHA and the changed paths, one to a line, from
+the file $LATEM_CHANGED_FILES names. Nothing about it reaches a control plane.
 
 Output:
   on a terminal, the run id, then the run's log as it is produced, until the
@@ -66,7 +83,8 @@ is exit 3 rather than a process that blocks forever, and nothing is queued.
 Examples:
   latem run myapp test
   latem run myapp ios-release --ref release/1.4 --input channel=beta
-  latem run myapp nightly --detach`,
+  latem run myapp nightly --detach
+  latem run myapp test --changes change.json --wait`,
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if detach && (wait || follow) {
@@ -92,6 +110,7 @@ Examples:
 				follow:    follow,
 				wait:      wait || follow,
 				byDefault: byDefault,
+				changes:   changes,
 			})
 		},
 	}
@@ -101,6 +120,7 @@ Examples:
 	cmd.Flags().BoolVar(&wait, "wait", false, "block until the run finishes")
 	cmd.Flags().BoolVar(&detach, "detach", false, "queue the run and exit without following it, on a terminal too")
 	cmd.Flags().StringVar(&actor, "actor", "", "who to record as having requested this (default: the current user)")
+	cmd.Flags().StringVar(&changes, "changes", "", "a JSON file of changed files to build on a commit this machine has; - for stdin")
 	return cmd
 }
 
@@ -133,6 +153,8 @@ type submission struct {
 	// byDefault is a follow nobody asked for: stdout is a terminal and no
 	// flag said otherwise (A81).
 	byDefault bool
+	// changes is --changes: the file of a changes run's changes (A91).
+	changes string
 }
 
 // submitRun queues a run and, depending on the flags, watches it.
@@ -161,6 +183,9 @@ func submitRun(cmd *cobra.Command, s submission) error {
 	}
 	if s.actor == "" {
 		s.actor = currentActor()
+	}
+	if s.changes != "" {
+		return submitChangesRun(cmd, st, id, s)
 	}
 
 	req := protocol.RunRequest{
@@ -253,4 +278,47 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// submitChangesRun is submitRun for --changes (A91): the files become a
+// commit, and the run is pinned to it. Running the command is the approval,
+// as running latem try is.
+func submitChangesRun(cmd *cobra.Command, st *state, id string, s submission) error {
+	ctx := cmd.Context()
+	cs, err := readChangeSet(s.changes, cmd.InOrStdin())
+	if err != nil {
+		return usageErrorf("--changes: %v", err)
+	}
+	ref, _, err := tryRef(s.ref, "", DefaultRef)
+	if err != nil {
+		return err
+	}
+	queued, err := startChangesRun(ctx, st, id, changesRun{
+		repo: s.repo, job: s.job, ref: ref, inputs: s.inputs, actor: s.actor, requireAgent: s.wait,
+	}, cs)
+	if err != nil {
+		if s.byDefault && exitCode(err) == ExitAgentDown {
+			err = &ExitError{Code: ExitAgentDown, Err: fmt.Errorf("%w\nor queue it to start when one does:\n  the same command with --detach", err)}
+		}
+		return err
+	}
+
+	printf(cmd.OutOrStdout(), "%s\n", queued.RunID)
+	errOut := cmd.ErrOrStderr()
+	if queued.SHA == queued.Base {
+		printf(errOut, "the changes leave %.12s as it is: this builds that commit\n", queued.Base)
+	} else {
+		printf(errOut, "%d path(s) changed on %.12s: commit %.12s, on no ref\n", queued.Paths, queued.Base, queued.SHA)
+	}
+	if !queued.AgentRunning {
+		printf(errOut, "queued (agent not running) — it starts when one does: `latem agent`\n")
+	}
+	if !s.wait {
+		return nil
+	}
+	err = watchRun(cmd, st, queued.RunID, s.follow)
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		return fmt.Errorf("stopped watching %s, which goes on\n  latem logs -f %[1]s   follows it again\n  latem cancel %[1]s    stops it", queued.RunID)
+	}
+	return err
 }

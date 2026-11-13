@@ -175,3 +175,10 @@ machine to run `latem approve`, and the agent is told so. `latem try`, secrets,
 vars, repositories and the service are not offered either (amendment A87). Nor
 can the agent run `latem approve` over the same ssh: with no terminal it refuses
 (A89).
+
+**An agent can have its own unpushed change built**, by giving `startRun` the
+commit it started from and the files it changed (`changes`), where the machine
+allows it: `agent_changes = true` under the repository in config.toml, a base in
+the history of an allowed ref, and a job the base's `.latem/jobs.yaml`
+declares. [`jobs.md`](jobs.md) has the JSON and
+[`configuration.md`](configuration.md) the line (amendment A91).

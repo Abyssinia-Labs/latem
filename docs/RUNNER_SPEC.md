@@ -504,6 +504,8 @@ url        = "wss://api.example.com/agent"
 token_file = "~/.latem/agent.key"   # 0600, never inline in this file
 
 # --- repos: the allowlist. A repo absent here cannot be built. ---
+# `agent_changes = true` in a repo lets an agent reaching this machine through
+# `latem mcp` build its own unpushed changes there (A91). Off unless written.
 [repos.myapp]
 url          = "git@github.com:me/myapp.git"
 allowed_refs = ["main", "release/*"]   # expanded to refs/heads/* — INV-5
@@ -4242,6 +4244,7 @@ callers and adds nothing against `ssh -tt`. Looking at the parent process or the
 `SSH_TTY` or a login shell: what an agent can set is no evidence, and a person in tmux has neither.
 A second factor or a signed approval, which would make this a boundary. The case here is an agent
 being helpful, not someone holding the account who means harm.
+
 ### Amendment from a check that has to answer in a minute
 
 | # | Section | Change | Why |
@@ -4319,4 +4322,105 @@ retention above.
 
 **Not in this amendment.** Workflow jobs. A warm workspace shared between jobs, or between runners.
 Several warm workspaces for one job, so that runs need not take turns. Submodules and git-lfs.
+
+### Amendment from a change that was never pushed
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A91 | §5 INV-2 and INV-5, §7.3, §8, §12, §19, A57, A76, A87, A89 | **A changes run builds a commit this machine already has with a set of files changed on top of it. The caller sends the base commit, each changed file whole and the paths removed, as JSON. The command makes them a commit on no ref in the agent's mirror, a child of the base, and queues a run pinned to it and approved for it, as `latem try` does for a working tree. `latem run --changes FILE` takes them from a person. `latem mcp`'s `startRun` takes them from an agent, only for a repository whose config says `agent_changes = true`, only on a base in the history of a ref its `allowed_refs` admit, and only as a job the base's `.latem/jobs.yaml` declares, which the changes may not touch. The job reads the base as `$LATEM_BASE_SHA` and the changed paths from the file `$LATEM_CHANGED_FILES` names** | ANVerS checks an agent's change before it lands, so before any push (LAT-5). `latem run` builds a ref a remote has. `latem try` builds a working tree, and wants a checkout on the build machine and a person at it, and A87 kept it from agents for that reason. An ANVerS daemon has neither a checkout there nor a push: it has the base it started from and the files it changed. Sending a whole tree for every check is what makes a check slow. With A90 the build machine already holds the base, built |
+
+**The changes.** One JSON document, the same from a person's file and in an agent's tool call:
+
+```json
+{"base": "0f3c…40 hex characters",
+ "files": [{"path": "src/lib.rs", "text": "…"},
+           {"path": "assets/logo.png", "base64": "…"},
+           {"path": "ci/test.sh", "text": "…", "mode": "755"}],
+ "remove": ["src/old.rs"]}
+```
+
+A file is sent whole, as text or, for bytes that are not UTF-8, as standard base64. Whole files
+and not a diff, because a caller that has no checkout has no diff tool either, and a patch that
+does not apply is one more way to fail. A file keeps the mode the base has it at unless `mode` says
+`644` or `755`, and a new file is `644`. `remove` lists paths the base has and the result does
+not. At most 5,000 paths and 16 MiB of files: it is for what one change touches, and the base it
+is relative to is what keeps it small. Bytes are stored as sent, with no filter and no line-ending
+conversion.
+
+**What is refused, before anything is written.** `update-index --index-info` takes any record it
+is given, so every rule a working tree would have enforced is enforced by latem: a path that is
+empty, absolute, not clean, has a `..` part, a backslash or a control character; a path under a
+`.git` by any spelling a filesystem here folds to it (`.GIT`, `.git.`, `git~1`); a path written
+twice, or written and removed; a remove of a path the base does not have as a file; a write where
+the base has a directory, a symbolic link or a submodule; a file under a path that is a file,
+unless the same changes remove that file. Each refusal names the path. The first test of the
+commit builder found the first two the hard way: git wrote a tree with `.git/config` in it, and one
+holding both `dir` and `dir/inner.txt`.
+
+**The commit.** `read-tree` of the base into a temporary index, `hash-object -w --no-filters` of
+each file, `update-index --index-info`, `write-tree`, `commit-tree -p <base>`. A tree equal to the
+base's is the base, and no commit is made. The author, committer and dates are fixed (`latem`, the
+base's own commit date), so the commit is a function of the base and the changes: the same changes
+on the same base are the same commit, and a caller that asks twice finds one run by one name
+(`listRuns` by `sha`). The message says how many paths changed and on which commit.
+
+**Into the mirror, as A76 wrote into it.** The command writes objects and nothing else. The index
+is a temporary file; no ref, `FETCH_HEAD` or pack is touched, so nothing the agent's own fetches
+lock is written, and A57's rule stands as A76 narrowed it. A base the mirror does not have yet is
+fetched by its name from the repository's remote, with this machine's own credential, under no
+ref. A machine with no mirror of the repository gets one first, as gate 6 makes it.
+
+**In the queue and at the gates.** The command writes the run's row itself, as latem try does, for
+the same two reasons: it is approved for exactly its commit, and it is marked local, with the base
+beside the mark. No `RunRequest` field carries either, so no broker can make one (INV-2). A local
+run skips gate 6's fetch and gate 7's normalization, is admitted at gate 8 by its approval, and is
+refused, never parked, if the approval is not for its own commit. From gate 10 on it is a run: its
+job is read from the commit (INV-5), in a fresh clone or its warm workspace (A90). It is not a
+workflow run's job. It has no event, no needs and no token, and it runs whatever `latem run` would
+have run under that name. Nothing about it reaches a control plane, as for a try.
+
+**What the job is told.** `LATEM_SHA` is the commit that was made and `LATEM_BASE_SHA` the commit
+the files were changed from. `LATEM_CHANGED_FILES` names a file in the job's temporary directory
+with the changed paths, one to a line, as `git diff --name-only` lists them, removed paths
+included. A job that tests only what a change touches reads it. One that wants the diff has both
+commits in its workspace. The log names the first twenty paths and counts the rest.
+
+**Who approves.** Whoever runs `latem run --changes` is the approval, as with `latem try`: they
+have a shell on the machine as its user, and the files are theirs to send. It asks for no terminal,
+as A89 left `latem try` asking for none. A89's question is for a run somebody else's event made and
+this machine held; a command that builds its caller's own files has nobody else to ask about. An
+agent reaching the machine through `latem mcp` is a different caller. A87 gave it no approval at
+all, and A89 closed the way round that. This amendment gives it one, of a narrow kind, and says who
+gives it:
+
+- **A person, at the machine, beforehand.** `agent_changes = true` under `[repos.<key>]`. Off
+  unless written. Without it `startRun` refuses and names the line. It is read from config.toml on
+  each call, so a reload is not even needed to take it away.
+- **On a base the repository already admits.** The ref, `main` unless given, has to match
+  `allowed_refs`, and the base has to be in its history: as the mirror has the ref, or, when the
+  mirror is behind, as the remote has it now, read with `ls-remote` and fetched by name under no
+  ref. So an agent cannot build on a pull request's head, or on a commit only an approval let
+  through.
+- **As a job the base declares.** The job has to be in `.latem/jobs.yaml` at the base, and the
+  changes may not write or remove that file, in any capitals: a Mac's disk opens `.LATEM/Jobs.yaml`
+  as the same file, and a checkout holding both would leave whichever was written last. The
+  commands that check a change are then not the change's own to write. A change to the registry is
+  pushed and reviewed like any other.
+
+That is a rule about the registry and not a sandbox. A job's steps run the repository's own
+scripts and build its own code, and the changes can change both. On a native runner they run as
+the agent's user (§13.0). The line in config.toml is the operator saying this agent's code may run
+here, for this repository, with what that repository's jobs can reach. It is the same decision
+`allowed_refs` records for a branch, made for an agent's working copy.
+
+**What it costs.** No network when the mirror has the base. One temporary index of the base's
+tree, one blob per changed file, one tree and one commit in the mirror, left unreachable and
+collected by §14.4's gc after thirty days. One sqlite row. On an agent's run, one `merge-base`, one
+blob read of the registry, and, only when the mirror's ref does not hold the base, one `ls-remote`
+and one fetch. Nothing per tick, and nothing on a control plane.
+
+**Not in this amendment.** A diff or a patch as the changes. Symbolic links and submodules in
+them. Changes on top of changes, except by sending the union against the base. A workflow's job
+for an agent, which would need the workflow file held as the registry is. An agent's changes on a
+machine reached through latem-cloud, which would carry code through the control plane (§17).
 

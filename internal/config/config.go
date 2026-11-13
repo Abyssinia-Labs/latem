@@ -310,6 +310,12 @@ type Repo struct {
 	// outright rather than queued for someone to rubber-stamp.
 	RequireApprovalOtherwise bool              `toml:"require_approval_otherwise"`
 	ApprovalTTL              protocol.Duration `toml:"approval_ttl"`
+	// AgentChanges lets an agent reaching this machine through `latem mcp`
+	// run this repository's jobs.yaml jobs on a commit of an allowed ref with
+	// files it sends changed on top (A91). It is the operator's standing
+	// approval of code nobody has pushed or reviewed, so it is off unless
+	// written: without it the tool refuses and says which line gives it.
+	AgentChanges bool `toml:"agent_changes"`
 	// GitHub is the repository's owner/name, which a workflow reads as
 	// github.repository and $GITHUB_REPOSITORY (A50). Optional: a URL on
 	// github.com already says it, and only a URL that does not — a local
