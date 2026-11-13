@@ -76,11 +76,14 @@ neither ~/.local/bin, where install.sh puts latem, nor Homebrew's bin.
 Its tools list runs (by repository, state or commit), show one with its
 result — each step, and the errors its output named, by file and line — read
 its log, wait for it to finish, start a .latem/jobs.yaml job, cancel a run,
-and check which of a repository's workflow jobs this machine can run.
+check which of a repository's workflow jobs this machine can run, and say what
+this machine can build and what is in the way, as ` + "`latem setup --json`" + ` does.
 
 It never approves. A run held for approval (INV-5) waits for a person at this
 machine to run ` + "`latem approve`" + `, and ` + "`latem try`" + `, which makes an approved run, is not
-offered either. Nor are secrets, vars, repositories, the service or setup.
+offered either. Nor are secrets, vars, repositories, the service or setup's
+changes: what is in the way is closed in a shell on this machine, with
+` + "`latem setup apply`" + `, or by its person.
 
 An agent can have its own unpushed changes built, with startRun's changes,
 only for a repository whose entry here says ` + "`agent_changes = true`" + `: that line
@@ -111,7 +114,9 @@ const mcpInstructions = `This is one build machine running latem, reached over s
 
 To see whether a commit built here: listRuns with its repo and the full sha (git rev-parse HEAD), then waitForRun on any run that has not settled. waitForRun answers with the run's result: each step and how it ended, and the errors its output named, each with a file and a line. getRunLogs is for what that leaves out — the end of the log says why.
 
-startRun starts a job from the repository's .latem/jobs.yaml; a workflow job comes from a push or a pull request through latem-cloud, not from here. To check a change before pushing it, give startRun changes: the commit you started from and the files you changed, whole. It runs only for a repository whose machine allows an agent's changes, and the refusal says so when it does not. A run whose ref is outside the repository's allowed refs is held for a person: it shows state awaiting_approval, and only a person at this machine can let it go (latem approve). Say so and stop; this server cannot approve.`
+startRun starts a job from the repository's .latem/jobs.yaml; a workflow job comes from a push or a pull request through latem-cloud, not from here. To check a change before pushing it, give startRun changes: the commit you started from and the files you changed, whole. It runs only for a repository whose machine allows an agent's changes, and the refusal says so when it does not. A run whose ref is outside the repository's allowed refs is held for a person: it shows state awaiting_approval, and only a person at this machine can let it go (latem approve). Say so and stop; this server cannot approve.
+
+getReadiness says what this machine can build and what is in the way of the rest. It changes nothing, and neither can this server: an item is closed in a shell on this machine with latem setup apply, or by the person who runs it.`
 
 // The JSON-RPC error codes MCP uses.
 const (

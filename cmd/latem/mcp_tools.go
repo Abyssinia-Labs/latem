@@ -19,17 +19,19 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
 // The tools `latem mcp` offers (A87). Each is a command an operator could
-// type over ssh — list, logs, run, cancel, workflows check — and goes through
-// the same code: reads from state.db and the log files, writes over the
-// agent's socket. What is not here is left out on purpose. approve and try
-// are INV-5's local approvals, which a person gives; secrets, vars, repo,
-// service and setup change what this machine builds and with what.
+// type over ssh — list, logs, run, cancel, workflows check, setup --json —
+// and goes through the same code: reads from state.db and the log files,
+// writes over the agent's socket. What is not here is left out on purpose.
+// approve and try are INV-5's local approvals, which a person gives; secrets,
+// vars, repo, service and setup's own changes change what this machine builds
+// and with what. getReadiness reads setup's plan and applies none of it (A95).
 //
 // startRun's changes (A91) are the one way an agent builds what nobody
 // pushed, and they run under an approval a person gave beforehand, in this
@@ -82,6 +84,12 @@ const (
 	// sqlite, so cheap, and still well inside what a person notices.
 	mcpPoll = 500 * time.Millisecond
 )
+
+// mcpReadinessWait bounds getReadiness: the two minutes the agent gives the
+// same look for its heartbeat (A70), so a Docker daemon that does not answer
+// holds up an agent's call by no more than that. A var so a test can wait
+// less.
+var mcpReadinessWait = 2 * time.Minute
 
 func mcpTools() []mcpTool {
 	runID := schemaString("A run id, r_ and 24 hex characters, as listRuns and startRun give it")
@@ -194,6 +202,25 @@ func mcpTools() []mcpTool {
 			}),
 			readOnly: true, idempotent: true, openWorld: true,
 			call: mcpCheckWorkflows,
+		},
+		{
+			name:  "getReadiness",
+			title: "What this machine can build",
+			description: "What this machine can build, kind by kind (iOS, Android, Linux and the rest), and what stands in the way of each, as `latem setup --json` prints it. " +
+				"Reads every repository's workflows, from this machine's mirror or else GitHub, and probes the toolchains; it stops after two minutes. Changes nothing: this server applies nothing. " +
+				"A kind's state is ready (a runner here takes its jobs and nothing they need is missing), missing (a runner takes them and something is in the way), " +
+				"off (this machine could build them and no runner here takes them yet) or impossible (they need another operating system). " +
+				"Each of its items is one thing in the way, with an id and how it closes. " +
+				"run (commands latem runs) and config (changes to config.toml) close with `latem setup apply <id>` in a shell on the machine, " +
+				"and `latem setup apply --kind <name>` closes a kind's items and then turns the kind on, once its proof passes in a step's environment. " +
+				"yours (commands a person types: sudo, a licence, a secret's value) and manual (words) are the person's: ask them. " +
+				"An item with a warning gives something up, and only the person, at a terminal, may apply it. A soft item is worth doing and does not count against the kind. " +
+				"With repo, only the kinds with a job from that repository, each whole.",
+			input: schemaObject(nil, map[string]any{
+				"repo": schemaString("A repository as this machine names it: a key under [repos] in its config.toml"),
+			}),
+			readOnly: true, idempotent: true, openWorld: true,
+			call: mcpGetReadiness,
 		},
 	}
 }
@@ -855,4 +882,84 @@ func mcpCheckWorkflows(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return nil, errors.New("workflows check printed no report")
+}
+
+// mcpGetReadiness is `latem setup --json` (A69): the plan runSetupPlan prints,
+// read back, and with repo narrowed to the kinds that repository has a job
+// of. It applies nothing; `latem setup apply` in a shell on the machine does
+// (A95).
+func mcpGetReadiness(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		Repo string `json:"repo"`
+	}
+	if err := mcpArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.Repo != "" {
+		cfg, err := loadConfig()
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := cfg.Repos[a.Repo]; !ok {
+			return nil, fmt.Errorf("this machine builds no repository %q: it builds %s",
+				a.Repo, strings.Join(sortedStrings(cfg.Repos), ", "))
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, mcpReadinessWait)
+	defer cancel()
+	var out, diag bytes.Buffer
+	c := &cobra.Command{}
+	c.SetContext(ctx)
+	c.SetIn(strings.NewReader(""))
+	c.SetOut(&out)
+	c.SetErr(&diag)
+	err := runSetupPlan(c, newSetupDeps())
+	// A look stopped part way still answers: a repository it could not read
+	// is unread, and a probe it cut short finds no Xcode. That is a machine
+	// read in part, and it would be taken for the machine.
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return nil, fmt.Errorf("reading this machine took longer than %v, the bound the agent's own look has (A70), "+
+			"and was stopped. `latem setup --json` on the machine reads it with no bound", mcpReadinessWait)
+	case ctx.Err() != nil:
+		return nil, fmt.Errorf("the call was cancelled before this machine was read: %w", ctx.Err())
+	}
+	if err != nil {
+		if msg := strings.TrimSpace(diag.String()); msg != "" {
+			return nil, fmt.Errorf("%w\n%s", err, msg)
+		}
+		return nil, err
+	}
+	var plan readiness.Plan
+	if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
+		return nil, fmt.Errorf("setup printed a plan that does not read: %w", err)
+	}
+	if a.Repo != "" {
+		plan = planOfRepo(plan, a.Repo)
+	}
+	return plan, nil
+}
+
+// planOfRepo is plan with only the kinds key has a job of, each whole, and
+// the jobs and repositories it could not read that are key's.
+func planOfRepo(plan readiness.Plan, key string) readiness.Plan {
+	out := plan
+	out.Kinds, out.Unclassified, out.Unread = nil, nil, nil
+	for _, k := range plan.Kinds {
+		if slices.Contains(k.Repos, key) {
+			out.Kinds = append(out.Kinds, k)
+		}
+	}
+	for _, ref := range plan.Unclassified {
+		if strings.HasPrefix(ref, key+" ") {
+			out.Unclassified = append(out.Unclassified, ref)
+		}
+	}
+	for _, u := range plan.Unread {
+		if strings.HasPrefix(u, key+": ") {
+			out.Unread = append(out.Unread, u)
+		}
+	}
+	return out
 }
