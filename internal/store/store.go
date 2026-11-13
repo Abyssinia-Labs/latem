@@ -137,10 +137,25 @@ type WorkflowRun struct {
 	// Only that command sets it, writing the row itself. No RunRequest field
 	// carries it, so [WorkflowRunOf] never does and no broker can.
 	Local bool `json:"local,omitempty"`
+	// Base marks a changes run (A91): a commit a command made from a commit
+	// this machine has and a set of changed files, and Base is that commit.
+	// Such a run is Local, is any job `latem run` could start, and names no
+	// Workflow file. Only the command that makes one sets it.
+	Base string `json:"base,omitempty"`
 }
 
-// IsLocal reports a run `latem try` made (A76).
+// IsLocal reports a run whose commit a command on this machine made, on no
+// ref: `latem try`'s (A76), or a changes run's (A91).
 func (r Run) IsLocal() bool { return r.Workflow != nil && r.Workflow.Local }
+
+// ChangesBase is the commit a changes run's changes are on, or "" for any
+// other run (A91).
+func (r Run) ChangesBase() string {
+	if r.IsLocal() {
+		return r.Workflow.Base
+	}
+	return ""
+}
 
 // The broker keys of the broker_state table (amendment A28).
 //

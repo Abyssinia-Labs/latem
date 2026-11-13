@@ -1,0 +1,5 @@
+# sample
+./b.go:3:8: "fmt" imported and not used
+./b.go:6:2: declared and not used: x
+./b.go:6:7: undefined: undefinedThing
+./b.go:7:9: cannot use "nope" (untyped string constant) as int value in return statement

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/broker"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
+	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -45,6 +46,14 @@ func (x *execution) openLogs(ctx context.Context) error {
 	x.h.attachRing(ring)
 	sinks = append(sinks, ring)
 
+	// The run's result (A92) is read off the same frames the log is written
+	// from: after the redactor, and nothing the log does not hold.
+	x.res = result.NewCollector(x.o.logDir, result.Header{
+		RunID: x.run.ID, Repo: x.run.Repo, Job: x.run.Job, Ref: x.run.Ref,
+		Base: x.run.ChangesBase(), Inputs: x.run.Inputs,
+	})
+	sinks = append(sinks, x.res)
+
 	for _, brk := range x.o.brks {
 		ls, lerr := brk.Logs(ctx, x.run.ID)
 		if lerr != nil {
@@ -60,6 +69,7 @@ func (x *execution) openLogs(ctx context.Context) error {
 	}
 
 	x.emitter = logstream.NewEmitter(x.run.ID, x.red, sinks...)
+	x.emitter.OnAnnotation(x.res.Annotate)
 	x.flushDeferred()
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
+	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/internal/store"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -29,6 +30,10 @@ import (
 // agent's socket. What is not here is left out on purpose. approve and try
 // are INV-5's local approvals, which a person gives; secrets, vars, repo,
 // service and setup change what this machine builds and with what.
+//
+// startRun's changes (A91) are the one way an agent builds what nobody
+// pushed, and they run under an approval a person gave beforehand, in this
+// machine's config, for one repository: changes.go has the rules.
 //
 // Each call opens its own [state], as a command does, rather than the server
 // holding one: a repository added or a config reloaded while an agent's
@@ -97,11 +102,13 @@ func mcpTools() []mcpTool {
 			call: mcpListRuns,
 		},
 		{
-			name:        "getRun",
-			title:       "Get a run",
-			description: "One run on this machine: its state, commit, exit code and error, its workflow run when it is a workflow job, its inputs, and what it waits for when it is held.",
-			input:       schemaObject([]string{"runId"}, map[string]any{"runId": runID}),
-			readOnly:    true, idempotent: true,
+			name:  "getRun",
+			title: "Get a run",
+			description: "One run on this machine: its state, commit, exit code and error, its workflow run when it is a workflow job, its inputs, and what it waits for when it is held. " +
+				"With it, its result: each step and how it ended, and the problems the steps' output named — a compiler's errors, a failed test — each with its file, line, message and the tool's own suggested fix when it gave one. " +
+				"A run still going shows the steps so far.",
+			input:    schemaObject([]string{"runId"}, map[string]any{"runId": runID}),
+			readOnly: true, idempotent: true,
 			call: mcpGetRun,
 		},
 		{
@@ -121,9 +128,11 @@ func mcpTools() []mcpTool {
 		{
 			name:  "waitForRun",
 			title: "Wait for a run to settle",
-			description: "Waits until a run settles — succeeded, failed, cancelled and the rest — and returns it. " +
+			description: "Waits until a run settles — succeeded, failed, cancelled and the rest — and returns it with its result: " +
+				"each step and how it ended, and the problems their output named, each with its file, line and message, so a failure rarely needs the log. " +
+				"One call waits up to ten minutes; there is nothing to poll. " +
 				"Returns sooner, with settled false, at the timeout, or when waiting cannot help: a run held for a person's approval, or one queued with no agent running here. " +
-				"Call it again for longer.",
+				"Call it again for longer. A client that sends a progress token is told each state and each step as it ends.",
 			input: schemaObject([]string{"runId"}, map[string]any{
 				"runId":          runID,
 				"timeoutSeconds": schemaInteger(fmt.Sprintf("How long to wait, %d seconds unless given", int(mcpDefaultWait.Seconds())), 1, int(mcpMaxWait.Seconds())),
@@ -136,12 +145,30 @@ func mcpTools() []mcpTool {
 			title: "Start a job",
 			description: "Starts a job of the repository's .latem/jobs.yaml on this machine, as `latem run` does, and returns its run id at once: waitForRun follows it. " +
 				"The job is read from the repository at the ref's commit. A ref outside the repository's allowed refs is held until a person at this machine approves it. " +
-				"To build a commit again, start the same job on the same ref.",
+				"To build a commit again, start the same job on the same ref. " +
+				"With changes, it builds a commit this machine has with your files changed on top, with no push: " +
+				"give the base commit, each changed file whole, and the paths removed. " +
+				"That needs the machine's config to allow an agent's changes for the repository, a base in the history of the ref, " +
+				"and a job the base declares; .latem/jobs.yaml itself cannot be changed this way. " +
+				"The job reads the changed paths from the file $LATEM_CHANGED_FILES names.",
 			input: schemaObject([]string{"repo", "job"}, map[string]any{
 				"repo":   schemaString("A repository as this machine names it: a key under [repos] in its config.toml"),
 				"job":    schemaString("A job in the repository's .latem/jobs.yaml"),
-				"ref":    schemaString("A branch, tag or commit; " + DefaultRef + " unless given"),
+				"ref":    schemaString("A branch, tag or commit; " + DefaultRef + " unless given. With changes, the branch or tag the base is on"),
 				"inputs": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": []string{"string", "number", "boolean"}}, "description": "The job's declared inputs, by name"},
+				"changes": schemaObject([]string{"base"}, map[string]any{
+					"base": schemaString("The commit the changes are on: all 40 hex characters, in the history of ref"),
+					"files": map[string]any{
+						"type": "array", "description": "Files to write, each whole",
+						"items": schemaObject([]string{"path"}, map[string]any{
+							"path":   schemaString("The file's path in the repository, with forward slashes"),
+							"text":   schemaString("Its content, as text"),
+							"base64": schemaString("Its content as standard base64, for bytes that are not UTF-8; instead of text"),
+							"mode":   map[string]any{"type": "string", "enum": []string{"644", "755"}, "description": "755 for an executable. Left out, the file keeps the mode the base has it at"},
+						}),
+					},
+					"remove": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Paths the base has that the result does not"},
+				}),
 			}),
 			call: mcpStartRun,
 		},
@@ -224,32 +251,42 @@ func mcpArgs(raw json.RawMessage, v any) error {
 
 // mcpRun is a run as the tools show it.
 type mcpRun struct {
-	ID         string            `json:"id"`
-	Number     int64             `json:"number"`
-	Repo       string            `json:"repo"`
-	Job        string            `json:"job"`
-	Ref        string            `json:"ref"`
-	SHA        string            `json:"sha,omitempty"`
-	State      protocol.RunState `json:"state"`
-	Settled    bool              `json:"settled"`
-	ExitCode   *int              `json:"exitCode,omitempty"`
-	ErrorCode  string            `json:"errorCode,omitempty"`
-	Error      string            `json:"error,omitempty"`
-	Runner     string            `json:"runner,omitempty"`
-	Origin     string            `json:"origin"`
-	Workflow   *mcpWorkflow      `json:"workflow,omitempty"`
-	CreatedAt  time.Time         `json:"createdAt"`
-	StartedAt  *time.Time        `json:"startedAt,omitempty"`
-	FinishedAt *time.Time        `json:"finishedAt,omitempty"`
+	ID        string            `json:"id"`
+	Number    int64             `json:"number"`
+	Repo      string            `json:"repo"`
+	Job       string            `json:"job"`
+	Ref       string            `json:"ref"`
+	SHA       string            `json:"sha,omitempty"`
+	State     protocol.RunState `json:"state"`
+	Settled   bool              `json:"settled"`
+	ExitCode  *int              `json:"exitCode,omitempty"`
+	ErrorCode string            `json:"errorCode,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Runner    string            `json:"runner,omitempty"`
+	Origin    string            `json:"origin"`
+	Workflow  *mcpWorkflow      `json:"workflow,omitempty"`
+	// Changes is set for a changes run (A91): the commit its files were
+	// changed on. Its sha is the commit that made.
+	Changes    *mcpChanges `json:"changes,omitempty"`
+	CreatedAt  time.Time   `json:"createdAt"`
+	StartedAt  *time.Time  `json:"startedAt,omitempty"`
+	FinishedAt *time.Time  `json:"finishedAt,omitempty"`
 	// Waiting is what a held run waits for that no tool here can give it.
 	Waiting string `json:"waiting,omitempty"`
 
 	// Shown by getRun, not in a list.
-	Inputs       map[string]string `json:"inputs,omitempty"`
-	CancelReason string            `json:"cancelReason,omitempty"`
-	ExpiresAt    *time.Time        `json:"expiresAt,omitempty"`
-	ApprovedAt   *time.Time        `json:"approvedAt,omitempty"`
-	ApprovedSHA  string            `json:"approvedSha,omitempty"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+	// Result is how the run went, step by step, with the problems its
+	// output named (A92). By getRun and waitForRun.
+	Result       *result.Result `json:"result,omitempty"`
+	CancelReason string         `json:"cancelReason,omitempty"`
+	ExpiresAt    *time.Time     `json:"expiresAt,omitempty"`
+	ApprovedAt   *time.Time     `json:"approvedAt,omitempty"`
+	ApprovedSHA  string         `json:"approvedSha,omitempty"`
+}
+
+type mcpChanges struct {
+	Base string `json:"base"`
 }
 
 type mcpWorkflow struct {
@@ -273,7 +310,12 @@ func runView(r store.Run, detail bool) mcpRun {
 	if r.OriginActor != "" {
 		v.Origin += " by " + r.OriginActor
 	}
-	if w := r.Workflow; w != nil {
+	if base := r.ChangesBase(); base != "" {
+		if v.SHA == "" {
+			v.SHA = r.Workflow.SHA
+		}
+		v.Changes = &mcpChanges{Base: base}
+	} else if w := r.Workflow; w != nil {
 		if v.SHA == "" {
 			v.SHA = w.SHA
 		}
@@ -381,7 +423,24 @@ func mcpGetRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runView(r, true), nil
+	v := runView(r, true)
+	v.Result = mcpResultOf(st, r)
+	return v, nil
+}
+
+// mcpResultOf is a run's result (A92) for a run that has got far enough to
+// have one, and nil for one still waiting to start: there is nothing in it
+// the run does not already say.
+func mcpResultOf(st *state, r store.Run) *result.Result {
+	switch r.State {
+	case protocol.StateQueued, protocol.StateAwaitingApproval, protocol.StateClaimed:
+		return nil
+	}
+	res, err := runResult(st.cfg.Paths.Logs, r)
+	if err != nil {
+		return nil
+	}
+	return res
 }
 
 type mcpLogLine struct {
@@ -543,14 +602,17 @@ func mcpWaitForRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	defer deadline.Stop()
 	tick := time.NewTicker(mcpPoll)
 	defer tick.Stop()
+	told := mcpWaitProgress{report: mcpProgressOf(ctx), logs: st.cfg.Paths.Logs}
 	for {
 		r, err := mcpRunOf(ctx, st, a.RunID)
 		if err != nil {
 			return nil, err
 		}
 		v := runView(r, false)
+		told.tell(r)
 		switch {
 		case r.State.IsTerminal():
+			v.Result = mcpResultOf(st, r)
 			return answer{Settled: true, Run: v}, nil
 		case r.State == protocol.StateAwaitingApproval:
 			return answer{Run: v, Note: "held for a person's approval: waiting cannot settle it"}, nil
@@ -567,12 +629,63 @@ func mcpWaitForRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 }
 
+// mcpWaitProgress tells a waiting client what has happened since it was last
+// told: a new state, and each step as it ends, read from the run's result
+// when that file changes (A92). A client that sent no progress token is told
+// nothing, and nothing is read for it.
+type mcpWaitProgress struct {
+	report func(string)
+	logs   string
+
+	state protocol.RunState
+	steps int
+	mtime time.Time
+}
+
+func (p *mcpWaitProgress) tell(r store.Run) {
+	if p.report == nil {
+		return
+	}
+	// The steps first: a run's last step ends before its state does, and is
+	// told in that order.
+	p.tellSteps(r.ID)
+	if r.State != p.state {
+		p.state = r.State
+		p.report(string(r.State))
+	}
+}
+
+func (p *mcpWaitProgress) tellSteps(runID string) {
+	path, err := result.Path(p.logs, runID)
+	if err != nil {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.ModTime().Equal(p.mtime) {
+		return
+	}
+	p.mtime = info.ModTime()
+	res, err := result.Read(p.logs, runID)
+	if err != nil {
+		return
+	}
+	for _, s := range res.Steps[min(p.steps, len(res.Steps)):] {
+		msg := fmt.Sprintf("step %s: %s in %s", s.Name, s.Outcome, shortMs(s.DurationMs))
+		if s.Errors > 0 {
+			msg += fmt.Sprintf(", %d error(s)", s.Errors)
+		}
+		p.report(msg)
+	}
+	p.steps = len(res.Steps)
+}
+
 func mcpStartRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a struct {
-		Repo   string         `json:"repo"`
-		Job    string         `json:"job"`
-		Ref    string         `json:"ref"`
-		Inputs map[string]any `json:"inputs"`
+		Repo    string         `json:"repo"`
+		Job     string         `json:"job"`
+		Ref     string         `json:"ref"`
+		Inputs  map[string]any `json:"inputs"`
+		Changes *changeSet     `json:"changes"`
 	}
 	if err := mcpArgs(raw, &a); err != nil {
 		return nil, err
@@ -615,6 +728,9 @@ func mcpStartRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if a.Changes != nil {
+		return mcpStartChangesRun(ctx, st, id, a.Repo, a.Job, a.Ref, inputs, a.Changes)
+	}
 	ref := a.Ref
 	if ref == "" {
 		ref = DefaultRef
@@ -634,6 +750,41 @@ func mcpStartRun(ctx context.Context, raw json.RawMessage) (any, error) {
 	}{RunID: sub.RunID, AgentRunning: sub.AgentRunning, Note: "queued: waitForRun follows it"}
 	if !sub.AgentRunning {
 		out.Note = "queued, and no agent is running on this machine: it starts when one does"
+	}
+	return out, nil
+}
+
+// mcpStartChangesRun is startRun with changes (A91): an agent's files on a
+// commit this machine has, as a run nobody pushed. The refusals are the
+// operator's rules, and say what a person would have to do.
+func mcpStartChangesRun(
+	ctx context.Context, st *state, id, repo, job, ref string, inputs map[string]string, cs *changeSet,
+) (any, error) {
+	normalized, _, err := tryRef(ref, "", DefaultRef)
+	if err != nil {
+		return nil, err
+	}
+	queued, err := startChangesRun(ctx, st, id, changesRun{
+		repo: repo, job: job, ref: normalized, inputs: inputs,
+		actor: currentActor() + " via latem mcp", agent: true,
+	}, cs)
+	if err != nil {
+		return nil, st.agentDown(err)
+	}
+	out := struct {
+		RunID        string `json:"runId"`
+		SHA          string `json:"sha"`
+		Base         string `json:"base"`
+		ChangedPaths int    `json:"changedPaths"`
+		AgentRunning bool   `json:"agentRunning"`
+		Note         string `json:"note"`
+	}{RunID: queued.RunID, SHA: queued.SHA, Base: queued.Base, ChangedPaths: queued.Paths,
+		AgentRunning: queued.AgentRunning, Note: "queued: waitForRun follows it"}
+	switch {
+	case !queued.AgentRunning:
+		out.Note = "queued, and no agent is running on this machine: it starts when one does"
+	case queued.SHA == queued.Base:
+		out.Note = "queued. The changes leave the base as it is, so this builds the base: waitForRun follows it"
 	}
 	return out, nil
 }

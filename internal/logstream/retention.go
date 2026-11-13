@@ -17,6 +17,10 @@ const (
 	DefaultGzipAfter = 24 * time.Hour
 )
 
+// ResultSuffix is what a run's result file adds to its id, beside its log
+// (internal/result writes it; this package only sweeps it).
+const ResultSuffix = ".result.json"
+
 // PruneOptions controls the daily log sweep.
 type PruneOptions struct {
 	// Retention deletes logs older than this. Zero uses [DefaultRetention].
@@ -68,6 +72,22 @@ func Prune(dir string, opts PruneOptions, now time.Time, live func(runID string)
 			continue
 		}
 		name := entry.Name()
+		if strings.HasSuffix(name, ResultSuffix) {
+			// A run's result (A92) is kept as long as its log is and no
+			// longer: it is the log, read once. It is small, and is never
+			// compressed, since a caller reads it by name.
+			runID := strings.TrimSuffix(name, ResultSuffix)
+			info, err := entry.Info()
+			if err != nil || live(runID) || now.Sub(info.ModTime()) <= opts.Retention {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			if err := os.Remove(path); err != nil {
+				return report, fmt.Errorf("logstream: removing %s: %w", path, err)
+			}
+			report.BytesFreed += info.Size()
+			continue
+		}
 		if !strings.HasSuffix(name, ".log") && !strings.HasSuffix(name, ".log.gz") {
 			continue
 		}

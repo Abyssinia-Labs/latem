@@ -488,6 +488,7 @@ labels = ["macos", "arm64", "xcode-16", "ios"]
 shutdown_grace = "30m"
 work_dir       = "~/.latem/work"
 log_retention  = "14d"
+warm_retention = "7d"               # a warm workspace unused this long is removed (A90)
 queue_ttl      = "72h"              # queued longer than this → rejected
 auto_update    = false   # true needs a build with an embedded signing key (§20)
 remote_logs    = "always"           # "always" | "on_failure"
@@ -503,6 +504,8 @@ url        = "wss://api.example.com/agent"
 token_file = "~/.latem/agent.key"   # 0600, never inline in this file
 
 # --- repos: the allowlist. A repo absent here cannot be built. ---
+# `agent_changes = true` in a repo lets an agent reaching this machine through
+# `latem mcp` build its own unpushed changes there (A91). Off unless written.
 [repos.myapp]
 url          = "git@github.com:me/myapp.git"
 allowed_refs = ["main", "release/*"]   # expanded to refs/heads/* — INV-5
@@ -679,6 +682,7 @@ jobs:
 | `timeout` | duration | Wall clock, whole job. Enforced by the agent, not the executor. |
 | `caches` | `[]string` | References `caches[].name`. Undefined name is a parse error. |
 | `concurrency_group` | string | At most one run per group per machine. Queued, not rejected. |
+| `workspace` | `fresh` \| `warm` | `fresh`, the default, is §12's new clone per run. `warm` keeps the directory between this job's runs on a runner, with every tracked file at the run's commit and what the repository ignores left in place (A90). |
 | `inputs` | map | Declares name, type (`string`\|`bool`\|`int`\|`enum`), constraints, default. |
 | `secrets` | `[]string` | Names resolved by §15. Undeclared secrets are not injected. |
 | `artifacts` | list | Glob relative to workspace, plus retention. |
@@ -1089,6 +1093,7 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 - Docker build layers: `docker buildx prune --filter until=168h --force`.
 - Cache volumes exceeding `max_size` (default 25 GB per volume): evict by atime, oldest first, down to 80% of the cap.
 - Workspaces under `work/` older than 24h with no live run: delete. Nothing else to clean — §12's clones leave no administrative state behind in the mirror.
+- Warm workspaces under `warm/` that no run has used for `agent.warm_retention` (default 7d): delete, never one a run holds. Below a runner's disk floor, every one not in use goes (A90).
 - Mirror maintenance: `git gc --prune=30.days.ago` per mirror, skipped for any mirror a live run is reading, since automatic gc is disabled there (§12).
 - Tart: `tart list` for VMs matching `latem-run-*` with no live run; delete. A leaked VM starts as a near-free copy-on-write clone and grows toward the image's provisioned 140 GB (§13.2) as the build writes, which is the fastest way to fill a Mac mini.
 - Mirrors untouched for 90 days: report in `latem doctor`, never auto-delete (a mirror may be the only local copy).
@@ -4239,3 +4244,294 @@ callers and adds nothing against `ssh -tt`. Looking at the parent process or the
 `SSH_TTY` or a login shell: what an agent can set is no evidence, and a person in tmux has neither.
 A second factor or a signed approval, which would make this a boundary. The case here is an agent
 being helpful, not someone holding the account who means harm.
+
+### Amendment from a check that has to answer in a minute
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A90 | §9, §12, §14.4, §13.1, §13.3, A53 | **A jobs.yaml job that says `workspace: warm` builds in a directory this machine keeps for it, one per repository, runner and job, instead of a new clone. Each run gives that directory a new `.git`, cloned from the mirror, and brings every tracked file to the run's commit by comparing content, so only files that differ are written. What the repository ignores is left as the last run left it, and what is neither tracked nor ignored is removed. Runs of one job on one runner take turns. A warm workspace unused for `agent.warm_retention`, 7 days unless set, is removed** | ANVerS checks each change an agent makes before it lands, and its second tier has a minute to answer (ANVerS spec §11, LAT-4). §12 gives every run a new clone at a new path. That is why a run is reproducible, and it is also why every run compiles from nothing: a build's incremental state sits beside its sources, in `target/`, `node_modules/`, `.next/`, and a new clone has none of it. A mounted cache (§14) keeps a package store warm and cannot keep that, because a cache may not be mounted inside the workspace and a path that changes every run invalidates what a compiler keyed by path |
+
+**What is kept.** Exactly what the repository ignores. After the checkout, `git status` in a warm
+workspace is clean: every tracked file is the commit's, and nothing untracked is there unless
+`.gitignore` names it. So a warm workspace differs from a fresh one only under ignored paths, which
+is where build tools put what they build. The rule needs no list of directories from the job, and a
+repository already maintains it. An ignored file a step wrote is kept like any other, a `.env`
+included: the next run of the same job reads it, and that is the meaning of warm.
+
+**By content, not by timestamp.** The new `.git` has an index that holds the commit's tree and no
+record of the files on disk (`read-tree`). Refreshing it (`update-index --refresh`) therefore reads
+every tracked file and compares what it holds. A file that matches is marked clean and is not
+written, so its modification time is what the last build saw, which is what `make`, `cargo` and
+`tsc --incremental` decide by. A file that differs, because the commit changed it or because a step
+edited it, is written by `checkout --force`. A step that edits a tracked file and restores its size
+and timestamps has hidden nothing. The cost is one read of the tracked tree per run, which is the
+price of not trusting a timestamp a step could set.
+
+**The `.git` is never kept.** A53 has the reason: every step can write the workspace's `.git`,
+through the bind mount on docker and as the same user on native, and a host git reading a `.git` a
+step wrote would run its hooks, its fsmonitor and its filter drivers as the agent. A fresh clone
+never had the problem, because its `.git` was made after the last step that could have touched it.
+A kept directory would have it on every run after the first. So each run clones a new `.git` beside
+the tree (`clone --local --no-checkout`, hard links, as §12's) and moves it in, and the old one is
+removed without being read, whatever it has become. The agent runs git only in a `.git` no step has
+seen.
+
+**Which directory.** `warm/<repo>/<runner>/<job>/tree`, beside `mirrors/` so the clone hard-links.
+The runner is in the path because two runners are two toolchains. The job is in it because two
+jobs' outputs are not each other's. The path is the same every run, so what a tool wrote with an
+absolute path in it still names the right place. Beside the tree, and outside what a step is given,
+are a record of the commit and run it was last used for and the lock.
+
+**Turns.** One run holds a warm workspace at a time. Another run of the same job on the same runner
+waits for it, for as long as its own job's `timeout` allows, since the job's wall clock starts when
+the run does (§9). A run that waits it out fails with `E_SOURCE` and says what it waited for. The
+hold is a gate inside the agent and a `flock` beside the tree, which is what `latem cache prune`,
+another process, meets.
+
+**Where the question is asked.** Whether a job is warm is in the registry, and gate 11 reads the
+registry from the workspace gate 10 makes. So gate 10 first reads `.latem/jobs.yaml` from the
+mirror at the same commit, by object id. Nothing is decided from that reading but which directory
+the checkout uses. Gate 11 still reads the job from the workspace, and gates 12 to 15 admit it from
+there, so INV-5 is where it was.
+
+**When it cannot be warm.** The log says why, and the job builds in a fresh clone:
+
+- a repository with submodules or git-lfs. Both keep their objects under the superproject's `.git`,
+  which a warm workspace replaces each run, so both would be fetched again every time;
+- a workflow's job. A workflow file has no key for it, and adding one would stop the file being a
+  GitHub workflow;
+- a workspace git cannot bring to the commit: a directory a step left unwritable, say. It is
+  removed and made again from nothing, once, and that run is a cold one.
+
+**What it does not promise.** Isolation between runs of one job. Whatever an earlier run left under
+an ignored path, a later one builds with, so a warm job's runs trust each other as far as their
+build tools trust their own caches. That is the same trust a mounted cache already asks (§14), and
+it is why warm is asked for job by job and is never the default.
+
+**Disk.** A warm workspace is a build's whole output and grows with it. The daily pass removes one
+no run has used for `agent.warm_retention`, and every one not in use when a runner is below its
+disk floor (§14.4). `latem cache ls` lists each with its size, and `latem cache prune` removes the
+unused ones by hand, `--aggressive` all that nothing holds. A job that loses its warm workspace
+only starts cold.
+
+**What it costs.** Per run of a warm job: one hard-linked clone of the mirror without a checkout,
+one read of the tracked tree, and a write of the files that differ. No network. A fresh clone's
+checkout writes every file, so a warm run writes less than a fresh one from its second run on. Per
+run of any other job: nothing. On disk: one build tree per warm job per runner, bounded by the
+retention above.
+
+**Measured**, on 2026-11-12, on the MacBook's native runner, with the ANVerS repository's Rust
+workspace (cargo 1.99.1) and a build of this amendment's code as a second agent beside the
+installed one:
+
+| Job | First run, nothing kept | Same commit again | One file changed |
+|---|---|---|---|
+| `cargo test -p anvers-gate` (12 tests) | 9.0 s | 1.5 s | 1.7 to 2.2 s |
+| `cargo test --workspace --no-run` (ten crates) | 12.6 s | | 3.9 s |
+
+The first column is also what every run cost before, since a fresh clone is a first run every time.
+In the second, cargo found nothing to do: no file had been written, so no timestamp had moved. In
+the third, the changed file was in `anvers-oplog`, at the bottom of the workspace, and cargo
+compiled it and the six crates above it and none of their dependencies. The times are whole runs,
+from the command to the run's last state, and the changes in the third column were sent as A91's
+changed files. On the same Mac's docker runner a run of a small repository's warm job took 0.4 s.
+The two workspaces were 0.7 and 2.9 GiB.
+
+That docker run also found a hole in the first version of the cleanup. A commit that removed
+`.gitignore` left the old file behind, untracked, and `git clean` obeyed it once more before
+removing it, so a directory this commit did not ignore survived a run. The clean now repeats until
+a pass removes nothing.
+
+**Not in this amendment.** Workflow jobs. A warm workspace shared between jobs, or between runners.
+Several warm workspaces for one job, so that runs need not take turns. Submodules and git-lfs.
+
+### Amendment from a change that was never pushed
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A91 | §5 INV-2 and INV-5, §7.3, §8, §12, §19, A57, A76, A87, A89 | **A changes run builds a commit this machine already has with a set of files changed on top of it. The caller sends the base commit, each changed file whole and the paths removed, as JSON. The command makes them a commit on no ref in the agent's mirror, a child of the base, and queues a run pinned to it and approved for it, as `latem try` does for a working tree. `latem run --changes FILE` takes them from a person. `latem mcp`'s `startRun` takes them from an agent, only for a repository whose config says `agent_changes = true`, only on a base in the history of a ref its `allowed_refs` admit, and only as a job the base's `.latem/jobs.yaml` declares, which the changes may not touch. The job reads the base as `$LATEM_BASE_SHA` and the changed paths from the file `$LATEM_CHANGED_FILES` names** | ANVerS checks an agent's change before it lands, so before any push (LAT-5). `latem run` builds a ref a remote has. `latem try` builds a working tree, and wants a checkout on the build machine and a person at it, and A87 kept it from agents for that reason. An ANVerS daemon has neither a checkout there nor a push: it has the base it started from and the files it changed. Sending a whole tree for every check is what makes a check slow. With A90 the build machine already holds the base, built |
+
+**The changes.** One JSON document, the same from a person's file and in an agent's tool call:
+
+```json
+{"base": "0f3c…40 hex characters",
+ "files": [{"path": "src/lib.rs", "text": "…"},
+           {"path": "assets/logo.png", "base64": "…"},
+           {"path": "ci/test.sh", "text": "…", "mode": "755"}],
+ "remove": ["src/old.rs"]}
+```
+
+A file is sent whole, as text or, for bytes that are not UTF-8, as standard base64. Whole files
+and not a diff, because a caller that has no checkout has no diff tool either, and a patch that
+does not apply is one more way to fail. A file keeps the mode the base has it at unless `mode` says
+`644` or `755`, and a new file is `644`. `remove` lists paths the base has and the result does
+not. At most 5,000 paths and 16 MiB of files: it is for what one change touches, and the base it
+is relative to is what keeps it small. Bytes are stored as sent, with no filter and no line-ending
+conversion.
+
+**What is refused, before anything is written.** `update-index --index-info` takes any record it
+is given, so every rule a working tree would have enforced is enforced by latem: a path that is
+empty, absolute, not clean, has a `..` part, a backslash or a control character; a path under a
+`.git` by any spelling a filesystem here folds to it (`.GIT`, `.git.`, `git~1`); a path written
+twice, or written and removed; a remove of a path the base does not have as a file; a write where
+the base has a directory, a symbolic link or a submodule; a file under a path that is a file,
+unless the same changes remove that file. Each refusal names the path. The first test of the
+commit builder found the first two the hard way: git wrote a tree with `.git/config` in it, and one
+holding both `dir` and `dir/inner.txt`.
+
+**The commit.** `read-tree` of the base into a temporary index, `hash-object -w --no-filters` of
+each file, `update-index --index-info`, `write-tree`, `commit-tree -p <base>`. A tree equal to the
+base's is the base, and no commit is made. The author, committer and dates are fixed (`latem`, the
+base's own commit date), so the commit is a function of the base and the changes: the same changes
+on the same base are the same commit, and a caller that asks twice finds one run by one name
+(`listRuns` by `sha`). The message says how many paths changed and on which commit.
+
+**Into the mirror, as A76 wrote into it.** The command writes objects and nothing else. The index
+is a temporary file; no ref, `FETCH_HEAD` or pack is touched, so nothing the agent's own fetches
+lock is written, and A57's rule stands as A76 narrowed it. A base the mirror does not have yet is
+fetched by its name from the repository's remote, with this machine's own credential, under no
+ref. A machine with no mirror of the repository gets one first, as gate 6 makes it.
+
+**In the queue and at the gates.** The command writes the run's row itself, as latem try does, for
+the same two reasons: it is approved for exactly its commit, and it is marked local, with the base
+beside the mark. No `RunRequest` field carries either, so no broker can make one (INV-2). A local
+run skips gate 6's fetch and gate 7's normalization, is admitted at gate 8 by its approval, and is
+refused, never parked, if the approval is not for its own commit. From gate 10 on it is a run: its
+job is read from the commit (INV-5), in a fresh clone or its warm workspace (A90). It is not a
+workflow run's job. It has no event, no needs and no token, and it runs whatever `latem run` would
+have run under that name. Nothing about it reaches a control plane, as for a try.
+
+**What the job is told.** `LATEM_SHA` is the commit that was made and `LATEM_BASE_SHA` the commit
+the files were changed from. `LATEM_CHANGED_FILES` names a file in the job's temporary directory
+with the changed paths, one to a line, as `git diff --name-only` lists them, removed paths
+included. A job that tests only what a change touches reads it. One that wants the diff has both
+commits in its workspace. The log names the first twenty paths and counts the rest.
+
+**Who approves.** Whoever runs `latem run --changes` is the approval, as with `latem try`: they
+have a shell on the machine as its user, and the files are theirs to send. It asks for no terminal,
+as A89 left `latem try` asking for none. A89's question is for a run somebody else's event made and
+this machine held; a command that builds its caller's own files has nobody else to ask about. An
+agent reaching the machine through `latem mcp` is a different caller. A87 gave it no approval at
+all, and A89 closed the way round that. This amendment gives it one, of a narrow kind, and says who
+gives it:
+
+- **A person, at the machine, beforehand.** `agent_changes = true` under `[repos.<key>]`. Off
+  unless written. Without it `startRun` refuses and names the line. It is read from config.toml on
+  each call, so a reload is not even needed to take it away.
+- **On a base the repository already admits.** The ref, `main` unless given, has to match
+  `allowed_refs`, and the base has to be in its history: as the mirror has the ref, or, when the
+  mirror is behind, as the remote has it now, read with `ls-remote` and fetched by name under no
+  ref. So an agent cannot build on a pull request's head, or on a commit only an approval let
+  through.
+- **As a job the base declares.** The job has to be in `.latem/jobs.yaml` at the base, and the
+  changes may not write or remove that file, in any capitals: a Mac's disk opens `.LATEM/Jobs.yaml`
+  as the same file, and a checkout holding both would leave whichever was written last. The
+  commands that check a change are then not the change's own to write. A change to the registry is
+  pushed and reviewed like any other.
+
+That is a rule about the registry and not a sandbox. A job's steps run the repository's own
+scripts and build its own code, and the changes can change both. On a native runner they run as
+the agent's user (§13.0). The line in config.toml is the operator saying this agent's code may run
+here, for this repository, with what that repository's jobs can reach. It is the same decision
+`allowed_refs` records for a branch, made for an agent's working copy.
+
+**What it costs.** No network when the mirror has the base. One temporary index of the base's
+tree, one blob per changed file, one tree and one commit in the mirror, left unreachable and
+collected by §14.4's gc after thirty days. One sqlite row. On an agent's run, one `merge-base`, one
+blob read of the registry, and, only when the mirror's ref does not hold the base, one `ls-remote`
+and one fetch. Nothing per tick, and nothing on a control plane.
+
+**Not in this amendment.** A diff or a patch as the changes. Symbolic links and submodules in
+them. Changes on top of changes, except by sending the union against the base. A workflow's job
+for an agent, which would need the workflow file held as the registry is. An agent's changes on a
+machine reached through latem-cloud, which would carry code through the control plane (§17).
+
+### Amendment from a caller that is a program
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A92 | §16, §19, §22, A42, A87, INV-4 | **Every run leaves a result beside its log: each step and how it ended, and the problems the steps' output named, each with its severity, file, line, column, message, the tool's code for it and the tool's own suggested fix when it gave one. It is read off the log's frames, after the redactor, by readers that each know one tool's format: rustc and clippy, `cargo test`, the go compiler, vet and the linters built on them, `go test`, tsc, `bun test`, vitest, biome, pytest, and anything that prints `file:line:col: error:` as cc, clang, swiftc and xcodebuild do. A step names a problem itself with `::error file=…,line=…::`. `latem result <run-id>` prints it, `--json` for a program. `latem mcp`'s `waitForRun` and `getRun` return it with the run, and `waitForRun` tells a client that sent a progress token each state and each step as it ends** | ANVerS records each check as evidence: a status, and structured errors, each with what broke, where, and a likely fix (ANVerS spec §4, LAT-7). A run gave it a state and a log. Its own runner kept the last forty lines of output and called that the summary, and an agent handed forty lines of a test runner's epilogue has to go and find the compiler error above them. A87's `waitForRun` already waited in one call, for up to ten minutes; what it returned was a state |
+
+**What a problem is.** A line, or a few, in a step's output that a tool wrote to say something is
+wrong at a place:
+
+```json
+{"severity": "error", "file": "crates/anvers-gate/tests/gate.rs", "line": 458, "column": 5,
+ "test": "latem_e2e_fails", "tool": "cargo-test", "step": "test",
+ "message": "assertion `left == right` failed: the change broke arithmetic\n  left: 2\n right: 3"}
+```
+
+`code` is the tool's name for the kind of problem (`E0308`, `TS2322`, `clippy::ptr_arg`,
+`lint/style/useConst`), and `test` the failing test's name. `help` is the fix the tool suggested: a
+compiler's `help:`, with the corrected line when it printed one, or a linter's safe fix. latem
+never writes one of its own. A caller that wants a likely fix where the tool gave none has the
+message and the place, which is what a person would have. A path a tool wrote absolute, because it
+was given the workspace that way, is made relative to the workspace.
+
+**The readers do not guess.** Each was written against what its tool prints, kept in
+`internal/result/testdata` as the tool printed it on this project's machines, with the versions in
+the test. A line is a problem only when it names a place the way a tool that found something does.
+`error: could not compile`, a script's `error: something went wrong` and a timestamped log line
+that says `error:` are not problems. Neither is `main.go:12: starting`, which is what
+`log.Lshortfile` prints: the go reader wants a column, as the compiler gives one. What the readers
+miss is still in the log, and `getRunLogs` is still there. A format nobody has written a reader for
+yields a result with its steps and no problems, never a wrong one.
+
+**A step that passed has no errors.** The readers recognise shapes, and a step that exits 0 while
+printing the shape of an error was showing one: a compile-fail test's expected diagnostics, a tool
+listing what it fixed. So a successful step keeps the warnings found in it and loses the errors.
+What a step wrote itself with `::error` is its own statement and stays.
+
+**Where it comes from.** The collector is one more sink of §16's pipeline, beside the file, the
+ring and each broker's. It receives the frames the file sink writes, so every line it reads is
+redacted, and a problem's message holds nothing the log does not (INV-4). The run tells it where
+each step begins and ends; only a step's stdout and stderr are read, never the agent's own lines.
+Workflow commands never reach a sink as written, since the emitter renders them (A42), so the
+emitter hands an `::error`, `::warning` or `::notice` on with its parameters, redacted the same
+way.
+
+**The document.** `<logs>/<run-id>.result.json`, written by rename when each step ends and when the
+run does, so a reader mid-run sees whole steps and never part of a file. It carries the run (repo,
+job, ref, commit, a changes run's base, inputs, runner, whether the workspace was warm), its state
+and whether that is settled, its error code and message, its steps (name, outcome, exit code,
+duration, counts) and its problems, errors first, each kind in the order it was printed. At most
+100 errors and 50 warnings are kept, a message is cut at 2,000 bytes and a suggestion at 1,000,
+and `dropped` counts the rest: a build that prints ten thousand errors has one problem, and it is
+in the first hundred. A problem printed twice in a step, as cargo prints a library's warnings again
+for its tests, is one. Lists are `[]` when empty, never `null`. `inputs` is how a caller tells its
+own runs apart, a tier or an attempt, without latem knowing what those are.
+
+**Reading it.** `latem result <run-id>` is for a person: the run's ending, a table of steps, then
+each problem with its place, message and suggestion. `--json` is the document. Both exit 0 whatever
+the run's state, as `latem logs` does. A run with no stored result, because it never started a step
+or its log's retention removed it, answers from its row and says that is all there is. A run its
+agent did not see end takes its ending from the row, and says so.
+
+**Through MCP, with nothing to poll.** `waitForRun` returns the settled run with its result, so one
+call starts a run and one more has its evidence. `getRun` returns it too, for a run still going
+with the steps so far. A listing does not carry results. A client that sends `_meta.progressToken`
+with `waitForRun` receives a `notifications/progress` for each state the run enters and for each
+step as it ends, with its outcome, time and error count, before the call's answer: results as they
+arrive, on the one connection, for a client that wants them. The wait itself is unchanged from
+A87: it reads one sqlite row every 500 ms on the machine, and now one `stat` of the result file
+beside it for a client that asked for progress.
+
+**Retention and cost.** The result is swept with its log, after `agent.log_retention`, never
+compressed, since it is read by name, and never under a live run. Per line of output, a handful of
+anchored regular expressions on a line the pipeline has already split and redacted. Per step, one
+file write of a few kilobytes, bounded at well under a megabyte by the caps above. Nothing is
+added to a run's row, which the queue and every listing read, and nothing is sent to a control
+plane.
+
+**Measured**, in A90's setup, through `latem mcp` over stdio: a change to one test file of
+`anvers-gate`, sent as changed files, was built, run and answered in 2.2 s, as one `startRun` and
+one `waitForRun`. The failing test came back with its file, line 458, column 5, its name and the
+assertion's two values. A change that did not compile came back in 1.7 s as `E0308` at
+`crates/anvers-gate/src/lib.rs:22:5`.
+
+**Not in this amendment.** Sending results to a control plane, which is protocol work and belongs
+with latem-cloud's own MCP server. Problem matchers a repository declares for a tool of its own;
+until then `::error file=…::` is how a script says it. Kotlin and Gradle, jest, and xcodebuild's
+test failures, which need their own readers. Coverage, and which tests ran: ANVerS's risk score
+asks for both (ADR-0009), and neither is in a log in a form worth trusting.
+

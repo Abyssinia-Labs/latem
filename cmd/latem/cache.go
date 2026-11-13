@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/source"
 )
 
 func newCacheCommand() *cobra.Command {
@@ -64,8 +66,13 @@ zero: "unknown" and "empty" lead to opposite eviction decisions, and printing
 			if err != nil {
 				return err
 			}
+			warm, err := listWarmWorkspaces()
+			if err != nil {
+				return err
+			}
 			if len(infos) == 0 {
 				printf(cmd.OutOrStdout(), "no caches yet — they appear the first time a job declares one\n")
+				printWarmWorkspaces(cmd.OutOrStdout(), warm)
 				return nil
 			}
 			sort.Slice(infos, func(i, j int) bool {
@@ -95,9 +102,66 @@ zero: "unknown" and "empty" lead to opposite eviction decisions, and printing
 				return err
 			}
 			printf(cmd.OutOrStdout(), "\n%s, %s\n", countCaches(len(infos)), formatBytes(total))
+			printWarmWorkspaces(cmd.OutOrStdout(), warm)
 			return nil
 		},
 	}
+}
+
+// listWarmWorkspaces reads the workspaces jobs keep between runs (A90), from
+// their own directory, through a manager that writes nothing.
+func listWarmWorkspaces() ([]source.WarmInfo, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	reader, err := source.NewReader(source.Config{MirrorDir: cfg.Paths.Mirrors, WarmDir: cfg.Paths.Warm})
+	if err != nil {
+		// No git on this PATH is doctor's to report; the caches above are
+		// still worth showing.
+		return nil, nil
+	}
+	return reader.ListWarm()
+}
+
+// printWarmWorkspaces lists warm workspaces under the caches, when there are
+// any: they are the other thing on this machine that makes a build fast and
+// costs disk.
+func printWarmWorkspaces(out io.Writer, warm []source.WarmInfo) {
+	if len(warm) == 0 {
+		return
+	}
+	printf(out, "\nwarm workspaces — kept by jobs that say `workspace: warm`\n")
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	printf(w, "REPO\tJOB\tRUNNER\tSIZE\tLAST USED\tCOMMIT\n")
+	var total int64
+	for _, in := range warm {
+		size := dirBytes(in.Path)
+		total += size
+		used := formatAge(in.UsedAt)
+		if in.InUse {
+			used = "in use"
+		}
+		printf(w, "%s\t%s\t%s\t%s\t%s\t%.12s\n", in.Repo, in.Job, in.Runner, formatBytes(size), used, in.SHA)
+	}
+	_ = w.Flush()
+	printf(out, "\n%d warm, %s\n", len(warm), formatBytes(total))
+}
+
+// dirBytes is the apparent size of everything under path. A file that
+// vanishes mid-walk, which a running build makes normal, is skipped.
+func dirBytes(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // countCaches renders the cache count with a noun that agrees with it. The
@@ -114,6 +178,7 @@ func newCachePruneCommand() *cobra.Command {
 		aggressive bool
 		maxSizeGB  float64
 		maxAgeH    int
+		warmAgeH   int
 	)
 	cmd := &cobra.Command{
 		Use:   "prune",
@@ -123,6 +188,9 @@ func newCachePruneCommand() *cobra.Command {
   - Docker build layers untouched for a week
   - cache volumes over their ceiling, evicted by access time down to 80%
   - workspaces under work/ older than a day with no live run
+  - warm workspaces no run has used for agent.warm_retention (7 days unless
+    set), or every one not in use with --aggressive; the next run of that job
+    starts cold (A90)
   - git gc on each mirror, skipping any a live run is reading
   - Tart VMs named latem-run-* with no live run — a leaked one carrying an
     Xcode image costs about 90 GB, which is the fastest way to fill a Mac
@@ -156,17 +224,53 @@ as full as it was.`,
 
 			rep, pruneErr := mgr.Prune(cmd.Context(), opts)
 			printPruneReport(cmd.OutOrStdout(), rep)
+			warmErr := pruneWarmWorkspaces(cmd.OutOrStdout(), aggressive, warmAgeH)
 			// The report is printed before the error is returned. A prune that
 			// freed 40 GB and then failed its last sweep has still freed
 			// 40 GB, and an operator needs to know which.
-			return pruneErr
+			return errors.Join(pruneErr, warmErr)
 		},
 	}
 	cmd.Flags().BoolVar(&aggressive, "aggressive", false,
 		"evict caches that would otherwise be kept — what the agent does below a runner's min_free_gb")
 	cmd.Flags().Float64Var(&maxSizeGB, "max-size-gb", 0, "per-cache ceiling in GB (default 25)")
 	cmd.Flags().IntVar(&maxAgeH, "workspace-max-age-hours", 0, "delete workspaces older than this (default 24)")
+	cmd.Flags().IntVar(&warmAgeH, "warm-max-age-hours", 0,
+		"delete warm workspaces unused for longer than this (default agent.warm_retention)")
 	return cmd
+}
+
+// pruneWarmWorkspaces removes the warm workspaces nobody has used for long
+// enough (A90), and prints which. One a run in the agent is building in is
+// held by a lock this process cannot take, and is left.
+func pruneWarmWorkspaces(out io.Writer, aggressive bool, maxAgeHours int) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(cfg.Paths.Warm); statErr != nil {
+		return nil // no job here has ever kept one
+	}
+	mgr, err := source.New(source.Config{MirrorDir: cfg.Paths.Mirrors, WorkDir: cfg.Paths.Work, WarmDir: cfg.Paths.Warm})
+	if err != nil {
+		return err
+	}
+	retention := cfg.Agent.WarmRetention.Duration()
+	if maxAgeHours > 0 {
+		retention = time.Duration(maxAgeHours) * time.Hour
+	}
+	cutoff := time.Now().Add(-retention)
+	if aggressive {
+		cutoff = time.Time{}
+	}
+	gone, err := mgr.PruneWarm(cutoff)
+	if len(gone) > 0 {
+		printf(out, "\nwarm workspaces removed (%d)\n", len(gone))
+		for _, w := range gone {
+			printf(out, "  %s %s on %s, last used %s\n", w.Repo, w.Job, w.Runner, formatAge(w.UsedAt))
+		}
+	}
+	return err
 }
 
 func printPruneReport(w io.Writer, rep cache.Report) {

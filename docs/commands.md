@@ -143,6 +143,35 @@ itself with `ssh -tt` or `script`. It is a guard against an agent approving,
 not a wall against whoever holds the account, who could edit `config.toml`
 instead (RUNNER_SPEC A89). Over ssh, log in and run it at the prompt.
 
+## `latem result`: what broke, and where
+
+**`latem result <run-id>` prints how the run went**, step by step, and the
+errors its output named, each with the file and line the tool put on it:
+
+```console
+$ latem result r_a9ebf5ded6aac0b56fe40fbc
+r_a9ebf5ded6aac0b56fe40fbc failed (E_STEP): step "test" exited 101
+  job tier2 of anvers at 3b10592fa747, changes on cc276f84bc76, on macos, warm workspace, 1.8s
+
+STEP  OUTCOME            TIME  ERRORS  WARNINGS
+test  failure, exit 101  1.5s  1       0
+
+1 error(s), 0 warning(s)
+error crates/anvers-gate/tests/gate.rs:458:5  latem_e2e_fails  (cargo-test, step test)
+    assertion `left == right` failed: the change broke arithmetic
+      left: 2
+     right: 3
+```
+
+`--json` is the same result as one document, for a program. It is read off the
+run's log, after the redactor, by readers for rustc and clippy, `cargo test`,
+go's compiler, vet and `go test`, tsc, `bun test`, vitest, biome, pytest, and
+anything that prints `file:line:col: error:` the way clang and xcodebuild do.
+A script of your own names a problem with
+`echo "::error file=src/x.c,line=3::what is wrong"`. A suggested fix is shown
+when the tool printed one, and is the tool's. It exits 0 whatever the run's
+state, as `latem logs` does (amendment A92).
+
 ## `latem mcp`: an agent on another machine
 
 **An agent working on your laptop can watch and drive the builds on a build
@@ -170,8 +199,20 @@ repository, state, or the commit an agent just pushed), `getRun`,
 `latem run`), `cancelRun`, and `checkWorkflows` (as
 `latem workflows check --repo`).
 
+**`waitForRun` is one call, and it answers with the result.** It waits up to
+ten minutes for the run to settle and returns it with what `latem result`
+prints: the steps, and each error by file and line. There is nothing to poll.
+A client that sends a progress token is told each step as it ends.
+
 **It never approves.** A run held for approval waits for a person at the
 machine to run `latem approve`, and the agent is told so. `latem try`, secrets,
 vars, repositories and the service are not offered either (amendment A87). Nor
 can the agent run `latem approve` over the same ssh: with no terminal it refuses
 (A89).
+
+**An agent can have its own unpushed change built**, by giving `startRun` the
+commit it started from and the files it changed (`changes`), where the machine
+allows it: `agent_changes = true` under the repository in config.toml, a base in
+the history of an allowed ref, and a job the base's `.latem/jobs.yaml`
+declares. [`jobs.md`](jobs.md) has the JSON and
+[`configuration.md`](configuration.md) the line (amendment A91).

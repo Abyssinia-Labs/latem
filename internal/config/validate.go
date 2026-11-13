@@ -103,6 +103,7 @@ func validateAgent(cfg *Config, md *toml.MetaData, opts Options) []error {
 
 	problems = appendDuration(problems, "agent.shutdown_grace", &cfg.Agent.ShutdownGrace, DefaultShutdownGrace)
 	problems = appendDuration(problems, "agent.log_retention", &cfg.Agent.LogRetention, DefaultLogRetention)
+	problems = appendDuration(problems, "agent.warm_retention", &cfg.Agent.WarmRetention, DefaultWarmRetention)
 	problems = appendDuration(problems, "agent.queue_ttl", &cfg.Agent.QueueTTL, DefaultQueueTTL)
 
 	switch cfg.Agent.RemoteLogs {

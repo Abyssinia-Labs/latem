@@ -77,6 +77,11 @@ type Config struct {
 	// everything here whose run id is not in a non-terminal state.
 	WorkDir string
 
+	// WarmDir holds the workspaces jobs keep between runs (A90), one per
+	// repository, runner and job. Empty means this manager keeps none, and a
+	// job that asks for one builds in a fresh clone.
+	WarmDir string
+
 	// GitBinary is the git executable. Empty means "git", resolved on PATH at
 	// [New] so a missing git is a startup failure (§6 preflight) rather than a
 	// surprise forty minutes into the first build.
@@ -185,6 +190,8 @@ type Manager struct {
 	// git invocation.
 	mu     sync.Mutex
 	repoMu map[string]*sync.Mutex
+	// warmGates is one turn per warm workspace, by its directory (A90).
+	warmGates map[string]chan struct{}
 
 	// readOnly marks a manager from [NewReader]: it reads mirrors the agent
 	// made and writes nothing (A57).
@@ -235,6 +242,20 @@ func New(cfg Config) (*Manager, error) {
 	}
 	if err := CheckSameFilesystem(cfg.MirrorDir, cfg.WorkDir); err != nil {
 		return nil, err
+	}
+	if cfg.WarmDir != "" {
+		if !filepath.IsAbs(cfg.WarmDir) {
+			return nil, codeErr(protocol.ErrSource, "warm dir %q is not absolute", cfg.WarmDir)
+		}
+		cfg.WarmDir = filepath.Clean(cfg.WarmDir)
+		if err := mkdirPrivate(cfg.WarmDir); err != nil {
+			return nil, err
+		}
+		// The same reason as WorkDir: each run's new .git is a hard-linked
+		// clone, and across filesystems it is a copy of every object.
+		if err := CheckSameFilesystem(cfg.MirrorDir, cfg.WarmDir); err != nil {
+			return nil, err
+		}
 	}
 
 	return &Manager{

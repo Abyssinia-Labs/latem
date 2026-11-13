@@ -1,0 +1,17 @@
+error[E0425]: cannot find value `missing` in this scope
+ --> src/lib.rs:3:13
+  |
+3 |     a + b + missing
+  |             ^^^^^^^ not found in this scope
+
+error[E0308]: mismatched types
+ --> src/lib.rs:2:18
+  |
+2 |     let x: i32 = "a";
+  |            ---   ^^^ expected `i32`, found `&str`
+  |            |
+  |            expected due to this
+
+Some errors have detailed explanations: E0308, E0425.
+For more information about an error, try `rustc --explain E0308`.
+error: could not compile `sample` (lib) due to 2 previous errors

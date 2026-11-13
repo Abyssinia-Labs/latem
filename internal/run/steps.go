@@ -8,6 +8,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -47,6 +48,7 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 			if !holds {
 				x.note("step %d/%d: %s skipped (if: %s)", i+1, total, label, s.If.Source())
 				x.recordResult(s.ID, skipped)
+				x.res.StepSkipped(label, "if: "+s.If.Source())
 				continue
 			}
 		case first != nil:
@@ -54,6 +56,7 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 			// condition is success(), which no longer holds.
 			x.note("step %d/%d: %s skipped (an earlier step failed)", i+1, total, label)
 			x.recordResult(s.ID, skipped)
+			x.res.StepSkipped(label, "an earlier step failed")
 			continue
 		}
 
@@ -64,6 +67,7 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 
 		x.note("step %d/%d: %s", i+1, total, label)
 		start := x.o.now()
+		x.res.StepStart(label)
 
 		var (
 			out     outcome
@@ -93,6 +97,7 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 			stepEnding(out, x.o.now().Sub(start).Round(time.Millisecond)))
 		forgiven := !out.ok() && s.ContinueOnError && !stopsTheRun(out)
 		x.recordResult(s.ID, resultOf(out, forgiven))
+		x.res.StepEnd(stepOutcome(out), forgiven, out.exitCode, x.redact(out.msg))
 		if forgiven {
 			// A50: the step failed and the job carries on as though it had
 			// not. Its outcome says failure for anything that asks; the job's
@@ -344,4 +349,55 @@ func (x *execution) keepState(use string, state map[string]string) {
 	for k, v := range state {
 		x.actionState[use][k] = v
 	}
+}
+
+// stepOutcome is how a step ended, in the result's words (A92).
+func stepOutcome(out outcome) string {
+	switch {
+	case out.ok():
+		return result.OutcomeSuccess
+	case out.state == protocol.StateCancelled:
+		return result.OutcomeCancelled
+	case out.state == protocol.StateTimedOut:
+		return result.OutcomeTimedOut
+	}
+	return result.OutcomeFailure
+}
+
+// describeResult tells the result what the gates settled, once the job's
+// environment is up: the commit, the runner, the kind of workspace, and the
+// directories a tool may print in front of a path — the workspace as the host
+// names it, and as the step does.
+func (x *execution) describeResult() {
+	kind := "fresh"
+	if x.ws.Warm() {
+		kind = "warm"
+	}
+	roots := []string{x.ws.Path}
+	if x.env != nil {
+		if dir := x.env.WorkspaceDir(); dir != "" && dir != x.ws.Path {
+			roots = append(roots, dir)
+		}
+	}
+	x.res.Describe(x.refNormalized, x.sha, x.runner.Name, kind, x.started, roots...)
+}
+
+// finishResult writes the run's result as it ended (A92). A run with no
+// result is one fewer thing a caller can read, not a failed run, so a result
+// that cannot be written is a line in the log.
+func (x *execution) finishResult(out outcome, msg string) {
+	if x.res == nil {
+		return
+	}
+	x.res.Describe(x.refNormalized, x.sha, runnerName(x.runner), "", time.Time{})
+	if err := x.res.Finish(out.state, out.code, msg, out.exitCode); err != nil {
+		x.note("the run's result could not be written: %v", err)
+	}
+}
+
+func runnerName(r *Runner) string {
+	if r == nil {
+		return ""
+	}
+	return r.Name
 }

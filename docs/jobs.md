@@ -108,6 +108,27 @@ only the paths it lists in the workspace, in cone mode unless
 runs inside the job's environment, so a docker image needs git, and `main`'s
 branch protection has to let the App push.
 
+**Build a change nobody has pushed, without a checkout.** `latem run REPO JOB
+--changes FILE` builds a commit this machine already has with files changed on
+top of it. `FILE` is JSON, the commit and the files, each whole:
+
+```json
+{"base": "0f3c… all 40 characters",
+ "files": [{"path": "src/lib.rs", "text": "…"},
+           {"path": "ci/test.sh", "text": "…", "mode": "755"},
+           {"path": "logo.png", "base64": "…"}],
+ "remove": ["src/old.rs"]}
+```
+
+The files become a commit on no ref, a child of the base, and the run is pinned
+to it, as `latem try` pins a working tree's. The job reads the base as
+`$LATEM_BASE_SHA` and the changed paths, one to a line, from the file
+`$LATEM_CHANGED_FILES` names, so a test job can run what the change touches.
+With `workspace: warm` (below) only the changed files are written before the
+build starts. An agent sends the same JSON through `latem mcp`'s `startRun`,
+for a repository whose config allows it; [configuration.md](configuration.md)
+has the line. RUNNER_SPEC A91 has the design.
+
 ## `.latem/jobs.yaml`
 
 ### Give the repository a job
@@ -284,6 +305,30 @@ typo fails the run that introduced it instead of silently doing something else.
 **Required are `version: 1`, at least one job, and per job `runs_on` and
 `steps`.** Everything else is optional — `timeout` defaults to 30m, the shell
 defaults to `bash`.
+
+**`workspace: warm` keeps the job's directory between its runs**, so a build
+picks up where the last one stopped:
+
+```yaml
+jobs:
+  test:
+    runs_on: [linux]
+    workspace: warm         # fresh, a new clone per run, unless you say so
+    steps:
+      - name: test
+        run: cargo test
+```
+
+Every run starts with each tracked file at its commit, checked by content, and
+with whatever the repository ignores still there: `target/`, `node_modules/`,
+`.next/`. Only the files that differ are written, so a compiler that goes by
+modification time rebuilds only what changed. A file that is neither tracked nor
+ignored is removed. The directory is the job's own on that runner
+(`~/.latem/warm/<repo>/<runner>/<job>/tree`), at the same path every run, and
+runs of the job take turns on it. `latem cache ls` shows each warm workspace
+and its size; one nobody has used for a week (`agent.warm_retention`) is
+removed. A repository with submodules or git-lfs builds in a fresh clone, and
+the log says so. RUNNER_SPEC A90 has the design.
 
 `artifacts` is a list of globs relative to the workspace root, each with an
 optional `retain`. Collected files land in `~/.latem/artifacts/<run-id>/`

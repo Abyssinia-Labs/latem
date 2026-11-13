@@ -127,9 +127,11 @@ latem setup android-sdk              Google's Android command-line tools in $AND
 latem init --repo <name>=<url>       write a starting config.toml for this machine
 latem agent                          run the agent in the foreground (`latem service install` runs it at boot)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow | --wait | --detach]   a .latem/jobs.yaml job; follows it on a terminal
+latem run <repo> <job> --changes FILE   the same job on a commit this machine has, with the files in FILE changed on top; no push
 latem try [-C dir] [--workflow F] [--event E] [--input k=v] [--ref R] [--matrix k=v] [--repo R] [--detach] <job>   a workflow job from this working tree, uncommitted changes included; no push
 latem list [--all] [--state S] [--repo R] [--limit N]
 latem logs <run-id> [-f] [-n N]
+latem result <run-id> [--json]       how each step ended, and the errors their output named, by file and line
 latem artifacts <run-id>             what a run collected, with each file's path on this machine; reads no content
 latem cancel <run-id> [--reason R]
 latem approve <run-id>               local only, at a terminal: you type the commit it pins (INV-5)

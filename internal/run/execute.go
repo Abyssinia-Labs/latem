@@ -11,6 +11,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/result"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/store"
@@ -35,6 +36,8 @@ type execution struct {
 
 	red     logstream.Redactor
 	emitter *logstream.Emitter
+	// res builds the run's result from its log and its steps (A92).
+	res *result.Collector
 	// deferred holds notes produced before the emitter existed.
 	//
 	// The broker sinks themselves are not held here. Each one is owned by the
@@ -75,6 +78,10 @@ type execution struct {
 	// actionState is what each use of a JavaScript action saved through
 	// $GITHUB_STATE, by use (A51).
 	actionState map[string]map[string]string
+	// changed is the paths a changes run's commit differs from its base in,
+	// and changedPath where the job reads them (A91).
+	changed     []string
+	changedPath string
 	// credentialWritten is whether a checkout step put the job's token in
 	// the environment, for a later one that does not persist to take back
 	// (A53).
@@ -269,6 +276,10 @@ func (x *execution) drive(ctx context.Context) Result {
 	if err := x.putSecretFiles(jobCtx); err != nil {
 		return x.finish(ctx, fail(err, protocol.ErrExecutor))
 	}
+	if err := x.putChangedFiles(jobCtx); err != nil {
+		return x.finish(ctx, fail(err, protocol.ErrExecutor))
+	}
+	x.describeResult()
 
 	// Gate 19: execute.
 	if err := x.to(jobCtx, protocol.StateRunning, protocol.Update{Runner: runner.Name}); err != nil {
@@ -340,7 +351,10 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// rather than Acquire: Acquire resolves the ref again, and a second
 	// resolution is a second answer — the window between them is precisely the
 	// one an approval is supposed to close.
-	ws, err := mirror.Checkout(ctx, x.run.ID, normalized, sha)
+	//
+	// A job that keeps its workspace gets that directory instead of a clone
+	// (A90); its teardown gives the directory's turn back and removes nothing.
+	ws, err := x.checkout(ctx, mirror, normalized, sha)
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}
@@ -648,6 +662,7 @@ func (x *execution) terminateWith(ctx context.Context, out outcome, refs []proto
 		return x.raced(err)
 	}
 	x.noteOutcome(out)
+	x.finishResult(out, u.ErrorMsg)
 
 	// §15: the buffers are zeroed the moment the run is terminal. The string
 	// copies in the executor's environment map cannot be zeroed — Go strings

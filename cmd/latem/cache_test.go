@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // `latem cache rm` deletes a directory, and until now nothing tested it.
@@ -232,5 +234,65 @@ func TestCacheRm_APathShapedNameMatchesNothing(t *testing.T) {
 				t.Fatalf("cache rm %q removed something outside a cache: %v", name, statErr)
 			}
 		})
+	}
+}
+
+// seedWarm creates a warm workspace (A90) as the agent leaves one: its tree,
+// and beside it the record of what it holds and when it was last used.
+func seedWarm(t *testing.T, configDir, repo, runner, job string, usedAt time.Time) string {
+	t.Helper()
+	dir := filepath.Join(configDir, "warm", repo, runner, job)
+	if err := os.MkdirAll(filepath.Join(dir, "tree", "target"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tree", "target", "out.o"), []byte("object code"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := fmt.Sprintf(`{"repo":%q,"runner":%q,"job":%q,"sha":"0123456789abcdef0123456789abcdef01234567","run_id":"r_1","used_at":%q}`,
+		repo, runner, job, usedAt.UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Warm workspaces are the other thing that costs disk to make a build fast,
+// so the listing that shows caches shows them, and the prune that reclaims
+// caches reclaims the ones nobody has used.
+func TestCache_ListsAndPrunesWarmWorkspaces(t *testing.T) {
+	dir := cacheConfigDir(t, "ios")
+	recent := seedWarm(t, dir, "app", "ios", "test", time.Now().Add(-time.Hour))
+	stale := seedWarm(t, dir, "app", "ios", "old-job", time.Now().Add(-30*24*time.Hour))
+
+	stdout, _, err := execCommand(t, "cache", "ls")
+	if err != nil {
+		t.Fatalf("cache ls: %v", err)
+	}
+	for _, want := range []string{"warm workspaces", "old-job", "0123456789ab", "2 warm"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("listing does not mention %q:\n%s", want, stdout)
+		}
+	}
+
+	stdout, _, err = execCommand(t, "cache", "prune")
+	if err != nil {
+		t.Fatalf("cache prune: %v\n%s", err, stdout)
+	}
+	if !strings.Contains(stdout, "warm workspaces removed (1)") || !strings.Contains(stdout, "old-job") {
+		t.Errorf("the prune does not say which warm workspace it removed:\n%s", stdout)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a warm workspace unused for 30 days survived the prune: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("the prune removed a warm workspace used an hour ago: %v", err)
+	}
+
+	// --aggressive is a disk below its floor: every one not in use goes.
+	if _, _, err := execCommand(t, "cache", "prune", "--aggressive"); err != nil {
+		t.Fatalf("cache prune --aggressive: %v", err)
+	}
+	if _, err := os.Stat(recent); !os.IsNotExist(err) {
+		t.Errorf("--aggressive left a warm workspace nothing holds: %v", err)
 	}
 }
