@@ -349,3 +349,28 @@ jobs:
 		t.Error("accepted a duplicate job key")
 	}
 }
+
+// A job's workspace is fresh unless it says warm (A90), and a typo is not
+// quietly fresh: a job someone meant to be warm would build cold for ever.
+func TestParse_Workspace(t *testing.T) {
+	doc := func(line string) string {
+		return "version: 1\njobs:\n  test:\n    runs_on: [linux]\n" + line + "    steps: [{run: \"true\"}]\n"
+	}
+	for _, tc := range []struct{ line, want string }{
+		{"", ""},
+		{"    workspace: fresh\n", WorkspaceFresh},
+		{"    workspace: warm\n", WorkspaceWarm},
+	} {
+		r, err := Parse([]byte(doc(tc.line)))
+		if err != nil {
+			t.Fatalf("%q: %v", tc.line, err)
+		}
+		if got := r.Jobs["test"].Workspace; got != tc.want {
+			t.Errorf("%q: workspace = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+	_, err := Parse([]byte(doc("    workspace: wram\n")))
+	if err == nil || !strings.Contains(err.Error(), `workspace "wram" must be "fresh" or "warm"`) {
+		t.Fatalf("a misspelt workspace was taken: %v", err)
+	}
+}

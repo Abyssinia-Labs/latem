@@ -285,6 +285,30 @@ typo fails the run that introduced it instead of silently doing something else.
 `steps`.** Everything else is optional — `timeout` defaults to 30m, the shell
 defaults to `bash`.
 
+**`workspace: warm` keeps the job's directory between its runs**, so a build
+picks up where the last one stopped:
+
+```yaml
+jobs:
+  test:
+    runs_on: [linux]
+    workspace: warm         # fresh, a new clone per run, unless you say so
+    steps:
+      - name: test
+        run: cargo test
+```
+
+Every run starts with each tracked file at its commit, checked by content, and
+with whatever the repository ignores still there: `target/`, `node_modules/`,
+`.next/`. Only the files that differ are written, so a compiler that goes by
+modification time rebuilds only what changed. A file that is neither tracked nor
+ignored is removed. The directory is the job's own on that runner
+(`~/.latem/warm/<repo>/<runner>/<job>/tree`), at the same path every run, and
+runs of the job take turns on it. `latem cache ls` shows each warm workspace
+and its size; one nobody has used for a week (`agent.warm_retention`) is
+removed. A repository with submodules or git-lfs builds in a fresh clone, and
+the log says so. RUNNER_SPEC A90 has the design.
+
 `artifacts` is a list of globs relative to the workspace root, each with an
 optional `retain`. Collected files land in `~/.latem/artifacts/<run-id>/`
 and stay on that machine: a control plane is told each one's path, size and

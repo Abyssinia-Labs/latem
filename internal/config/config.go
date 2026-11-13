@@ -60,6 +60,11 @@ const (
 const (
 	DefaultShutdownGrace = 30 * time.Minute
 	DefaultLogRetention  = 14 * 24 * time.Hour
+	// DefaultWarmRetention is how long a warm workspace nobody builds in is
+	// kept (A90). A week: a job that runs on every change keeps its own
+	// warm, and one that last ran before the weekend still finds it on
+	// Monday; a job that was renamed or dropped stops costing disk.
+	DefaultWarmRetention = 7 * 24 * time.Hour
 	DefaultQueueTTL      = 72 * time.Hour
 	DefaultApprovalTTL   = 24 * time.Hour
 	DefaultMetricsAddr   = "127.0.0.1:9838"
@@ -241,7 +246,11 @@ type Agent struct {
 	// which is what makes --config-dir relocate it (§8).
 	WorkDir      string            `toml:"work_dir"`
 	LogRetention protocol.Duration `toml:"log_retention"`
-	QueueTTL     protocol.Duration `toml:"queue_ttl"`
+	// WarmRetention removes a warm workspace no run has used for this long
+	// (A90). The daily pass applies it; a disk below a runner's floor
+	// removes every one not in use, whatever its age.
+	WarmRetention protocol.Duration `toml:"warm_retention"`
+	QueueTTL      protocol.Duration `toml:"queue_ttl"`
 	// AutoUpdate is off by default. Self-update re-execs the agent, and doing
 	// that to somebody's build machine without being asked is not a default
 	// anyone should have to discover (§20).

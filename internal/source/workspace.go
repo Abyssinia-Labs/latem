@@ -33,7 +33,14 @@ type Workspace struct {
 	Repo  string
 	Ref   string
 	SHA   string
+
+	// release is set for a warm workspace (A90): removing it gives its turn
+	// to the next run and leaves its files where they are.
+	release func() error
 }
+
+// Warm reports a workspace its job keeps between runs (A90).
+func (w *Workspace) Warm() bool { return w.release != nil }
 
 // Acquire runs gates 9 and 10 together: resolve the ref to a commit, then
 // build the workspace at it.
@@ -277,7 +284,13 @@ func (w *Workspace) Env() map[string]string {
 // no worktree administrative state in the mirror to prune, so a workspace
 // cannot be half-deleted and cannot leak into the next run. Safe to call
 // twice.
+//
+// A warm workspace is released instead (A90): its files are what the job
+// asked to keep.
 func (w *Workspace) Remove() error {
+	if w.release != nil {
+		return w.release()
+	}
 	if err := os.RemoveAll(w.Path); err != nil {
 		return wrapErr(protocol.ErrSource, err, "removing workspace %s", w.Path)
 	}

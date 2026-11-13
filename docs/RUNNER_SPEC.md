@@ -488,6 +488,7 @@ labels = ["macos", "arm64", "xcode-16", "ios"]
 shutdown_grace = "30m"
 work_dir       = "~/.latem/work"
 log_retention  = "14d"
+warm_retention = "7d"               # a warm workspace unused this long is removed (A90)
 queue_ttl      = "72h"              # queued longer than this → rejected
 auto_update    = false   # true needs a build with an embedded signing key (§20)
 remote_logs    = "always"           # "always" | "on_failure"
@@ -679,6 +680,7 @@ jobs:
 | `timeout` | duration | Wall clock, whole job. Enforced by the agent, not the executor. |
 | `caches` | `[]string` | References `caches[].name`. Undefined name is a parse error. |
 | `concurrency_group` | string | At most one run per group per machine. Queued, not rejected. |
+| `workspace` | `fresh` \| `warm` | `fresh`, the default, is §12's new clone per run. `warm` keeps the directory between this job's runs on a runner, with every tracked file at the run's commit and what the repository ignores left in place (A90). |
 | `inputs` | map | Declares name, type (`string`\|`bool`\|`int`\|`enum`), constraints, default. |
 | `secrets` | `[]string` | Names resolved by §15. Undeclared secrets are not injected. |
 | `artifacts` | list | Glob relative to workspace, plus retention. |
@@ -1089,6 +1091,7 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 - Docker build layers: `docker buildx prune --filter until=168h --force`.
 - Cache volumes exceeding `max_size` (default 25 GB per volume): evict by atime, oldest first, down to 80% of the cap.
 - Workspaces under `work/` older than 24h with no live run: delete. Nothing else to clean — §12's clones leave no administrative state behind in the mirror.
+- Warm workspaces under `warm/` that no run has used for `agent.warm_retention` (default 7d): delete, never one a run holds. Below a runner's disk floor, every one not in use goes (A90).
 - Mirror maintenance: `git gc --prune=30.days.ago` per mirror, skipped for any mirror a live run is reading, since automatic gc is disabled there (§12).
 - Tart: `tart list` for VMs matching `latem-run-*` with no live run; delete. A leaked VM starts as a near-free copy-on-write clone and grows toward the image's provisioned 140 GB (§13.2) as the build writes, which is the fastest way to fill a Mac mini.
 - Mirrors untouched for 90 days: report in `latem doctor`, never auto-delete (a mirror may be the only local copy).
@@ -4239,3 +4242,81 @@ callers and adds nothing against `ssh -tt`. Looking at the parent process or the
 `SSH_TTY` or a login shell: what an agent can set is no evidence, and a person in tmux has neither.
 A second factor or a signed approval, which would make this a boundary. The case here is an agent
 being helpful, not someone holding the account who means harm.
+### Amendment from a check that has to answer in a minute
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A90 | §9, §12, §14.4, §13.1, §13.3, A53 | **A jobs.yaml job that says `workspace: warm` builds in a directory this machine keeps for it, one per repository, runner and job, instead of a new clone. Each run gives that directory a new `.git`, cloned from the mirror, and brings every tracked file to the run's commit by comparing content, so only files that differ are written. What the repository ignores is left as the last run left it, and what is neither tracked nor ignored is removed. Runs of one job on one runner take turns. A warm workspace unused for `agent.warm_retention`, 7 days unless set, is removed** | ANVerS checks each change an agent makes before it lands, and its second tier has a minute to answer (ANVerS spec §11, LAT-4). §12 gives every run a new clone at a new path. That is why a run is reproducible, and it is also why every run compiles from nothing: a build's incremental state sits beside its sources, in `target/`, `node_modules/`, `.next/`, and a new clone has none of it. A mounted cache (§14) keeps a package store warm and cannot keep that, because a cache may not be mounted inside the workspace and a path that changes every run invalidates what a compiler keyed by path |
+
+**What is kept.** Exactly what the repository ignores. After the checkout, `git status` in a warm
+workspace is clean: every tracked file is the commit's, and nothing untracked is there unless
+`.gitignore` names it. So a warm workspace differs from a fresh one only under ignored paths, which
+is where build tools put what they build. The rule needs no list of directories from the job, and a
+repository already maintains it. An ignored file a step wrote is kept like any other, a `.env`
+included: the next run of the same job reads it, and that is the meaning of warm.
+
+**By content, not by timestamp.** The new `.git` has an index that holds the commit's tree and no
+record of the files on disk (`read-tree`). Refreshing it (`update-index --refresh`) therefore reads
+every tracked file and compares what it holds. A file that matches is marked clean and is not
+written, so its modification time is what the last build saw, which is what `make`, `cargo` and
+`tsc --incremental` decide by. A file that differs, because the commit changed it or because a step
+edited it, is written by `checkout --force`. A step that edits a tracked file and restores its size
+and timestamps has hidden nothing. The cost is one read of the tracked tree per run, which is the
+price of not trusting a timestamp a step could set.
+
+**The `.git` is never kept.** A53 has the reason: every step can write the workspace's `.git`,
+through the bind mount on docker and as the same user on native, and a host git reading a `.git` a
+step wrote would run its hooks, its fsmonitor and its filter drivers as the agent. A fresh clone
+never had the problem, because its `.git` was made after the last step that could have touched it.
+A kept directory would have it on every run after the first. So each run clones a new `.git` beside
+the tree (`clone --local --no-checkout`, hard links, as §12's) and moves it in, and the old one is
+removed without being read, whatever it has become. The agent runs git only in a `.git` no step has
+seen.
+
+**Which directory.** `warm/<repo>/<runner>/<job>/tree`, beside `mirrors/` so the clone hard-links.
+The runner is in the path because two runners are two toolchains. The job is in it because two
+jobs' outputs are not each other's. The path is the same every run, so what a tool wrote with an
+absolute path in it still names the right place. Beside the tree, and outside what a step is given,
+are a record of the commit and run it was last used for and the lock.
+
+**Turns.** One run holds a warm workspace at a time. Another run of the same job on the same runner
+waits for it, for as long as its own job's `timeout` allows, since the job's wall clock starts when
+the run does (§9). A run that waits it out fails with `E_SOURCE` and says what it waited for. The
+hold is a gate inside the agent and a `flock` beside the tree, which is what `latem cache prune`,
+another process, meets.
+
+**Where the question is asked.** Whether a job is warm is in the registry, and gate 11 reads the
+registry from the workspace gate 10 makes. So gate 10 first reads `.latem/jobs.yaml` from the
+mirror at the same commit, by object id. Nothing is decided from that reading but which directory
+the checkout uses. Gate 11 still reads the job from the workspace, and gates 12 to 15 admit it from
+there, so INV-5 is where it was.
+
+**When it cannot be warm.** The log says why, and the job builds in a fresh clone:
+
+- a repository with submodules or git-lfs. Both keep their objects under the superproject's `.git`,
+  which a warm workspace replaces each run, so both would be fetched again every time;
+- a workflow's job. A workflow file has no key for it, and adding one would stop the file being a
+  GitHub workflow;
+- a workspace git cannot bring to the commit: a directory a step left unwritable, say. It is
+  removed and made again from nothing, once, and that run is a cold one.
+
+**What it does not promise.** Isolation between runs of one job. Whatever an earlier run left under
+an ignored path, a later one builds with, so a warm job's runs trust each other as far as their
+build tools trust their own caches. That is the same trust a mounted cache already asks (§14), and
+it is why warm is asked for job by job and is never the default.
+
+**Disk.** A warm workspace is a build's whole output and grows with it. The daily pass removes one
+no run has used for `agent.warm_retention`, and every one not in use when a runner is below its
+disk floor (§14.4). `latem cache ls` lists each with its size, and `latem cache prune` removes the
+unused ones by hand, `--aggressive` all that nothing holds. A job that loses its warm workspace
+only starts cold.
+
+**What it costs.** Per run of a warm job: one hard-linked clone of the mirror without a checkout,
+one read of the tracked tree, and a write of the files that differ. No network. A fresh clone's
+checkout writes every file, so a warm run writes less than a fresh one from its second run on. Per
+run of any other job: nothing. On disk: one build tree per warm job per runner, bounded by the
+retention above.
+
+**Not in this amendment.** Workflow jobs. A warm workspace shared between jobs, or between runners.
+Several warm workspaces for one job, so that runs need not take turns. Submodules and git-lfs.
+

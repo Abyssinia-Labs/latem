@@ -340,7 +340,10 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// rather than Acquire: Acquire resolves the ref again, and a second
 	// resolution is a second answer — the window between them is precisely the
 	// one an approval is supposed to close.
-	ws, err := mirror.Checkout(ctx, x.run.ID, normalized, sha)
+	//
+	// A job that keeps its workspace gets that directory instead of a clone
+	// (A90); its teardown gives the directory's turn back and removes nothing.
+	ws, err := x.checkout(ctx, mirror, normalized, sha)
 	if err != nil {
 		return nil, registry.Decision{}, err
 	}

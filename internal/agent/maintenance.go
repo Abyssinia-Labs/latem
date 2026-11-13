@@ -41,7 +41,38 @@ func (a *Agent) Maintain(ctx context.Context) {
 	a.maintainQueue(ctx)
 	a.maintainLogs()
 	a.maintainArtifacts()
+	a.maintainWarm(ctx)
 	a.maintainCaches(ctx)
+}
+
+// maintainWarm removes the warm workspaces no run has used for
+// warm_retention (A90), and every one not in use when a runner is below its
+// disk floor: a warm workspace is a build's whole output, and the next run
+// that wants one it lost only starts cold.
+func (a *Agent) maintainWarm(ctx context.Context) {
+	if a.src == nil {
+		return
+	}
+	retention := a.current().Agent.WarmRetention.Duration()
+	if retention <= 0 {
+		retention = config.DefaultWarmRetention
+	}
+	cutoff := a.now().Add(-retention)
+	if a.belowAnyFloor(ctx) {
+		cutoff = time.Time{}
+	}
+	gone, err := a.src.PruneWarm(cutoff)
+	if err != nil {
+		a.log.Error("pruning warm workspaces", "dir", a.cfg.Paths.Warm, "err", err)
+	}
+	if len(gone) > 0 {
+		names := make([]string, 0, len(gone))
+		for _, w := range gone {
+			names = append(names, w.Repo+"/"+w.Runner+"/"+w.Job)
+		}
+		a.log.Info("warm workspace retention", "removed", names, "retention", retention,
+			"below_disk_floor", cutoff.IsZero())
+	}
 }
 
 // maintainQueue is §11's TTL sweep, run daily as well as at startup.

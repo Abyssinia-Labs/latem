@@ -101,6 +101,10 @@ broken config does not fail at startup, it fails forty minutes into somebody's
 build. Disk floors are per runner — 40 GB for docker, 60 for native, 200 for
 tart — because a global 20 GB admits an iOS build the machine cannot finish.
 
+`warm_retention` (7 days unless set) is how long a warm workspace, one a job
+keeps with `workspace: warm`, stays on disk with no run using it. It needs a
+restart to change.
+
 ## Metrics
 
 `metrics_addr` serves Prometheus text at `/metrics` and a JSON snapshot at

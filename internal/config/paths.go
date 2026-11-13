@@ -38,6 +38,10 @@ type Paths struct {
 	// Mirrors holds one bare mirror per repo. It has to be on the same
 	// filesystem as Work or `git clone --local` stops hardlinking (§12).
 	Mirrors string
+	// Warm holds the workspaces jobs keep between runs, one per repository,
+	// runner and job (A90). Beside Mirrors, so each run's new .git is a
+	// hard-linked clone.
+	Warm string
 	// Logs holds <run-id>.log (§16).
 	Logs string
 	// Artifacts holds <run-id>/ (§17).
@@ -65,6 +69,7 @@ const (
 	workName       = "work"
 	cachesName     = "caches"
 	mirrorsName    = "mirrors"
+	warmName       = "warm"
 	logsName       = "logs"
 	artifactsName  = "artifacts"
 	actionsName    = "actions"
@@ -118,6 +123,7 @@ func derivePaths(dir string) Paths {
 		Work:       filepath.Join(dir, workName),
 		Caches:     filepath.Join(dir, cachesName),
 		Mirrors:    filepath.Join(dir, mirrorsName),
+		Warm:       filepath.Join(dir, warmName),
 		Logs:       filepath.Join(dir, logsName),
 		Artifacts:  filepath.Join(dir, artifactsName),
 		Actions:    filepath.Join(dir, actionsName),

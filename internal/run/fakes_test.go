@@ -66,6 +66,8 @@ type fakeSource struct {
 	// noMirror makes it answer that there is no mirror yet.
 	opened   []source.Repo
 	noMirror bool
+	// warm, when set, makes the mirror one that keeps workspaces (A90).
+	warm *fakeWarm
 }
 
 // setSHA moves the ref, as a force-push does.
@@ -92,6 +94,9 @@ func (s *fakeSource) Fetch(_ context.Context, repo source.Repo) (Mirror, error) 
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if s.warm != nil {
+		return &fakeWarmMirror{fakeMirror{src: s}}, nil
 	}
 	return &fakeMirror{src: s}, nil
 }

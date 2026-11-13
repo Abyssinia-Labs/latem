@@ -211,6 +211,7 @@ func (a *Agent) buildDependencies() error {
 	src, err := source.New(source.Config{
 		MirrorDir: a.cfg.Paths.Mirrors,
 		WorkDir:   a.cfg.Paths.Work,
+		WarmDir:   a.cfg.Paths.Warm,
 		Logger:    a.log,
 	})
 	if err != nil {

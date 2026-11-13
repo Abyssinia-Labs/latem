@@ -35,6 +35,12 @@ const (
 	DefaultShell   = "bash"
 )
 
+// The values of a job's `workspace` (A90).
+const (
+	WorkspaceFresh = "fresh"
+	WorkspaceWarm  = "warm"
+)
+
 // Limits that bound a registry. These are not tuning knobs; they exist so a
 // malformed or hostile file fails at parse rather than at some later point
 // where the failure is harder to attribute.
@@ -98,8 +104,14 @@ type Job struct {
 	Caches      []string          `json:"caches,omitempty"`
 	// ConcurrencyGroup serialises across jobs, not merely across runners. At
 	// most one run per group per machine; others queue rather than fail.
-	ConcurrencyGroup string            `json:"concurrency_group,omitempty"`
-	Inputs           map[string]*Input `json:"inputs,omitempty"`
+	ConcurrencyGroup string `json:"concurrency_group,omitempty"`
+	// Workspace is "fresh", the default — a new clone per run (§12) — or
+	// "warm": the job gets the directory its last run on the same runner
+	// left, with every tracked file brought to this run's commit and
+	// everything the repository ignores still there (A90). A workflow has no
+	// such key, so only a jobs.yaml job can ask.
+	Workspace string            `json:"workspace,omitempty"`
+	Inputs    map[string]*Input `json:"inputs,omitempty"`
 	// RequiresIsolation marks a job whose steps came from code the operator
 	// did not write — a remote action (A42 phase 5). It is set by the
 	// compiler and excluded from decoding: by the time a job reaches here the
@@ -319,6 +331,12 @@ func (j *Job) validate(name string, declaredCaches map[string]bool) []error {
 
 	if j.ConcurrencyGroup != "" && !cacheNamePattern.MatchString(j.ConcurrencyGroup) {
 		add("concurrency_group %q must match %s", j.ConcurrencyGroup, cacheNamePattern)
+	}
+
+	switch j.Workspace {
+	case "", WorkspaceFresh, WorkspaceWarm:
+	default:
+		add("workspace %q must be %q or %q", j.Workspace, WorkspaceFresh, WorkspaceWarm)
 	}
 
 	if len(j.Inputs) > MaxInputsPerJob {
