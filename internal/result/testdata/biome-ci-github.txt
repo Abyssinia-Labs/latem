@@ -1,0 +1,132 @@
+::warning title=lint/style/useConst,file=src/lint.ts,line=1,endLine=1,col=1,endColumn=4::This let declares a variable that is only assigned once.
+::error title=format,file=data.json,line=1,endLine=1,col=2,endColumn=2::File content differs from formatting output
+::error title=parse,file=src/broken.ts,line=2,endLine=2,col=10,endColumn=11::expected `:` but instead found `1`
+::error title=parse,file=src/broken.ts,line=2,endLine=2,col=11,endColumn=12::expected `:` but instead found `;`
+::error title=parse,file=src/broken.ts,line=3,endLine=3,col=1,endColumn=2::Expected a statement but instead found '}'.
+
+::error title=assist/source/organizeImports,file=src/sum.ts,line=1,endLine=2,col=1,endColumn=25::Sort these imports.
+::error title=format,file=src/sum.ts,line=1,endLine=1,col=2,endColumn=2::File content differs from formatting output
+src/lint.ts:1:1 lint/style/useConst  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! This let declares a variable that is only assigned once.
+  
+  > 1 │ let count = 1;
+      │ ^^^
+    2 │ export const view = count;
+    3 │ 
+  
+  i 'count' is never reassigned.
+  
+  > 1 │ let count = 1;
+      │     ^^^^^
+    2 │ export const view = count;
+    3 │ 
+  
+  i Safe fix: Use const instead.
+  
+    1   │ - let·count·=·1;
+      1 │ + const·count·=·1;
+    2 2 │   export const view = count;
+    3 3 │   
+  
+
+data.json format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × File content differs from formatting output
+  
+    1   │ - {"name":"app","items":[1,2,3],
+    2   │ - ···"nested":{"a":1}}
+      1 │ + {·"name":·"app",·"items":·[1,·2,·3],·"nested":·{·"a":·1·}·}
+    3 2 │   
+  
+
+src/broken.ts:2:10 parse ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × expected `:` but instead found `1`
+  
+    1 │ export function broken( {
+  > 2 │   return 1;
+      │          ^
+    3 │ }
+    4 │ 
+  
+  i Remove 1
+  
+
+src/broken.ts:2:11 parse ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × expected `:` but instead found `;`
+  
+    1 │ export function broken( {
+  > 2 │   return 1;
+      │           ^
+    3 │ }
+    4 │ 
+  
+  i Remove ;
+  
+
+src/broken.ts:3:1 parse ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Expected a statement but instead found '}'.
+  
+    1 │ export function broken( {
+    2 │   return 1;
+  > 3 │ }
+      │ ^
+    4 │ 
+  
+  i Expected a statement here.
+  
+    1 │ export function broken( {
+    2 │   return 1;
+  > 3 │ }
+      │ ^
+    4 │ 
+  
+
+src/broken.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Code formatting aborted due to parsing errors. To format code with errors, enable the 'formatter.formatWithErrors' option.
+  
+
+src/sum.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Sort these imports.
+  
+  > 1 │ import { z } from "./z";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^
+  > 2 │ import { a } from "./a";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^
+    3 │ export const   total = a+z;
+    4 │ 
+  
+  i Safe fix: Organize imports and exports (Biome)
+  
+    1   │ - import·{·z·}·from·"./z";
+    2   │ - import·{·a·}·from·"./a";
+      1 │ + import·{·a·}·from·"./a";
+      2 │ + import·{·z·}·from·"./z";
+    3 3 │   export const   total = a+z;
+    4 4 │   
+  
+
+src/sum.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × File content differs from formatting output
+  
+    1 1 │   import { z } from "./z";
+    2 2 │   import { a } from "./a";
+    3   │ - export·const···total·=·a+z;
+      3 │ + export·const·total·=·a·+·z;
+    4 4 │   
+  
+
+Checked 4 files in 1393µs. No fixes applied.
+Found 7 errors.
+Found 1 warning.
+ci ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+

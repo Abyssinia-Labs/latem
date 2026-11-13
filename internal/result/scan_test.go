@@ -185,6 +185,76 @@ func TestScanBiome(t *testing.T) {
 	}
 }
 
+// Every kind of diagnostic biome prints, from `biome check` and from
+// `biome ci`, which writes the same in colour, with a terminal hyperlink
+// around each rule's name, even into a pipe. Captured on 2026-11-12 from
+// biome 2.5.11 on four files: a lint warning, a file the formatter would
+// change, a syntax error, and imports out of order.
+//
+// The formatter's problems have a file and no line. v0.9.0 read only the
+// headers with a line and a category of two words or more, so it missed
+// them and the parser's, and a job that failed on `biome check` came back
+// with a failed step and nothing located.
+func TestScanBiomeReadsEveryKindOfDiagnostic(t *testing.T) {
+	want := []Problem{
+		{Severity: "warning", File: "src/lint.ts", Line: 1, Column: 1, Code: "lint/style/useConst",
+			Message: "This let declares a variable that is only assigned once.", Help: "Use const instead.", Tool: "biome"},
+		{Severity: "error", File: "data.json", Code: "format",
+			Message: "Formatter would have printed the following content:", Tool: "biome"},
+		{Severity: "error", File: "src/broken.ts", Line: 2, Column: 10, Code: "parse",
+			Message: "expected `:` but instead found `1`", Tool: "biome"},
+		{Severity: "error", File: "src/broken.ts", Line: 2, Column: 11, Code: "parse",
+			Message: "expected `:` but instead found `;`", Tool: "biome"},
+		{Severity: "error", File: "src/broken.ts", Line: 3, Column: 1, Code: "parse",
+			Message: "Expected a statement but instead found '}'.", Tool: "biome"},
+		{Severity: "error", File: "src/broken.ts", Code: "format",
+			Message: "Code formatting aborted due to parsing errors. To format code with errors, enable the 'formatter.formatWithErrors' option.",
+			Tool:    "biome"},
+		{Severity: "error", File: "src/sum.ts", Line: 1, Column: 1, Code: "assist/source/organizeImports",
+			Message: "Sort these imports.", Help: "Organize imports and exports (Biome)", Tool: "biome"},
+		{Severity: "error", File: "src/sum.ts", Code: "format",
+			Message: "Formatter would have printed the following content:", Tool: "biome"},
+	}
+	check(t, "biome-check.txt", want)
+
+	// `biome ci` has its own words for a file the formatter would change.
+	ci := append([]Problem(nil), want...)
+	for _, i := range []int{1, 7} {
+		ci[i].Message = "File content differs from formatting output"
+	}
+	check(t, "biome-ci.txt", ci)
+}
+
+// A rule of ━ after a file's name is biome's. One after a word that is no
+// file is the line biome ends a run with, or somebody's banner.
+func TestScanBiomeWantsAFileBeforeTheRule(t *testing.T) {
+	s := &scanner{}
+	for _, line := range []string{
+		"check ━━━━━━━━━━━━━━━━━━━━",
+		"",
+		"  × Some errors were emitted while running checks.",
+		"",
+		"format ━━━━━━━━━━━━━━━━━━━━",
+		"",
+		"  × Some errors were emitted while running checks.",
+		"",
+		"results summary ━━━━━━━━━━━━",
+		"",
+		"  × 3 suites failed",
+		"my notes/todo.json format ━━━━━━━━━━━━",
+		"",
+		"  × Formatter would have printed the following content:",
+	} {
+		s.line(line)
+	}
+	s.flush()
+	want := []Problem{{Severity: "error", File: "my notes/todo.json", Code: "format",
+		Message: "Formatter would have printed the following content:", Tool: "biome"}}
+	if !reflect.DeepEqual(s.out, want) {
+		t.Errorf("read\n%s\nwant\n%s", show(s.out), show(want))
+	}
+}
+
 // The shapes that are one line, from the tools that are not on this machine
 // to print them.
 func TestScanOneLine(t *testing.T) {
