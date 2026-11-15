@@ -1299,7 +1299,7 @@ The original argument survives for what it did cover: the runner still invokes `
 
 ```
 latem setup [--url U] [--repo owner/name …] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57)
-latem setup apply <item-id>... [--kind K] [--json]   Close what `setup --json` says is in the way, as the setup screen would, without it; a person's item, or one of the two settings that give something up off a terminal, exits 4 (A94)
+latem setup apply <item-id>... [--kind K] [--json]   Close what `setup --json` says is in the way, as the setup screen would, without it; a person's item, or one of the two settings that give something up off a terminal, exits 4 (A94). A secret or variable no store holds is closed where it will be read, OpenVault first (A97)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow | --wait | --detach]   Follows the run's log on a terminal and exits with its result; for a script, or with --detach, queues it and prints its id (A81)
 latem try [-C dir] [--workflow F] [--event E] [--input k=v] [--ref R] [--matrix k=v] [--repo R] [--detach] <job>   One workflow job from this working tree, uncommitted changes included; no push, no control plane (A76)
@@ -4776,5 +4776,70 @@ to the vault. A value can stay in config.toml for as long as the vault does not 
 move can be one variable at a time.
 
 **Not in this amendment.** What `latem setup` says of a vault: the setting that turns it on, a
-service down, a collection or a name missing. That follows. A machine-wide variable, which has no
+service down, a collection or a name missing. That follows (*A97*). A machine-wide variable, which has no
 collection. Writing to the vault.
+
+
+### Amendment from a plan that said `latem secrets set` to a machine with a vault
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A97 | §15, §19, A69, A73, A86, A94, A96 | **`latem setup` reads OpenVault before it names a fix for a secret or a variable that no store here holds, and names the step that closes the gap. A vault on this device that answers and holds one of the machine's repositories, which the config does not read yet, is counted as though it were read, and turning it on is a config item, `openvault-on`. A service that does not answer is `openvault-service`, latem's to run. No vault on this device is `openvault-join`, the person's. No collection for a repository is `openvault-collection-R`, the person's on an admin device, naming this device as OpenVault does. A name the collection lacks is `openvault set R/E/NAME --secret` or `--var`, the person's. A variable a job reads that no store holds is an item of its own, `vars-R`. Without OpenVault, `latem secrets set` stays the fix. The person's exit 4 under `setup apply`, and `latem mcp`'s `getReadiness` returns the same plan** | `latem setup --json` on a machine new to a repository told it to `latem secrets set` every secret. When the config did not read OpenVault, which is every new machine, the plan never mentioned it. When the config did read it, the inventory counted the vault's names but dropped what doctor already knew: a service that does not answer, and a repository with no collection on the machine. Both read as every secret missing, with the same fix. A name the collection lacked was also told `latem secrets set`. The user keeps every secret in OpenVault, and every variable since A96 |
+
+**The vault first.** Setup works out what this machine has of OpenVault before it reads any
+repository: whether `openvault` is on this shell's PATH or the agent's, whether this device has a vault (a
+`vault.db` in OpenVault's directory, which `openvault join` or `init` makes, read without opening
+it), and, when either is true or the config reads OpenVault, whether the service answers, which
+configured repositories it holds a collection for, and this device's name. The last three come from
+the listing the inventory already made, through `onceOpenVault`, and from one `devices` request.
+Nothing reads a key or a value.
+
+**Counted as though read.** A vault that answers and holds a collection for one of the machine's
+repositories is counted as though `[secrets] openvault = true`, even where the config does not say
+so yet. Each job's names are then missing or held as they would be once it does. Turning it on is the
+item that makes that true. It blocks when a job reads a name only the vault holds, or a name the vault
+should hold. When nothing a job reads depends on it, there is no item.
+
+**One failure, one item, its owner.**
+
+| Item | When | Closes it | Whose |
+|---|---|---|---|
+| `openvault-on` | the vault answers, holds one of the machine's repositories, and is not read | `[secrets] openvault = true`, and the agent restarts for it, as for every `[secrets]` change | latem's: `setup apply` writes it |
+| `openvault-service` | the config reads OpenVault, this device has a vault, and the service does not answer | `openvault service install`, which needs no sudo (OpenVault 0.2.2 and later) | latem's: `setup apply` runs it. A key with a passphrase is the person's, and the item says how |
+| `openvault-join` | the config reads OpenVault and this device has no vault | `openvault join` here, then `openvault approve` on a device already in the vault | the person's |
+| `openvault-collection-R` | the vault answers and holds no collection `R` | `openvault scope <this device> R read`, on an admin device | the person's |
+| `secrets-R`, `vars-R` | the collection lacks a name a job reads | `openvault set R/E/NAME --secret`, or `--var`, on a device that may write `R` | the person's |
+| `secrets-R`, `vars-R` | no OpenVault here | `latem secrets set`, or `latem vars set`, with a line pointing to `docs/secrets.md`, "From OpenVault" | the person's |
+
+While the service does not answer, or this device has no vault, the names it might hold cannot be
+said. Then the service or the join is the one item, carrying the jobs it holds up, and the next plan
+says what is left. On a machine that does not read the vault, joining it or starting its service is
+shown beside `latem secrets set`, soft: either closes the gap, and neither is required.
+
+**This device's name.** `openvault scope` takes a device's name, or the start of its id. The
+service's `devices` answer flags this device. Its name is used unless another device of the vault,
+a revoked one included, has the same name, or its name could not be read. Then the item uses the
+first 8 hex characters of its id.
+
+**Variables.** A variable a job reads that no store here holds now gets an item, `vars-R`, like a
+secret's. The names are the job's own: every expression in its declaration, its conditions and
+steps, and its workflow's env, defaults, concurrency and run-name (`workflow.JobVarReads`), for the
+job's environment. For a called job they are the called job's and its outermost caller job's. A
+composite action's own file is not read. `latem workflows check` still warns per workflow from the
+file's text, as it did. A heartbeat names a variable as it names a secret (A73), and never its
+value.
+
+**Exit 4.** Every item that is only the person's commands or words is refused by `setup apply`
+with exit 4, A94's number, and prints what to type. The line no longer says "on this machine" for
+`openvault scope` or `openvault set`, which are typed on another device, and the item's words say
+which. `openvault-on` and `openvault-service` are latem's, and `setup apply` closes them.
+`getReadiness` (A95) reads the same plan, and its description names the new fields.
+
+**What it costs.** On a machine with neither the `openvault` command nor a vault, and a config that
+does not read it, nothing is asked. Otherwise each look adds one `devices` request to the listing
+the inventory already makes, and where the vault is counted as read, the variable reads A96 counts.
+The agent's readiness beat looks every 15 minutes (A70), and a person's `setup` once.
+
+**Not in this amendment.** Making a collection, or adding this device to one: those are an admin
+device's, with Touch ID or the recovery phrase, and latem never runs them. Telling a key with a
+passphrase from one without, which would mean reading the key file.

@@ -158,6 +158,17 @@ machine-wide names never asks OpenVault.
 machine has no collection for — "no collection wake" — by name. For those
 repositories, OpenVault simply holds nothing, and the stores after it answer.
 
+**`latem setup` looks at OpenVault first** (A97). For a secret or a variable
+that no store here holds, it names the step that closes the gap. With a vault
+on this device that holds one of the machine's repositories and a config that
+does not read it yet, that step is turning it on, which `latem setup apply
+openvault-on` writes. Otherwise it is the service (`openvault service
+install`), joining the vault (`openvault join`, then `openvault approve`
+elsewhere), the collection (`openvault scope <this device> R read` on an admin
+device), or the name itself (`openvault set R/E/NAME --secret`). Without
+OpenVault, it is still `latem secrets set`. [Commands](commands.md#latem-setup-apply-closing-what-is-in-the-way-from-a-shell)
+has the table.
+
 A pull request's job asks OpenVault nothing until its commit is approved, as
 for every other store; see [Pull requests](#pull-requests).
 

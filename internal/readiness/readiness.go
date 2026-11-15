@@ -58,7 +58,39 @@ type Input struct {
 	Images     []Image
 	// Unread are repositories whose jobs could not be read, each with why.
 	Unread []string
+	// Vault is what this machine has of OpenVault, which decides what closes
+	// a secret or a variable no store here holds (A97).
+	Vault Vault
 }
+
+// Vault is OpenVault on this machine, as setup found it (A86, A96, A97). Its
+// zero value is a machine without it.
+type Vault struct {
+	// Installed: the openvault command is here, or a vault is, or its
+	// service answers.
+	Installed bool `json:"installed"`
+	// Here: this device holds a vault, which `openvault join` makes.
+	Here bool `json:"here"`
+	// On: config.toml says `[secrets] openvault = true`.
+	On bool `json:"on"`
+	// Answers: its service answered on its socket.
+	Answers bool `json:"answers"`
+	// Device is this device as `openvault scope` names it, when it answered.
+	Device string `json:"device,omitempty"`
+	// Held are the configured repositories this device holds a collection
+	// for, when it answered.
+	Held []string `json:"held,omitempty"`
+}
+
+// Ready reports a vault this machine could read and does not: here, its
+// service answering, and holding a collection for one of the machine's
+// repositories. Its jobs' names are then counted as though it were read,
+// and turning it on is the item that closes them.
+func (v Vault) Ready() bool { return !v.On && v.Here && v.Answers && len(v.Held) > 0 }
+
+// reads reports whether a name's fix is the vault's: it is read, or would
+// be by turning it on.
+func (v Vault) reads() bool { return (v.On || v.Ready()) && v.Answers }
 
 // Runner is one runner in config.toml, and what its steps find.
 type Runner struct {
@@ -84,10 +116,15 @@ type Job struct {
 	// Moving are the actions it names by a tag or branch, on a machine that
 	// wants a commit; NotAllowed those [actions] allowed leaves out.
 	Moving, NotAllowed []string
-	// Secrets are the names it reads that have no value here, and Env the
-	// GitHub environment it runs in, which scopes them.
+	// Secrets are the names it reads that have no value here, Vars the
+	// variables, and Env the GitHub environment it runs in, which scopes
+	// them.
 	Secrets []string
+	Vars    []string
 	Env     string
+	// FromVault: a name it reads is held by OpenVault alone, so reading the
+	// vault is what gives it one (A97).
+	FromVault bool
 }
 
 // Image is a docker runner's image.
@@ -164,8 +201,10 @@ type Item struct {
 	// Warning is said before a change that gives something up.
 	Warning string `json:"warning,omitempty"`
 	// Secrets are the names a secrets item's Yours set, each with its
-	// environment when it has one: "TOKEN (staging)".
+	// environment when it has one: "TOKEN (staging)". Vars are a variables
+	// item's, the same way (A97).
 	Secrets []string `json:"secrets,omitempty"`
+	Vars    []string `json:"vars,omitempty"`
 }
 
 // Item IDs that Advert treats apart, the first and last followed by a name.
@@ -174,6 +213,12 @@ const (
 	itemMovingRefs = "moving-refs"
 	itemImage      = "image-"
 	itemSecrets    = "secrets-"
+	itemVars       = "vars-"
+	// OpenVault's, the last followed by a repository (A97).
+	itemOpenVaultOn      = "openvault-on"
+	itemOpenVaultService = "openvault-service"
+	itemOpenVaultJoin    = "openvault-join"
+	itemCollection       = "openvault-collection-"
 )
 
 // Change is one edit to config.toml.
@@ -197,6 +242,7 @@ const (
 	ChangeMovingRefs = "allow-moving-refs"
 	ChangeAllowed    = "allowed"    // [actions] allowed gains Value
 	ChangeNewRunner  = "new-runner" // a native runner, named Value
+	ChangeOpenVault  = "openvault"  // [secrets] openvault = true (A97)
 )
 
 // Probe is one command that has to work in a step's environment.
@@ -303,7 +349,7 @@ func kindOn(d definition, jobs []Job, in Input) Kind {
 		k.Items = append(k.Items, wiring(k, reports, tc, r)...)
 	}
 	k.Items = append(k.Items, settings(jobs, executor)...)
-	k.Items = append(k.Items, secretItems(jobs)...)
+	k.Items = append(k.Items, secretItems(jobs, in.Vault)...)
 	k.Items = append(k.Items, imageItems(d, r, in.Images)...)
 	k.Notes = routeNotes(d, jobs, r)
 	k.Proof = proofOf(d, tc, r)
@@ -568,41 +614,200 @@ func merge(into, more []string) []string {
 }
 
 // secretItems names, never shows, what these jobs read and have no value for
-// here. Secrets are per machine, so a machine new to a repository has none.
-func secretItems(jobs []Job) []Item {
-	var out []Item
+// here, and says what closes each: OpenVault first when the machine has it,
+// and the step that is in the way of it before the names (A97). Secrets are
+// per machine unless the vault holds them, so a machine new to a repository
+// has none.
+func secretItems(jobs []Job, v Vault) []Item {
+	var lacking, fromVault []string
 	for _, j := range jobs {
-		if len(j.Secrets) == 0 {
+		if len(j.Secrets)+len(j.Vars) > 0 {
+			lacking = append(lacking, j.Ref)
+		}
+		if j.FromVault || (v.Ready() && len(j.Secrets)+len(j.Vars) > 0) {
+			fromVault = append(fromVault, j.Ref)
+		}
+	}
+	var out []Item
+	switch {
+	case v.On && !v.Answers:
+		// Every name it holds is unknown until it answers, so nothing past
+		// it can be said.
+		if len(lacking) == 0 {
+			return nil
+		}
+		if !v.Here {
+			return []Item{joinItem(lacking, false)}
+		}
+		return []Item{serviceItem(lacking, false)}
+	case v.Ready() && len(fromVault) > 0:
+		out = append(out, Item{ID: itemOpenVaultOn, Title: "secrets and variables read from OpenVault", Jobs: fromVault,
+			Have:   "not read: this device's vault holds collection " + strings.Join(v.Held, ", "),
+			Config: []Change{{What: ChangeOpenVault, Line: "[secrets] openvault = true"}}})
+	case !v.On && v.Installed && !v.Here && len(lacking) > 0:
+		out = append(out, joinItem(lacking, true))
+	case !v.On && v.Here && !v.Answers && len(lacking) > 0:
+		out = append(out, serviceItem(lacking, true))
+	}
+
+	var repos []string
+	byRepo := map[string][]Job{}
+	for _, j := range jobs {
+		if len(j.Secrets)+len(j.Vars) == 0 {
 			continue
 		}
-		id := itemSecrets + j.Repo
-		i := slices.IndexFunc(out, func(it Item) bool { return it.ID == id })
-		if i < 0 {
-			out = append(out, Item{ID: id, Title: j.Repo + "'s secrets set here"})
-			i = len(out) - 1
+		if _, ok := byRepo[j.Repo]; !ok {
+			repos = append(repos, j.Repo)
 		}
-		for _, name := range j.Secrets {
-			argv := []string{"latem", "secrets", "set", "--repo", j.Repo, name}
-			label := name
-			if j.Env != "" {
-				// A job in an environment reads the environment's value
-				// first, and that is the one to set.
-				argv = []string{"latem", "secrets", "set", "--repo", j.Repo, "--env", j.Env, name}
-				label = name + " (" + j.Env + ")"
-			}
-			if !slices.Contains(out[i].Secrets, label) {
-				out[i].Yours = append(out[i].Yours, argv)
-				out[i].Secrets = append(out[i].Secrets, label)
-			}
-		}
-		if !slices.Contains(out[i].Jobs, j.Ref) {
-			out[i].Jobs = append(out[i].Jobs, j.Ref)
-		}
+		byRepo[j.Repo] = append(byRepo[j.Repo], j)
 	}
-	for i := range out {
-		out[i].Have = fmt.Sprintf("%d not set", len(out[i].Yours))
+	for _, repo := range repos {
+		if v.reads() && !slices.Contains(v.Held, repo) {
+			out = append(out, collectionItem(repo, byRepo[repo], v.Device))
+			continue
+		}
+		if it, ok := namesItem(repo, byRepo[repo], v, false); ok {
+			out = append(out, it)
+		}
+		if it, ok := namesItem(repo, byRepo[repo], v, true); ok {
+			out = append(out, it)
+		}
 	}
 	return out
+}
+
+// joinItem is a device not in the vault: the person's, here and on a device
+// already in it. Soft when the machine does not read the vault, where it is
+// one way of several.
+func joinItem(jobs []string, soft bool) Item {
+	return Item{ID: itemOpenVaultJoin, Title: "this device in OpenVault", Have: "no vault on this device",
+		Jobs: jobs, Soft: soft,
+		Yours: [][]string{{"openvault", "join"}},
+		Manual: []string{"then approve it on a device already in the vault: `openvault approve`, " +
+			"with --read for each repository's collection this machine builds"}}
+}
+
+// serviceItem is a service that does not answer. latem runs its install,
+// which needs no sudo (OpenVault 0.2.2 and later).
+func serviceItem(jobs []string, soft bool) Item {
+	return Item{ID: itemOpenVaultService, Title: "OpenVault's service answering", Have: "it does not answer",
+		Jobs: jobs, Soft: soft,
+		Run: [][]string{{"openvault", "service", "install"}},
+		Manual: []string{"it refuses a key that opens with a passphrase, which nobody would be there to type: " +
+			"`openvault keys passphrase --remove`, or start `openvault service` by hand after each reboot"}}
+}
+
+// collectionItem is a repository this device holds no collection for: the
+// person's, on an admin device, which every one of its names waits on.
+func collectionItem(repo string, jobs []Job, device string) Item {
+	if device == "" {
+		device = "<this device>"
+	}
+	it := Item{ID: itemCollection + repo, Title: repo + "'s collection in OpenVault on this device",
+		Yours: [][]string{{"openvault", "scope", device, repo, "read"}},
+		Manual: []string{"on an admin device of the vault, not this one; if the vault has no collection " + repo +
+			" yet, `openvault collections create " + repo + "` there first, then `openvault set` each name"}}
+	for _, j := range jobs {
+		it.Secrets = mergeLabels(it.Secrets, j.Secrets, j.Env)
+		it.Vars = mergeLabels(it.Vars, j.Vars, j.Env)
+		if !slices.Contains(it.Jobs, j.Ref) {
+			it.Jobs = append(it.Jobs, j.Ref)
+		}
+	}
+	it.Have = fmt.Sprintf("none here; %d not set", len(it.Secrets)+len(it.Vars))
+	return it
+}
+
+// namesItem is a repository's secrets, or with vars its variables, that no
+// store here holds, each with the command that sets it where it will be read:
+// the vault when the machine reads it, and otherwise this machine.
+func namesItem(repo string, jobs []Job, v Vault, vars bool) (Item, bool) {
+	it := Item{ID: itemSecrets + repo, Title: repo + "'s secrets set here"}
+	if vars {
+		it = Item{ID: itemVars + repo, Title: repo + "'s variables set here"}
+	}
+	vaulted := v.reads()
+	for _, j := range jobs {
+		names := j.Secrets
+		if vars {
+			names = j.Vars
+		}
+		for _, name := range names {
+			label := name
+			if j.Env != "" {
+				label = name + " (" + j.Env + ")"
+			}
+			have := it.Secrets
+			if vars {
+				have = it.Vars
+			}
+			if slices.Contains(have, label) {
+				continue
+			}
+			it.Yours = append(it.Yours, setArgv(repo, j.Env, name, vaulted, vars))
+			if vars {
+				it.Vars = append(it.Vars, label)
+			} else {
+				it.Secrets = append(it.Secrets, label)
+			}
+		}
+		if len(names) > 0 && !slices.Contains(it.Jobs, j.Ref) {
+			it.Jobs = append(it.Jobs, j.Ref)
+		}
+	}
+	if len(it.Yours) == 0 {
+		return Item{}, false
+	}
+	it.Have = fmt.Sprintf("%d not set", len(it.Yours))
+	switch {
+	case vaulted:
+		it.Manual = []string{"on a device that may write collection " + repo + ", each value on stdin; " +
+			"it reaches this machine when the vault syncs"}
+	case !v.Installed:
+		it.Manual = []string{"or keep them in OpenVault, one copy every machine reads: " +
+			"docs/secrets.md, \"From OpenVault\""}
+	}
+	return it, true
+}
+
+// setArgv is the command that sets one name where a job of repo in env reads
+// it first: the environment's own when the job has one.
+func setArgv(repo, env, name string, vaulted, vars bool) []string {
+	switch {
+	case vaulted:
+		entry := repo + "/" + name
+		if env != "" {
+			entry = repo + "/" + env + "/" + name
+		}
+		kind := "--secret"
+		if vars {
+			kind = "--var"
+		}
+		return []string{"openvault", "set", entry, kind}
+	case vars:
+		argv := []string{"latem", "vars", "set", "--repo", repo}
+		if env != "" {
+			argv = append(argv, "--env", env)
+		}
+		return append(argv, name, "<value>")
+	}
+	argv := []string{"latem", "secrets", "set", "--repo", repo}
+	if env != "" {
+		argv = append(argv, "--env", env)
+	}
+	return append(argv, name)
+}
+
+func mergeLabels(into, names []string, env string) []string {
+	for _, n := range names {
+		if env != "" {
+			n += " (" + env + ")"
+		}
+		if !slices.Contains(into, n) {
+			into = append(into, n)
+		}
+	}
+	return into
 }
 
 func imageItems(d definition, r *Runner, images []Image) []Item {

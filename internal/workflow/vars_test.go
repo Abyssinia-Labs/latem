@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"errors"
+	"io/fs"
 	"slices"
 	"strings"
 	"testing"
@@ -128,4 +129,74 @@ jobs:
 	if job.Steps[0].Env["GHA_EXPR_1"] != "eu" {
 		t.Errorf("vars.REGION = %q", job.Steps[0].Env["GHA_EXPR_1"])
 	}
+}
+
+// A97: the variables a job reads are named from everything it is compiled
+// from: its conditions, its steps, its workflow's env, and a called job's
+// caller.
+func TestJobVarReads_NamesWhatAJobReadsAndNothingElse(t *testing.T) {
+	files := fleetFS(map[string]string{
+		"ci.yml": `
+on: [push]
+env:
+  STAGE: ${{ vars.STAGE }}
+jobs:
+  test:
+    if: vars.LATEM == 'true'
+    runs-on: [linux]
+    steps:
+      - run: echo ${{ vars.REGION }}
+      - if: ${{ vars.DEPLOY == 'yes' }}
+        run: ./deploy.sh
+  other:
+    runs-on: [linux]
+    steps:
+      - run: echo ${{ vars.ONLY_OTHER }}
+  call:
+    uses: ./.github/workflows/called.yml
+    with:
+      channel: ${{ vars.CHANNEL }}
+  dynamic:
+    runs-on: [linux]
+    steps:
+      - run: echo ${{ vars[github.job] }}
+`,
+		"called.yml": `
+on:
+  workflow_call:
+    inputs:
+      channel: {type: string}
+jobs:
+  publish:
+    runs-on: [linux]
+    steps:
+      - run: echo ${{ vars.PUBLISH_TOKEN_NAME }}
+`,
+	})
+	w, err := Parse([]byte(mustRead(t, files, Dir+"/ci.yml")), Dir+"/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for job, want := range map[string][]string{
+		"test":         {"DEPLOY", "LATEM", "REGION", "STAGE"},
+		"other":        {"ONLY_OTHER", "STAGE"},
+		"call/publish": {"CHANNEL", "PUBLISH_TOKEN_NAME"},
+	} {
+		got, computed := JobVarReads(files, w, job)
+		if !slices.Equal(got, want) || computed {
+			t.Errorf("%s: %v (computed %v), want %v", job, got, computed, want)
+		}
+	}
+	if _, computed := JobVarReads(files, w, "dynamic"); !computed {
+		t.Error("vars[github.job] names no variable a list could hold")
+	}
+}
+
+func mustRead(t *testing.T, fsys fs.FS, name string) string {
+	t.Helper()
+	b, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

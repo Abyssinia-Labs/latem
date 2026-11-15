@@ -32,15 +32,17 @@ const (
 	ovCollections byte = 0x01
 	ovGet         byte = 0x03
 	ovList        byte = 0x06
+	ovDevices     byte = 0x08
 	ovReadChunk   byte = 0x1a
 	ovFetch       byte = 0x1c
 
-	ovNames   byte = 0x81
-	ovEntry   byte = 0x82
-	ovListing byte = 0x84
-	ovChunk   byte = 0x95
-	ovFetched byte = 0x97
-	ovError   byte = 0x7f
+	ovNames      byte = 0x81
+	ovEntry      byte = 0x82
+	ovListing    byte = 0x84
+	ovDeviceList byte = 0x86
+	ovChunk      byte = 0x95
+	ovFetched    byte = 0x97
+	ovError      byte = 0x7f
 
 	ovSecret byte = 0x01
 	ovVar    byte = 0x02
@@ -66,6 +68,18 @@ const openVaultMaxEntry = 512
 // [ErrNotFound] too, because the chain goes on to the next store, and it is
 // separate so that doctor can say which machine lacks which collection.
 var ErrNoCollection = fmt.Errorf("no collection on this machine: %w", ErrNotFound)
+
+// OpenVaultHere reports whether this device holds a vault, for environ: a
+// vault.db in OpenVault's directory, beside its socket. It reads no key and
+// opens nothing.
+func OpenVaultHere(environ []string) bool {
+	socket, err := OpenVaultSocket(environ)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(filepath.Dir(socket), "vault.db"))
+	return err == nil
+}
 
 // OpenVaultSocket returns the OpenVault service's socket for environ, which is
 // os.Environ's form: $OPENVAULT_HOME/service.sock, else
@@ -691,6 +705,8 @@ func ovOpName(typ byte) string {
 		return "read chunk"
 	case ovFetch:
 		return "fetch"
+	case ovDevices:
+		return "devices"
 	}
 	return fmt.Sprintf("0x%02x", typ)
 }

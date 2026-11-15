@@ -19,6 +19,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 )
@@ -52,6 +53,8 @@ type toolchainDeps struct {
 	host func() system.Host
 	// stores are where this machine's secrets are, read for their names.
 	stores func(config.Paths) (secretStores, error)
+	// vaultHere reports whether this device holds an OpenVault vault (A97).
+	vaultHere func() bool
 }
 
 func realToolchainDeps() toolchainDeps {
@@ -74,6 +77,7 @@ func realToolchainDeps() toolchainDeps {
 		brewOwner: brewOwner,
 		host:      sys.Host,
 		stores:    func(p config.Paths) (secretStores, error) { return newSecretStores(p) },
+		vaultHere: func() bool { return secrets.OpenVaultHere(os.Environ()) },
 	}
 }
 

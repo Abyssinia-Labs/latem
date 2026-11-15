@@ -181,6 +181,35 @@ or the answer was no. What came after it was not tried. An id the plan does
 not have is exit `2`, and the message lists the ids there are (RUNNER_SPEC
 A94).
 
+**A secret or a variable no store here holds is closed where it will be
+read** (A97). Setup looks at OpenVault first, and the item names the step in
+the way:
+
+| Item | When | Whose |
+|---|---|---|
+| `openvault-on` | a vault here answers and holds one of this machine's repositories, and `config.toml` does not read it | latem's: writes `[secrets] openvault = true`, and the agent restarts for it |
+| `openvault-service` | the config reads OpenVault and its service does not answer | latem's: runs `openvault service install` |
+| `openvault-join` | the config reads OpenVault and this device has no vault | the person's: `openvault join` here, then `openvault approve` on a device already in it |
+| `openvault-collection-R` | this device holds no collection `R` | the person's, on an admin device: `openvault scope <this device> R read` |
+| `secrets-R`, `vars-R` | the collection lacks a name a job reads | the person's, on a device that may write `R`: `openvault set R/E/NAME --secret`, or `--var` |
+| `secrets-R`, `vars-R` | no OpenVault on this machine | the person's: `latem secrets set`, or `latem vars set` |
+
+```console
+$ latem setup apply openvault-on
+openvault-on: wrote [secrets] openvault = true; closed
+The agent restarted with it.
+$ latem setup apply openvault-collection-tsedal
+openvault-collection-tsedal: a person's to type; latem never runs sudo, accepts a licence or sets a secret's value:
+  openvault scope Mini tsedal read
+  on an admin device of the vault, not this one; …
+```
+
+Until the service answers, the names it might hold cannot be said, so a
+service down or a device not joined is the one item, and the next plan says
+what is left. On a machine that does not read the vault yet, joining it or
+starting its service is shown beside `latem secrets set`, as soft: either
+closes the gap.
+
 ## `latem result`: what broke, and where
 
 **`latem result <run-id>` prints how the run went**, step by step, and the

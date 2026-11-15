@@ -13,6 +13,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
@@ -31,11 +32,18 @@ type fakeMachine struct {
 	brewOwner string
 	// notInstalled are programs lookPath does not find.
 	notInstalled map[string]bool
+	// vault is OpenVault's service, and vaultHere a vault on this device
+	// (A97); then is what a successful install changes, by command line.
+	vault     *fakeOpenVault
+	vaultHere bool
+	then      map[string]func()
 }
 
 func newFakeMachine() *fakeMachine {
+	// No OpenVault unless a test gives it one (A97): the machine running the
+	// suite may well have it, and its answer is not this machine's.
 	return &fakeMachine{dirs: map[string]string{}, absent: map[string]bool{}, gives: map[string][2]string{},
-		notInstalled: map[string]bool{}}
+		notInstalled: map[string]bool{"openvault": true}}
 }
 
 func (m *fakeMachine) deps() toolchainDeps {
@@ -59,6 +67,9 @@ func (m *fakeMachine) deps() toolchainDeps {
 				return errors.New("exit status 1")
 			}
 			m.dirs[got[0]] = got[1]
+			if f := m.then[line]; f != nil {
+				f()
+			}
 			printf(w, "    (installed %s)\n", got[0])
 			return nil
 		},
@@ -71,8 +82,14 @@ func (m *fakeMachine) deps() toolchainDeps {
 		brewOwner: func(string) (string, bool) {
 			return m.brewOwner, m.brewOwner == ""
 		},
-		host:   func() system.Host { return system.Host{OS: "macOS", Arch: "arm64"} },
-		stores: func(config.Paths) (secretStores, error) { return secretStores{}, nil },
+		host: func() system.Host { return system.Host{OS: "macOS", Arch: "arm64"} },
+		stores: func(p config.Paths) (secretStores, error) {
+			if m.vault == nil {
+				return secretStores{}, nil
+			}
+			return secretStores{file: secrets.NewFileStore(p.SecretsEnv), openvault: m.vault}, nil
+		},
+		vaultHere: func() bool { return m.vaultHere },
 	}
 }
 

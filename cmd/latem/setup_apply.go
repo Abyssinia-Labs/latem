@@ -352,9 +352,19 @@ func (a *applier) person(id string, at []found) {
 			}
 		}
 	}
+	where := ", on this machine"
+	for _, f := range at {
+		for _, argv := range f.item.Yours {
+			// What OpenVault's admin or a writer of the collection types is
+			// typed on that device, which the item's words name (A97).
+			if len(argv) > 1 && argv[0] == "openvault" && (argv[1] == "scope" || argv[1] == "set") {
+				where = ""
+			}
+		}
+	}
 	switch {
 	case len(lines) > 0:
-		printf(a.w, "%s: a person's to type, on this machine; latem never runs sudo, accepts a licence or sets a secret's value:\n", id)
+		printf(a.w, "%s: a person's to type%s; latem never runs sudo, accepts a licence or sets a secret's value:\n", id, where)
 	case len(words) > 0:
 		printf(a.w, "%s: a person's to do:\n", id)
 	default:
