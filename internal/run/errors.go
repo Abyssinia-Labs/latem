@@ -93,9 +93,17 @@ func fromDecision(d registry.Decision) outcome {
 func secretOutcome(err error) outcome {
 	code := protocol.ErrMissingSecret
 
-	var ce *secrets.CommandError
+	var (
+		ce  *secrets.CommandError
+		ove *secrets.OpenVaultError
+	)
 	switch {
 	case errors.As(err, &ce) && !ce.NotInstalled():
+		code = protocol.ErrSecretBackend
+	case errors.As(err, &ove):
+		// A service that is not running, the common case after a reboot
+		// on a machine whose key has a passphrase (A86): retried, like a
+		// locked Keychain, and not the secret someone forgot to set.
 		code = protocol.ErrSecretBackend
 	case errors.Is(err, fs.ErrPermission):
 		// secrets.env with the wrong mode: §15 names it as a backend fault.
