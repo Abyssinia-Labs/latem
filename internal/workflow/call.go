@@ -815,7 +815,7 @@ type calledJob struct {
 func resolveCall(fsys fs.FS, w *Workflow, jobPath string, sc expr.Scope, opts Options) (*calledJob, error) {
 	raw, _ := sc.Contexts["needs"].(map[string]any)
 	if opts.Vars != nil {
-		sc = withContext(sc, "vars", stringsToAny(opts.Vars("")))
+		sc = withVars(sc, opts.Vars, "")
 	}
 	segs := strings.Split(jobPath, "/")
 	if len(segs)-1 > protocol.MaxCallDepth {

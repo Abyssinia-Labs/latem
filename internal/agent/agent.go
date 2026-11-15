@@ -77,6 +77,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
+	"github.com/Abyssinia-Labs/latem/internal/repovars"
 	"github.com/Abyssinia-Labs/latem/internal/run"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
@@ -182,6 +183,10 @@ type Options struct {
 	// from config. A test supplies its own so no real credential store is
 	// touched.
 	Secrets secrets.Provider
+	// Vault overrides OpenVault as a workflow job's variables are read from
+	// it (A96), used only when the config says `[secrets] openvault = true`.
+	// Nil reads the service's own socket.
+	Vault repovars.Vault
 
 	// Releases is the source §20's self-update reads. Nil builds the real one
 	// from the embedded trusted key; a test supplies one that needs no
@@ -227,6 +232,7 @@ type Options struct {
 	PreflightInterval   time.Duration
 	MaintenanceInterval time.Duration
 	ToolchainsInterval  time.Duration
+	VarsInterval        time.Duration
 	WatchInterval       time.Duration
 	ClaimInterval       time.Duration
 	SlotWait            time.Duration
@@ -338,6 +344,16 @@ type Agent struct {
 	// machine is what MeasureMachine last found (A63).
 	machine atomic.Pointer[capacity.Machine]
 
+	// vault is OpenVault, read for variables (A96); nil unless the config
+	// the agent started with says `[secrets] openvault = true`, which, like
+	// every [secrets] change, takes a restart.
+	vault repovars.Vault
+	// vaultVars is the vault's part of the heartbeat's digests, as varsLoop
+	// last read it, every varsEvery or when rereadVars rings.
+	vaultVars  vaultDigests
+	varsEvery  time.Duration
+	rereadVars chan struct{}
+
 	mu sync.Mutex
 	// activeRepos maps a live run id to its repo key, so the cache pruner can
 	// answer "is a live run reading this mirror" without a database round trip
@@ -382,6 +398,8 @@ func New(opts Options) (*Agent, error) {
 		maintenanceEvery: orDuration(opts.MaintenanceInterval, DefaultMaintenanceInterval),
 		toolchainsEvery:  orDuration(opts.ToolchainsInterval, DefaultToolchainsInterval),
 		reprobe:          make(chan struct{}, 1),
+		varsEvery:        orDuration(opts.VarsInterval, DefaultVarsInterval),
+		rereadVars:       make(chan struct{}, 1),
 		watchEvery:       orDuration(opts.WatchInterval, DefaultWatchInterval),
 		claimEvery:       orDuration(opts.ClaimInterval, DefaultClaimInterval),
 		updateEvery:      orDuration(opts.UpdateInterval, DefaultUpdateInterval),
@@ -442,6 +460,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.spawn(&wg, func() { a.preflightLoop(workCtx) })
 	a.spawn(&wg, func() { a.maintenanceLoop(workCtx) })
 	a.spawn(&wg, func() { a.toolchainsLoop(workCtx) })
+	a.spawn(&wg, func() { a.varsLoop(workCtx) })
 	a.spawn(&wg, func() { a.watchLoop(workCtx) })
 	a.spawn(&wg, func() { a.updateLoop(workCtx) })
 	a.spawn(&wg, func() { a.homebrewLoop(workCtx) })
@@ -734,7 +753,7 @@ func (a *Agent) health(ctx context.Context) protocol.MachineHealth {
 	cfg := a.current()
 	repos := cfg.Repos
 	for _, key := range slices.Sorted(maps.Keys(repos)) {
-		info := protocol.RepoInfo{Key: key, Vars: varDigests(repos[key].VarsFor(""))}
+		info := protocol.RepoInfo{Key: key, Vars: a.heartbeatVars(key, repos[key])}
 		if slug, ok := repos[key].GitHubRepository(); ok {
 			info.GitHub = slug
 		}

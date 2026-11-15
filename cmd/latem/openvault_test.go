@@ -14,7 +14,28 @@ import (
 // machine holds, and the scoped names in each.
 type fakeOpenVault struct {
 	names map[string][]string // collection -> scoped names, as secrets.OpenVaultProvider.Names gives them
-	err   error
+	// vars is each collection's variables (A96). A collection in names and
+	// not here holds none.
+	vars map[string]secrets.Variables
+	err  error
+}
+
+func (f *fakeOpenVault) Variables(_ context.Context, collection string, envs func(string) bool) (secrets.Variables, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	_, held := f.names[collection]
+	v, ok := f.vars[collection]
+	if !held && !ok {
+		return nil, secrets.ErrNoCollection
+	}
+	out := secrets.Variables{}
+	for env, m := range v {
+		if envs == nil || envs(env) {
+			out[env] = m
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeOpenVault) Collections(context.Context) ([]string, error) {

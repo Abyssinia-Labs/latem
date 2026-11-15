@@ -226,8 +226,8 @@ func (x *execution) artifactsFrom() []string {
 	defer func() { _ = root.Close() }()
 	slug, _ := x.githubRepository()
 	opts := workflow.PlanOptions{Repository: slug, LabelAliases: x.o.labelAliases()}
-	if vars := x.repoVars(); vars != nil {
-		opts.Vars = vars("")
+	if x.vars != nil {
+		opts.Vars = x.vars.plan
 	}
 	from, err := workflow.ArtifactsFrom(root.FS(), x.req.Workflow, x.req.Job, *x.req.Event, opts)
 	if err != nil {

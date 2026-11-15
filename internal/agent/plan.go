@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/repovars"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -94,9 +97,17 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, peer pla
 	}
 	ev := req.Event
 	workflows, err := workflow.PlanEvent(fsys, ev, workflow.PlanOptions{
-		Repository:        slug,
-		LabelAliases:      cfg.LabelAliases,
-		Vars:              repoCfg.VarsFor(""),
+		Repository:   slug,
+		LabelAliases: cfg.LabelAliases,
+		Vars: func() (map[string]string, error) {
+			// The repository's own, from the vault and config.toml as a run
+			// reads them (A96), when an expression first reads one.
+			set, err := repovars.ReadWhere(ctx, a.vault, req.Repo, repoCfg, ownVars)
+			if err != nil {
+				return nil, err
+			}
+			return set.For(""), nil
+		},
 		NoCalls:           !peer.calls,
 		NoPlacedArtifacts: !peer.artifacts,
 		Changed: func() ([]string, error) {
@@ -111,6 +122,12 @@ func (a *Agent) makePlan(ctx context.Context, req protocol.PlanRequest, peer pla
 		},
 	})
 	if err != nil {
+		// A variable the plan reads and the vault could not give: a backend
+		// down, not a workflow that is wrong (A96).
+		var ove *secrets.OpenVaultError
+		if errors.As(err, &ove) {
+			return fail(protocol.ErrSecretBackend, err)
+		}
 		return fail(codeOr(registry.CodeOf(err), protocol.ErrBadRegistry), err)
 	}
 	if peer.requires {

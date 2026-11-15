@@ -236,7 +236,7 @@ jobs:
     steps:
       - run: echo ${{ vars.READY }}
 `)
-	opts := Options{Vars: vars}
+	opts := Options{Vars: StaticVars(vars)}
 
 	plain, err := CompileWith(t.Context(), w, "plain", testScope(), opts)
 	if err != nil {

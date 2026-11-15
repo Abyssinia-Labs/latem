@@ -111,7 +111,7 @@ var jobContexts = map[string]bool{"github": true, "needs": true, "vars": true, "
 // against sc, with the repository's variables in it: a job this machine's
 // variables keep off it, whatever else it needs. An if: that cannot be read
 // stops nothing here, because the compile that reaches it will say why.
-func VarsStopJob(w *Workflow, jobName string, sc expr.Scope, vars func(string) map[string]string) bool {
+func VarsStopJob(w *Workflow, jobName string, sc expr.Scope, vars func(string) (map[string]string, error)) bool {
 	declared, ok := w.Jobs[jobName]
 	if !ok || strings.TrimSpace(declared.If) == "" {
 		return false
@@ -124,7 +124,7 @@ func VarsStopJob(w *Workflow, jobName string, sc expr.Scope, vars func(string) m
 		return false
 	}
 	if vars != nil {
-		sc = withContext(sc, "vars", stringsToAny(vars("")))
+		sc = withVars(sc, vars, "")
 	}
 	if sc, err = typedInputs(w, sc); err != nil {
 		return false

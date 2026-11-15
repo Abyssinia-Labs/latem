@@ -175,7 +175,11 @@ func runTry(cmd *cobra.Command, job string, f tryFlags) error {
 
 	actor := currentActor()
 	ev := tryEvent(target.slug, f.event, file, ref, tc, inputs, actor)
-	opts := workflow.PlanOptions{Repository: target.slug, LabelAliases: cfg.LabelAliases, Vars: target.repo.VarsFor("")}
+	opts := workflow.PlanOptions{Repository: target.slug, LabelAliases: cfg.LabelAliases,
+		Vars: func() (map[string]string, error) {
+			set, err := readRepoVars(ctx, cfg, target.repoKey)
+			return set.For(""), err
+		}}
 	pw, err := workflow.PlanFile(fsys, file, ev, opts)
 	if err != nil {
 		return fmt.Errorf("planning %s: %w", file, err)
@@ -490,11 +494,19 @@ func precheckTry(
 	if parsed.err != nil {
 		return "", parsed.err
 	}
+	// The plan already read the variables when it needed them, and a vault
+	// that did not answer then stopped it; this is the same answer.
+	vars, varsErr := repoVarsIn(ctx, cfg, stores, t)
 	rep := checkReport{aliases: map[string][]string{}}
-	jr := checkJob(ctx, cfg, t, inv, fetcher, fsys, parsed, &plannedFile{pw: pw, ev: ev, all: []protocol.Event{ev}}, pj, &rep)
+	jr := checkJob(ctx, cfg, t, inv, vars, fetcher, fsys, parsed, &plannedFile{pw: pw, ev: ev, all: []protocol.Event{ev}}, pj, &rep)
 	st := newStyler(w)
 	for _, f := range jr.findings {
 		printFinding(w, st, "", f)
+	}
+	if varsErr != nil {
+		printFinding(w, st, "", finding{level: levelWarn,
+			text:  fmt.Sprintf("%v; a job that reads vars fails until it answers", varsErr),
+			fixes: []string{"openvault service install"}})
 	}
 	if len(pj.ArtifactsFrom) > 0 && jr.level() != levelFail {
 		// A84: a try is one job, and its needs did not run.

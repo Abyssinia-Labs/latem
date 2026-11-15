@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/repovars"
 )
 
 func newVarsCommand() *cobra.Command {
@@ -23,13 +25,55 @@ and a job in an environment from [repos.<key>.environments.<env>.vars] over
 them (A50). Variables are not secrets: they may appear in a compiled job and
 in its log. For anything that may not, use ` + "`latem secrets`" + `.
 
-These commands edit those tables as text, keeping the rest of config.toml as
-it was, then ask the running agent to reload.`,
+With [secrets] openvault = true, OpenVault comes first (A96): a variable
+entry of collection <key>, <env>/NAME for an environment and NAME for the
+repository, each before config.toml's in its scope. ` + "`openvault set`" + `
+<key>/<env>/NAME --var writes one there, and list shows which answers.
+
+set and rm edit config.toml as text, keeping the rest of it as it was, then
+ask the running agent to reload. latem never writes to OpenVault.`,
 		Args: noArgs,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
 	cmd.AddCommand(newVarsSetCommand(), newVarsListCommand(), newVarsRmCommand())
 	return cmd
+}
+
+// readRepoVars is repository key's variables as a run reads them (A96):
+// OpenVault's first, when the config reads it, then config.toml's. A vault
+// that does not answer is the error, with config.toml's alone in the set.
+func readRepoVars(ctx context.Context, cfg *config.Config, key string) (repovars.Set, error) {
+	stores, err := varStores(cfg)
+	if err != nil {
+		return repovars.Of(cfg.Repos[key], nil), err
+	}
+	return repoVarsIn(ctx, cfg, stores, checkTarget{repoKey: key, repo: cfg.Repos[key]})
+}
+
+// varStores are the stores variables are read from: none but config.toml's
+// unless the config reads OpenVault.
+func varStores(cfg *config.Config) (secretStores, error) {
+	if !cfg.Secrets.OpenVault {
+		return secretStores{}, nil
+	}
+	return newSecretStores(cfg.Paths)
+}
+
+// repoVarsIn is [readRepoVars] from stores already made, for a check target,
+// which may be a checkout this machine has no [repos.*] entry for.
+func repoVarsIn(ctx context.Context, cfg *config.Config, stores secretStores, t checkTarget) (repovars.Set, error) {
+	if t.repo == nil {
+		return repovars.Of(nil, nil), nil
+	}
+	var vault repovars.Vault
+	if cfg.Secrets.OpenVault && stores.openvault != nil {
+		vault = stores.openvault
+	}
+	set, err := repovars.Read(ctx, vault, t.repoKey, t.repo)
+	if err != nil {
+		return repovars.Of(t.repo, nil), err
+	}
+	return set, nil
 }
 
 // varName is GitHub's rule for a variable's name, which internal/config
@@ -91,6 +135,9 @@ func newVarsSetCommand() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			printf(out, "set vars.%s for %s\n", name, sc)
+			if shadow := openVaultVarShadow(cmd.Context(), sc, name); shadow != "" {
+				printf(out, "\n%s\n", shadow)
+			}
 			if warning != "" {
 				printf(out, "\n%s\n", warning)
 			}
@@ -118,37 +165,83 @@ func newVarsListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			stores, err := varStores(cfg)
+			if err != nil {
+				return err
+			}
 			var rows [][]string
 			for _, key := range slices.Sorted(maps.Keys(cfg.Repos)) {
 				if sc.repo != "" && key != sc.repo {
 					continue
 				}
-				r := cfg.Repos[key]
-				if sc.env == "" {
-					for _, n := range slices.Sorted(maps.Keys(r.Vars)) {
-						rows = append(rows, []string{key, "-", n, r.Vars[n]})
-					}
+				set, err := repoVarsIn(cmd.Context(), cfg, stores, checkTarget{repoKey: key, repo: cfg.Repos[key]})
+				if err != nil {
+					// config.toml's are still listed: they are this machine's
+					// own, and the vault's are what a job would fail on now.
+					printf(cmd.ErrOrStderr(), "%v — OpenVault's variables are not listed, and a job that reads one fails until it answers\n", err)
 				}
-				for _, env := range slices.Sorted(maps.Keys(r.Environments)) {
-					if sc.env != "" && env != sc.env {
+				for _, v := range set.List() {
+					if sc.env != "" && v.Env != sc.env {
 						continue
 					}
-					vars := r.Environments[env].Vars
-					for _, n := range slices.Sorted(maps.Keys(vars)) {
-						rows = append(rows, []string{key, env, n, vars[n]})
+					row := []string{key, orDash(v.Env), v.Name, v.Value}
+					if cfg.Secrets.OpenVault {
+						row = append(row, sourcesText(v.Sources))
 					}
+					rows = append(rows, row)
 				}
 			}
 			if len(rows) == 0 {
 				printf(cmd.ErrOrStderr(), "no variables set for %s — `latem vars set --repo R NAME VALUE` sets one\n", sc)
 				return nil
 			}
-			printTable(cmd.OutOrStdout(), []string{"REPO", "ENVIRONMENT", "NAME", "VALUE"}, rows)
+			header := []string{"REPO", "ENVIRONMENT", "NAME", "VALUE"}
+			if cfg.Secrets.OpenVault {
+				// Which store a job reads it from, only where there are two.
+				header = append(header, "SOURCE")
+			}
+			printTable(cmd.OutOrStdout(), header, rows)
 			return nil
 		},
 	}
 	scope.register(cmd)
 	return cmd
+}
+
+// sourcesText is where a variable is held, the one a job reads first named
+// when there are two: "openvault, config.toml (openvault answers)".
+func sourcesText(sources []string) string {
+	if len(sources) < 2 {
+		return strings.Join(sources, ", ")
+	}
+	return strings.Join(sources, ", ") + " (" + sources[0] + " answers)"
+}
+
+// openVaultVarShadow says when OpenVault holds the variable just set in
+// config.toml, in the same scope: a job reads the vault's first (A96), so
+// the value written is read only once the vault no longer holds one. Names
+// only are compared.
+func openVaultVarShadow(ctx context.Context, sc secretScope, name string) string {
+	cfg, err := loadConfig()
+	if err != nil || !cfg.Secrets.OpenVault {
+		return ""
+	}
+	set, err := readRepoVars(ctx, cfg, sc.repo)
+	if err != nil {
+		return ""
+	}
+	for _, v := range set.List() {
+		if v.Env == sc.env && v.Name == name && len(v.Sources) > 0 && v.Sources[0] == repovars.FromOpenVault {
+			where := sc.repo + "/" + name
+			if sc.env != "" {
+				where = sc.repo + "/" + sc.env + "/" + name
+			}
+			return fmt.Sprintf("warning: OpenVault holds %s, and a job reads it before config.toml's; "+
+				"this value is read only once the vault holds none (`openvault set %s --var` changes the vault's)",
+				where, where)
+		}
+	}
+	return ""
 }
 
 func newVarsRmCommand() *cobra.Command {

@@ -186,7 +186,7 @@ func TestPlanCalls(t *testing.T) {
 	// they run, so the variables they read place them (A68).
 	files := maps.Clone(calls)
 	files["deploy.yml"] = strings.Replace(files["deploy.yml"], "channel: production", "channel: ${{ vars.CHANNEL }}", 1)
-	for _, pj := range dispatchDeploy(t, files, PlanOptions{Vars: map[string]string{"CHANNEL": "staging"}}) {
+	for _, pj := range dispatchDeploy(t, files, PlanOptions{Vars: planVars(map[string]string{"CHANNEL": "staging"})}) {
 		if strings.HasPrefix(pj.Key, "cli/") && !slices.Contains(pj.ReadsVars, "CHANNEL") {
 			t.Errorf("%s reads vars %v, not CHANNEL", pj.Key, pj.ReadsVars)
 		}

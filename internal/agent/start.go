@@ -272,6 +272,19 @@ func (a *Agent) buildOrchestrator() error {
 		}
 		provider = chain
 	}
+	// The variables' store is the secrets', decided as the chain is, at start
+	// (A96).
+	if a.cfg.Secrets.OpenVault {
+		a.vault = a.opts.Vault
+		if a.vault == nil {
+			socket, err := secrets.OpenVaultSocket(os.Environ())
+			if err != nil {
+				return wrapStartup("openvault", err)
+			}
+			a.vault = secrets.NewOpenVaultProvider(socket, 0)
+		}
+		a.loadVarDigests()
+	}
 
 	runners := make([]run.Runner, 0, len(a.runners))
 	for _, r := range a.runners {
@@ -296,6 +309,7 @@ func (a *Agent) buildOrchestrator() error {
 		AlwaysRedact: a.alwaysRedact(),
 		Source:       run.SourceManager(a.src),
 		Secrets:      provider,
+		Vault:        a.vault,
 		Caches:       a.caches,
 		Artifacts:    artifact.NewCollector(a.cfg.Paths.Artifacts),
 		Runners:      runners,

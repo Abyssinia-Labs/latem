@@ -183,7 +183,7 @@ jobs:
     steps: [{run: "true"}]
 `)
 	sc := runScope(nil, nil)
-	vars := func(string) map[string]string { return map[string]string{"LATEM": "true"} }
+	vars := StaticVars(func(string) map[string]string { return map[string]string{"LATEM": "true"} })
 	for job, want := range map[string]bool{"stopped": true, "running": false, "on-an-event": false, "plain": false, "absent": false} {
 		if got := VarsStopJob(w, job, sc, vars); got != want {
 			t.Errorf("%s: got %v, want %v", job, got, want)

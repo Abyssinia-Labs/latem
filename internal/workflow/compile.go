@@ -102,8 +102,11 @@ type Options struct {
 	// labels are mapped. See [compileLabels].
 	LabelAliases map[string][]string
 	// Vars answers the vars context for a job in an environment (empty for
-	// none), from the repository's config (A50). Nil leaves vars empty.
-	Vars func(environment string) map[string]string
+	// none): OpenVault's and config.toml's (A50, A96). It is asked only when
+	// an expression reads vars, and an error stops that expression, so a job
+	// never reads a variable as empty because its store did not answer. Nil
+	// leaves vars empty.
+	Vars func(environment string) (map[string]string, error)
 	// WorkflowRun compiles a workflow run's job (A52): needs, a job's if:,
 	// outputs: and continue-on-error are then its own to honour, and the
 	// scope carries the needs context they read.
@@ -139,7 +142,7 @@ func CompileWith(
 	// A50: vars are the repository's, then the environment's over them —
 	// so the environment is answered first, against the repository's.
 	if opts.Vars != nil {
-		sc = withContext(sc, "vars", stringsToAny(opts.Vars("")))
+		sc = withVars(sc, opts.Vars, "")
 	}
 	if opts.WorkflowRun {
 		// A dispatch's inputs arrive as strings; the inputs context holds
@@ -174,7 +177,7 @@ func CompileWith(
 		return nil, badRegistry("%s: job %q: environment: %v", w.Path, jobName, err)
 	}
 	if opts.Vars != nil && environment != "" {
-		sc = withContext(sc, "vars", stringsToAny(opts.Vars(environment)))
+		sc = withVars(sc, opts.Vars, environment)
 	}
 
 	// A50: the env context holds the workflow's and the job's env:, which is

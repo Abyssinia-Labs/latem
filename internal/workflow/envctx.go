@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 )
@@ -75,6 +76,40 @@ func withContext(sc expr.Scope, name string, value map[string]any) expr.Scope {
 	out := sc
 	out.Contexts = contexts
 	return out
+}
+
+// withVars is sc with the vars context for environment, worked out when an
+// expression first reads it (A96). Reading them can mean asking OpenVault, a
+// service a job that reads no variable should never wait on, and whose
+// failure has to stop the expression rather than read as empty.
+func withVars(sc expr.Scope, vars func(environment string) (map[string]string, error), environment string) expr.Scope {
+	var (
+		once sync.Once
+		v    map[string]any
+		err  error
+	)
+	contexts := make(map[string]expr.Value, len(sc.Contexts))
+	maps.Copy(contexts, sc.Contexts)
+	contexts["vars"] = expr.Deferred(func() (expr.Value, error) {
+		once.Do(func() {
+			var m map[string]string
+			if m, err = vars(environment); err == nil {
+				v = stringsToAny(m)
+			}
+		})
+		return v, err
+	})
+	out := sc
+	out.Contexts = contexts
+	return out
+}
+
+// StaticVars is a vars context that cannot fail, such as config.toml's alone.
+func StaticVars(vars func(environment string) map[string]string) func(string) (map[string]string, error) {
+	if vars == nil {
+		return nil
+	}
+	return func(environment string) (map[string]string, error) { return vars(environment), nil }
 }
 
 func stringsToAny(m map[string]string) map[string]any {

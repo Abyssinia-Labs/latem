@@ -61,6 +61,8 @@ type execution struct {
 	// runner, for the note that they changed under it (A64).
 	xcodeAtStart *string
 	sec          *secrets.Set
+	// vars reads the job's variables when an expression first does (A96).
+	vars *varsReader
 	// secretPaths is where each secret that is a file was written, in the
 	// job's temporary directory, which ${{ secrets.X }} reads as (A88).
 	secretPaths map[string]string
@@ -374,7 +376,7 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 	// and no other, and .latem/jobs.yaml is not consulted (A52).
 	opts := workflow.Options{
 		Policy: x.o.actionPolicy(), Fetcher: x.o.actionCache(),
-		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(),
+		LabelAliases: x.o.labelAliases(), Vars: x.repoVars(ctx),
 		Matrix: x.req.Matrix, IgnoreJobIf: x.run.IsLocal(),
 	}
 	if x.isWorkflowRun() {
@@ -388,6 +390,11 @@ func (x *execution) acquire(ctx context.Context) (*registry.Registry, registry.D
 		reg, src, err = workflow.ResolveWorkflowJob(ctx, ws.Path, x.req.Workflow, x.req.Job, x.workflowScope(), opts)
 	} else {
 		reg, src, err = workflow.ResolveWith(ctx, ws.Path, x.req.Job, x.workflowScope(), opts)
+	}
+	// Before the compile's own error: a variable that could not be read may
+	// be why it failed, and is the truer account (A96).
+	if verr := x.varsFailed(ctx); verr != nil {
+		return nil, registry.Decision{}, verr
 	}
 	if err != nil {
 		return nil, registry.Decision{}, err

@@ -1,10 +1,15 @@
 package run
 
 import (
+	"context"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
+	"github.com/Abyssinia-Labs/latem/internal/repovars"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 )
 
@@ -132,9 +137,11 @@ func (x *execution) toolCache() string {
 // alone.
 const toolCacheVolumePrefix = "latem-toolcache-"
 
-// repoVars answers the vars context from this repository's config (A50), or
-// nil without one, which leaves vars empty as it was before.
-func (x *execution) repoVars() func(environment string) map[string]string {
+// repoVars answers the vars context from OpenVault and this repository's
+// config (A50, A96), or nil without a config, which leaves vars empty as it
+// was before. The vault is read once, when an expression first reads vars,
+// and what came of it is kept for [execution.varsFailed].
+func (x *execution) repoVars(ctx context.Context) func(environment string) (map[string]string, error) {
 	cfg := x.o.config()
 	if cfg == nil {
 		return nil
@@ -143,5 +150,68 @@ func (x *execution) repoVars() func(environment string) map[string]string {
 	if !ok {
 		return nil
 	}
-	return r.VarsFor
+	if x.vars == nil {
+		var vault repovars.Vault
+		if cfg.Secrets.OpenVault {
+			vault = x.o.vault
+		}
+		key := x.req.Repo
+		x.vars = &varsReader{read: func() (repovars.Set, error) { return repovars.Read(ctx, vault, key, r) }}
+	}
+	return x.vars.For
+}
+
+// varsFailed is why this job's variables could not be read, if an
+// expression read them and they could not be (A96). It is asked once the job
+// is compiled, and wins over whatever the compile made of the failure: a job
+// that reads a variable never runs with it empty, and a store that did not
+// answer is a backend down, retried, not a workflow that is wrong.
+func (x *execution) varsFailed(ctx context.Context) error {
+	if x.vars == nil {
+		return nil
+	}
+	err := x.vars.failed()
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return &secrets.Error{Msg: "this job reads vars, and its variables could not be read", Err: err}
+}
+
+// varsReader reads a job's variables once, on first use (A96).
+type varsReader struct {
+	once sync.Once
+	read func() (repovars.Set, error)
+	set  repovars.Set
+	err  error
+	done atomic.Bool
+}
+
+func (v *varsReader) get() (repovars.Set, error) {
+	v.once.Do(func() {
+		v.set, v.err = v.read()
+		v.done.Store(true)
+	})
+	return v.set, v.err
+}
+
+// For is the vars context of a job in environment.
+func (v *varsReader) For(environment string) (map[string]string, error) {
+	s, err := v.get()
+	if err != nil {
+		return nil, err
+	}
+	return s.For(environment), nil
+}
+
+// plan is the repository's own variables, for a plan.
+func (v *varsReader) plan() (map[string]string, error) { return v.For("") }
+
+func (v *varsReader) failed() error {
+	if !v.done.Load() {
+		return nil
+	}
+	return v.err
 }

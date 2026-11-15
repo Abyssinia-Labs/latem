@@ -776,7 +776,9 @@ not on GitHub has a key and no `github`. Absent on a machine with no repositorie
 
 `repos[].vars` (2.4, A68) is a digest of each of the repository's variables, by
 name as `[repos.<key>.vars]` writes it: the first 8 bytes of the value's SHA-256,
-in hex. An unset variable is an absent name; an environment's are not sent. It
+in hex. On a machine that reads OpenVault it is of the value a job reads, the
+vault's over config.toml's (A96), and while the service does not answer it is
+what was read last. An unset variable is an absent name; an environment's are not sent. It
 tells two machines' answers apart and carries no value. Sent only to a control
 plane that said 2.4, which keeps a machine out of a job it would answer
 differently from the machine that stands for the repository.

@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -359,5 +360,44 @@ func TestContextKeys(t *testing.T) {
 	}
 	if keys, computed := p2.ContextKeys("secrets"); len(keys) != 0 || !computed {
 		t.Errorf("a computed key should be reported as computed: %v, %v", keys, computed)
+	}
+}
+
+// A96: a deferred context is worked out only when an expression reads it,
+// and its failure stops that expression rather than reading as null.
+func TestDeferredContextIsReadOnlyByAnExpressionThatNamesIt(t *testing.T) {
+	asked := 0
+	sc := scope()
+	sc.Contexts["vars"] = Deferred(func() (Value, error) {
+		asked++
+		return map[string]any{"LATEM": "true"}, nil
+	})
+	for _, src := range []string{"github.ref", "env.FOO == 'bar'", "format('{0}', matrix.os)"} {
+		p, err := Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Eval(sc); err != nil {
+			t.Fatalf("Eval(%q): %v", src, err)
+		}
+	}
+	if asked != 0 {
+		t.Fatalf("vars was worked out %d times by expressions that never name it", asked)
+	}
+	p, err := Parse("vars.LATEM == 'true'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := p.Eval(sc); err != nil || v != true {
+		t.Errorf("vars.LATEM == 'true' = %v, %v", v, err)
+	}
+	if asked != 1 {
+		t.Errorf("asked %d times, want 1", asked)
+	}
+
+	down := errors.New("the service is not running")
+	sc.Contexts["vars"] = Deferred(func() (Value, error) { return nil, down })
+	if _, err := p.Eval(sc); !errors.Is(err, down) {
+		t.Errorf("err = %v, want the deferred context's own failure", err)
 	}
 }
