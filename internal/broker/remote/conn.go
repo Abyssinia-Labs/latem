@@ -161,23 +161,34 @@ func (b *Broker) markRevoked(status int) {
 // symptom was a partition costing a full request timeout per outstanding
 // request instead of failing in milliseconds, on exactly the path a partition
 // is most likely to interrupt.
+//
+// Beside the reader runs [Broker.keepalive], which is what notices a link that
+// died without saying so (A98). A reset or a close frame ends the read on its
+// own; a black hole — the far side gone, nothing sent back, not even a reset —
+// leaves the read waiting for ever, and only a deadline ends it.
 func (b *Broker) runSession(ctx context.Context, conn *websocket.Conn) bool {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	b.openSession(conn)
+	live := newLiveness()
+	b.openSession(conn, live)
 	defer b.closeSession(conn)
 
 	readDone := make(chan error, 1)
 	go func() {
-		err := b.readLoop(sctx, conn)
+		err := b.readLoop(sctx, conn, live)
 		b.closeSession(conn)
 		readDone <- err
+	}()
+	kaDone := make(chan struct{})
+	go func() {
+		defer close(kaDone)
+		b.keepalive(sctx, conn, live)
 	}()
 
 	ok := true
 	if err := b.onConnect(sctx); err != nil {
-		if !b.stopping() {
+		if !b.stopping() && !live.givenUp() {
 			b.log.Warn("resuming with the control plane failed", "url", b.url, "err", err)
 		}
 		_ = conn.CloseNow()
@@ -185,7 +196,12 @@ func (b *Broker) runSession(ctx context.Context, conn *websocket.Conn) bool {
 	}
 
 	err := <-readDone
-	if ok && !b.stopping() {
+	cancel()
+	<-kaDone
+	// A connection this side gave up has said why already, in words that name
+	// the deadline; the read's own error would only be "use of closed network
+	// connection".
+	if ok && !b.stopping() && !live.givenUp() {
 		b.log.Warn("control plane connection lost", "url", b.url, "err", err)
 	}
 	return ok
@@ -379,12 +395,20 @@ func (b *Broker) flushSinks(ctx context.Context) {
 }
 
 // readLoop dispatches inbound messages until the connection dies.
-func (b *Broker) readLoop(ctx context.Context, conn *websocket.Conn) error {
+//
+// Every message is heard, whatever it turns out to be: a binary probe or a
+// malformed frame still proves the control plane is at the other end (A98).
+// Pongs are read here too, inside conn.Read, which is why a ping needs this
+// loop running. A dispatch holds the next read until it returns, so a pong
+// that arrives during one is heard late; dispatch is a store write and a
+// reply, and the silence window is two heartbeat intervals.
+func (b *Broker) readLoop(ctx context.Context, conn *websocket.Conn, live *liveness) error {
 	for {
 		typ, data, err := conn.Read(ctx)
 		if err != nil {
 			return err
 		}
+		live.hear()
 		if typ != websocket.MessageText {
 			// The wire is JSON by specification. A binary message is either a
 			// different protocol or a probe, and answering either is worse than
@@ -528,6 +552,15 @@ func (b *Broker) reply(ctx context.Context, id string, ack protocol.Ack) {
 }
 
 // send writes one frame on the current connection.
+//
+// Every frame has a write deadline, the silence window (A98). A write returns
+// once the frame is in the socket's send buffer, so on a dead link most writes
+// succeed and the deadline that catches it is the read side's, in
+// [Broker.keepalive]. This one catches what that cannot: a far side that still
+// sends but no longer reads, whose buffer this side fills until a write
+// blocks. A frame that cannot be written in that time ends the connection, as
+// silence does; when the caller's own context ends first the write is merely
+// abandoned, as it always was.
 func (b *Broker) send(ctx context.Context, f frame) error {
 	data, err := encode(f)
 	if err != nil {
@@ -535,7 +568,7 @@ func (b *Broker) send(ctx context.Context, f frame) error {
 	}
 
 	b.mu.Lock()
-	conn, revoked := b.conn, b.revoked
+	conn, live, revoked := b.conn, b.live, b.revoked
 	b.mu.Unlock()
 	switch {
 	case revoked:
@@ -544,9 +577,15 @@ func (b *Broker) send(ctx context.Context, f frame) error {
 		return ErrDisconnected
 	}
 
-	wctx, cancel := context.WithTimeout(ctx, b.reqTimeout)
+	start := time.Now()
+	wctx, cancel := context.WithTimeout(ctx, b.silence)
 	defer cancel()
 	if err := conn.Write(wctx, websocket.MessageText, data); err != nil {
+		if ctx.Err() == nil && time.Since(start) >= b.silence {
+			b.giveUp(conn, live,
+				fmt.Sprintf("could not write a frame to the control plane in %s, reconnecting", b.silence),
+				"kind", f.Kind)
+		}
 		return fmt.Errorf("remote: writing %s frame: %w", f.Kind, err)
 	}
 	return nil
@@ -642,11 +681,13 @@ func (b *Broker) resolve(id string, ack protocol.Ack) {
 	}
 }
 
-// openSession publishes a new connection and the channel that marks its life.
-func (b *Broker) openSession(conn *websocket.Conn) {
+// openSession publishes a new connection, its liveness, and the channel that
+// marks its life.
+func (b *Broker) openSession(conn *websocket.Conn, live *liveness) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.conn = conn
+	b.live = live
 	b.session = make(chan struct{})
 }
 
@@ -671,6 +712,7 @@ func (b *Broker) closeSession(conn *websocket.Conn) {
 		return
 	}
 	b.conn = nil
+	b.live = nil
 	session := b.session
 	b.session = closedChan()
 	b.waiters = map[string]*waiter{}
