@@ -17,7 +17,16 @@ type fakeOpenVault struct {
 	// vars is each collection's variables (A96). A collection in names and
 	// not here holds none.
 	vars map[string]secrets.Variables
-	err  error
+	// device is this device as the vault names it.
+	device string
+	err    error
+}
+
+func (f *fakeOpenVault) ThisDevice(context.Context) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.device, nil
 }
 
 func (f *fakeOpenVault) Variables(_ context.Context, collection string, envs func(string) bool) (secrets.Variables, error) {

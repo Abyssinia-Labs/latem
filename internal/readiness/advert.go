@@ -73,13 +73,18 @@ func advertItem(it Item, jobs int) protocol.ReadinessItem {
 	if n := len(it.Jobs); n > 0 && n < jobs {
 		count = fmt.Sprintf("%d of %d jobs", n, jobs)
 	}
-	if strings.HasPrefix(it.ID, itemSecrets) && len(it.Secrets) > 0 {
+	names := it.Secrets
+	if strings.HasPrefix(it.ID, itemVars) {
+		// A variable's name, like a secret's, and never its value (A97).
+		names = it.Vars
+	}
+	if (strings.HasPrefix(it.ID, itemSecrets) || strings.HasPrefix(it.ID, itemVars)) && len(names) > 0 {
 		budget := advertText
 		if count != "" {
 			budget -= len(", ") + len(count)
 		}
-		if names := secretNames(it.Secrets, budget); names != "" {
-			out.Have = names
+		if listed := secretNames(names, budget); listed != "" {
+			out.Have = listed
 		}
 	}
 	if count != "" {

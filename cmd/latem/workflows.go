@@ -371,6 +371,10 @@ type jobReport struct {
 	unisolated         bool
 	moving, notAllowed []string
 	secrets            []string
+	// vars are the variables it reads that no store here holds, and
+	// fromVault says a name it reads is held by OpenVault alone (A97).
+	vars      []string
+	fromVault bool
 	// artifactsFrom is the jobs whose uploads its downloads read (A84).
 	artifactsFrom []string
 	environment   string
@@ -845,7 +849,28 @@ func checkJob(
 	jr.labels, jr.unisolated = job.RunsOn, job.RequiresIsolation
 	jr.runner, jr.carrier = checkRunner(cfg, job, rep, fail)
 	checkSecrets(t, inv, job, &jr)
+	checkJobVars(fsys, w, pj.Key, t, set, job.Environment, &jr)
 	return jr
+}
+
+// checkJobVars names the variables the job reads that no store here holds,
+// for the job's environment, and whether one it reads only OpenVault holds
+// (A97). The workflow's own warning, checkVars, reads the file's text; this
+// reads the job.
+func checkJobVars(fsys fs.FS, w *workflow.Workflow, key string, t checkTarget, set repovars.Set, env string, jr *jobReport) {
+	if t.repo == nil {
+		return
+	}
+	names, _ := workflow.JobVarReads(fsys, w, key)
+	mine := repovars.Of(t.repo, nil)
+	for _, name := range names {
+		switch {
+		case !set.Holds(name, env):
+			jr.vars = append(jr.vars, name)
+		case !mine.Holds(name, env):
+			jr.fromVault = true
+		}
+	}
 }
 
 // stoppedHere reports whether the repository's variables keep this job from
@@ -1110,6 +1135,7 @@ func checkSecrets(t checkTarget, inv inventory, job *registry.Job, jr *jobReport
 			if !inv.has(name, t.repoKey, job.Environment) {
 				missing = append(missing, name)
 			}
+			jr.fromVault = jr.fromVault || inv.onlyInVault(name, t.repoKey, job.Environment)
 			continue
 		}
 		// A called workflow's job (A82): its environment's own, else what

@@ -96,6 +96,15 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 	for _, w := range imageWants(ctx, cfg, m.deps) {
 		in.Images = append(in.Images, readiness.Image{Runner: w.runner.Name, Ref: strings.TrimPrefix(w.gap.Missing, "its image, ")})
 	}
+	// OpenVault before the names (A97): a vault here that the config does not
+	// read yet is counted as though it were, and turning it on is an item.
+	in.Vault = vaultView(ctx, cfg, stores, m.deps)
+	read := cfg
+	if in.Vault.Ready() {
+		asOn := *cfg
+		asOn.Secrets.OpenVault = true
+		read = &asOn
+	}
 	for _, key := range sortedStrings(cfg.Repos) {
 		files, ok := m.files[key]
 		if !ok {
@@ -103,7 +112,7 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 		}
 		target := repoCheckTarget(cfg, key)
 		target.fsys, target.where, target.commit, target.workspace = files.fsys, files.where, files.sha, m.workspace
-		rep, err := analyzeWorkflows(ctx, cfg, target, stores)
+		rep, err := analyzeWorkflows(ctx, read, target, stores)
 		if err != nil {
 			in.Unread = append(in.Unread, fmt.Sprintf("%s: %v", key, err))
 			continue
@@ -117,11 +126,42 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 					Ref: fmt.Sprintf("%s %s %s", key, path.Base(wr.file), j.name), Repo: key,
 					Labels: j.labels, Report: *j.needs, Runner: j.carrier, Unisolated: j.unisolated,
 					Moving: j.moving, NotAllowed: j.notAllowed, Secrets: j.secrets, Env: j.environment,
+					Vars: j.vars, FromVault: j.fromVault,
 				})
 			}
 		}
 	}
 	return readiness.Build(in), nil
+}
+
+// vaultView is what setup knows of OpenVault here (A97), from what doctor and
+// the inventory already read: whether the service answers, and which of the
+// configured repositories it holds a collection for. A machine with neither
+// the command nor a vault is not asked anything.
+func vaultView(ctx context.Context, cfg *config.Config, stores secretStores, deps toolchainDeps) readiness.Vault {
+	v := readiness.Vault{On: cfg.Secrets.OpenVault}
+	if deps.vaultHere != nil {
+		v.Here = deps.vaultHere()
+	}
+	_, err := deps.lookPath("openvault")
+	v.Installed = err == nil || v.Here
+	if stores.openvault == nil || (!v.Installed && !v.On) {
+		return v
+	}
+	repos := sortedStrings(cfg.Repos)
+	// The inventory's own listing: onceOpenVault answers it once.
+	_, absent, err := stores.openvault.Names(ctx, repos)
+	if err != nil {
+		return v
+	}
+	v.Answers, v.Installed = true, true
+	for _, r := range repos {
+		if !slices.Contains(absent, r) {
+			v.Held = append(v.Held, r)
+		}
+	}
+	v.Device, _ = stores.openvault.ThisDevice(ctx)
+	return v
 }
 
 // runSetupPlan is `latem setup --json`: the plan, and nothing touched.
@@ -484,6 +524,9 @@ func applyChange(body string, cfg *config.Config, c readiness.Change) (string, e
 			allowed = append(allowed, c.Value)
 		}
 		return setTableKey(body, actions, actions, "allowed", tomlStringList(allowed))
+	case readiness.ChangeOpenVault:
+		secretsTable := []string{"secrets"}
+		return setTableKey(body, secretsTable, secretsTable, "openvault", "true")
 	case readiness.ChangeNewRunner:
 		return insertAfter(body, []string{"runner"}, fmt.Sprintf(`[[runner]]
 name        = %s

@@ -135,6 +135,8 @@ type secretStores struct {
 type openVaultLister interface {
 	Names(ctx context.Context, repos []string) (names, absent []string, err error)
 	Variables(ctx context.Context, collection string, envs func(string) bool) (secrets.Variables, error)
+	// ThisDevice names this device as `openvault scope` takes it (A97).
+	ThisDevice(ctx context.Context) (string, error)
 }
 
 // onceOpenVault answers each listing once. A readiness beat reads the
@@ -147,11 +149,26 @@ type onceOpenVault struct {
 	mu    sync.Mutex
 	seen  map[string]onceAnswer
 	vars  map[string]onceVars
+
+	deviceAsked bool
+	device      string
+	deviceErr   error
 }
 
 type onceVars struct {
 	vars secrets.Variables
 	err  error
+}
+
+// ThisDevice asks the service once.
+func (o *onceOpenVault) ThisDevice(ctx context.Context) (string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.deviceAsked {
+		o.device, o.deviceErr = o.inner.ThisDevice(ctx)
+		o.deviceAsked = true
+	}
+	return o.device, o.deviceErr
 }
 
 // Variables reads a collection's variables once, every environment's: each
@@ -731,20 +748,41 @@ func (inv inventory) inEnvironment(name, repo, env string) bool {
 // way the run looks it up (internal/run's resolveWorkflowSecrets): repo and
 // environment, then repo, then the machine.
 func (inv inventory) has(name, repo, env string) bool {
-	scopes := [][]string{{repo}, nil}
-	if repo == "" {
-		// A checkout this machine has no [repos.*] entry for: only the
-		// machine-wide name could answer.
-		scopes = [][]string{nil}
-	} else if env != "" {
-		scopes = append([][]string{{repo, env}}, scopes...)
-	}
-	for _, sc := range scopes {
+	for _, sc := range lookupScopes(repo, env) {
 		if len(inv.byName[secrets.ScopedName(name, sc...)]) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// onlyInVault reports whether OpenVault alone holds name for a job of repo in
+// env, so that without reading the vault it would read as unset (A97).
+func (inv inventory) onlyInVault(name, repo, env string) bool {
+	found := false
+	for _, sc := range lookupScopes(repo, env) {
+		for _, store := range inv.byName[secrets.ScopedName(name, sc...)] {
+			if store != "openvault" {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
+}
+
+// lookupScopes are the scopes a job of repo in env reads a name under, most
+// specific first.
+func lookupScopes(repo, env string) [][]string {
+	switch {
+	case repo == "":
+		// A checkout this machine has no [repos.*] entry for: only the
+		// machine-wide name could answer.
+		return [][]string{nil}
+	case env != "":
+		return [][]string{{repo, env}, {repo}, nil}
+	}
+	return [][]string{{repo}, nil}
 }
 
 // inventoryEntry is one stored name, decoded into its scope.

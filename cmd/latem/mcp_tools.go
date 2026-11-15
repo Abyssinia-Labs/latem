@@ -213,7 +213,9 @@ func mcpTools() []mcpTool {
 				"Each of its items is one thing in the way, with an id and how it closes. " +
 				"run (commands latem runs) and config (changes to config.toml) close with `latem setup apply <id>` in a shell on the machine, " +
 				"and `latem setup apply --kind <name>` closes a kind's items and then turns the kind on, once its proof passes in a step's environment. " +
-				"yours (commands a person types: sudo, a licence, a secret's value) and manual (words) are the person's: ask them. " +
+				"yours (commands a person types: sudo, a licence, a secret's or a variable's value, joining OpenVault or scoping a collection in it, " +
+				"some of them on another device, which manual then names) and manual (words) are the person's: ask them. " +
+				"secrets and vars name what no store here holds, never a value. " +
 				"An item with a warning gives something up, and only the person, at a terminal, may apply it. A soft item is worth doing and does not count against the kind. " +
 				"With repo, only the kinds with a job from that repository, each whole.",
 			input: schemaObject(nil, map[string]any{
