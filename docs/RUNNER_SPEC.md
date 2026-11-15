@@ -1133,6 +1133,7 @@ Rules:
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
 - A pull request's job resolves no secret from any link of the chain until its commit is approved on the machine with `latem approve`. Until then it waits in `awaiting_approval`, and no store is asked anything (A85).
 - `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value. A value with a control character in it other than tab and a line ending is refused, and so is a variable's (A73).
+- A workflow job's variables are read from OpenVault too, with `[secrets] openvault = true`: a variable entry, never a secret's, in each scope before config.toml's (A96).
 - `latem secrets copy --to HOST [--repo R] [--env E] NAME...` reads each value from secrets.env or the Keychain here, under exactly that scope, and hands it to `latem secrets set` on HOST over ssh, on its stdin (A73).
 - A name secrets.env defines twice has no value, and the error names its lines; every other name in the file still resolves. `secrets set --store file` keeps one line and `secrets rm --store file` removes them all (A73).
 
@@ -1312,7 +1313,7 @@ latem service reload                 Apply config.toml to the running agent (SIG
 latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A54)
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   To another machine's `secrets set`, on ssh's stdin (A73)
-latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54)
+latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54); list shows OpenVault's too, and which answers (A96)
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
@@ -2220,7 +2221,8 @@ secrets are not put in the run's environment the way a jobs.yaml job's are: each
 the step whose expression names it, which is GitHub's behaviour and keeps a credential away
 from steps — and third-party actions — that did not ask for it. `${{ vars.X }}` reads `[repos.<key>.vars]`,
 overridden by `[repos.<key>.environments.<environment>.vars]`; variables are not secrets, are
-answered at admission, and may appear in the compiled registry. `GITHUB_TOKEN` is neither: it
+answered at admission, and may appear in the compiled registry. *A96: with `[secrets] openvault =
+true`, OpenVault's variable entries come first in each scope.* `GITHUB_TOKEN` is neither: it
 arrives with workflow runs and the GitHub App, and until then `secrets.GITHUB_TOKEN` resolves
 like any other name.
 
@@ -4116,7 +4118,7 @@ with the number of entries and not with their size.
 
 **Not in this amendment.** Files: a signing keystore or `google-services.json` from OpenVault, at a
 temporary path for the job. OpenVault calls that M4. Variables (`vars.*`) from OpenVault, which
-would end A68's per-machine mismatches. A machine-wide collection. Writing to OpenVault from
+would end A68's per-machine mismatches (*A96 reads them*). A machine-wide collection. Writing to OpenVault from
 `latem secrets set`.
 
 ### Amendment from an agent on another machine
@@ -4678,3 +4680,101 @@ reads and closes it, as A87's tools do, so a repository added mid-session is in 
 secrets or `approve`, and A87's line stands: what changes what this machine builds, or with what, is
 a command in a shell on the machine, where an agent's harness shows the person each one first. It
 does not read state.db or the agent, and it touches no file but a temporary one of its own.
+
+
+### Amendment from variables that stayed on each machine
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A96 | §15, §19, A50, A68, A86 | **With `[secrets] openvault = true`, a workflow job's `vars.NAME` of repo `R` in environment `E` is read from OpenVault too: collection `R`, entry `E/NAME`, then `NAME`. Only an entry of kind variable answers, never a secret or a file. In each scope the vault comes before config.toml, and the environment's scope before the repository's. A run, a plan, the heartbeat's digests, `latem vars list` and `latem workflows check` read through one lookup. The vault is asked only when an expression reads `vars`. A service that does not answer then fails the job with `E_SECRET_BACKEND`, retryable, and refuses the plan with it. While it does not answer, the heartbeat says the digests it read last, kept on disk. The wire is unchanged** | The user keeps every secret in OpenVault, and workflow variables stayed in each machine's `config.toml`. A machine new to a repository had none of them, and A68 keeps a job off a machine whose variables differ from those of the machine that stands for the repository. So a new machine took no job that reads a variable until someone copied each value into its config by hand, and each copy is one more that goes stale. Reading the code for this found that a stopped service failed a secret's job with `E_MISSING_SECRET`, rejected and not retryable, which A86 said it would not |
+
+**The lookup.** §15's rule for secrets, which A86 follows: the most specific scope first, and
+in each scope the vault before the machine's own copy.
+
+| A job of repo `R` in environment `E` reads `NAME` from, first that holds it | |
+|---|---|
+| OpenVault, collection `R`, entry `E/NAME` | the environment's, shared |
+| config.toml, `[repos.R.environments.E.vars]` | the environment's, this machine's |
+| OpenVault, collection `R`, entry `NAME` | the repository's, shared |
+| config.toml, `[repos.R.vars]` | the repository's, this machine's |
+
+A job in no environment reads the last two. The vault comes first because it is the copy every
+machine shares, and a machine's own copy is the one that goes stale. An environment's value in
+config.toml still beats a repository's value in the vault, as A50 has the environment over the
+repository. `repovars.Set` is this lookup, and every reader uses it.
+
+**Variables only.** A secret is masked in a log and a variable is not, so no secret may reach the
+`vars` context. The listing gives each entry's kind, and only variable entries are read. Each read
+checks the kind again, since an entry can change between the two requests. A secret entry named
+like a variable is still a secret, and a file is never a variable. The other direction stands: a
+variable entry answers `secrets.NAME` (A86), where it is only masked. An entry deeper than one
+folder is left out. So is a name outside GitHub's rule for a variable, or one starting `GITHUB_`.
+
+**Off unless asked.** Only a machine whose config says `[secrets] openvault = true` asks the vault
+for a variable, as for a secret (A86), and the setting takes effect when the agent restarts.
+Without it nothing changes.
+
+**When it is read.** The `vars` context is now worked out when an expression first reads it
+(`expr.Deferred`), not when the scope is made. A run reads the vault once for its job: one listing
+of collection `R`, and one read of each variable entry in it, every environment's, since the job's
+environment is known only as it compiles. A job none of whose expressions names `vars` asks nothing,
+so it runs while the service is down. A plan reads the repository's own variables once, when one of
+its expressions reads `vars`. `latem workflows check` and `latem setup` read each repository once per
+look, and `latem vars list` once per repository.
+
+**When the service does not answer.** A job that reads `vars` fails before its environment is
+prepared, with `E_SECRET_BACKEND`, retryable, and the message names the service and the command
+that starts it. If the failure also made the compile fail, the compile's error is not what it says.
+The job never runs with the variable empty, nor with config.toml's copy alone, which is the stale
+answer this order exists to avoid. A plan that reads a variable is refused whole with
+`E_SECRET_BACKEND`, since one made with the variable empty would place or skip jobs on a value the
+repository never gave. An expression that reads `vars` together with a step's output is answered as
+that step starts. If it is the job's first read and the service does not answer then, that step
+fails. `latem workflows check` says where a workflow reads `vars` that the service did not answer,
+with `openvault service install`, and counts config.toml's. `latem vars list` says so and lists
+config.toml's.
+
+A stopped service failing a secret's job also becomes `E_SECRET_BACKEND`, retryable, as A86 said.
+`secretOutcome` had not learned OpenVault's error, and gave `E_MISSING_SECRET`, rejected.
+
+**The heartbeat.** A68's digests are of what a job reads: the repository's own variables, the
+vault's over config.toml's, and no environment's. They are not read per beat. Every minute, and at
+once after a reload, the agent reads each configured repository's own variables from the vault, and
+the heartbeat reads that copy. A run reads the vault afresh, so only placement can lag a change in
+the vault, and by about a minute.
+
+A service that does not answer changes nothing the heartbeat says: it keeps the digests read last.
+Meanwhile a job that reads a variable fails and is retried, and once the service answers the answer
+is the vault's again. Saying config.toml's alone would set this machine apart from its peers, and
+put a difference in Needs you, over a service that restarts. The wire cannot say "unknown" for one
+repository: a 2.4 control plane reads an absent `vars` as a repository with no variables. So the
+digests are kept in `~/.latem/openvault-vars.json`, mode `0600`, written only when one changes. It
+holds digests, which the heartbeat sends anyway, and never a value. An agent that starts before its
+service answers, as at login, says what the last one read. Only a machine that has never read the
+vault says config.toml's alone until it does.
+
+**What it costs.** All of it is local socket calls to the service, which reads its index or a
+SQLite row: no network and no egress. A job that reads `vars`: one listing and one read per variable
+entry of its collection. A job that reads none: nothing. A plan that reads `vars`: one listing and
+one read per repository-level variable. The agent, per minute and per configured repository: one
+listing and one read per repository-level variable, or for a collection this machine does not hold,
+one refused listing and one `collections`. A service that does not answer stops that minute's reads
+at the first repository. Nothing per beat, and the file is written only on a change.
+
+**The wire.** Unchanged: protocol 2.4's digest map per repository. latem-cloud needs no change.
+Values never leave the machine (INV-2).
+
+**Pull requests.** A pull request's job reads its variables as it reads config.toml's, before any
+approval. A variable is not a secret, and A85 holds back secrets and native runners. The read is
+the agent's, over its own socket, never a step's.
+
+**Moving them.** `openvault set R/NAME --var` or `R/E/NAME --var` on a device that may write `R`,
+the value on stdin, or `openvault import-env --collection R --env E --var NAME FILE` for an
+environment's from a file. `latem vars list` shows each variable's source and
+which answers, and `latem vars set` warns when the vault holds the name it sets. latem never writes
+to the vault. A value can stay in config.toml for as long as the vault does not hold it, so the
+move can be one variable at a time.
+
+**Not in this amendment.** What `latem setup` says of a vault: the setting that turns it on, a
+service down, a collection or a name missing. That follows. A machine-wide variable, which has no
+collection. Writing to the vault.

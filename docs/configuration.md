@@ -78,6 +78,14 @@ text and leave the rest of the file, comments included, as you wrote it.
 What this machine can run of a repository it allows, and how to run one of its
 jobs before you push, are in [Jobs](jobs.md#github-workflows).
 
+**A workflow's `${{ vars.NAME }}` is `[repos.<key>.vars]`**, with
+`[repos.<key>.environments.<env>.vars]` over it for a job in that
+environment, and `latem vars set --repo R [--env E] NAME VALUE` writes them.
+They are this machine's own copy. With `[secrets] openvault = true`,
+OpenVault's variables come first in each scope, so a value set once in the
+vault reaches every machine that reads it (A96); see
+[Variables](secrets.md#variables) for moving them there.
+
 **Edit `config.toml` by hand for anything else**, then tell the running
 agent, or the edit does nothing:
 

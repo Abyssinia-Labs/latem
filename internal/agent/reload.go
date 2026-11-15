@@ -140,6 +140,9 @@ func (a *Agent) Reload() ([]string, error) {
 	a.writeReloadStatus(nil, deferred)
 	// A runner's path_prepend decides where a step finds its tools (A60).
 	a.reprobeToolchains()
+	// A repository added is one whose variables the vault has not been
+	// asked for (A96).
+	a.rereadVarsSoon()
 	return deferred, nil
 }
 

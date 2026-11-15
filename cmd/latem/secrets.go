@@ -130,9 +130,11 @@ type secretStores struct {
 	openvault openVaultLister
 }
 
-// openVaultLister is [secrets.OpenVaultProvider.Names].
+// openVaultLister is [secrets.OpenVaultProvider]'s listings: the scoped names
+// it holds, and a repository's variables (A96).
 type openVaultLister interface {
 	Names(ctx context.Context, repos []string) (names, absent []string, err error)
+	Variables(ctx context.Context, collection string, envs func(string) bool) (secrets.Variables, error)
 }
 
 // onceOpenVault answers each listing once. A readiness beat reads the
@@ -144,6 +146,38 @@ type onceOpenVault struct {
 	inner openVaultLister
 	mu    sync.Mutex
 	seen  map[string]onceAnswer
+	vars  map[string]onceVars
+}
+
+type onceVars struct {
+	vars secrets.Variables
+	err  error
+}
+
+// Variables reads a collection's variables once, every environment's: each
+// repository's jobs are checked against the same answer, in a readiness beat
+// as in one command.
+func (o *onceOpenVault) Variables(ctx context.Context, collection string, envs func(string) bool) (secrets.Variables, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	a, ok := o.vars[collection]
+	if !ok {
+		a.vars, a.err = o.inner.Variables(ctx, collection, nil)
+		if o.vars == nil {
+			o.vars = map[string]onceVars{}
+		}
+		o.vars[collection] = a
+	}
+	if a.err != nil || envs == nil {
+		return a.vars, a.err
+	}
+	out := secrets.Variables{}
+	for env, v := range a.vars {
+		if envs(env) {
+			out[env] = v
+		}
+	}
+	return out, nil
 }
 
 type onceAnswer struct {

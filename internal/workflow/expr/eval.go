@@ -40,6 +40,13 @@ type Scope struct {
 	WorkspaceDir string
 }
 
+// Deferred is a context worked out the first time an expression reads it,
+// rather than when the scope is made. A workflow job's vars may come from
+// OpenVault, a local service that can be down (A96): asking it only when an
+// expression names vars means a job that reads none never waits on it, and one
+// that does stops with the reason instead of reading the variable as empty.
+type Deferred func() (Value, error)
+
 // Eval evaluates the program against a scope.
 func (p *Program) Eval(sc Scope) (Value, error) {
 	if p == nil || p.root == nil {
@@ -57,6 +64,15 @@ func (p *Program) Eval(sc Scope) (Value, error) {
 	return v, nil
 }
 
+// contextValue is a context as an expression reads it: a [Deferred] one is
+// worked out now.
+func contextValue(v Value) (Value, error) {
+	if d, ok := v.(Deferred); ok {
+		return d()
+	}
+	return v, nil
+}
+
 func evalNode(n *node, sc Scope) (Value, error) {
 	switch n.kind {
 	case nLiteral:
@@ -66,10 +82,10 @@ func evalNode(n *node, sc Scope) (Value, error) {
 		// A bare identifier is a context name. An unknown one is null rather
 		// than an error, matching the property rule above.
 		if v, ok := sc.Contexts[n.name]; ok {
-			return v, nil
+			return contextValue(v)
 		}
 		if v, ok := sc.Contexts[lowerASCII(n.name)]; ok {
-			return v, nil
+			return contextValue(v)
 		}
 		return nil, nil
 

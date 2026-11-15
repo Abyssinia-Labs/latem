@@ -141,7 +141,7 @@ latem repo add <owner/name> | list | remove <key|owner/name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
 latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   to another machine, on ssh's stdin
 latem vars set | rm --repo R [--env E] NAME [VALUE]
-latem vars list [--repo R] [--env E]
+latem vars list [--repo R] [--env E]   config.toml's and, with [secrets] openvault = true, OpenVault's, and which answers
 latem workflows check [path | --repo R] [--offline] [--json] [--fix] [-v]   which workflow jobs this machine can run, and the fix for the rest
 latem store check [path | --repo R] [--platform ios|android] [--json]   whether a preview would reach testers from this machine; read-only
 latem doctor [--secrets] [--fix]     check this machine and name the fix for anything wrong

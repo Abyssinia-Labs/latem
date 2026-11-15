@@ -384,7 +384,7 @@ jobs:
 	ev := protocol.Event{Name: EventPush, Ref: "refs/heads/main"}
 	mini := mustPlan(t, files, ev, PlanOptions{
 		LabelAliases: map[string][]string{"blacksmith-6vcpu-macos-26": {"macos"}},
-		Vars:         map[string]string{"LATEM": "true"},
+		Vars:         planVars(map[string]string{"LATEM": "true"}),
 	})[0].Jobs[0]
 	desktop := mustPlan(t, files, ev, PlanOptions{})[0].Jobs[0]
 
@@ -446,7 +446,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: make}]
 `}, protocol.Event{Name: EventPush, Ref: "refs/heads/main"}, PlanOptions{
-		Vars: map[string]string{"RUNNER": "linux", "STAGE": "staging", "MAX": "1", "OSES": `["a"]`},
+		Vars: planVars(map[string]string{"RUNNER": "linux", "STAGE": "staging", "MAX": "1", "OSES": `["a"]`}),
 	})[0].Jobs
 
 	got := map[string][]string{}

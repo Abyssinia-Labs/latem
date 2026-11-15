@@ -70,6 +70,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/repovars"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
@@ -136,6 +137,10 @@ type Options struct {
 	Source Source
 	// Secrets resolves the names a job declares. A *secrets.Chain satisfies it.
 	Secrets secrets.Provider
+	// Vault is OpenVault, read for a workflow job's variables when the
+	// config says `[secrets] openvault = true` (A96). Nil reads config.toml's
+	// alone.
+	Vault repovars.Vault
 	// Caches provisions cache mounts (gate 18).
 	Caches cache.Manager
 	// Artifacts collects declared outputs. A *artifact.Collector satisfies it.
@@ -221,6 +226,7 @@ type Orchestrator struct {
 	alwaysRedact [][]byte
 	src          Source
 	secrets      secrets.Provider
+	vault        repovars.Vault
 	caches       cache.Manager
 	artifacts    Collector
 	runners      []Runner
@@ -276,6 +282,7 @@ func New(opts Options) (*Orchestrator, error) {
 		alwaysRedact:    opts.AlwaysRedact,
 		src:             opts.Source,
 		secrets:         opts.Secrets,
+		vault:           opts.Vault,
 		caches:          opts.Caches,
 		artifacts:       opts.Artifacts,
 		runners:         append([]Runner(nil), opts.Runners...),

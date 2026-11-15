@@ -24,6 +24,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
+	"github.com/Abyssinia-Labs/latem/internal/repovars"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/actions"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
@@ -397,6 +398,9 @@ type workflowReport struct {
 
 type checkReport struct {
 	workflows []workflowReport
+	// varsErr is why OpenVault's variables could not be read (A96), when
+	// the config reads them.
+	varsErr error
 	// aliases and allowed are what --fix would add.
 	aliases map[string][]string
 	allowed []string
@@ -467,13 +471,16 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 		parsed[file] = parseForCheck(fsys, file)
 	}
 
+	// The variables, as a run reads them (A96): read once, so every job is
+	// checked against one answer. A vault that does not answer leaves
+	// config.toml's, and each workflow that reads vars says so.
+	vars, varsErr := repoVarsIn(ctx, cfg, stores, t)
+	rep.varsErr = varsErr
 	opts := workflow.PlanOptions{
 		Repository:   t.slug,
 		LabelAliases: cfg.LabelAliases,
 		Changed:      func() ([]string, error) { return checkoutFiles(fsys), nil },
-	}
-	if t.repo != nil {
-		opts.Vars = t.repo.VarsFor("")
+		Vars:         func() (map[string]string, error) { return vars.For(""), nil },
 	}
 
 	planned := map[string]*plannedFile{}
@@ -543,11 +550,11 @@ func analyzeWorkflows(ctx context.Context, cfg *config.Config, t checkTarget, st
 		}
 		envs := map[string]bool{}
 		for _, pj := range pf.pw.Jobs {
-			jr := checkJob(ctx, cfg, t, inv, fetcher, fsys, pw, pf, pj, &rep)
+			jr := checkJob(ctx, cfg, t, inv, vars, fetcher, fsys, pw, pf, pj, &rep)
 			wr.jobs = append(wr.jobs, jr)
 			envs[pj.Environment] = true
 		}
-		wr.findings = append(wr.findings, checkVars(t, pw, envs)...)
+		wr.findings = append(wr.findings, checkVars(t, pw, envs, vars, varsErr)...)
 		rep.workflows = append(rep.workflows, wr)
 	}
 	if data, err := fs.ReadFile(fsys, registry.Path); err == nil {
@@ -777,7 +784,7 @@ func checkoutFiles(fsys fs.FS) []string {
 
 // checkJob compiles one planned job and asks every question about it.
 func checkJob(
-	ctx context.Context, cfg *config.Config, t checkTarget, inv inventory, fetcher *stubFetcher,
+	ctx context.Context, cfg *config.Config, t checkTarget, inv inventory, set repovars.Set, fetcher *stubFetcher,
 	fsys fs.FS, pw *parsedWorkflow, pf *plannedFile, pj protocol.PlannedJob, rep *checkReport,
 ) jobReport {
 	jr := jobReport{key: pj.Key, name: pj.Name, labels: pj.Labels, artifactsFrom: pj.ArtifactsFrom}
@@ -806,10 +813,7 @@ func checkJob(
 		fail("refused: " + err.Error())
 		return jr
 	}
-	var vars func(string) map[string]string
-	if t.repo != nil {
-		vars = t.repo.VarsFor
-	}
+	vars := workflow.StaticVars(set.For)
 	jr.stopped = stoppedHere(t, pf, pj, w, vars)
 
 	fetcher.reset()
@@ -849,7 +853,7 @@ func checkJob(
 // an event no check tries, so one that reads no variable is never taken as
 // this, and that one job still counts: the job a person would miss is worse
 // than a line too many.
-func stoppedHere(t checkTarget, pf *plannedFile, pj protocol.PlannedJob, w *workflow.Workflow, vars func(string) map[string]string) bool {
+func stoppedHere(t checkTarget, pf *plannedFile, pj protocol.PlannedJob, w *workflow.Workflow, vars func(string) (map[string]string, error)) bool {
 	if len(pf.all) == 0 {
 		return false
 	}
@@ -1152,8 +1156,9 @@ func checkSecrets(t checkTarget, inv inventory, job *registry.Job, jr *jobReport
 // empty when unset.
 var varRef = regexp.MustCompile(`\bvars\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\])`)
 
-// checkVars names the vars a workflow reads that nothing here sets.
-func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool) []finding {
+// checkVars names the vars a workflow reads that nothing here sets: neither
+// OpenVault nor config.toml (A96).
+func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool, vars repovars.Set, varsErr error) []finding {
 	seen := map[string]bool{}
 	var missing []string
 	for _, m := range varRef.FindAllSubmatch(pw.data, -1) {
@@ -1163,19 +1168,21 @@ func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool) []findin
 		}
 		seen[name] = true
 		set := false
-		if t.repo != nil {
-			for env := range envs {
-				if _, ok := t.repo.VarsFor(env)[name]; ok {
-					set = true
-				}
-			}
+		for env := range envs {
+			set = set || vars.Holds(name, env)
 		}
 		if !set {
 			missing = append(missing, name)
 		}
 	}
+	var out []finding
+	if varsErr != nil && len(seen) > 0 {
+		out = append(out, finding{level: levelWarn,
+			text:  fmt.Sprintf("%v; until it answers, a job here that reads vars fails, and only config.toml's are counted", varsErr),
+			fixes: []string{"openvault service install"}})
+	}
 	if len(missing) == 0 {
-		return nil
+		return out
 	}
 	sort.Strings(missing)
 	f := finding{level: levelWarn, text: "vars with no value here, which read as empty: " + strings.Join(missing, ", ")}
@@ -1184,7 +1191,7 @@ func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool) []findin
 			f.fixes = append(f.fixes, "latem vars set --repo "+t.repoKey+" "+n+" <value>")
 		}
 	}
-	return []finding{f}
+	return append(out, f)
 }
 
 // applyWorkflowFixes writes the suggested aliases and allowlist entries.

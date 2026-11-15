@@ -161,6 +161,57 @@ repositories, OpenVault simply holds nothing, and the stores after it answer.
 A pull request's job asks OpenVault nothing until its commit is approved, as
 for every other store; see [Pull requests](#pull-requests).
 
+### Variables
+
+A workflow's `${{ vars.NAME }}` is read from OpenVault too, on the same
+machines, with the same `openvault = true` (A96). Only an entry of kind
+variable answers: a secret is masked in a log and a variable is not, so a
+secret never reaches `vars`, whatever it is called.
+
+| A job of repo `R` in environment `E` reads `vars.NAME` from, first that holds it |
+|---|
+| OpenVault, collection `R`, entry `E/NAME` |
+| `config.toml`, `[repos.R.environments.E.vars]` |
+| OpenVault, collection `R`, entry `NAME` |
+| `config.toml`, `[repos.R.vars]` |
+
+To move them, put each in the vault on a device that may write the
+collection. Nothing needs taking out of `config.toml` first: the vault's
+value is read before it, and `config.toml`'s only where the vault holds none.
+
+```console
+$ printf %s true | openvault set tsedal/LATEM --var        # the repository's own
+$ printf %s https://staging.example.com | openvault set tsedal/staging/BASE_URL --var
+$ openvault import-env --collection tsedal --env staging --var BASE_URL --var REGION staging.env
+$ latem vars list --repo tsedal
+REPO    ENVIRONMENT  NAME      VALUE                        SOURCE
+tsedal  -            LATEM     true                         openvault, config.toml (openvault answers)
+tsedal  staging      BASE_URL  https://staging.example.com  openvault
+```
+
+`import-env` reads a file of `NAME=value` lines into one environment's
+folder, and stores a name as a variable only when `--var` names it; every
+other name in the file goes in as a secret.
+
+`latem vars set` still writes `config.toml`, and warns when the vault holds
+the name it sets, since a job reads the vault's first. latem never writes to
+the vault.
+
+The vault is asked when a job's expression first reads `vars`: once per job,
+over the same socket. A job that reads none never asks. **If the service is
+not running, a job that reads a variable fails with `E_SECRET_BACKEND` and
+can be retried**, as for a secret. It never runs with the variable empty, or
+with `config.toml`'s older copy. A plan that reads one is refused the same
+way.
+
+The heartbeat tells the control plane a digest of each of a repository's own
+variables, so that a job goes only to machines that would answer it alike
+(A68). The agent reads them from the vault once a minute rather than on every
+beat. While the service does not answer, it goes on saying the digests it
+read last, so a service that restarts does not set the machine apart from
+the others. It keeps them, digests only, in `~/.latem/openvault-vars.json`
+for the next start.
+
 ### Files
 
 An OpenVault file (OpenVault 0.4 and later), such as a keystore, a `.p8` or a

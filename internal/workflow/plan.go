@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Abyssinia-Labs/latem/internal/workflow/expr"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -44,10 +45,13 @@ type PlanOptions struct {
 	Repository string
 	// LabelAliases is the machine's [label_aliases] (A50).
 	LabelAliases map[string][]string
-	// Vars are the repository's (A50). An environment's are not read: the
-	// plan names a job's environment, and nothing in it is evaluated inside
-	// one.
-	Vars map[string]string
+	// Vars reads the repository's variables, OpenVault's and config.toml's
+	// (A50, A96). An environment's are not read: the plan names a job's
+	// environment, and nothing in it is evaluated inside one. It is asked once,
+	// and only when an expression reads vars; a plan that reads them and
+	// cannot is refused whole with its error, rather than made with them
+	// empty. Nil reads none.
+	Vars func() (map[string]string, error)
 	// NoCalls plans a job that calls a workflow as one job that cannot run,
 	// saying why, for a control plane older than 2.8 (A82): it would refuse
 	// a plan whose keys are job paths, and the whole plan with them.
@@ -103,6 +107,12 @@ func PlanEvent(fsys fs.FS, ev protocol.Event, opts PlanOptions) ([]protocol.Plan
 			plan = append(plan, pw)
 		}
 	}
+	// A plan made with a variable it could not read would place or skip a
+	// job on an empty one; each job's own error would say so, and the plan
+	// is not that machine's to make (A96).
+	if p.varsErr != nil {
+		return nil, fmt.Errorf("reading the repository's variables: %w", p.varsErr)
+	}
 	return plan, nil
 }
 
@@ -128,6 +138,9 @@ func PlanFile(fsys fs.FS, file string, ev protocol.Event, opts PlanOptions) (pro
 	}
 	p := &planner{fsys: fsys, ev: ev, payload: payload, opts: opts, anyTrigger: true}
 	pw, _, err := p.workflow(file)
+	if err == nil && p.varsErr != nil {
+		err = fmt.Errorf("reading the repository's variables: %w", p.varsErr)
+	}
 	if err == nil && pw.Error != "" {
 		err = errors.New(pw.Error)
 	}
@@ -195,6 +208,11 @@ type planner struct {
 	ev      protocol.Event
 	payload map[string]any
 	opts    PlanOptions
+
+	// The variables, read when an expression first reads one (A96).
+	varsOnce sync.Once
+	vars     map[string]any
+	varsErr  error
 	// anyTrigger plans a file whatever its on: says (PlanFile).
 	anyTrigger bool
 
@@ -291,6 +309,21 @@ func (p *planner) workflow(file string) (protocol.PlannedWorkflow, bool, error) 
 	return pw, true, nil
 }
 
+// readVars is the vars context, read once.
+func (p *planner) readVars() (expr.Value, error) {
+	p.varsOnce.Do(func() {
+		var m map[string]string
+		if p.opts.Vars != nil {
+			m, p.varsErr = p.opts.Vars()
+		}
+		p.vars = stringsToAny(m)
+	})
+	if p.varsErr != nil {
+		return nil, p.varsErr
+	}
+	return p.vars, nil
+}
+
 // scope is what a plan's expressions read: github, as far as the event
 // answers it, inputs and vars.
 func (p *planner) scope(workflow string, inputs map[string]any, given map[string]string) expr.Scope {
@@ -326,7 +359,7 @@ func (p *planner) scope(workflow string, inputs map[string]any, given map[string
 				"graphql_url":      GitHubGraphQLURL,
 			},
 			"inputs": inputs,
-			"vars":   stringsToAny(p.opts.Vars),
+			"vars":   expr.Deferred(p.readVars),
 		},
 		Status: expr.StatusSuccess,
 	}
