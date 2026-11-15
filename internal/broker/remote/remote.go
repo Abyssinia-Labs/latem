@@ -130,6 +130,15 @@ const (
 	// loop should be waiting on rather than one this dial should keep holding.
 	DefaultHandshakeTimeout = 10 * time.Second
 
+	// DefaultPingInterval is how often the agent pings the control plane: §20's
+	// heartbeat interval (A98). A connection on which nothing — no frame, no
+	// pong — has arrived for two intervals is given up and dialled again, and so
+	// is one that cannot write a frame in two. Thirty seconds, so a dead link is
+	// replaced before the control plane's three missed beats (45s) mark the
+	// machine offline; and two intervals rather than one, so a single pong late
+	// behind a busy link's own output does not end it.
+	DefaultPingInterval = 15 * time.Second
+
 	// DefaultMaxBufferBytes is §7.4's per-run log buffer bound: 50 MB. Beyond
 	// it frames are dropped and one marker records how many, so the gap is
 	// visible rather than silent. See [sink].
@@ -190,6 +199,13 @@ type Options struct {
 	RequestTimeout   time.Duration
 	HandshakeTimeout time.Duration
 
+	// PingInterval is how often the connection is pinged; twice it is the
+	// silence after which the connection is given up, and every frame's write
+	// deadline (A98). Zero means [DefaultPingInterval]. It is not configuration,
+	// for the reason the heartbeat interval is not: a machine that could lengthen
+	// it could keep a dead link for as long as it liked.
+	PingInterval time.Duration
+
 	// Logger receives the transport's narration. Nil discards it. Unlike the
 	// local broker, whose failures are mostly a client hanging up, this one's
 	// failures are the ones an operator most wants in the log: a partition and
@@ -220,10 +236,15 @@ type Broker struct {
 	backoff    Backoff
 	reqTimeout time.Duration
 	handshake  time.Duration
-	log        *slog.Logger
-	sleep      func(ctx context.Context, d time.Duration) bool
-	jitter     func() float64
-	now        func() time.Time
+	// pingEvery and silence are A98's: how often the connection is pinged, and
+	// how long it may go without a frame or a pong — which is also how long one
+	// frame may take to write.
+	pingEvery time.Duration
+	silence   time.Duration
+	log       *slog.Logger
+	sleep     func(ctx context.Context, d time.Duration) bool
+	jitter    func() float64
+	now       func() time.Time
 
 	cmds chan protocol.Command
 
@@ -239,6 +260,8 @@ type Broker struct {
 	revoked   bool
 	machineID string
 	conn      *websocket.Conn
+	// live is conn's liveness (A98), published and retired with it.
+	live *liveness
 	// session is closed when the current connection ends. Waiters select on it
 	// so a partition unblocks them instead of holding them for RequestTimeout.
 	session chan struct{}
@@ -292,6 +315,9 @@ func Open(opts Options) (*Broker, error) {
 	if opts.HandshakeTimeout <= 0 {
 		opts.HandshakeTimeout = DefaultHandshakeTimeout
 	}
+	if opts.PingInterval <= 0 {
+		opts.PingInterval = DefaultPingInterval
+	}
 	if opts.MaxBufferBytes <= 0 {
 		opts.MaxBufferBytes = DefaultMaxBufferBytes
 	}
@@ -318,6 +344,8 @@ func Open(opts Options) (*Broker, error) {
 		backoff:    opts.Backoff.orDefault(),
 		reqTimeout: opts.RequestTimeout,
 		handshake:  opts.HandshakeTimeout,
+		pingEvery:  opts.PingInterval,
+		silence:    2 * opts.PingInterval,
 		log:        opts.Logger,
 		sleep:      opts.sleep,
 		jitter:     opts.jitter,
@@ -353,7 +381,7 @@ func (b *Broker) Close() error {
 		b.closed = true
 		close(b.done)
 		conn := b.conn
-		b.conn = nil
+		b.conn, b.live = nil, nil
 		b.mu.Unlock()
 
 		b.cancel()

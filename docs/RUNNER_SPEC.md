@@ -465,6 +465,7 @@ Cancel arrives on the local broker as the same `protocol.Command`, emitted by `l
 WebSocket to the control plane. `Authorization: Bearer <machine-token>`.
 
 - Reconnect with exponential backoff: 1s → 2s → 4s … capped at 60s, ±20% jitter.
+- Ping the control plane every 15s, §20's heartbeat interval. Give a connection up when nothing — no frame, no pong — has arrived on it for 30s, or when a frame cannot be written in 30s; log why, and reconnect as above. A dead link is otherwise invisible: a write succeeds once it is in the kernel's buffer (amendment A98).
 - On reconnect the agent sends a resume frame carrying, for every non-terminal run it owns, `{run_id, state, last_acked_seq}`. The server replays commands the agent missed and resumes log ingestion from `last_acked_seq + 1`. Every handler is idempotent by run id. The `last_acked_seq` in that frame is **this transport's own** — the live sink's position when there is one, and `broker_state` under `broker = 'remote'` otherwise (§22, amendment A28). It is never the machine's high-water mark, which a local broker writing to the same disk keeps far ahead of any network.
 - Log frames buffer to disk while disconnected, bounded at 50 MB per run; beyond that, drop and emit one marker frame recording how many lines were lost. Sequence numbers keep incrementing across the gap so the gap is visible rather than silent.
 - If the token is rejected (`401`), stop retrying, log loudly, and continue serving the local broker. A revoked token must never disable local operation.
@@ -4843,3 +4844,57 @@ The agent's readiness beat looks every 15 minutes (A70), and a person's `setup` 
 **Not in this amendment.** Making a collection, or adding this device to one: those are an admin
 device's, with Touch ID or the recovery phrase, and latem never runs them. Telling a key with a
 passphrase from one without, which would mean reading the key file.
+
+
+### Amendment from a socket that took heartbeats after its far end had gone
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A98 | §7.4, §20 | **The remote broker pings the control plane every 15s, §20's heartbeat interval, and gives a connection up once nothing has arrived on it for 30s: no frame of any kind and no pong. That is a read deadline that every frame and every pong extends. Every frame it writes has a 30s write deadline, and missing it ends the connection too. Either way the agent says why, once, at warn, and dials again with §7.4's backoff from its first step. Neither interval is configuration. The wire is unchanged: a ping is a WebSocket control frame, which every endpoint must answer (RFC 6455 §5.5.2)** | On 2026-11-13 the desktop's agent kept a WebSocket to `wss://gw.latem.dev/agent` whose far end had gone: ESTAB, 47 KB in Send-Q, the kernel retransmitting into nothing. A write returns once its bytes are in the send buffer, so every heartbeat succeeded, and no read had a deadline. latem-cloud marked the machine offline and held a production deploy with `no_machine` until someone ran `latem service restart`. Left alone, TCP gives up after about 15 minutes (`tcp_retries2`). The desktop is the only `[linux, amd64]` machine, so a gateway redeploy or a dropped IPv6 path stranded every deploy |
+
+**Why pings, and not the heartbeat.** A heartbeat carries no id and nothing answers it (PROTOCOL.md
+§4.5). A healthy control plane says nothing to an idle machine for hours, so silence alone proves
+nothing, and having the control plane answer every beat would be a protocol change. A ping is
+answered below the protocol, by the far side's WebSocket layer, and needs nothing from the control
+plane's code.
+
+**Any frame, not only a pong.** Every frame from the control plane extends the deadline, as a pong
+does. A reconnect's log flush can put megabytes ahead of a ping in the send buffer, while the
+control plane's acknowledgements of the batches arrive steadily. A link that is catching up must not
+be ended because its own ping is queued behind its output.
+
+**The numbers.** A ping every 15s. The connection is given up after 30s with nothing heard, and a
+frame that takes longer than 30s to write ends it too. Thirty seconds is two intervals: one late pong
+does not end a link, and a dead one is replaced before the control plane's three missed beats (45s)
+mark the machine offline. From the moment a link dies, the agent gives it up within 30s, waits the
+backoff's first step (1s ± 20%), and dials. Before, each write was bounded only by the 30s request
+timeout, and nothing said that a write's timeout had ended a connection.
+
+**What each catches.** The read deadline catches a black hole, where nothing comes back, not even a
+reset: no pong arrives. It also catches a link that carries the agent's frames and drops the
+control plane's. A far side that still sends but no longer reads is kept while its frames arrive,
+since it is plainly there. Once the agent has more to say than the socket's buffers hold, a write
+blocks, and the write deadline ends the connection. A reset or a close frame ends the read at once,
+as before.
+
+**What the log says.** `no frame from the control plane in 30s, reconnecting`, or `could not write a
+frame to the control plane in 30s, reconnecting`, with the URL, and not again as `control plane
+connection lost`. The dial that follows is logged as every dial is.
+
+**The control plane.** latem-cloud needs no change. Its gateways answer pings without code of their
+own. The Workers runtime answers for a hibernating Durable Object without waking it, and `ws`, which
+the Node gateway is built on, answers by default. Both were checked with the agent's own WebSocket
+library: wrangler 4.86's workerd, with the gateway's compatibility date, accepting the socket as
+`AgentSession` does; and `ws` 8.21.3, set up as `server.ts` sets it up. A ping is not a beat: the
+control plane judges a machine by its heartbeats, as before. It need not ping the agent, which answers
+a ping while it reads.
+
+**What it costs.** One ping and one pong every 15s for each connected machine, a few dozen bytes each
+way: about 2 MB a day per machine with every TCP and TLS header counted. The heartbeat already goes at
+the same interval and is larger. A ping makes no Convex call, writes no row, and on the Worker wakes
+no Durable Object. A dead link now costs one reconnect, where it used to cost up to 15 minutes
+offline.
+
+**Not in this amendment.** A setting for either interval: like the heartbeat's, a longer one would
+let a machine keep a dead link. Pings from the control plane to the agent. `remote.Verify`, which
+`latem register` runs once and which has its own 15s bound.

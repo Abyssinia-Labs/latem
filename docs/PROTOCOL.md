@@ -60,6 +60,17 @@ Alongside it, and doing more work than it does:
   checks it again on encode.
 - **Compression negotiation is left on** by the agent's dialler; a build's log
   volume is exactly what it pays off on.
+- **The agent pings, and a control plane answers (A98).** A WebSocket ping
+  every 15 s, §20's heartbeat interval. A connection on which nothing — no
+  frame of any kind, no pong — has arrived for 30 s is given up and dialled
+  again with the backoff below, and so is one on which a frame cannot be
+  written in 30 s; the agent logs which, once, at warn. Pings are control
+  frames, which RFC 6455 §5.5.2 requires every endpoint to answer, so no frame
+  of this protocol changes. This server answers without code of its own: the
+  Workers runtime does it for a hibernating Durable Object without waking it,
+  and `ws` does it by default for the Node gateway. A ping is not a beat: a
+  machine is judged by its heartbeats alone (§4.5). A control plane need not
+  ping the agent, which answers one while it reads.
 
 ### Handshake
 
@@ -843,7 +854,9 @@ and as often, from its own mirrors.
 ```
 
 No `id`; no ack expected. Every 15 seconds (§20). **Three missed beats — 45
-seconds — is offline.**
+seconds — is offline.** Because nothing answers it, a heartbeat tells the agent
+nothing about its link: a beat written into a dead socket succeeds as far as the
+agent can see. The agent's pings are what tell it (§1, A98).
 
 `runner.available` is false when preflight failed: Docker unreachable, no GPU
 toolkit, a missing Tart image, disk below the runner's floor.
@@ -1002,6 +1015,11 @@ What the agent does, in this order, on every connection (`runSession` →
 A session that got as far as sending its resume frame resets the backoff to one
 second. A server that accepts a connection and immediately hangs up would
 otherwise hold the agent at the base delay indefinitely.
+
+Beside the reader, from the handshake on, the agent pings every 15 s and gives
+the session up once nothing has arrived for 30 s (§1, A98). A session given up
+that way had got past its resume frame, so the next dial comes after the
+backoff's first step, about a second.
 
 On disconnect the agent re-offers every batch that was written but never
 acknowledged. "Without it the frames covering the outage would be marked sent,

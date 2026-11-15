@@ -80,6 +80,18 @@ type controlPlane struct {
 	hello         *helloFrame
 	onResume      func(cp *controlPlane, c *websocket.Conn, r protocol.Resume)
 
+	// stallNext turns the connection that reads the next frame into a black
+	// hole: after that frame it reads nothing, so answers no ping, and never
+	// closes. With chatter set it still sends, a frame every chatter; without,
+	// it sends nothing either. One connection per call, so the next is healthy.
+	stallNext bool
+	chatter   time.Duration
+	stalls    int
+	// pings counts the pings this control plane answered.
+	pings int
+	// release ends every stalled connection, at cleanup.
+	release chan struct{}
+
 	// waiters is how a test blocks until something has happened without
 	// sleeping for it.
 	waiters []chan struct{}
@@ -99,9 +111,12 @@ func newControlPlane(t *testing.T, token string) *controlPlane {
 		logs:       map[string][]protocol.LogFrame{},
 		seen:       map[string]map[uint64]bool{},
 		duplicates: map[string]int{},
+		release:    make(chan struct{}),
 	}
 	cp.srv = httptest.NewServer(http.HandlerFunc(cp.serve))
 	t.Cleanup(cp.srv.Close)
+	// Before the server closes: cleanups run last-registered first.
+	t.Cleanup(func() { close(cp.release) })
 	return cp
 }
 
@@ -130,7 +145,13 @@ func (cp *controlPlane) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, nil)
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		// Answered, as every WebSocket endpoint must, and counted.
+		OnPingReceived: func(context.Context, []byte) bool {
+			cp.count(&cp.pings)
+			return true
+		},
+	})
 	if err != nil {
 		return
 	}
@@ -165,6 +186,60 @@ func (cp *controlPlane) serve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cp.handle(conn, data)
+		if every, ok := cp.takeStall(); ok {
+			cp.stall(conn, every)
+			return
+		}
+	}
+}
+
+// takeStall reports whether this connection is the one [controlPlane.BlackHoleNext]
+// asked for, and how often it should still send.
+func (cp *controlPlane) takeStall() (time.Duration, bool) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	if !cp.stallNext {
+		return 0, false
+	}
+	cp.stallNext = false
+	cp.stalls++
+	cp.notifyLocked()
+	return cp.chatter, true
+}
+
+// stall is a far side that has gone without saying so. Nothing reads the
+// connection again, so pings pile up unanswered in its buffer and so does
+// everything else the agent writes, until the agent's own buffer fills behind
+// it. Nothing closes it either: no close frame, no FIN, no reset, which is
+// what a black hole sends. With every set it still writes, an ack for nothing
+// every interval, which the agent's resolve ignores.
+func (cp *controlPlane) stall(conn *websocket.Conn, every time.Duration) {
+	defer func() { _ = conn.CloseNow() }()
+	if every <= 0 {
+		<-cp.release
+		return
+	}
+	data, err := encode(frame{Kind: kindAck, ID: "chatter", Ack: &protocol.Ack{OK: true}})
+	if err != nil {
+		cp.t.Errorf("encoding the chatter: %v", err)
+		return
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-cp.release:
+			return
+		case <-tick.C:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := conn.Write(ctx, websocket.MessageText, data)
+		cancel()
+		if err != nil {
+			// The agent has hung up. Hold the socket as a black hole would.
+			<-cp.release
+			return
+		}
 	}
 }
 
@@ -324,6 +399,30 @@ func (cp *controlPlane) Partition() {
 	for _, c := range cp.liveConns() {
 		_ = c.CloseNow()
 	}
+}
+
+// BlackHoleNext makes the connection that reads the next frame from the agent
+// go silent after it, and chatter > 0 has it keep sending while it does. See
+// [controlPlane.stall].
+func (cp *controlPlane) BlackHoleNext(chatter time.Duration) {
+	cp.mu.Lock()
+	cp.stallNext = true
+	cp.chatter = chatter
+	cp.mu.Unlock()
+}
+
+// Stalls is how many connections have gone silent.
+func (cp *controlPlane) Stalls() int {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return cp.stalls
+}
+
+// Pings is how many pings this control plane has answered.
+func (cp *controlPlane) Pings() int {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	return cp.pings
 }
 
 // Heal ends the partition.
@@ -640,6 +739,8 @@ type harness struct {
 	DB    *store.DB
 	Clock *fakeClock
 	Token string
+	// Narration is what the transport logged, at warn and above.
+	Narration *testWriter
 }
 
 type harnessOptions struct {
@@ -653,6 +754,8 @@ type harnessOptions struct {
 	// simulates an agent restart: a new transport with no memory, against the
 	// state the last one left behind.
 	db *store.DB
+	// pingEvery overrides [DefaultPingInterval], for the tests of A98.
+	pingEvery time.Duration
 }
 
 func newHarness(t *testing.T, mutate func(*harnessOptions)) *harness {
@@ -674,6 +777,7 @@ func newHarness(t *testing.T, mutate func(*harnessOptions)) *harness {
 		tokenFile = newTokenFile(t, ho.token)
 	}
 
+	logger, narration := newTestLogger(t)
 	b, err := Open(Options{
 		URL:            cp.URL(),
 		TokenFile:      tokenFile,
@@ -683,7 +787,8 @@ func newHarness(t *testing.T, mutate func(*harnessOptions)) *harness {
 		MaxBufferBytes: ho.maxBuf,
 		QueueTTL:       ho.queueTTL,
 		Backoff:        DefaultBackoff,
-		Logger:         testLogger(t),
+		PingInterval:   ho.pingEvery,
+		Logger:         logger,
 		sleep:          clock.sleep,
 		// A fixed midpoint makes the schedule assertable. The dithering itself
 		// has its own test.
@@ -694,7 +799,7 @@ func newHarness(t *testing.T, mutate func(*harnessOptions)) *harness {
 	}
 	t.Cleanup(func() { _ = b.Close() })
 
-	return &harness{Broker: b, CP: cp, DB: db, Clock: clock, Token: ho.token}
+	return &harness{Broker: b, CP: cp, DB: db, Clock: clock, Token: ho.token, Narration: narration}
 }
 
 // newHarnessOn builds a harness against an existing database, which is what an
@@ -739,26 +844,49 @@ func (h *harness) AwaitResumes(t *testing.T, n int) {
 // It is at warn level: the reconnect loop says something on every attempt, and
 // a simulated ten-minute partition is fifteen of them.
 func testLogger(t *testing.T) *slog.Logger {
+	logger, _ := newTestLogger(t)
+	return logger
+}
+
+// newTestLogger is [testLogger] that also keeps what it was told, for the
+// tests whose subject is what the transport says.
+func newTestLogger(t *testing.T) (*slog.Logger, *testWriter) {
 	w := &testWriter{t: t}
 	t.Cleanup(w.stop)
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn})), w
 }
 
 // testWriter forwards to t.Log, tolerating writes that arrive after the test
 // has finished — the reconnect goroutine outlives the test body by a moment.
 type testWriter struct {
-	mu   sync.Mutex
-	t    *testing.T
-	done bool
+	mu    sync.Mutex
+	t     *testing.T
+	done  bool
+	lines []string
 }
 
 func (w *testWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	line := strings.TrimRight(string(p), "\n")
+	w.lines = append(w.lines, line)
 	if !w.done {
-		w.t.Logf("%s", strings.TrimRight(string(p), "\n"))
+		w.t.Logf("%s", line)
 	}
 	return len(p), nil
+}
+
+// Count is how many lines said want.
+func (w *testWriter) Count(want string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, l := range w.lines {
+		if strings.Contains(l, want) {
+			n++
+		}
+	}
+	return n
 }
 
 func (w *testWriter) stop() {
