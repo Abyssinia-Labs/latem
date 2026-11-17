@@ -1299,7 +1299,7 @@ The original argument survives for what it did cover: the runner still invokes `
 ## 19. Local trigger and CLI
 
 ```
-latem setup [--url U] [--repo owner/name …] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57)
+latem setup [--url U] [--repo owner/name …] [--like HOST|FILE] [--no-register] [--no-service]   config, repositories, register, service, doctor; idempotent (A54, A57). --like copies another machine's allowlist, and at a terminal its aliases and the two settings (A102)
 latem setup apply <item-id>... [--kind K] [--json]   Close what `setup --json` says is in the way, as the setup screen would, without it; a person's item, or one of the two settings that give something up off a terminal, exits 4 (A94). A secret or variable no store holds is closed where it will be read, OpenVault first (A97)
 latem agent                          Run the daemon (foreground; service wrappers in §23)
 latem run <repo> <job> [--ref R] [--input k=v] [--follow | --wait | --detach]   Follows the run's log on a terminal and exits with its result; for a script, or with --detach, queues it and prints its id (A81)
@@ -5020,6 +5020,55 @@ repository's word, and the label it names may be another vendor's.
 Either one, once written, brings the jobs here, and the plan made next shows neither.
 
 **What it costs.** Nothing is probed: the item is read from the jobs and the runners setup already has.
+
+
+### Amendment from a machine that started without what its siblings had
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A102 | §5 INV-2, §8, §19, A57, A68, A73, A89, A94, A100 | **`latem setup --like <machine>` makes a new machine's config like another's in four things: `[actions] allowed`, `[label_aliases]`, `allow_unisolated` and `require_pinned`. `<machine>` is a host ssh reaches, an alias from `~/.ssh/config` included, whose config.toml is read with `cat` and no latem; or, when it has a slash or ends in `.toml`, that file on this machine. It is read before setup writes anything, and one it cannot read stops setup with nothing written. The allowlist entries this machine lacks are written. The aliases for labels this machine does not alias, and each of the two settings where the other machine gives up what this one does not, are written only for a person at a terminal: shown as they will be written, asked `[y/N]` once for the aliases and once for each setting, with what was typed before the question thrown away. Off a terminal they are left, named, and the line to type at one is said, at the end too. Nothing else is copied** | On 2026-11-17 a Mac Studio set up with the same nine repositories as the mini could run 0 of their 141 jobs. Its `[actions] allowed` was empty, it had no `[label_aliases]`, and `require_pinned` and `allow_unisolated` were at their defaults. The mini and the MacBook had all of it, and each new machine had it typed in again by hand |
+
+**Where the other machine's config comes from.** Three places were weighed. latem-cloud knows a
+machine's aliases, since A68's heartbeat carries them, but not its allowlist or the two settings.
+Copying from it would put those in the heartbeat and add a way for the control plane to hand them
+to a machine. That machine would then run what the control plane said to allow, which is the
+definition INV-2 keeps the broker from supplying, and it could do so only after step 4, once it was
+registered. ssh reaches the other machine with the person's own keys, as `latem secrets copy` does
+(A73) and as an agent reaches `latem mcp` (A87). It needs no protocol and no change on the other
+machine: `cat` reads its config.toml from `${LATEM_CONFIG_DIR:-$HOME/.latem}`, so a mini on any
+latem works. A file is for a machine with no ssh between the two: the other machine's config.toml,
+copied however the person likes.
+
+**Only four things.** Only the parts it copies are decoded. The other machine's runners, paths,
+repositories, machine id and control plane are its own: a native runner's `path_prepend` names
+that machine's toolchains, and its token file is not here. The repositories come from `--repo` or
+step 2's questions, as before. An alias for a label this machine already aliases differently is
+kept, and the difference is said.
+
+**What needs a yes.** An action on the allowlist is refused unless a job of an allowed repository
+names it, and it is the same code on both machines, so it is written with no question, as
+`workflows check --fix` writes it (A100). An alias sends this machine every job of its repositories
+that asks for the label, and the control plane reads it (A68). So aliases are asked about as A100
+asks, all of them in one question, since they come as one machine's set. `allow_unisolated = true`
+and `require_pinned = false` each give something up, and each is asked about on its own, with what
+it gives up, as `setup apply` asks (A94). A setting this machine already has, or one the other
+machine keeps at its safe default, is not asked about. `--like` never turns a setting back to its
+default. The terminal check is A89's: stdin and stdout both, and like A94's, it keeps an agent from
+giving up isolation in the course of its work. It is no wall against whoever holds the account.
+
+**Off a terminal.** The allowlist is written. The aliases and settings are listed under "left for a
+person at a terminal", with the reason, and the line `latem setup --like <machine>` is said there
+and again under "next". Run again at a terminal, setup writes nothing twice and asks only what is
+left. The exit code is setup's own: the rest of setup is still worth doing, and nothing failed.
+
+**Where in setup.** After step 1 has a config and before step 2, so that each repository is
+checked against what the machine now allows. A change counts as a change to config.toml, so step 5
+restarts a running agent onto it. `--json` changes nothing, and `--like` with it is a usage error.
+
+**Measured.** In a scratch config directory, a fresh setup `--like` a config.toml shaped like the
+mini's, with a repository whose job needs the alias `blacksmith-4vcpu-ubuntu-2404`, the action
+`oven-sh/setup-bun` and a tag, went from 0 of 1 jobs to 1 of 1 once the person said yes to the
+aliases and to `require_pinned = false`. The person's no to `allow_unisolated` was left out.
 
 
 ### Amendment from a Mac Studio whose Xcode was installed and not selected

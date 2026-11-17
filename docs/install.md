@@ -142,6 +142,40 @@ $ latem secrets set --repo myapp DEPLOY_TOKEN
 
 `latem register --token-file F` still takes a token you already have.
 
+**A machine like another.** A new machine starts with no `[actions] allowed`,
+no `[label_aliases]`, and `require_pinned` and `allow_unisolated` at their
+defaults, so it may run none of the jobs your other machines run. `--like`
+copies them from one of those machines:
+
+```console
+$ latem setup --like mini --repo me/myapp
+1/6 config
+  wrote /Users/me/.latem/config.toml
+  runners: macos (native), linux (docker)
+  like mini: its config.toml, read over ssh
+  [actions] allowed: added oven-sh/setup-bun, dorny/paths-filter
+
+  mini's label aliases. An alias sends this machine every job of its repositories that asks for the label, and tells the control plane to send them here.
+    [label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]
+  Write this to config.toml? [y/N] y
+  added 1 label alias
+
+  As on mini: A tag can be moved to other code after you have read it. The other way is to pin each action to a commit in the workflow.
+    [actions] require_pinned = false
+  Write this to config.toml? [y/N] y
+  wrote [actions] require_pinned = false
+…
+```
+
+`mini` is anything `ssh` takes, an alias from `~/.ssh/config` included. The
+other machine's config.toml is read with `cat`, so its latem can be any
+version. With no ssh between the two, pass a copy of that file instead:
+`--like ./mini.toml`. Only those four things are copied. Its runners,
+repositories and registration stay its own. The allowlist is written as it
+is. The aliases and the two settings are yours to agree to at a terminal.
+Off one (an agent's shell, say) setup writes the allowlist, lists the rest,
+and says the line to type at a terminal: `latem setup --like mini`.
+
 **Driving step 3 from an agent.** An agent with a shell on the machine, such
 as Claude Code on it or over `ssh`, has no screen to drive. It reads
 `latem setup --json` and closes each item with

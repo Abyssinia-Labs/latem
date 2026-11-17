@@ -23,6 +23,7 @@ import (
 
 type setupFlags struct {
 	url, name, image string
+	like             string
 	repos            []string
 	noRegister       bool
 	noService        bool
@@ -44,7 +45,12 @@ done — each step looks at what is there and does only what is missing:
 
   1. config        writes ~/.latem/config.toml when there is none: a native
                    macos runner on a Mac, and a linux docker runner wherever a
-                   Docker daemon answers (on Linux, always).
+                   Docker daemon answers (on Linux, always). With
+                   --like <machine>, it then copies that machine's
+                   [actions] allowed, and at a terminal, once you say yes,
+                   its [label_aliases] and its allow_unisolated and
+                   require_pinned (A102). <machine> is a host ssh reaches,
+                   or its config.toml as a file.
   2. repositories  adds the repositories --repo names — or, on a terminal and
                    with none configured, asks which — and checks each one's
                    workflows, read without a checkout: one line each, how
@@ -102,6 +108,9 @@ Exit codes:
 			}
 			f.url = url
 			if f.json {
+				if f.like != "" {
+					return usageErrorf("--like writes to config.toml, and --json changes nothing; run them apart")
+				}
 				return runSetupPlan(cmd, newSetupDeps())
 			}
 			return runSetup(cmd, f, newSetupDeps())
@@ -111,6 +120,7 @@ Exit codes:
 	cmd.Flags().StringVar(&f.url, "url", registerURL, "control plane agent endpoint to register with")
 	cmd.Flags().StringVar(&f.name, "name", "", "machine name (default: this host's name)")
 	cmd.Flags().StringSliceVar(&f.repos, "repo", nil, "a GitHub repository this machine builds, as owner/name (repeatable)")
+	cmd.Flags().StringVar(&f.like, "like", "", "copy another machine's [actions] allowed, and at a terminal its [label_aliases] and the two settings: a host ssh reaches, or its config.toml")
 	cmd.Flags().StringVar(&f.image, "image", "", "default_image for the docker runner (default: latem-ubuntu, pinned by digest)")
 	cmd.Flags().BoolVar(&f.noRegister, "no-register", false, "do not register with a control plane; this machine runs local builds only")
 	cmd.Flags().BoolVar(&f.noService, "no-service", false, "do not install or restart the agent service")
@@ -165,6 +175,17 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	// lose what was typed ahead for the next.
 	p := newPrompter(cmd)
 
+	// The machine to be like is read before anything is written, so one
+	// that cannot be reached leaves this one as it was (A102).
+	var like likeMachine
+	if f.like != "" {
+		var err error
+		if like, err = readLikeMachine(ctx, f.like); err != nil {
+			return err
+		}
+	}
+	var liked likeOutcome
+
 	// 1 — config.
 	step("1/6 config")
 	if _, err := os.Stat(paths.File); os.IsNotExist(err) {
@@ -209,6 +230,17 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	if err != nil {
 		return fmt.Errorf("%w\n\nsetup stopped here: the agent would not start on this config. "+
 			"`latem doctor` names every fix; run `latem setup` again after", err)
+	}
+	if f.like != "" {
+		// Before the repositories, so that each is checked against what
+		// this machine now allows.
+		if liked, err = setupLike(cmd, p, like, cfg); err != nil {
+			return err
+		}
+		changed = changed || liked.wrote
+		if cfg, err = loadConfig(); err != nil {
+			return err
+		}
 	}
 
 	// 2 — repositories.
@@ -284,6 +316,9 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	doctorErr := deps.doctor(cmd)
 
 	printf(out, "\n%s\n", st.heading("next"))
+	if len(liked.held) > 0 {
+		printf(out, "  %s  at a terminal: %s's label aliases and settings, which need a person's yes\n", likeLine(f.like), f.like)
+	}
 	if cfg, err := loadConfig(); err == nil && len(cfg.Repos) == 0 {
 		printf(out, "  latem repo add <owner/name>         allow a repository; the agent picks it up\n")
 	}
