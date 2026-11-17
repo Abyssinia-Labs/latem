@@ -14,9 +14,10 @@ only ever sends names. [Why it exists](docs/why.md).
 
 ### 1. Install
 
-With Homebrew, on macOS or Linux:
+With Homebrew, on macOS or Linux. Current Homebrew refuses a third-party tap's formula until you trust it, so trust it first:
 
 ```console
+$ brew trust --formula abyssinia-labs/tap/latem
 $ brew install abyssinia-labs/tap/latem
 ```
 
