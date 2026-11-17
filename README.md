@@ -66,7 +66,8 @@ try checks.yml › beacon at 366325402a69, as a push on refs/heads/try-demo
 
 `latem try` needs no push, and nothing about the run reaches a control plane.
 It follows the run's log and exits with the run's result. `workflows check
---fix` writes the label aliases and allowed actions it suggests.
+--fix` writes the allowed actions it suggests, and the label aliases once you
+say yes to them at a terminal.
 [More on workflows](docs/jobs.md#github-workflows).
 
 Or give the repository a `.latem/jobs.yaml`, commit it and push it:

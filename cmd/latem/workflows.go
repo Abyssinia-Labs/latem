@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -87,9 +88,13 @@ contents, a script not in the repository — is counted, not guessed.
 A job's if: is not evaluated: the question is whether this machine could run
 the job, not whether this event would.
 
---fix adds the [label_aliases] and [actions] allowed entries it suggests to
-config.toml, and asks the running agent to reload. Pinning an action and
-storing a secret stay yours to do.
+--fix adds the [actions] allowed entries it suggests to config.toml, and asks
+the running agent to reload. The [label_aliases] entries it suggests it shows
+first, exactly as it would write them, and writes only when you say yes at a
+terminal: an alias sends this machine every job that asks for the label, in
+any of its repositories (A100). With no terminal on stdin and stdout, it
+writes the rest, leaves the aliases, and exits 4 naming the command to type
+at one. Pinning an action and storing a secret stay yours to do.
 
 The checkout is matched to a [repos.*] entry by its origin remote, or by
 --repo, for its vars and secrets.
@@ -108,7 +113,8 @@ over a workflow job of the same name.
 Exit codes:
   0  every job these events plan can run here
   1  at least one cannot, or the checkout could not be read
-  2  usage`,
+  2  usage
+  4  --fix had aliases to ask about, and no terminal to ask at`,
 		Args: rangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 && f.repo != "" {
@@ -129,7 +135,7 @@ Exit codes:
 	cmd.Flags().BoolVar(&f.json, "json", false, "print the report as JSON")
 	cmd.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "say where each job's needs were read from")
 	cmd.Flags().StringVar(&f.branch, "branch", "", "the branch pushes and pull requests are checked against (default: the repo's)")
-	cmd.Flags().BoolVar(&f.fix, "fix", false, "add the suggested [label_aliases] and [actions] entries to config.toml")
+	cmd.Flags().BoolVar(&f.fix, "fix", false, "add the suggested [actions] entries to config.toml, and the [label_aliases] ones you agree to at a terminal")
 	return cmd
 }
 
@@ -222,24 +228,38 @@ func checkAndReport(cmd *cobra.Command, cfg *config.Config, target checkTarget, 
 		return err
 	}
 	var fixed []string
+	var asked aliasAnswer
 	if f.fix && rep.hasFixes() {
-		paths := config.DerivePaths(configDir())
-		fixed, err = applyWorkflowFixes(paths, cfg, rep)
-		if err != nil {
-			return err
+		// An alias is the person's to agree to, at a terminal (A100). What
+		// they do not agree to is left out, and the rest is still written.
+		toWrite := rep
+		if len(rep.aliases) > 0 {
+			if asked, err = askAboutAliases(cmd, rep); err != nil {
+				return err
+			}
+			if !asked.yes {
+				toWrite.aliases = nil
+			}
 		}
-		if cfg, err = loadConfig(); err != nil {
-			return err
+		if toWrite.hasFixes() {
+			paths := config.DerivePaths(configDir())
+			fixed, err = applyWorkflowFixes(paths, cfg, toWrite)
+			if err != nil {
+				return err
+			}
+			if cfg, err = loadConfig(); err != nil {
+				return err
+			}
+			if rep, err = analyzeWorkflows(ctx, cfg, target, stores); err != nil {
+				return err
+			}
+			defer announceConfigChange(out, paths)
 		}
-		if rep, err = analyzeWorkflows(ctx, cfg, target, stores); err != nil {
-			return err
-		}
-		defer announceConfigChange(out, paths)
 	}
 
 	switch {
 	case f.json:
-		if err := printCheckJSON(out, target, rep, fixed); err != nil {
+		if err := printCheckJSON(out, target, rep, fixed, asked.held()); err != nil {
 			return err
 		}
 	case len(fixed) > 0:
@@ -251,15 +271,111 @@ func checkAndReport(cmd *cobra.Command, cfg *config.Config, target checkTarget, 
 		printf(out, "\n")
 	default:
 		printCheckReport(out, target, rep, f.verbose)
-		if rep.hasFixes() {
-			printf(out, "\n`latem workflows check --fix` adds the [label_aliases] and [actions] entries above.\n")
+		switch {
+		case f.fix:
+		case len(rep.aliases) > 0 && len(rep.allowed) > 0:
+			printf(out, "\n`latem workflows check --fix` adds the [actions] entries above, and asks you about the "+
+				"[label_aliases] ones first, at a terminal.\n")
+		case len(rep.aliases) > 0:
+			printf(out, "\n`latem workflows check --fix` asks you about the [label_aliases] entries above, at a terminal, "+
+				"and adds them if you say yes.\n")
+		case rep.hasFixes():
+			printf(out, "\n`latem workflows check --fix` adds the [actions] entries above.\n")
 		}
+	}
+	if asked.notOne != "" {
+		return &ExitError{Code: ExitNoTerminal, Err: fmt.Errorf(
+			"the [label_aliases] entries were not written: an alias is agreed to by a person at a terminal, and %s (A100). "+
+				"It would write:\n%s\n\nThe person who runs this machine types, at a terminal on it:\n  %s",
+			asked.notOne, strings.Join(indented(asked.lines), "\n"), checkFixLine(target, f))}
 	}
 	if rep.failed() > 0 || rep.broken() > 0 {
 		return &ExitError{Code: ExitFailure, Err: fmt.Errorf("%d of %d jobs cannot run on this machine as it is, "+
 			"and %d workflow file(s) could not be planned", rep.failed(), rep.jobs(), rep.broken())}
 	}
 	return nil
+}
+
+// aliasWarning is said before a [label_aliases] line is written, by --fix
+// and by setup (A100). It is why an alias is the person's to agree to.
+const aliasWarning = "An alias sends this machine every job of its repositories that asks for the label, " +
+	"and tells the control plane to send them here."
+
+// aliasAnswer is what came of asking about the aliases --fix would write.
+type aliasAnswer struct {
+	lines []string // the [label_aliases] lines, as config.toml will read them
+	yes   bool
+	// notOne says which of stdin and stdout is not a terminal, when nobody
+	// could be asked.
+	notOne string
+}
+
+// held is the lines left for a person at a terminal, or nil.
+func (a aliasAnswer) held() []string {
+	if a.notOne == "" {
+		return nil
+	}
+	return a.lines
+}
+
+// askAboutAliases asks the person at the terminal whether to add the
+// [label_aliases] lines rep suggests (A100). An alias routes other
+// workflows' jobs onto this machine, and the control plane reads it too
+// (A68), so it is agreed to as allow_unisolated is under `setup apply`
+// (A94): shown exactly as it will be written, asked with no as the default,
+// and with nobody at a terminal to ask, not written.
+func askAboutAliases(cmd *cobra.Command, rep checkReport) (aliasAnswer, error) {
+	a := aliasAnswer{lines: aliasLines(rep)}
+	in, out, notOne := terminalPair(cmd)
+	if notOne != "" {
+		a.notOne = notOne
+		return a, nil
+	}
+	printf(out, "\n%s\n", aliasWarning)
+	for _, l := range indented(a.lines) {
+		printf(out, "%s\n", l)
+	}
+	// An answer is one typed after the question was on the screen.
+	if err := discardTypeAhead(in); err != nil {
+		return a, fmt.Errorf("clearing what was typed ahead: %w", err)
+	}
+	yes, err := (&prompter{in: bufio.NewReader(in), out: out}).confirm("Write this to config.toml?", false)
+	if err != nil {
+		return a, err
+	}
+	a.yes = yes
+	if !yes {
+		printf(out, "left as it is: the answer was no\n")
+	}
+	return a, nil
+}
+
+// aliasLines is the [label_aliases] lines of suggestedFixLines.
+func aliasLines(rep checkReport) []string {
+	return slices.DeleteFunc(suggestedFixLines(rep), func(l string) bool { return !strings.HasPrefix(l, "[label_aliases] ") })
+}
+
+// checkFixLine is the command that runs this check again with --fix, for a
+// person to type at a terminal.
+func checkFixLine(t checkTarget, f workflowsCheckFlags) string {
+	line := "latem workflows check"
+	if t.fsys == nil {
+		line += " " + shellWord(t.dir)
+	}
+	if f.repo != "" {
+		line += " --repo " + shellWord(f.repo)
+	}
+	if f.offline {
+		line += " --offline"
+	}
+	if f.branch != "" {
+		line += " --branch " + shellWord(f.branch)
+	}
+	line += " --fix"
+	if global.configDir != "" {
+		line += " --config-dir " + shellWord(global.configDir)
+	}
+	return line
 }
 
 // repoCheckTarget is a configured repository as a check target, read without

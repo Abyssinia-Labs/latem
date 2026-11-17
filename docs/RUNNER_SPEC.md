@@ -1315,7 +1315,7 @@ latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   To another machine's `secrets set`, on ssh's stdin (A73)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54); list shows OpenVault's too, and which answers (A96)
-latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59)
+latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59); --fix writes a label alias only on a person's yes at a terminal (A100)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
 latem mcp                            This machine's builds to an agent over MCP, on stdin and stdout, started by ssh; never approves (A87). Its getReadiness tool reads what `setup --json` says and applies nothing (A95)
@@ -2610,7 +2610,8 @@ produced itself (`linux`, `macos`, `arm64`, or an existing alias's target) is a 
 machine lacks; any other is a vendor's label as written, and an alias is the fix.
 Vars referenced in the file with no value are a warning, as they read as empty. `--fix` writes
 the alias and allowlist entries, through the same text edit and load gate as the other commands,
-and reloads; it never changes `require_pinned` or stores a secret. The checkout is matched to a
+and reloads; it never changes `require_pinned` or stores a secret. An alias it writes only on a
+person's yes at a terminal (*A100*). The checkout is matched to a
 `[repos.*]` entry by its `origin` remote or `--repo`.
 
 **`latem register` with no token** runs RFC 8628's device flow against the control plane behind
@@ -5084,3 +5085,42 @@ once. A local command, no network.
 **Not in this amendment.** A run is not refused for it: a run's note (A59) says the job needs Xcode
 selected, as for any gap.
 
+### Amendment from an alias written with nobody asked
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A100 | §19, A54, A57, A68, A89, A94 | **A `[label_aliases]` entry is the person's to agree to, at a terminal, as `allow_unisolated` and `require_pinned = false` are under `setup apply` (A94). `latem workflows check --fix` shows each alias exactly as it will be written, says what an alias does, and asks `Write this to config.toml? [y/N]`, with no as the default and what was typed before the question thrown away. With stdin or stdout not a terminal it writes nothing of the aliases, names each line it would have written and the command a person types at a terminal to write it, and exits 4. The `[actions] allowed` entries it suggests are not the person's to agree to, and are written either way. `--json` says what it left, as `held`** | On 2026-11-17 an agent onboarding a Mac Studio ran `latem workflows check --repo thinking-map --fix` from a shell with no terminal, and it wrote `[label_aliases] blacksmith-6vcpu-macos-26 = ["macos"]` with nobody asked. The setup guide had said that an alias is a line the person agrees to in `latem setup` at a terminal, and setup's repositories step asks before it adds one. `--fix` was a second way to write the same line, and it asked nothing |
+
+**Why an alias is a person's.** An alias is not a fix to one job. It says that every job of this
+machine's repositories that asks for the label is this machine's to run, today's workflows and any
+written later. Since A68 a heartbeat carries the aliases, and the control plane routes by them, so
+an alias also moves jobs that another machine of the fleet was taking. `blacksmith-6vcpu-macos-26 =
+["macos"]` sends a native macOS runner every job that asks for that label. That is the same kind of
+decision as running remote actions unisolated: what may run here, and as whom. Michael decided it on
+2026-11-17: aliases need a person's yes at a terminal.
+
+**What counts as a terminal.** The question `latem approve` asks (A89): stdin and stdout both
+terminals, as isatty(3) answers. It keeps an agent from writing an alias in the course of its work,
+from Claude Code's shell, `latem mcp`'s ssh, a script or a pipe. It does not stop one that makes a
+terminal for itself, and is not meant to: it is a guard, not a boundary against the account's owner.
+
+**What the refusal says.**
+
+```
+the [label_aliases] entries were not written: an alias is agreed to by a person at a terminal, and neither stdin nor stdout is one (A100). It would write:
+  [label_aliases] blacksmith-6vcpu-macos-26 = ["macos"]
+
+The person who runs this machine types, at a terminal on it:
+  latem workflows check --repo thinking-map --fix
+```
+
+Exit 4 is A89's number for a decision that has to go to a person. The report above it is printed as
+before, and so is what `--fix` did write.
+
+**What else writes an alias.** `latem setup`'s repositories step (A57), which asks only on a terminal
+and only with a person's answer. Nothing else: `latem mcp`'s `checkWorkflows` runs the check without
+`--fix` (A87), and `setup apply` writes no alias today.
+
+**Not in this amendment.** Asking about each alias apart: `--fix` asks once for all the lines it
+shows, as setup's repositories step does. An alias to a runner whose labels no name implies, which
+`--fix` never suggests and a person writes by hand.
