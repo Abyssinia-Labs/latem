@@ -4898,3 +4898,20 @@ offline.
 **Not in this amendment.** A setting for either interval: like the heartbeat's, a longer one would
 let a machine keep a dead link. Pings from the control plane to the agent. `remote.Verify`, which
 `latem register` runs once and which has its own 15s bound.
+
+### Amendment from deploys that ran after the tests failed
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A99 | §9, A42, A50, A58 | **A workflow step's `if:` that calls no status function (`success()`, `failure()`, `cancelled()`, `always()`) is `success() && (if)`, as on GitHub: once a step has failed, or the run is cancelled, it is skipped whatever it says. One answered at admission was already held to this: a true one leaves the step with no condition, and the run loop skips such a step after a failure. One left to the run, because it reads `steps`, `job`, `runner` or `secrets`, now carries the `success()` written into it. A condition that calls a status function is left as written, so `always()` and `failure()` still run after a failure, and a step forgiven by `continue-on-error` still leaves the job's status `success` (A50). A composite action's steps get the rule through the `uses:` step's condition, which they inherit. `.latem/jobs.yaml` is unchanged: its steps cannot carry a condition, and every one after a failure is skipped** | On 2026-11-16 latem-cloud's `App` workflow failed its test step and then deployed Convex, the gateway and the web app to production. The deploy steps' conditions read a step's output, `if: steps.changed.outputs.convex == 'true'`, so they were left to the run, and the run loop asked only the condition. GitHub would have skipped them. Only the one step whose condition began with an explicit `success() &&` was skipped. A job's own `if:` had the rule since A52; a step's did not |
+
+**Where the rule lives.** The compiler adds it, not the run loop, because only the compiler knows
+whether a condition calls a status function; the run loop sees a `registry.Condition` it can only
+ask. A skipped step's log line quotes the condition as it was run: `skipped (if: success() &&
+(steps.changed.outputs.convex == 'true'))`.
+
+**Not in this amendment.** On GitHub, a status function inside a composite action answers for that
+action's own steps; here it answers for the job, and an inner step's condition is joined to the
+`uses:` step's with `&&`. So an inner `if: always()` under a `uses:` step whose condition calls no
+status function runs after a failure before the action, which GitHub would not reach. Telling the two
+apart needs the job's status at the moment the action began, which no condition can read yet.

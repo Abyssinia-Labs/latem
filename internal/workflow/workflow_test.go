@@ -652,6 +652,90 @@ func TestStepIDIsCarried(t *testing.T) {
 
 // A condition is one expression. Text around it would coerce to a non-empty
 // string, which is always truthy — a condition that silently always passes.
+// A99: a step condition that calls no status function is success() && (it).
+// Answered at admission, a true one leaves no condition, and the run loop
+// skips a step with none after a failure; left to the run, it carries the
+// success() itself. One that calls a status function is left as written.
+func TestAConditionWithNoStatusFunctionIsSuccessAndIt(t *testing.T) {
+	w := parse(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    env:
+      X: 'y'
+    steps:
+      - id: changed
+        run: make
+      - name: literal
+        if: true
+        run: ./deploy.sh
+      - name: env
+        if: env.X == 'y'
+        run: ./deploy.sh
+      - name: steps
+        if: steps.changed.outputs.convex == 'true'
+        run: ./deploy.sh
+      - name: failure
+        if: failure()
+        run: ./cleanup.sh
+      - name: always
+        if: always()
+        run: ./report.sh
+      - name: either
+        if: success() || steps.changed.outcome == 'failure'
+        run: ./either.sh
+`)
+	job, err := Compile(t.Context(), w, "b", testScope())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	byName := map[string]registry.Step{}
+	for _, st := range job.Steps {
+		byName[st.Name] = st
+	}
+	for _, name := range []string{"literal", "env"} {
+		if byName[name].If != nil {
+			t.Errorf("%s: a condition true at admission should leave no If, got %q", name, byName[name].If.Source())
+		}
+	}
+
+	ran := map[string]map[string]string{"changed": {"convex": "true"}}
+	holds := func(name string, status registry.StepStatus) bool {
+		t.Helper()
+		c := byName[name].If
+		if c == nil {
+			t.Fatalf("%s: no condition", name)
+		}
+		ok, err := c.Holds(registry.StepScope{Status: status, Outputs: ran})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return ok
+	}
+	if !holds("steps", registry.StatusSuccess) {
+		t.Error("steps: should run while the job is succeeding")
+	}
+	if holds("steps", registry.StatusFailure) {
+		t.Error("steps: ran after a failure — the implicit success() is missing")
+	}
+	if holds("steps", registry.StatusCancelled) {
+		t.Error("steps: ran after a cancellation")
+	}
+	if got := byName["steps"].If.Source(); got != "success() && (steps.changed.outputs.convex == 'true')" {
+		t.Errorf("steps: source = %q, want the implicit success() spelled out", got)
+	}
+
+	if !holds("failure", registry.StatusFailure) || holds("failure", registry.StatusSuccess) {
+		t.Error("failure(): should run after a failure and only then")
+	}
+	if !holds("always", registry.StatusFailure) || !holds("always", registry.StatusCancelled) {
+		t.Error("always(): should run whatever the status")
+	}
+	if got := strings.TrimSpace(byName["either"].If.Source()); got != "success() || steps.changed.outcome == 'failure'" {
+		t.Errorf("either: a condition that calls a status function was rewritten: %q", got)
+	}
+}
+
 func TestConditionMustBeASingleExpression(t *testing.T) {
 	w := parse(t, "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - if: run when ${{ always() }}\n        run: make\n")
 	if _, err := Compile(t.Context(), w, "b", testScope()); err == nil {

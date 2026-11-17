@@ -39,6 +39,9 @@ func (x *execution) runSteps(ctx context.Context, budget time.Duration) outcome 
 		sc := x.stepScope(status)
 		switch {
 		case s.If != nil:
+			// A condition that calls no status function reaches here as
+			// success() && (it): the compiler writes the implicit success()
+			// in (A99), so this asks the condition and nothing else.
 			holds, err := s.If.Holds(sc)
 			if err != nil {
 				out := fail(&registry.Error{Code: protocol.ErrBadRegistry,
