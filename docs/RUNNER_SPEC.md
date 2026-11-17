@@ -1329,7 +1329,7 @@ latem version
 **`latem doctor` is a first-class deliverable, not a nice-to-have.** It is what makes G6 achievable and what turns the failure table in §18.1 into a self-service fix. It must check, and for each failure print the exact command to run:
 
 - git, docker, tart availability and versions
-- Docker daemon reachable; current user in the `docker` group
+- Docker daemon reachable; current user in the `docker` group. The daemon is the agent's: `DOCKER_HOST`, or the system socket. One that does not answer names the fix for the engine the `docker` command reaches, as setup's `docker-agent` item does (A100)
 - **`docker` and the agent reach one daemon**, compared by daemon id: the agent uses `DOCKER_HOST` or the system socket and ignores `docker context`, which Docker Desktop moves, so a step's `docker` command can be asking another daemon. A warning, because a job that does not call `docker` is unaffected
 - Docker base image satisfies the §13.1 contract — runs the image once and checks uid 1000 exists, `$HOME` is writable, and `bash`/`git` are present
 - NVIDIA toolkit functional when `gpu = true`; `/dev/kvm` present and readable when an emulator job is configured
@@ -4915,3 +4915,31 @@ action's own steps; here it answers for the job, and an inner step's condition i
 `uses:` step's with `&&`. So an inner `if: always()` under a `uses:` step whose condition calls no
 status function runs after a failure before the action, which GitHub would not reach. Telling the two
 apart needs the job's status at the moment the action began, which no condition can read yet.
+
+
+### Amendment from a Mac that moved from Docker Desktop to Kiri
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A100 | §19, A69, A70 | **`latem setup` asks the daemon the agent's docker runners use, `DOCKER_HOST` or else the system socket, as the Docker SDK's `FromEnv` resolves it, and never the `docker` command's context. When it does not answer, the Linux kind gets a blocking item, `docker-agent`, that names the fix for the engine the command's context reaches: Kiri's `kiri setup --docker-socket`, after removing another engine's link; OrbStack's and Rancher Desktop's admin setting; Docker Desktop's default-socket setting; a link by hand for Colima or an engine latem does not know; or `DOCKER_HOST` in the agent's service. On a Mac where Docker Desktop's `com.docker.socket` helper is installed and not disabled, and the context is another engine's, the item names the helper as the cause and disables it first. The Linux kind's proof runs `docker info` with `DOCKER_HOST` set to the agent's address. doctor's `docker.daemon` names the same fix** | The MacBook moved from Docker Desktop to Kiri (LAT-22). Its agent's Linux runner went unavailable at once: the LaunchAgent sets no `DOCKER_HOST`, and `/var/run/docker.sock` was Docker Desktop's dead link. Readiness said nothing, because its proof ran the `docker` command, which follows the context, and the context was Kiri's. Fixing the link by hand lasted until the next boot, when Docker Desktop's privileged helper pointed it back. doctor said `open -a Docker` |
+
+**What is asked.** Only when a docker runner is configured. One ping to the agent's address, with a
+5s bound. Only when it does not answer: where the system socket links, the endpoint of the command's
+current context (asked without `DOCKER_HOST`, which it would echo), and on a Mac whether
+`/Library/LaunchDaemons/com.docker.socket.plist` exists and `launchctl print-disabled system` lists it
+disabled. None of these needs sudo.
+
+**Which engine.** By the context's socket path: `~/.kiri/` is Kiri, `~/.orbstack/` OrbStack,
+`~/.colima/` Colima, `~/.rd/` Rancher Desktop, `~/.docker/run/` Docker Desktop. The commands in the item
+are the person's (A89): each touches the system socket or launchd's system domain. `setup apply`
+exits 4 on it.
+
+**What it costs.** The agent's readiness beat looks every 15 minutes (A70), so one local ping per
+quarter hour when Docker answers, and three short local commands more when it does not. A person's
+`setup`, `setup --json`, `setup apply` and `getReadiness` ask once per plan. No network, no control
+plane call. The heartbeat's readiness digest changes only when the item comes or goes.
+
+**Not in this amendment.** A config key for the agent's Docker host, written into its LaunchAgent or
+systemd unit, which would not depend on who owns the system socket at boot. It touches the service
+definition's revision and how a reload treats a changed key, and is left open on LAT-22. Comparing the
+agent's daemon with the command's when both answer stays doctor's `docker.context` warning.

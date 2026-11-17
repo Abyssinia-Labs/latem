@@ -19,6 +19,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
@@ -55,6 +56,9 @@ type toolchainDeps struct {
 	stores func(config.Paths) (secretStores, error)
 	// vaultHere reports whether this device holds an OpenVault vault (A97).
 	vaultHere func() bool
+	// docker asks the daemon the agent's docker runners use (A100). Nil asks
+	// nothing.
+	docker func(ctx context.Context) readiness.Docker
 }
 
 func realToolchainDeps() toolchainDeps {
@@ -78,6 +82,7 @@ func realToolchainDeps() toolchainDeps {
 		host:      sys.Host,
 		stores:    func(p config.Paths) (secretStores, error) { return newSecretStores(p) },
 		vaultHere: func() bool { return secrets.OpenVaultHere(os.Environ()) },
+		docker:    agentDocker,
 	}
 }
 

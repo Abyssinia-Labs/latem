@@ -22,6 +22,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/internal/source"
@@ -79,10 +80,13 @@ type doctor struct {
 
 	includeSecrets bool
 
-	loadCfg    func() (*config.Config, error)
-	newDocker  func(docker.Options) (dockerProbe, error)
-	newSecrets func(secrets.Options) (secretResolver, error)
-	sameFS     func(mirrorDir, workDir string) error
+	loadCfg   func() (*config.Config, error)
+	newDocker func(docker.Options) (dockerProbe, error)
+	// agentDocker reads, when the daemon does not answer, what names its fix
+	// (A100). Nil keeps the generic one.
+	agentDocker func(ctx context.Context) readiness.Docker
+	newSecrets  func(secrets.Options) (secretResolver, error)
+	sameFS      func(mirrorDir, workDir string) error
 	// newAppStore and clock exist for A35's checks: one talks to Apple and the
 	// other signs a token, and neither should need a real credential or the
 	// wall clock to be covered by a test.
@@ -167,6 +171,7 @@ func newDoctor() *doctor {
 		newSecrets: func(opts secrets.Options) (secretResolver, error) {
 			return secrets.New(opts)
 		},
+		agentDocker: agentDocker,
 		newAppStore: func() *appstore.Client { return &appstore.Client{} },
 		kvm:         system.CheckKVM,
 		sameFS:      source.CheckSameFilesystem,
@@ -282,7 +287,7 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 			if !required {
 				level = warn
 			}
-			out = append(out, level("docker.daemon", "docker daemon", firstLineOf(err.Error()), d.startDockerCommand()))
+			out = append(out, d.daemonDown(ctx, level, firstLineOf(err.Error())))
 		} else {
 			out = append(out, pass("docker.daemon", "docker daemon", "reachable"))
 			out = append(out, d.checkDockerContext(ctx, probe)...)
@@ -1492,6 +1497,20 @@ func (d *doctor) installCommand(tool string) string {
 		return needs.PackageLine(host.Family, tool)
 	}
 	return "sudo apt-get install -y " + tool + "   # or your distribution's equivalent"
+}
+
+// daemonDown is docker.daemon failing, with the fix setup's plan names for
+// the engine the `docker` command reaches (A100): Docker Desktop's
+// `open -a Docker` is no fix on a Mac that runs Kiri or OrbStack.
+func (d *doctor) daemonDown(ctx context.Context, level func(id, title, detail string, fix ...string) check, detail string) check {
+	if d.agentDocker == nil {
+		return level("docker.daemon", "docker daemon", detail, d.startDockerCommand())
+	}
+	it, ok := readiness.DockerAgentItem(d.agentDocker(ctx), d.sys.Host())
+	if !ok || len(it.Yours)+len(it.Manual) == 0 {
+		return level("docker.daemon", "docker daemon", detail, d.startDockerCommand())
+	}
+	return level("docker.daemon", "docker daemon", it.Have, commandLines(it.Yours)...).withManual(it.Manual...).withNotes(detail)
 }
 
 func (d *doctor) startDockerCommand() string {

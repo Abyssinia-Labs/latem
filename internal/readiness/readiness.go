@@ -61,6 +61,8 @@ type Input struct {
 	// Vault is what this machine has of OpenVault, which decides what closes
 	// a secret or a variable no store here holds (A97).
 	Vault Vault
+	// Docker is the daemon the agent's docker runners use (A100).
+	Docker Docker
 }
 
 // Vault is OpenVault on this machine, as setup found it (A86, A96, A97). Its
@@ -350,9 +352,12 @@ func kindOn(d definition, jobs []Job, in Input) Kind {
 	}
 	k.Items = append(k.Items, settings(jobs, executor)...)
 	k.Items = append(k.Items, secretItems(jobs, in.Vault)...)
+	if d.name == needs.KindLinux && r != nil && r.Executor == needs.ExecutorDocker {
+		k.Items = append(k.Items, dockerAgentItem(in.Docker, in.Host, k.Jobs)...)
+	}
 	k.Items = append(k.Items, imageItems(d, r, in.Images)...)
 	k.Notes = routeNotes(d, jobs, r)
-	k.Proof = proofOf(d, tc, r)
+	k.Proof = proofOf(d, tc, r, in.Docker)
 
 	switch {
 	case !k.On:
@@ -849,7 +854,7 @@ func routeNotes(d definition, jobs []Job, r *Runner) []string {
 // proofOf is what shows a kind works here. It is a check that the tools run in
 // a step's environment, not a build: a real one of anything takes minutes,
 // and the first job is that.
-func proofOf(d definition, tc system.Toolchains, r *Runner) []Probe {
+func proofOf(d definition, tc system.Toolchains, r *Runner, dk Docker) []Probe {
 	var env map[string]string
 	if r != nil {
 		env = r.Env
@@ -874,7 +879,15 @@ func proofOf(d definition, tc system.Toolchains, r *Runner) []Probe {
 		return []Probe{{Title: "Docker answers", Argv: []string{"docker", "info", "--format", "{{.ServerVersion}}"}, Env: env}}
 	case needs.KindLinux:
 		if r != nil && r.Executor == needs.ExecutorDocker {
-			return []Probe{{Title: "Docker answers", Argv: []string{"docker", "info", "--format", "{{.ServerVersion}}"}}}
+			// The agent's daemon, not the context's: the command follows
+			// DOCKER_HOST before its context, and the agent reads nothing else
+			// (A100).
+			p := Probe{Title: "Docker answers", Argv: []string{"docker", "info", "--format", "{{.ServerVersion}}"}}
+			if dk.Host != "" {
+				p.Title = "Docker answers where the agent looks"
+				p.Env = map[string]string{"DOCKER_HOST": dk.Host}
+			}
+			return []Probe{p}
 		}
 	}
 	return nil
