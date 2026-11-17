@@ -966,7 +966,7 @@ Target: Linux x86_64 (desktop) and Linux arm64 (the container role on an Apple s
 - Android emulator jobs need `--device /dev/kvm`; preflight checks it exists and is readable by the daemon's user (§18.2).
 - Disk floor `min_free_gb` defaults to 40 for a docker runner — enough for a base image, a layer cache, and one build's intermediates.
 
-**Step execution.** Each step is one `docker exec` into the run's container. Per §9, that means a **new process every step**: `cd` and `export` do not carry over, the filesystem does. The exec sets `WorkingDir` to `/workspace` and passes the full merged environment explicitly rather than relying on anything the previous exec did. `Step.Run` is passed to the configured shell as a single argument — `["bash", "-c", step.Run]` as an argv slice, never a concatenated string (INV-3).
+**Step execution.** Each step is one `docker exec` into the run's container. Per §9, that means a **new process every step**: `cd` and `export` do not carry over, the filesystem does. The exec sets `WorkingDir` to `/workspace` and passes the full merged environment explicitly rather than relying on anything the previous exec did. `Step.Run` is passed to the configured shell as a single argument — `["bash", "-c", step.Run]` as an argv slice, never a concatenated string (INV-3). Before the first step, the executor waits until the container takes an exec (**A105**): an engine may return from the start before the container has a shell.
 
 **Base image contract.** The container image is the operator's, but three things are required of it, and `latem doctor` checks them by running the image once:
 
@@ -4945,3 +4945,34 @@ doctor run. Nothing is added to a heartbeat, a run or the wire.
 
 **Not in this amendment.** Moving a vault: that is the vault's own migration. Dropping the old names:
 a later release, once every machine has moved; the old readiness ids go first, after one release.
+
+### Amendment from an engine whose start returned before the container could run a shell
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A105 | §13.1, §21 | **After the run container's start returns, the Docker executor waits until it is running with a pid, by inspect, and then until it takes one exec of `/bin/sh -c true` as the run user in `/workspace`. Only that exec is tried again, and only while the engine answers `stat /bin/sh: no such file or directory`: after 10 ms, doubling to at most 500 ms between tries, for 30 s in all. A container that exits before its first step, an exec that fails any other way, and an engine that has not readied the container in 30 s fail the run with `E_EXECUTOR`, retryable, saying what the engine answered. A step's own exit 127 is the step's, as before, and is never tried again** | On Kiri 0.2.1 (LAT-23), the MacBook's `linux` runner failed about one job in ten at its first step, in 0 s: `kiri: cannot start container: exec: "/bin/sh": stat /bin/sh: no such file or directory`, exit 127, reported as `E_STEP`. Docker's API promises that a started container takes an exec, and Docker Desktop kept the promise for thousands of runs. Kiri, it appears, returns from the start while it is still filling the container's new volumes from the image. A run that had failed in no time read as the job's fault, and latem-cloud's flaky detection would have marked the job flaky |
+
+**What was measured.** A one-step job (`uname -m`, `cat /etc/os-release`) in `latem-ubuntu:local`, by
+`latem try` against a second agent on the MacBook. With v0.11.0: the first run on a new runner failed,
+then 40 runs, 20 back to back and 20 three seconds apart, all passed; 10 runs each on a new tool-cache
+volume all failed; 10 runs 30 s apart failed twice. The trigger is a new volume. `latem-ubuntu:local`
+holds 1.1 GB under `/opt/hostedtoolcache`, which a new tool-cache volume is filled from, and an exec
+finds no `/bin/sh` until Kiri has done so. The run's own volume is new every run as well, and
+small. With the wait, counted from `docker events`: of 100 containers with the tool-cache volume already
+there, 21 needed a second exec, 12 to 25 ms after the start, and none needed a third. On a new
+tool-cache volume every container needed several, and was ready after 0.64 to 7.3 s (25 runs). The
+same 60 runs as above then all passed: 40 mixed, 10 on a new volume, 10 thirty seconds apart.
+
+**Why 30 s.** The ticket's first guess was 2 s, ten times the window first seen. It failed one run in
+ten on a new volume. Thirty seconds is four times the slowest seen. An engine that never readies its
+container still fails the run in half a minute, retryably, which costs one exec and one inspect per
+try and nothing else.
+
+**Why one exec, and not every step.** Retrying a step on exit 127 would retry a job's own `command not
+found`, and a step is not always safe to run twice. The readiness exec is the executor's, does
+nothing, and is the only one that can be told apart from a step by its argv.
+
+**Not in this amendment.** Reporting the behaviour to Kiri, which waits for the operator. Probe
+containers (`doctor`'s image checks, the GPU and KVM preflights, a tilde cache target's home probe),
+which run one command as the container's own process and never exec into it. A container step's own
+container (A44), which runs its command as its process too.
