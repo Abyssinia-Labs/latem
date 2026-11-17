@@ -381,11 +381,13 @@ func (a *applier) person(id string, at []found) {
 	a.persons = append(a.persons, shellWord(id))
 }
 
-// givesUp reports whether changes hold one of the two settings that widen
-// what may run here, which only a person at a terminal may write.
+// givesUp reports whether changes hold a setting that widens what may run
+// here, which only a person at a terminal may write: the two settings, and a
+// label a job's runs-on names, which sends this machine those jobs (A107).
 func givesUp(changes []readiness.Change) bool {
 	return slices.ContainsFunc(changes, func(c readiness.Change) bool {
-		return c.What == readiness.ChangeUnisolated || c.What == readiness.ChangeMovingRefs
+		return c.What == readiness.ChangeUnisolated || c.What == readiness.ChangeMovingRefs ||
+			c.What == readiness.ChangeRunsOnLabel
 	})
 }
 
@@ -486,10 +488,6 @@ func (a *applier) switchOn(t applyTarget) {
 		a.fail(t.id, fmt.Sprintf("%s %s, and nothing here changes that", k.Title, k.Why))
 	case k.On:
 		printf(a.w, "%s: on, on the %s runner\n", t.id, k.Runner)
-	case k.Label == "":
-		printf(a.w, "%s: a person's to do: %s comes with the %s runner's labels, and which labels a runner carries is said in config.toml\n",
-			t.id, k.Title, orDash(k.Runner))
-		a.persons = append(a.persons, t.id)
 	case k.Blocking() > 0:
 		var ids []string
 		theirs := true
@@ -506,6 +504,12 @@ func (a *applier) switchOn(t applyTarget) {
 			return
 		}
 		a.fail(t.id, why)
+	case k.Label == "":
+		// Nothing in the way, and still no job of it comes here: a kind
+		// with no runner of its own, or with no job yet.
+		printf(a.w, "%s: a person's to do: %s comes with the %s runner's labels, and which labels a runner carries is said in config.toml\n",
+			t.id, k.Title, orDash(k.Runner))
+		a.persons = append(a.persons, t.id)
 	default:
 		change := kindLabel(k, readiness.ChangeLabelAdd)
 		if err := a.change(k, []readiness.Change{change}); err != nil {

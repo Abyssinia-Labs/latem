@@ -232,8 +232,11 @@ const (
 	itemAllowed    = "allowed-"
 	itemMovingRefs = "moving-refs"
 	itemImage      = "image-"
-	itemSecrets    = "secrets-"
-	itemVars       = "vars-"
+	// ItemRunsOn is the labels a label-less kind's jobs ask for and its
+	// runner lacks (A107).
+	ItemRunsOn  = "runs-on-labels"
+	itemSecrets = "secrets-"
+	itemVars    = "vars-"
 	// The vault's, the last followed by a repository (A97). Each was
 	// openvault-… before latem vault was renamed (A104).
 	itemVaultOn      = "vault-on"
@@ -281,6 +284,10 @@ const (
 	ChangeAllowed    = "allowed"    // [actions] allowed gains Value
 	ChangeNewRunner  = "new-runner" // a native runner, named Value
 	ChangeVault      = "vault"      // [secrets] vault = true (A97, A104)
+	// ChangeRunsOnLabel: Runner gains the label Value, which a job's runs-on
+	// names. It sends the machine every job that asks for it, so only a
+	// person at a terminal says yes to it (A107).
+	ChangeRunsOnLabel = "runs-on-label"
 )
 
 // Probe is one command that has to work in a step's environment.
@@ -387,6 +394,9 @@ func kindOn(d definition, jobs []Job, in Input) Kind {
 		k.Items = append(k.Items, wiring(k, reports, tc, r)...)
 	}
 	k.Items = append(k.Items, settings(jobs, executor)...)
+	if !k.On && d.label == "" && r != nil && r.Executor == needs.ExecutorNative {
+		k.Items = append(k.Items, runsOnItem(k.Title, jobs, r)...)
+	}
 	k.Items = append(k.Items, secretItems(jobs, in.Vault)...)
 	if d.name == needs.KindLinux && r != nil && r.Executor == needs.ExecutorDocker {
 		k.Items = append(k.Items, dockerAgentItem(in.Docker, in.Host, k.Jobs)...)
@@ -475,6 +485,47 @@ func takes(d definition, jobs []Job, r *Runner) bool {
 		return hasLabel(r.Labels, "xcode") || hasLabel(r.Labels, "macos")
 	}
 	return false
+}
+
+// runsOnItem is what turns on a kind that no label of its own switches (iOS,
+// macOS apps, Xcode builds, macOS): its jobs reach a runner here once the
+// runner carries every label their runs-on names. It names each one, and the
+// labels line config.toml would then say (A107).
+func runsOnItem(title string, jobs []Job, r *Runner) []Item {
+	var lacking, refs []string
+	for _, j := range jobs {
+		if j.Runner != "" {
+			continue
+		}
+		var mine []string
+		for _, l := range j.Labels {
+			if !hasLabel(r.Labels, l) {
+				mine = append(mine, l)
+			}
+		}
+		if len(mine) == 0 {
+			continue
+		}
+		refs = append(refs, j.Ref)
+		lacking = merge(lacking, mine)
+	}
+	if len(lacking) == 0 {
+		return nil
+	}
+	after := append(slices.Clone(r.Labels), lacking...)
+	quoted := make([]string, len(after))
+	for i, l := range after {
+		quoted[i] = fmt.Sprintf("%q", l)
+	}
+	it := Item{ID: ItemRunsOn, Title: fmt.Sprintf("the %s runner labelled for %s jobs", r.Name, title), Jobs: refs,
+		Have: fmt.Sprintf("their runs-on names %s, which the %s runner lacks", strings.Join(lacking, ", "), r.Name),
+		Warning: fmt.Sprintf("Every job of this machine's repositories whose runs-on names these labels will come to the %s runner. "+
+			"The line in its [[runner]] table becomes: labels = [%s]", r.Name, strings.Join(quoted, ", "))}
+	for _, l := range lacking {
+		it.Config = append(it.Config, Change{What: ChangeRunsOnLabel, Runner: r.Name, Value: l,
+			Line: fmt.Sprintf("the %s runner gains the label %s", r.Name, l)})
+	}
+	return []Item{it}
 }
 
 func hasLabel(labels []string, want string) bool {
