@@ -5118,9 +5118,41 @@ Exit 4 is A89's number for a decision that has to go to a person. The report abo
 before, and so is what `--fix` did write.
 
 **What else writes an alias.** `latem setup`'s repositories step (A57), which asks only on a terminal
-and only with a person's answer. Nothing else: `latem mcp`'s `checkWorkflows` runs the check without
-`--fix` (A87), and `setup apply` writes no alias today.
+and only with a person's answer, and since A101 the setup screen and `setup apply`, under the same
+rule. `latem mcp`'s `checkWorkflows` runs the check without `--fix` (A87).
 
 **Not in this amendment.** Asking about each alias apart: `--fix` asks once for all the lines it
 shows, as setup's repositories step does. An alias to a runner whose labels no name implies, which
 `--fix` never suggests and a person writes by hand.
+
+### Amendment from a machine that looked ready and was sent nothing
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A101 | §19, A57, A69, A94, A95, A100 | **A job whose `runs-on` names a label no runner here carries, where the label's name says which runner should take it, is an item of the job's kind in `latem setup --json`, `getReadiness` and the setup screen: `label-alias-<label>`, a config item that writes `[label_aliases] "<label>" = [<runner label>]`, the alias `workflows check --fix` suggests. It counts against the kind, so the kind is not ready while the item is open. It gives something up (A100), so it carries a warning, the setup screen asks, and `setup apply` writes it only on a person's yes at a terminal and otherwise exits 4 naming the command** | On 2026-11-17 a Mac Studio was set up with `latem setup apply --kind ios` and then `latem setup` at a terminal, which said iOS had two things to do, both take-one's secrets. thinking-map's `apple` job asks for `blacksmith-6vcpu-macos-26`, which no runner on the machine carried, and setup never said so: only `latem workflows check --repo thinking-map` did. Someone who followed setup alone would have had a machine that looked ready for iOS and was never sent thinking-map's job |
+
+**What it reads.** The labels the compiler produced for the job, after the machine's aliases, as
+`workflows check` reads them (A55, A57). A label is this item's when no runner here carries it,
+the compiler did not produce it, and its name says which runner it means: an `ubuntu` or `linux`
+label is the `linux` runner's, a `macos` one the `macos` runner's. That is the same rule by which
+`workflows check` suggests an alias. A label whose name says nothing is not an item: which runner
+it means is the person's call, and the job may be meant for another machine. A label the compiler
+produced (`linux`, `macos`, `arm64`, or an alias's target) is a platform this machine lacks, and no
+alias supplies it.
+
+**One item per label.** Several jobs asking for one label share an item, which lists them. An
+alias is for a label, not a job.
+
+**Its kind.** The job's kind, read from its steps (A59), as for every other item. A kind whose only
+jobs are such jobs is off, since no runner here takes it. Either way it is not ready.
+
+**Closing it.** `latem setup apply label-alias-<label>` at a terminal shows the warning and the
+line, and asks `Write this to config.toml? [y/N]`, as it asks about `unisolated` (A94). Off a
+terminal it writes nothing and exits 4 with `latem setup apply label-alias-<label>` for a person
+to type. `--kind K` asks about each such item of K in turn. The screen asks as it asks about any
+config item, with the warning above the line. The heartbeat's readiness (A70) says the item by its
+title; the alias stays on the machine.
+
+**Not in this amendment.** A label whose name implies no runner. It is a note at most: which
+runner it means, or whether it is another machine's, is the person's to say, and a guess would
+send jobs here that were meant elsewhere.

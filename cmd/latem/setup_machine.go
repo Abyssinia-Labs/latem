@@ -134,7 +134,7 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 					Ref: fmt.Sprintf("%s %s %s", key, path.Base(wr.file), j.name), Repo: key,
 					Labels: j.labels, Report: *j.needs, Runner: j.carrier, Unisolated: j.unisolated,
 					Moving: j.moving, NotAllowed: j.notAllowed, Secrets: j.secrets, Env: j.environment,
-					Vars: j.vars, FromVault: j.fromVault,
+					Vars: j.vars, FromVault: j.fromVault, Aliases: j.aliases,
 				})
 			}
 		}
@@ -541,6 +541,9 @@ func applyChange(body string, cfg *config.Config, c readiness.Change) (string, e
 			allowed = append(allowed, c.Value)
 		}
 		return setTableKey(body, actions, actions, "allowed", tomlStringList(allowed))
+	case readiness.ChangeLabelAlias:
+		aliases := []string{"label_aliases"}
+		return setTableKey(body, aliases, aliases, c.Key, tomlStringList(c.Labels))
 	case readiness.ChangeVault:
 		secretsTable := []string{"secrets"}
 		return setTableKey(body, secretsTable, secretsTable, "vault", "true")

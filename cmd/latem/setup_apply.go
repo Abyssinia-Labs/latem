@@ -382,12 +382,14 @@ func (a *applier) person(id string, at []found) {
 }
 
 // givesUp reports whether changes hold a setting that widens what may run
-// here, which only a person at a terminal may write: the two settings, and a
-// label a job's runs-on names, which sends this machine those jobs (A107).
+// here, which only a person at a terminal may write: one of the two [actions]
+// settings (A94), a label a job's runs-on names, which sends this machine
+// those jobs (A107), or a label alias, which sends it other workflows' jobs
+// (A100, A101).
 func givesUp(changes []readiness.Change) bool {
 	return slices.ContainsFunc(changes, func(c readiness.Change) bool {
 		return c.What == readiness.ChangeUnisolated || c.What == readiness.ChangeMovingRefs ||
-			c.What == readiness.ChangeRunsOnLabel
+			c.What == readiness.ChangeRunsOnLabel || c.What == readiness.ChangeLabelAlias
 	})
 }
 

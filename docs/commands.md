@@ -173,9 +173,18 @@ a restart applies the change. `--json` prints the plan afterwards, as `setup
 --json` does, and the lines above go to stderr.
 
 **What is a person's exits `4`**, with what they would type: a command with
-sudo in it, a licence, Xcode, a secret's value. So do `unisolated` and
-`moving-refs`, which give something up, unless stdin and stdout are a
-terminal. Then it asks, and the answer defaults to no. Exit `1` is something
+sudo in it, a licence, Xcode, a secret's value. So do `unisolated`,
+`moving-refs` and a `label-alias-<label>` item, which give something up,
+unless stdin and stdout are a terminal. Then it asks, and the answer defaults
+to no.
+
+**A job whose `runs-on` no runner here carries** is an item of its kind,
+`label-alias-<label>`, when the label's name says which runner should take it:
+`blacksmith-6vcpu-macos-26` is the `macos` runner's. It writes the alias
+`workflows check --fix` suggests, `[label_aliases] "blacksmith-6vcpu-macos-26"
+= ["macos"]`, and the kind is not ready while it is open. An alias sends this
+machine every job that asks for the label, so it is written only on a
+person's yes at a terminal (RUNNER_SPEC A100, A101). Exit `1` is something
 that did not close: a command failed, the check failed (no label is written),
 or the answer was no. What came after it was not tried. An id the plan does
 not have is exit `2`, and the message lists the ids there are (RUNNER_SPEC

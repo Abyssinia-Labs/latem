@@ -445,3 +445,103 @@ func TestSetupApply_UsageErrors(t *testing.T) {
 		t.Errorf("no config: %v", err)
 	}
 }
+
+// thinking-map's apple job on the Mac Studio (A101): its runs-on names a
+// label no runner here carries. `setup --json` says so as an item of the
+// job's kind, with the alias that brings it here, and the kind is not ready.
+// `setup apply` writes the alias only with a person's yes at a terminal
+// (A100).
+const blacksmithRepo = `on: push
+jobs:
+  apple:
+    runs-on: blacksmith-6vcpu-macos-26
+    steps:
+      - run: xcodebuild -version
+`
+
+const aliasItem = "label-alias-blacksmith-6vcpu-macos-26"
+
+func TestSetup_AnUnmatchedRunsOnIsAnItem(t *testing.T) {
+	dir, _ := setupMachine(t, fstest.MapFS{".github/workflows/apple.yml": {Data: []byte(blacksmithRepo)}})
+
+	out, err := latemIn(t, dir, "", "setup", "--json")
+	if err != nil {
+		t.Fatalf("setup --json: %v\n%s", err, out)
+	}
+	var plan readiness.Plan
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	var found *readiness.Item
+	for _, k := range plan.Kinds {
+		for i, it := range k.Items {
+			if it.ID == aliasItem {
+				found = &k.Items[i]
+				if k.State == readiness.Ready {
+					t.Errorf("%s is ready with the item open", k.Name)
+				}
+			}
+		}
+	}
+	if found == nil {
+		t.Fatalf("no %s in the plan:\n%s", aliasItem, out)
+	}
+	if found.Warning != readiness.AliasWarning || len(found.Config) != 1 ||
+		found.Config[0].Line != `[label_aliases] "blacksmith-6vcpu-macos-26" = ["macos"]` ||
+		!slices.Equal(found.Jobs, []string{"app apple.yml apple"}) {
+		t.Errorf("item = %+v", *found)
+	}
+}
+
+func TestSetupApply_AnAliasOffATerminalIsAPersons(t *testing.T) {
+	dir, _ := setupMachine(t, fstest.MapFS{".github/workflows/apple.yml": {Data: []byte(blacksmithRepo)}})
+	noAgentRunning(t)
+	before := readConfigFile(t, dir)
+
+	_, stderr, err := applyIn(t, dir, aliasItem)
+	if exitCode(err) != ExitNoTerminal {
+		t.Fatalf("exit %d (%v)\n%s", exitCode(err), err, stderr)
+	}
+	if readConfigFile(t, dir) != before {
+		t.Error("an alias was written with nobody to ask")
+	}
+	for _, want := range []string{
+		aliasItem + ": it gives something up, so only a person at a terminal may write it, and neither stdin nor stdout is one. " +
+			readiness.AliasWarning,
+		`  it writes [label_aliases] "blacksmith-6vcpu-macos-26" = ["macos"]`,
+		"  latem setup apply " + aliasItem + " --config-dir " + shellWord(dir),
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+}
+
+func TestSetupApply_AnAliasAtATerminal(t *testing.T) {
+	dir, _ := setupMachine(t, fstest.MapFS{".github/workflows/apple.yml": {Data: []byte(blacksmithRepo)}})
+	noAgentRunning(t)
+	prev := global.configDir
+	t.Cleanup(func() { global.configDir = prev })
+	const asked = "Write this to config.toml? [y/N]"
+
+	before := readConfigFile(t, dir)
+	_, stderr, err := atTerminal(t, terminalSession{prompt: asked, answer: ""},
+		"setup", "apply", aliasItem, "--config-dir", dir)
+	if exitCode(err) != ExitFailure || readConfigFile(t, dir) != before ||
+		!strings.Contains(stderr, aliasItem+": left as it is: the answer was no") {
+		t.Errorf("no: exit %d (%v)\n%s", exitCode(err), err, stderr)
+	}
+
+	screen, stderr, err := atTerminal(t, terminalSession{prompt: asked, answer: "y"},
+		"setup", "apply", aliasItem, "--config-dir", dir)
+	if err != nil {
+		t.Fatalf("%v\n%s\n%s", err, screen, stderr)
+	}
+	if got := loadConfigIn(t, dir).LabelAliases["blacksmith-6vcpu-macos-26"]; !slices.Equal(got, []string{"macos"}) {
+		t.Errorf("label alias = %v", got)
+	}
+	if !strings.Contains(screen, readiness.AliasWarning) ||
+		!strings.Contains(stderr, aliasItem+`: wrote [label_aliases] "blacksmith-6vcpu-macos-26" = ["macos"]; closed`) {
+		t.Errorf("screen:\n%s\nstderr:\n%s", screen, stderr)
+	}
+}

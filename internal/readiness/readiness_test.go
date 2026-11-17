@@ -300,3 +300,60 @@ func TestBuild_AKindOnlyOnARunnerThatDoesNotSuitIt(t *testing.T) {
 		t.Errorf("have = %q: it is the kind's own runner", it.Have)
 	}
 }
+
+// The Mac Studio on 2026-11-17 (A101): take-one's iOS job reaches the macos
+// runner, and thinking-map's asks for a Blacksmith label no runner carries.
+// iOS is not ready while that job can never come here, and the item names
+// the alias that brings it, which only a person agrees to (A100).
+func TestBuild_AnUnmatchedRunsOnIsAnItemOfItsKind(t *testing.T) {
+	mac := system.Host{OS: "macOS", Arch: "arm64"}
+	tc := system.Toolchains{Host: mac}
+	report := needs.Report{Platform: "macOS", Kind: needs.KindIOS}
+	in := Input{Machine: "studio", Host: mac, Toolchains: tc,
+		Runners: []Runner{{Name: "macos", Executor: needs.ExecutorNative, Labels: []string{"macos"}, Toolchains: tc}},
+		Jobs: []Job{
+			{Ref: "take-one ios.yml ios", Repo: "take-one", Labels: []string{"macos"}, Runner: "macos", Report: report},
+			{Ref: "thinking-map apple.yml apple", Repo: "thinking-map", Labels: []string{"blacksmith-6vcpu-macos-26"},
+				Report: report, Aliases: map[string][]string{"blacksmith-6vcpu-macos-26": {"macos"}}},
+			{Ref: "thinking-map apple.yml ui", Repo: "thinking-map", Labels: []string{"blacksmith-6vcpu-macos-26"},
+				Report: report, Aliases: map[string][]string{"blacksmith-6vcpu-macos-26": {"macos"}}},
+		}}
+	k := kind(t, Build(in), needs.KindIOS)
+	if !k.On || k.State != Missing {
+		t.Errorf("iOS is %s (on %v), want missing while a job cannot reach it: %+v", k.State, k.On, k.Items)
+	}
+	it := item(t, k, "label-alias-blacksmith-6vcpu-macos-26")
+	if it.Soft || it.Warning != AliasWarning || len(it.Config) != 1 ||
+		!slices.Equal(it.Jobs, []string{"thinking-map apple.yml apple", "thinking-map apple.yml ui"}) {
+		t.Errorf("item = %+v", it)
+	}
+	if c := it.Config[0]; c.What != ChangeLabelAlias || c.Key != "blacksmith-6vcpu-macos-26" ||
+		!slices.Equal(c.Labels, []string{"macos"}) || c.Line != `[label_aliases] "blacksmith-6vcpu-macos-26" = ["macos"]` {
+		t.Errorf("change = %+v", c)
+	}
+	if strings.Count(strings.Join(titles(k), "\n"), "a label alias for") != 1 {
+		t.Errorf("one label is one item: %q", titles(k))
+	}
+
+	// Once the alias is there the job reaches the runner, and nothing is left.
+	for i := range in.Jobs {
+		in.Jobs[i].Aliases, in.Jobs[i].Runner = nil, "macos"
+	}
+	if k := kind(t, Build(in), needs.KindIOS); k.State != Ready {
+		t.Errorf("with the alias, iOS is %s: %+v", k.State, k.Items)
+	}
+
+	// A kind whose only job is such a job is off: no runner takes it.
+	in.Jobs = []Job{{Ref: "thinking-map apple.yml apple", Repo: "thinking-map", Labels: []string{"blacksmith-6vcpu-macos-26"},
+		Report: report, Aliases: map[string][]string{"blacksmith-6vcpu-macos-26": {"macos"}}}}
+	k = kind(t, Build(in), needs.KindIOS)
+	if k.State == Ready || k.Blocking() == 0 {
+		t.Errorf("only the unmatched job: iOS is %s with %d blocking", k.State, k.Blocking())
+	}
+	// The alias is the one fix for a vendor's label: the runner is not also
+	// offered it as a label of its own (A107).
+	if slices.ContainsFunc(k.Items, func(it Item) bool { return it.ID == ItemRunsOn }) {
+		t.Errorf("a label the alias covers is offered to the runner too: %+v", k.Items)
+	}
+	item(t, k, "label-alias-blacksmith-6vcpu-macos-26")
+}
