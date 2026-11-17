@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,7 +54,7 @@ type toolchainDeps struct {
 	host func() system.Host
 	// stores are where this machine's secrets are, read for their names.
 	stores func(config.Paths) (secretStores, error)
-	// vaultHere reports whether this device holds an OpenVault vault (A97).
+	// vaultHere reports whether this device holds a vault (A97).
 	vaultHere func() bool
 }
 
@@ -71,6 +72,14 @@ func realToolchainDeps() toolchainDeps {
 			// no PATH: a machine set up by hand has it wherever it was put.
 			if name == "latem" {
 				return os.Executable()
+			}
+			// The vault's command is also where cargo and Homebrew put it,
+			// which may be on no PATH here (A104).
+			if secrets.IsVaultCommand(name) {
+				if p, err := lookPathOr(name, servicePath(sys)); err == nil {
+					return p, nil
+				}
+				return secrets.LookVaultCommand(name, secrets.VaultSearchDirs(os.Environ()))
 			}
 			return lookPathOr(name, servicePath(sys))
 		},
@@ -533,4 +542,19 @@ func configureInstall(out io.Writer, cfg *config.Config, r *config.Runner, argv 
 		printf(out, "      %s\n", l)
 	}
 	return true, nil
+}
+
+// vaultCommand is the vault's command on this machine by name, for what latem
+// tells a person to type (A104). A test replaces it, so that what it pins
+// does not depend on what the machine running it has installed.
+var vaultCommand = secrets.VaultCommandHere
+
+// vaultServiceFix is the command that keeps the vault's service running:
+// the one err's provider names, else this machine's.
+func vaultServiceFix(err error) string {
+	var ove *secrets.OpenVaultError
+	if errors.As(err, &ove) {
+		return ove.ServiceFix()
+	}
+	return vaultCommand() + " service install"
 }

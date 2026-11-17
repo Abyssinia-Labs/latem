@@ -56,7 +56,7 @@ var vaultDown = &secrets.OpenVaultError{Op: "list", NotRunning: true}
 func vaultAgent(t *testing.T, vault *fakeVault) (*Agent, *config.Config) {
 	t.Helper()
 	cfg := newConfigDir(t, configOptions{})
-	cfg.Secrets.OpenVault = true
+	cfg.Secrets.Vault = true
 	cfg.Repos["app"].Vars = map[string]string{"LATEM": "false", "REGION": "us"}
 	a, err := New(Options{Config: cfg, Logger: testLogger(t), Vault: vault})
 	if err != nil {
@@ -209,7 +209,7 @@ func TestAgent_PlansWithTheVaultsVariablesAndRefusesWhenItIsDown(t *testing.T) {
 	sha := runGit(t, repo, "rev-parse", "HEAD")
 
 	cfg := newConfigDir(t, configOptions{repoURL: repo, remoteURL: cp.URL()})
-	cfg.Secrets.OpenVault = true
+	cfg.Secrets.Vault = true
 	cfg.Repos["app"].Vars = map[string]string{"RUNNER": "config-label"}
 	vault := &fakeVault{vars: map[string]secrets.Variables{"app": {"": {"RUNNER": "vault-label"}}}}
 	ta := newTestAgent(t, cfg, func(o *Options) { o.Vault = vault })
@@ -251,4 +251,38 @@ func waitForPlan(t *testing.T, cp *controlPlane, id string) protocol.PlanResult 
 		return false
 	})
 	return got
+}
+
+// A104: an agent restarted after latem vault's rename, before it has read the
+// vault itself, says what the last agent kept under the file's old name, and
+// the first answer it writes replaces that file with the new one.
+func TestHeartbeatVars_ARestartReadsTheDigestsKeptUnderTheOldName(t *testing.T) {
+	vault := &fakeVault{vars: map[string]secrets.Variables{"app": {"": {"LATEM": "true"}}}}
+	a, cfg := vaultAgent(t, vault)
+	a.refreshVars(t.Context())
+	before := a.heartbeatVars("app", cfg.Repos["app"])
+	if err := os.Rename(cfg.Paths.VarDigests, cfg.Paths.OldVarDigests); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(Options{Config: cfg, Logger: testLogger(t), Vault: vault})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.vault = vault
+	restarted.loadVarDigests()
+	vault.set(nil, vaultDown)
+	restarted.refreshVars(t.Context())
+	if after := restarted.heartbeatVars("app", cfg.Repos["app"]); !maps.Equal(before, after) {
+		t.Errorf("after a restart with only %s: %v, want %v", filepath.Base(cfg.Paths.OldVarDigests), after, before)
+	}
+
+	vault.set(map[string]secrets.Variables{"app": {"": {"LATEM": "false"}}}, nil)
+	restarted.refreshVars(t.Context())
+	if _, err := os.Stat(cfg.Paths.VarDigests); err != nil {
+		t.Errorf("the new file was not written: %v", err)
+	}
+	if _, err := os.Stat(cfg.Paths.OldVarDigests); !os.IsNotExist(err) {
+		t.Errorf("the old file is still there to go stale (%v)", err)
+	}
 }

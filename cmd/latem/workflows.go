@@ -1205,7 +1205,7 @@ func checkVars(t checkTarget, pw *parsedWorkflow, envs map[string]bool, vars rep
 	if varsErr != nil && len(seen) > 0 {
 		out = append(out, finding{level: levelWarn,
 			text:  fmt.Sprintf("%v; until it answers, a job here that reads vars fails, and only config.toml's are counted", varsErr),
-			fixes: []string{"openvault service install"}})
+			fixes: []string{vaultServiceFix(varsErr)}})
 	}
 	if len(missing) == 0 {
 		return out
