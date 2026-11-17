@@ -224,20 +224,13 @@ func TestWorkflowsCheck_FixWritesTheAliasOnAYesAndTheAllowlist(t *testing.T) {
 	if !strings.Contains(readConfigFile(t, dir), "# The operator's own note") {
 		t.Error("--fix lost the operator's comment")
 	}
-	for _, want := range []string{
-		// What it asks, exactly as it will be written, before writing it.
-		aliasWarning,
-		"  [label_aliases] blacksmith-2vcpu-ubuntu-2204 = [\"linux\"]\r\n  [label_aliases] blacksmith-4vcpu-ubuntu-2404 = [\"linux\"]\r\n" + aliasQuestion,
-		"fixed in", `[label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]`,
-		`[actions] allowed = ["actions/setup-node"]`, "no agent is running",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output lacks %q:\n%s", want, out)
-		}
-	}
-	// The report is of the machine after the fix: e2e now runs.
-	if strings.Contains(out, `runs-on "blacksmith-4vcpu-ubuntu-2404": no runner`) {
-		t.Errorf("the report predates the fix:\n%s", out)
+	// What it asks, exactly as it will be written, before writing it. What
+	// it prints after the answer is the off-terminal test's to read: the
+	// screen's last lines can still be in the terminal when it closes.
+	asked := aliasWarning + "\r\n" +
+		"  [label_aliases] blacksmith-2vcpu-ubuntu-2204 = [\"linux\"]\r\n  [label_aliases] blacksmith-4vcpu-ubuntu-2404 = [\"linux\"]\r\n" + aliasQuestion
+	if !strings.Contains(out, asked) {
+		t.Errorf("output lacks %q:\n%s", asked, out)
 	}
 	// Pinning is not --fix's to decide.
 	if cfg.Actions.RequirePinned != nil {
@@ -299,8 +292,17 @@ func TestWorkflowsCheck_FixOffATerminalLeavesTheAliasToAPerson(t *testing.T) {
 			t.Errorf("err lacks %q:\n%v", want, err)
 		}
 	}
-	if aliasQuestionAsked := strings.Contains(out, aliasQuestion); aliasQuestionAsked {
+	if strings.Contains(out, aliasQuestion) {
 		t.Errorf("it asked with nobody to answer:\n%s", out)
+	}
+	// What it did write, it says, and the report is of the machine after it.
+	for _, want := range []string{"fixed in", `[actions] allowed = ["actions/setup-node"]`, "no agent is running"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "is not in [actions] allowed") {
+		t.Errorf("the report predates the fix:\n%s", out)
 	}
 
 	// --json says what it held, for a script.
