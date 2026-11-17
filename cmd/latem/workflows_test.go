@@ -163,7 +163,7 @@ func TestWorkflowsCheck_NamesEveryProblemAndItsFix(t *testing.T) {
 		// What the events do not plan, and what does not parse.
 		"not planned for a push to main, a pull request, or a dispatch (on: release)",
 		".github/workflows/broken.yml",
-		"`latem workflows check --fix`",
+		"`latem workflows check --fix` adds the [actions] entries above, and asks you about the [label_aliases] ones first, at a terminal.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
@@ -197,10 +197,19 @@ func TestWorkflowsCheck_FindsSecretsInEveryScopeARunReads(t *testing.T) {
 	}
 }
 
-func TestWorkflowsCheck_FixWritesTheAliasAndTheAllowlist(t *testing.T) {
+// At a terminal --fix shows the aliases it would write and writes them on a
+// yes (A100), with the allowlist, which it writes without asking.
+func TestWorkflowsCheck_FixWritesTheAliasOnAYesAndTheAllowlist(t *testing.T) {
 	dir, repo, _ := checkFixture(t)
+	prev := global.configDir
+	t.Cleanup(func() { global.configDir = prev })
 
-	out, _ := latemIn(t, dir, "", "workflows", "check", repo, "--fix", "--no-color")
+	screen, stderr, err := atTerminal(t, terminalSession{prompt: aliasQuestion, answer: "y"},
+		"workflows", "check", repo, "--fix", "--no-color", "--config-dir", dir)
+	out := screen + stderr
+	if exitCode(err) != ExitFailure {
+		t.Errorf("exit %d (%v), want 1: other jobs still cannot run\n%s", exitCode(err), err, out)
+	}
 	cfg := loadConfigIn(t, dir)
 	if got := cfg.LabelAliases["blacksmith-4vcpu-ubuntu-2404"]; !slices.Equal(got, []string{"linux"}) {
 		t.Errorf("label alias = %v\n%s", got, out)
@@ -215,19 +224,95 @@ func TestWorkflowsCheck_FixWritesTheAliasAndTheAllowlist(t *testing.T) {
 	if !strings.Contains(readConfigFile(t, dir), "# The operator's own note") {
 		t.Error("--fix lost the operator's comment")
 	}
-	for _, want := range []string{"fixed in", `[label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]`,
-		`[actions] allowed = ["actions/setup-node"]`, "no agent is running"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output lacks %q:\n%s", want, out)
-		}
-	}
-	// The report is of the machine after the fix: e2e now runs.
-	if strings.Contains(out, `runs-on "blacksmith-4vcpu-ubuntu-2404": no runner`) {
-		t.Errorf("the report predates the fix:\n%s", out)
+	// What it asks, exactly as it will be written, before writing it. What
+	// it prints after the answer is the off-terminal test's to read: the
+	// screen's last lines can still be in the terminal when it closes.
+	asked := aliasWarning + "\r\n" +
+		"  [label_aliases] blacksmith-2vcpu-ubuntu-2204 = [\"linux\"]\r\n  [label_aliases] blacksmith-4vcpu-ubuntu-2404 = [\"linux\"]\r\n" + aliasQuestion
+	if !strings.Contains(out, asked) {
+		t.Errorf("output lacks %q:\n%s", asked, out)
 	}
 	// Pinning is not --fix's to decide.
 	if cfg.Actions.RequirePinned != nil {
 		t.Error("--fix changed require_pinned")
+	}
+}
+
+// aliasQuestion is what --fix asks before it writes an alias.
+const aliasQuestion = "Write this to config.toml? [y/N]"
+
+// At a terminal the answer defaults to no, and a line typed before the
+// question is not an answer to it. A no leaves the aliases out and still
+// writes the allowlist, which was never the person's to agree to.
+func TestWorkflowsCheck_FixLeavesTheAliasOnANo(t *testing.T) {
+	for _, s := range []terminalSession{
+		{prompt: aliasQuestion, answer: ""},
+		{prompt: aliasQuestion, answer: "n"},
+		{typeAhead: "y", prompt: aliasQuestion, answer: ""},
+	} {
+		dir, repo, _ := checkFixture(t)
+		prev := global.configDir
+		t.Cleanup(func() { global.configDir = prev })
+
+		screen, stderr, err := atTerminal(t, s, "workflows", "check", repo, "--fix", "--no-color", "--config-dir", dir)
+		cfg := loadConfigIn(t, dir)
+		if len(cfg.LabelAliases) != 0 || exitCode(err) != ExitFailure ||
+			!slices.Equal(cfg.Actions.Allowed, []string{"actions/setup-node"}) ||
+			!strings.Contains(screen, "left as it is: the answer was no") {
+			t.Errorf("%+v: exit %d (%v), aliases %v, allowed %v\n%s%s", s, exitCode(err), err,
+				cfg.LabelAliases, cfg.Actions.Allowed, screen, stderr)
+		}
+	}
+}
+
+// With no terminal there is nobody to agree to an alias, so --fix writes
+// the allowlist, leaves the aliases, and exits 4 with the lines it would
+// have written and the command a person types at a terminal (A100), as
+// `setup apply` does for unisolated and moving-refs (A94).
+func TestWorkflowsCheck_FixOffATerminalLeavesTheAliasToAPerson(t *testing.T) {
+	dir, repo, _ := checkFixture(t)
+
+	out, err := latemIn(t, dir, "", "workflows", "check", repo, "--fix", "--no-color")
+	if exitCode(err) != ExitNoTerminal {
+		t.Fatalf("exit %d (%v), want 4\n%s", exitCode(err), err, out)
+	}
+	cfg := loadConfigIn(t, dir)
+	if len(cfg.LabelAliases) != 0 {
+		t.Errorf("an alias was written with nobody to ask: %v", cfg.LabelAliases)
+	}
+	if !slices.Equal(cfg.Actions.Allowed, []string{"actions/setup-node"}) {
+		t.Errorf("[actions] allowed = %v; what is not a person's is still done", cfg.Actions.Allowed)
+	}
+	for _, want := range []string{
+		"the [label_aliases] entries were not written: an alias is agreed to by a person at a terminal, and neither stdin nor stdout is one (A100).",
+		"  [label_aliases] blacksmith-4vcpu-ubuntu-2404 = [\"linux\"]",
+		"  latem workflows check " + shellWord(repo) + " --fix --config-dir " + shellWord(dir),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err lacks %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(out, aliasQuestion) {
+		t.Errorf("it asked with nobody to answer:\n%s", out)
+	}
+	// What it did write, it says, and the report is of the machine after it.
+	for _, want := range []string{"fixed in", `[actions] allowed = ["actions/setup-node"]`, "no agent is running"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "is not in [actions] allowed") {
+		t.Errorf("the report predates the fix:\n%s", out)
+	}
+
+	// --json says what it held, for a script.
+	out, err = latemIn(t, dir, "", "workflows", "check", repo, "--fix", "--json")
+	var rep struct {
+		Held []string `json:"held"`
+	}
+	if exitCode(err) != ExitNoTerminal || json.Unmarshal([]byte(out), &rep) != nil ||
+		!slices.Contains(rep.Held, `[label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]`) {
+		t.Errorf("--json: exit %d (%v), held %q\n%s", exitCode(err), err, rep.Held, out)
 	}
 }
 

@@ -33,8 +33,11 @@ only), vars that would read as empty, and what latem refuses outright — a
 workflow of another repository, `services:`, `container:`. A matrix job is checked leg by
 leg, each with its own `runs-on`, and a job that calls a workflow of the
 repository as the called workflow's jobs, each by its job path, `release/pack`. `--fix` writes the
-`[label_aliases]` and `[actions]` entries it suggests and reloads the agent;
-pinning an action and storing a secret stay yours. It exits 1 while any job
+`[actions]` entries it suggests and reloads the agent. The `[label_aliases]`
+entries it shows you first and writes only when you say yes at a terminal,
+since an alias sends this machine every job that asks for its label; with no
+terminal it leaves them and exits 4 with the command to type at one.
+Pinning an action and storing a secret stay yours. It exits 1 while any job
 cannot run, so it also works as a gate.
 
 **Try one before you push it.** `latem try <job>` runs one workflow job

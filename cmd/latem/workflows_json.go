@@ -22,6 +22,9 @@ type checkJSON struct {
 	Workflows  []workflowJSON `json:"workflows"`
 	Suggested  map[string]any `json:"suggested,omitempty"`
 	Fixed      []string       `json:"fixed,omitempty"`
+	// Held are the [label_aliases] lines --fix left for a person at a
+	// terminal (A100).
+	Held []string `json:"held,omitempty"`
 }
 
 type workflowJSON struct {
@@ -73,10 +76,10 @@ func findingsJSON(fs []finding) []findingJSON {
 	return out
 }
 
-func printCheckJSON(w io.Writer, t checkTarget, rep checkReport, fixed []string) error {
+func printCheckJSON(w io.Writer, t checkTarget, rep checkReport, fixed, held []string) error {
 	out := checkJSON{
 		Source: t.dir, Commit: t.commit, Repository: t.slug, RepoKey: t.repoKey, Branch: t.branch,
-		Jobs: rep.jobs(), Failed: rep.failed(), Broken: rep.broken(), Fixed: fixed,
+		Jobs: rep.jobs(), Failed: rep.failed(), Broken: rep.broken(), Fixed: fixed, Held: held,
 		Workflows: []workflowJSON{},
 	}
 	if t.fsys != nil {
