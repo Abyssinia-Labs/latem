@@ -22,6 +22,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/selfupdate"
 	"github.com/Abyssinia-Labs/latem/internal/source"
@@ -79,10 +80,13 @@ type doctor struct {
 
 	includeSecrets bool
 
-	loadCfg    func() (*config.Config, error)
-	newDocker  func(docker.Options) (dockerProbe, error)
-	newSecrets func(secrets.Options) (secretResolver, error)
-	sameFS     func(mirrorDir, workDir string) error
+	loadCfg   func() (*config.Config, error)
+	newDocker func(docker.Options) (dockerProbe, error)
+	// agentDocker reads, when the daemon does not answer, what names its fix
+	// (A106). Nil keeps the generic one.
+	agentDocker func(ctx context.Context) readiness.Docker
+	newSecrets  func(secrets.Options) (secretResolver, error)
+	sameFS      func(mirrorDir, workDir string) error
 	// newAppStore and clock exist for A35's checks: one talks to Apple and the
 	// other signs a token, and neither should need a real credential or the
 	// wall clock to be covered by a test.
@@ -136,15 +140,19 @@ type doctor struct {
 	// canConnect is whether a running process may connect to a Unix socket
 	// (A66); nil asks the real one through /proc.
 	canConnect func(pid int, socket string) (bool, error)
-	// openVault is the OpenVault service a run would read (A86); nil asks
+	// openVault is the vault service a run would read (A86); nil asks
 	// the one at this user's socket. A test never reaches the real one.
 	openVault func() (openVaultCollections, error)
 }
 
-// openVaultCollections is [secrets.OpenVaultProvider]'s listing.
+// openVaultCollections is [secrets.OpenVaultProvider]'s listing, and what
+// doctor names of it: its socket, its command, and whether its key has a
+// passphrase.
 type openVaultCollections interface {
 	Collections(ctx context.Context) ([]string, error)
 	Socket() string
+	Command() string
+	KeyPassphrase() (passphrase, known bool)
 }
 
 func newDoctor() *doctor {
@@ -167,6 +175,7 @@ func newDoctor() *doctor {
 		newSecrets: func(opts secrets.Options) (secretResolver, error) {
 			return secrets.New(opts)
 		},
+		agentDocker: agentDocker,
 		newAppStore: func() *appstore.Client { return &appstore.Client{} },
 		kvm:         system.CheckKVM,
 		sameFS:      source.CheckSameFilesystem,
@@ -195,7 +204,7 @@ func (d *doctor) run(ctx context.Context) report {
 	rep.section("Executors", append(d.checkExecutors(ctx), d.checkRunnerLabels(ctx)...)...)
 	rep.section("Capacity", d.checkCapacity(ctx)...)
 	rep.section("Repositories", d.checkRepos(ctx)...)
-	rep.section("OpenVault", d.checkOpenVault(ctx)...)
+	rep.section("Vault", d.checkOpenVault(ctx)...)
 	rep.section("What jobs need", needsChecks...)
 	rep.section("Actions", d.checkActions()...)
 	if d.includeSecrets {
@@ -282,7 +291,7 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 			if !required {
 				level = warn
 			}
-			out = append(out, level("docker.daemon", "docker daemon", firstLineOf(err.Error()), d.startDockerCommand()))
+			out = append(out, d.daemonDown(ctx, level, firstLineOf(err.Error())))
 		} else {
 			out = append(out, pass("docker.daemon", "docker daemon", "reachable"))
 			out = append(out, d.checkDockerContext(ctx, probe)...)
@@ -1048,7 +1057,7 @@ func (d *doctor) checkSecrets(ctx context.Context) []check {
 	chain, err := d.newSecrets(secrets.Options{
 		FilePath:  d.cfg.Paths.SecretsEnv,
 		Commands:  d.cfg.Secrets.Commands,
-		OpenVault: d.cfg.Secrets.OpenVault,
+		OpenVault: d.cfg.Secrets.Vault,
 	})
 	if err != nil {
 		return []check{fail("secrets.chain", "secrets chain", err.Error())}
@@ -1151,14 +1160,15 @@ func backendDiagnostic(err error) string {
 	return ""
 }
 
-// ---------------------------------------------------------------- openvault
+// ---------------------------------------------------------------- vault
 
-// checkOpenVault says whether the OpenVault service a run reads answers, and
+// checkOpenVault says whether the vault service a run reads answers, and
 // which configured repositories this machine holds no collection for, by
-// name (A86). Nothing is decrypted: OpenVault lists collections from its
-// index. Silent unless `[secrets] openvault = true`.
+// name (A86). Nothing is decrypted: the vault lists collections from its
+// index. Silent unless `[secrets] vault = true`. Its ids were openvault.*
+// before latem vault was renamed (A104).
 func (d *doctor) checkOpenVault(ctx context.Context) []check {
-	if d.cfg == nil || !d.cfg.Secrets.OpenVault {
+	if d.cfg == nil || !d.cfg.Secrets.Vault {
 		return nil
 	}
 	open := d.openVault
@@ -1168,28 +1178,33 @@ func (d *doctor) checkOpenVault(ctx context.Context) []check {
 			if err != nil {
 				return nil, err
 			}
-			return secrets.NewOpenVaultProvider(socket, 0), nil
+			return secrets.NewOpenVaultProvider(socket, 0).WithCommand(secrets.VaultCommandHere()), nil
 		}
 	}
 	ov, err := open()
 	if err != nil {
-		return []check{fail("openvault.service", "OpenVault service", err.Error())}
+		return []check{fail("vault.service", "vault service", err.Error())}
 	}
+	vault := ov.Command()
 	have, err := ov.Collections(ctx)
 	if err != nil {
-		c := fail("openvault.service", "OpenVault service", err.Error(), "openvault service install").
-			withNotes("A job reading a secret that no store before OpenVault holds fails with " +
-				"E_SECRET_BACKEND until the service answers, and is retried. `openvault service " +
-				"install` (OpenVault 0.2.2 and later) has the system start it at login and again if " +
-				"it stops. It refuses a key that opens with a passphrase, which nobody would be there " +
-				"to type: remove it with `openvault keys passphrase --remove`, or start `openvault " +
-				"service` by hand after every reboot.")
+		notes := "A job reading a secret that no store before the vault holds fails with " +
+			"E_SECRET_BACKEND until the service answers, and is retried. `" + vault + " service " +
+			"install` has the system start it at login and again if it stops."
+		// A key in the Secure Enclave, or a key file without a passphrase,
+		// opens with nobody there; only a passphrase stops the service.
+		if passphrase, known := ov.KeyPassphrase(); passphrase || !known {
+			notes += " It refuses a key that opens with a passphrase, which nobody would be there " +
+				"to type: remove it with `" + vault + " keys passphrase --remove`, or start `" + vault +
+				" service` by hand after every reboot."
+		}
+		c := fail("vault.service", "vault service", err.Error(), vault+" service install").withNotes(notes)
 		if diag := backendDiagnostic(err); diag != "" {
 			c.Notes = append(c.Notes, diag)
 		}
 		return []check{c}
 	}
-	out := []check{pass("openvault.service", "OpenVault service", "answers on "+ov.Socket())}
+	out := []check{pass("vault.service", "vault service", "answers on "+ov.Socket())}
 
 	var here, absent []string
 	for _, key := range sortedStrings(d.cfg.Repos) {
@@ -1200,16 +1215,16 @@ func (d *doctor) checkOpenVault(ctx context.Context) []check {
 		}
 	}
 	if len(here) > 0 {
-		out = append(out, pass("openvault.collections", "OpenVault collections", strings.Join(here, ", ")))
+		out = append(out, pass("vault.collections", "vault collections", strings.Join(here, ", ")))
 	}
 	if len(absent) > 0 {
-		out = append(out, warn("openvault.collections.absent", "OpenVault collections",
+		out = append(out, warn("vault.collections.absent", "vault collections",
 			"this machine has no collection "+strings.Join(absent, ", ")+
 				", so those repositories' secrets come from the other stores here, or read empty",
-			fmt.Sprintf("openvault scope <this device> %s read   # on an admin device", absent[0])).
+			fmt.Sprintf("%s scope <this device> %s read   # on an admin device", vault, absent[0])).
 			withNotes("A collection is named as the repository's key in config.toml, and holds "+
-				"<environment>/NAME for one environment and NAME for every other. `openvault "+
-				"collections create` makes one, and `openvault import-env` fills it from a secrets.env."))
+				"<environment>/NAME for one environment and NAME for every other. `"+vault+" "+
+				"collections create` makes one, and `"+vault+" import-env` fills it from a secrets.env."))
 	}
 	return out
 }
@@ -1507,6 +1522,20 @@ func (d *doctor) installCommand(tool string) string {
 		return needs.PackageLine(host.Family, tool)
 	}
 	return "sudo apt-get install -y " + tool + "   # or your distribution's equivalent"
+}
+
+// daemonDown is docker.daemon failing, with the fix setup's plan names for
+// the engine the `docker` command reaches (A106): Docker Desktop's
+// `open -a Docker` is no fix on a Mac that runs Kiri or OrbStack.
+func (d *doctor) daemonDown(ctx context.Context, level func(id, title, detail string, fix ...string) check, detail string) check {
+	if d.agentDocker == nil {
+		return level("docker.daemon", "docker daemon", detail, d.startDockerCommand())
+	}
+	it, ok := readiness.DockerAgentItem(d.agentDocker(ctx), d.sys.Host())
+	if !ok || len(it.Yours)+len(it.Manual) == 0 {
+		return level("docker.daemon", "docker daemon", detail, d.startDockerCommand())
+	}
+	return level("docker.daemon", "docker daemon", it.Have, commandLines(it.Yours)...).withManual(it.Manual...).withNotes(detail)
 }
 
 func (d *doctor) startDockerCommand() string {

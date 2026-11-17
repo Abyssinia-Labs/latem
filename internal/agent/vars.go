@@ -105,7 +105,7 @@ func (a *Agent) refreshVars(ctx context.Context) {
 			a.vaultVars.down = true
 			a.vaultVars.mu.Unlock()
 			if first {
-				a.log.Warn("OpenVault did not answer for the repositories' variables; the heartbeat keeps "+
+				a.log.Warn("the vault did not answer for the repositories' variables; the heartbeat keeps "+
 					"the digests it read last, and a job that reads a variable fails until it answers", "err", err)
 			}
 			return
@@ -130,15 +130,18 @@ func (a *Agent) refreshVars(ctx context.Context) {
 	a.vaultVars.mu.Unlock()
 
 	if recovered {
-		a.log.Info("OpenVault answers again for the repositories' variables")
+		a.log.Info("the vault answers again for the repositories' variables")
 	}
 	if !changed {
 		return
 	}
 	slices.Sort(names)
-	a.log.Info("variables in OpenVault read", "repos", names)
+	a.log.Info("variables in the vault read", "repos", names)
 	if err := writeVarDigests(a.cfg.Paths.VarDigests, read); err != nil {
 		a.log.Warn("could not keep the variables' digests for the next start", "err", err)
+	} else if old := a.cfg.Paths.OldVarDigests; old != "" {
+		// The new file answers from now on; the old one would only go stale.
+		_ = os.Remove(old)
 	}
 }
 
@@ -150,6 +153,11 @@ func (a *Agent) loadVarDigests() {
 		return
 	}
 	b, err := os.ReadFile(a.cfg.Paths.VarDigests)
+	if errors.Is(err, os.ErrNotExist) && a.cfg.Paths.OldVarDigests != "" {
+		// The file's name before latem vault was renamed (A104), until this
+		// agent writes the new one.
+		b, err = os.ReadFile(a.cfg.Paths.OldVarDigests)
+	}
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			a.log.Warn("could not read the variables' digests kept from the last start", "err", err)
@@ -159,7 +167,7 @@ func (a *Agent) loadVarDigests() {
 	var f varDigestsFile
 	if err := json.Unmarshal(b, &f); err != nil {
 		a.log.Warn("the variables' digests kept from the last start do not parse; config.toml's answer until "+
-			"OpenVault does", "err", err)
+			"the vault does", "err", err)
 		return
 	}
 	a.vaultVars.mu.Lock()
@@ -179,7 +187,7 @@ func writeVarDigests(path string, repos map[string]map[string]string) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".openvault-vars-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".vault-vars-*")
 	if err != nil {
 		return err
 	}

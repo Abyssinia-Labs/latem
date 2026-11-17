@@ -39,17 +39,12 @@ $ latem setup --plain
 
 2/6 repositories
   a repository this machine should build (owner/name), or Enter to skip: me/myapp
-checking https://github.com/me/myapp.git the way the agent will fetch it …
-added repos.myapp to /Users/me/.latem/config.toml
-
-  6 of 9 jobs in myapp can run on this machine
-    checks.yml: e2e — uses oven-sh/setup-bun@v2: oven-sh/setup-bun is not in [actions] allowed
-    …
-  its workflows need, in config.toml:
-    [label_aliases] "blacksmith-4vcpu-ubuntu-2404" = ["linux"]
-    [actions] allowed += "oven-sh/setup-bun"
-  add them? [Y/n] y
-  added 2 entries
+  myapp: 6 of 9 jobs can run here — see `latem workflows check --repo myapp`
+    its workflows need, in config.toml:
+      [label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]
+      [actions] allowed += "oven-sh/setup-bun"
+    add them? [Y/n] y
+    added them; now 9 of 9 jobs can run here
   another (owner/name), or Enter to go on:
 
 3/6 toolchains
@@ -96,6 +91,18 @@ that is already done, so it is safe to run again:
    daemon answers (always, on Linux), whose image is
    [`latem-ubuntu`](../images/ubuntu/README.md) pinned by digest (`--image`
    names another).
+
+   The agent finds Docker at `DOCKER_HOST`, or else at `/var/run/docker.sock`,
+   and never reads `docker context`. On a Mac any engine that answers there
+   will do: Docker Desktop, Kiri, OrbStack, Colima or
+   Rancher Desktop. Docker Desktop links the system socket to itself. Kiri does
+   with `kiri setup --docker-socket`, OrbStack and Rancher Desktop when they
+   may use admin rights, and Colima only by hand. If the `docker` command
+   answers and the agent's socket does not, setup and doctor say so and name
+   the fix for the engine they find. Moving from Docker Desktop to another
+   engine, disable Docker Desktop's helper too (`sudo launchctl disable
+   system/com.docker.socket`) or uninstall it: at every boot the helper points
+   `/var/run/docker.sock` back at Docker Desktop.
 2. **repositories** — adds the repositories `--repo owner/name` names, or on
    a terminal with none configured asks which, and checks each one's
    workflows without a checkout: how many jobs this machine can run, why not

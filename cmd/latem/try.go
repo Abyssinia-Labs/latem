@@ -506,7 +506,7 @@ func precheckTry(
 	if varsErr != nil {
 		printFinding(w, st, "", finding{level: levelWarn,
 			text:  fmt.Sprintf("%v; a job that reads vars fails until it answers", varsErr),
-			fixes: []string{"openvault service install"}})
+			fixes: []string{vaultServiceFix(varsErr)}})
 	}
 	if len(pj.ArtifactsFrom) > 0 && jr.level() != levelFail {
 		// A84: a try is one job, and its needs did not run.

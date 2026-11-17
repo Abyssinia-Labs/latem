@@ -114,7 +114,7 @@ func (x *execution) resolveWorkflowSecrets(ctx context.Context, names []string) 
 	// every user in its container (A88). Refused before anything starts.
 	if files := fileSecrets(set); len(files) > 0 && executorName(x.runner) != "native" {
 		set.Zero()
-		return fail(fmt.Errorf("%s %s an OpenVault file, which reaches a step only on a native runner: "+
+		return fail(fmt.Errorf("%s %s a vault file, which reaches a step only on a native runner: "+
 			"the %s executor's temporary files are readable by every user in its container",
 			strings.Join(files, ", "), plural(len(files), "is", "are"), executorName(x.runner)),
 			protocol.ErrMissingSecret), false
@@ -182,7 +182,7 @@ func (x *execution) putSecretFiles(ctx context.Context) error {
 		data, _ := x.sec.Value(name)
 		path, err := x.env.PutTemp(ctx, temp, data)
 		if err != nil {
-			return fmt.Errorf("writing secret %s, an OpenVault file: %w", name, err)
+			return fmt.Errorf("writing secret %s, a vault file: %w", name, err)
 		}
 		if x.secretPaths == nil {
 			x.secretPaths = map[string]string{}

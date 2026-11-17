@@ -579,7 +579,7 @@ func validateSecrets(cfg *Config) []error {
 		cfg.Secrets.Provider = SecretsProviderChain
 	case SecretsProviderChain:
 	default:
-		add("secrets.provider is %q; the only provider is %q — environment, then OpenVault when openvault = true, then secrets.env, then the keychain, then pass, then a per-secret command, first hit wins (§15)",
+		add("secrets.provider is %q; the only provider is %q — environment, then the vault when vault = true, then secrets.env, then the keychain, then pass, then a per-secret command, first hit wins (§15)",
 			cfg.Secrets.Provider, SecretsProviderChain)
 	}
 

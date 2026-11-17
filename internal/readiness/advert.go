@@ -68,6 +68,9 @@ func advertItem(it Item, jobs int) protocol.ReadinessItem {
 		out.Title, out.Have = "its image", ""
 	case it.ID == itemMovingRefs:
 		out.Have = ""
+	case it.ID == ItemDockerAgent:
+		// Its own words name a socket's path, which stays here (A106).
+		out.Have = "nothing answers"
 	}
 	count := ""
 	if n := len(it.Jobs); n > 0 && n < jobs {

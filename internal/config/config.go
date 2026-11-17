@@ -128,7 +128,7 @@ const (
 )
 
 // SecretsProviderChain is the only provider §15 defines: environment, then
-// OpenVault when [Secrets.OpenVault] is set, then secrets.env, then the macOS
+// the vault when [Secrets.Vault] is set, then secrets.env, then the macOS
 // keychain, then pass/gopass, then a per-secret command, first hit wins.
 const SecretsProviderChain = "chain"
 
@@ -458,9 +458,14 @@ type Secrets struct {
 	Provider string `toml:"provider"`
 	// Commands is a per-secret shell command, the last link in the chain.
 	Commands map[string]string `toml:"commands"`
-	// OpenVault reads a job's secrets from the OpenVault service on this
-	// machine, after the environment and before every other store (A86): a
-	// repository's collection, entry <environment>/NAME, then NAME.
+	// Vault reads a job's secrets from the vault's service on this machine,
+	// after the environment and before every other store (A86): a
+	// repository's collection, entry <environment>/NAME, then NAME. It is
+	// `vault = true`, or the key's name before latem vault was renamed,
+	// `openvault = true`; either turns it on (A104).
+	Vault bool `toml:"vault"`
+	// OpenVault is `openvault = true`, read into Vault as the file is
+	// decoded. Nothing else reads it.
 	OpenVault bool `toml:"openvault"`
 }
 
@@ -551,6 +556,9 @@ func decodeAndValidate(data []byte, opts Options, earlier []error) (*Config, err
 		// the one place that stops at the first problem.
 		return nil, &Error{Path: opts.configFile(), Problems: append(earlier, err)}
 	}
+
+	// The vault's key before it was renamed is still read (A104).
+	cfg.Secrets.Vault = cfg.Secrets.Vault || cfg.Secrets.OpenVault
 
 	problems := append([]error(nil), earlier...)
 	problems = append(problems, unknownKeys(&md)...)

@@ -210,10 +210,10 @@ type Options struct {
 	Pass PassOptions
 	// Commands is the [secrets.commands] table: secret name to command string.
 	Commands map[string]string
-	// OpenVault puts OpenVault in the chain, read from the service at
+	// OpenVault puts the vault in the chain, read from the service at
 	// [OpenVaultSocket] of Environ. Off is the default: a machine reads its
-	// secrets from OpenVault because its config says so (`[secrets]
-	// openvault = true`), never because a vault happens to be there — a vault
+	// secrets from the vault because its config says so (`[secrets]
+	// vault = true`), never because a vault happens to be there — a vault
 	// whose service is not running would otherwise fail every job on it.
 	OpenVault bool
 	// Runner executes external programs. Nil uses [ExecRunner]; a test
@@ -258,7 +258,12 @@ func New(opts Options) (*Chain, error) {
 		if err != nil {
 			return nil, err
 		}
-		providers = append(providers, NewOpenVaultProvider(socket, opts.Timeout))
+		// Its errors name the command found from the same environment.
+		command, _, ok := FindVaultCommand(VaultSearchDirs(environ))
+		if !ok {
+			command = VaultCommand
+		}
+		providers = append(providers, NewOpenVaultProvider(socket, opts.Timeout).WithCommand(command))
 	}
 
 	if opts.FilePath != "" {

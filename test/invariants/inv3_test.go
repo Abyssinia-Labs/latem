@@ -54,6 +54,8 @@ var shellCallSites = map[string]string{
 	"internal/executor/docker/image.go": "a fixed image-probe script, no interpolation",
 	"internal/executor/docker/executor.go": "two fixed literals: the idle entrypoint and the " +
 		"/dev/kvm readability probe",
+	"internal/executor/docker/ready.go": "LAT-23's readiness exec, the fixed literal " +
+		"`/bin/sh -c true`: nothing from a run, a step or a broker reaches its argv",
 	"cmd/latem/checks_locale.go": "A33's locale probe: `env LANG=… bash -lc <fixed script>`, " +
 		"every element a compile-time constant. It runs the step's own shell deliberately, " +
 		"because a login shell's profile is what can overrule the locale and only the shell " +

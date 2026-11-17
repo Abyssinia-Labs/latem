@@ -150,6 +150,10 @@ type Executor struct {
 	probeImage    string
 	gpuProbeImage string
 	init          bool
+
+	// readyBudget bounds how long Prepare waits for a started container to
+	// take its first exec. [ReadyBudget] unless a test shortens it.
+	readyBudget time.Duration
 }
 
 var _ executor.Executor = (*Executor)(nil)
@@ -175,6 +179,7 @@ func New(opts Options) (*Executor, error) {
 		probeImage:    orDefault(opts.ProbeImage, "busybox:latest"),
 		gpuProbeImage: orDefault(opts.GPUProbeImage, "nvidia/cuda:12.4.1-base-ubuntu22.04"),
 		init:          opts.Init == nil || *opts.Init,
+		readyBudget:   ReadyBudget,
 	}
 	if e.pidsLimit == 0 {
 		e.pidsLimit = DefaultPidsLimit
@@ -335,6 +340,13 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 		// reconciliation.
 		_ = env.Close(context.WithoutCancel(ctx))
 		return nil, wrapErr(protocol.ErrExecutor, err, "start container %s", name)
+	}
+	// A start that has returned is not, on every engine, a container that
+	// takes an exec (LAT-23). Wait for one here, so the engine's lag is
+	// E_EXECUTOR and never the first step's exit 127.
+	if err := e.awaitReady(ctx, env); err != nil {
+		_ = env.Close(context.WithoutCancel(ctx))
+		return nil, err
 	}
 
 	// §9's between-step channel has to exist before the first step runs, or

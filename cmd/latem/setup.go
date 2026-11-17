@@ -6,9 +6,9 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,8 +47,11 @@ done — each step looks at what is there and does only what is missing:
                    Docker daemon answers (on Linux, always).
   2. repositories  adds the repositories --repo names — or, on a terminal and
                    with none configured, asks which — and checks each one's
-                   workflows, read without a checkout, offering the label
-                   aliases and allowed actions they need (A57).
+                   workflows, read without a checkout: one line each, how
+                   many of its jobs can run here and what is in the way,
+                   with ` + "`latem workflows check`" + ` for the detail. Asked, it
+                   offers the label aliases and allowed actions they need
+                   (A57).
   3. toolchains    shows what this machine builds, kind by kind, whichever
                    machine its repositories' jobs ask for today, and what is
                    in the way of each (A69). On a terminal this is a screen:
@@ -341,17 +344,19 @@ func setupRepositories(cmd *cobra.Command, p *prompter, f setupFlags, cfg *confi
 	return nil
 }
 
-// setupCheckRepo checks a repository just added: how many of its jobs this
-// machine can run, why not the rest, and — asked, on a terminal — the
-// [label_aliases] and [actions] entries that would let more run. Once they
-// are added it checks again, because a job refused for its labels is checked
-// for nothing else until a runner carries them: what stops it next is said,
-// and a setting setup does not choose for you is left as a setting to choose.
-// A failure to read it is reported and does not stop setup.
+// setupCheckRepo checks a repository just added and says, in one line, how
+// many of its jobs this machine can run and what is in the way of the rest
+// (LAT-30): nine repositories at twenty lines each pushed step 4's connect
+// code out of sight. The detail is `latem workflows check`'s, and `latem setup
+// --json`'s. Asked, on a terminal, it offers the [label_aliases] and [actions]
+// entries that would let more run, naming each, since a yes covers only what
+// was shown. Once they are added it checks again, because a job refused for
+// its labels is checked for nothing else until a runner carries them. A
+// failure to read it is reported and does not stop setup.
 func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
-	report := func(err error) { printf(out, "  its workflows were not checked: %v\n", err) }
+	report := func(err error) { printf(out, "  %s: its workflows were not checked: %v\n", key, err) }
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -394,79 +399,73 @@ func setupCheckRepo(cmd *cobra.Command, p *prompter, asking bool, key string) {
 			return
 		}
 		if round == 0 {
-			if k := kindsSummary(rep); k != "" {
-				printf(out, "\n  %s builds: %s\n", key, k)
-			}
-			printf(out, "\n  %d of %d jobs in %s can run on this machine\n", rep.jobs()-rep.failed(), rep.jobs(), key)
+			printf(out, "  %s: %s\n", key, repoSummary(key, rep, !asking))
 		} else {
-			printf(out, "  now %d of %d can run\n", rep.jobs()-rep.failed(), rep.jobs())
+			printf(out, "    added them; now %s\n", repoSummary(key, rep, true))
 		}
-		printRefusals(out, rep)
 		// Three rounds at most: an entry setup adds can uncover another
 		// entry's need, and never a chain longer than labels, then actions.
-		if !rep.hasFixes() || round == 2 {
-			printLeftToYou(out, rep)
-			break
+		if !asking || !rep.hasFixes() || round == 2 {
+			return
 		}
-		printf(out, "  its workflows need, in config.toml:\n")
+		printf(out, "    its workflows need, in config.toml:\n")
 		for _, l := range suggestedFixLines(rep) {
-			printf(out, "    %s\n", l)
+			printf(out, "      %s\n", l)
 		}
-		add := false
-		if asking {
-			if add, err = p.confirm("  add them?", true); err != nil {
-				report(err)
-				return
-			}
+		add, err := p.confirm("    add them?", true)
+		if err != nil {
+			report(err)
+			return
 		}
 		if !add {
-			printf(out, "  `latem workflows check --repo %s --fix` adds them\n", key)
-			printLeftToYou(out, rep)
-			break
+			return
 		}
 		cfg, err := loadConfig()
 		if err != nil {
 			report(err)
 			return
 		}
-		fixed, err := applyWorkflowFixes(config.DerivePaths(configDir()), cfg, rep)
-		if err != nil {
+		if _, err := applyWorkflowFixes(config.DerivePaths(configDir()), cfg, rep); err != nil {
 			report(err)
 			return
 		}
-		printf(out, "  added %d entr%s\n", len(fixed), map[bool]string{true: "y", false: "ies"}[len(fixed) == 1])
 	}
-	printf(out, "  the details: latem workflows check --repo %s\n", key)
 }
 
-// printRefusals names up to six jobs this machine refuses, each with the
-// first reason.
-func printRefusals(out io.Writer, rep checkReport) {
-	shown := 0
-	for _, wr := range rep.workflows {
-		for _, j := range wr.jobs {
-			if j.level() != levelFail || len(j.findings) == 0 {
-				continue
-			}
-			if shown == 6 {
-				printf(out, "    …\n")
-				return
-			}
-			first := strings.SplitN(j.findings[0].text, "\n", 2)[0]
-			printf(out, "    %s: %s — %s\n", path.Base(wr.file), j.key, first)
-			shown++
+// repoSummary is a repository's check in one line: "0 of 14 jobs can run
+// here; 4 actions to allow, 1 label alias to add, 1 setting left to you —
+// see `latem workflows check --repo antescript`". Without fixes the entries
+// --fix would add are not counted: they are what is about to be offered.
+func repoSummary(key string, rep checkReport, withFixes bool) string {
+	s := fmt.Sprintf("%d of %d jobs can run here", rep.jobs()-rep.failed(), rep.jobs())
+	var parts []string
+	count := func(n int, one, many string) {
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, map[bool]string{true: one, false: many}[n == 1]))
 		}
 	}
+	if withFixes {
+		count(len(rep.allowed), "action to allow", "actions to allow")
+		count(len(rep.aliases), "label alias to add", "label aliases to add")
+	}
+	count(len(leftToYou(rep)), "setting left to you", "settings left to you")
+	if len(parts) > 0 {
+		s += "; " + strings.Join(parts, ", ")
+	}
+	if rep.failed() > 0 || rep.broken() > 0 {
+		s += fmt.Sprintf(" — see `latem workflows check --repo %s`", key)
+	}
+	return s
 }
 
-// printLeftToYou says the config.toml settings that would let more of the
-// refused jobs run and that setup does not add: whether to run remote
-// actions unisolated, or actions not pinned to a commit, is the operator's
-// call, and so is which runner a label no runner here carries should mean.
-// The other fix for each — a change to the workflow — is workflows check's
-// to say.
-func printLeftToYou(out io.Writer, rep checkReport) {
-	offered := suggestedFixLines(rep)
+// leftToYou is the config.toml settings that would let more of the refused
+// jobs run and that setup does not add: whether to run remote actions
+// unisolated, or actions not pinned to a commit, is the operator's call, and
+// so is which runner a label no runner here carries should mean. A label
+// --fix would alias is not one of them, however the finding quotes it. The
+// other fix for each — a change to the workflow — is workflows check's to
+// say.
+func leftToYou(rep checkReport) []string {
 	var lines []string
 	for _, wr := range rep.workflows {
 		for _, j := range wr.jobs {
@@ -482,20 +481,39 @@ func printLeftToYou(out io.Writer, rep checkReport) {
 					if i < 0 {
 						continue
 					}
-					if l := fix[i:]; !slices.Contains(offered, l) && !slices.Contains(lines, l) {
+					l := fix[i:]
+					if label, ok := aliasLineLabel(l); ok {
+						if _, offered := rep.aliases[label]; offered {
+							continue
+						}
+					} else if strings.HasPrefix(l, "[actions] allowed") {
+						continue
+					}
+					if !slices.Contains(lines, l) {
 						lines = append(lines, l)
 					}
 				}
 			}
 		}
 	}
-	if len(lines) == 0 {
-		return
+	return lines
+}
+
+// aliasLineLabel is the label a "[label_aliases] <label> = …" line names,
+// quoted or not.
+func aliasLineLabel(l string) (string, bool) {
+	rest, ok := strings.CutPrefix(l, "[label_aliases] ")
+	if !ok {
+		return "", false
 	}
-	printf(out, "  settings that would let more run, which setup leaves to you:\n")
-	for _, l := range lines {
-		printf(out, "    %s\n", l)
+	k, _, ok := strings.Cut(rest, " = ")
+	if !ok {
+		return "", false
 	}
+	if u, err := strconv.Unquote(k); err == nil {
+		k = u
+	}
+	return k, true
 }
 
 // registered reports whether the machine already has a control plane and a
