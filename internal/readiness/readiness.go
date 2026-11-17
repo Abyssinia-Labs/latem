@@ -685,16 +685,24 @@ func settings(jobs []Job, executor string) []Item {
 	}
 	if len(moving) > 0 {
 		out = append(out, Item{ID: itemMovingRefs, Title: "actions named by a tag accepted", Have: strings.Join(refs, ", "), Jobs: moving,
-			Warning: "A tag can be moved to other code after you have read it. The other way is to pin each action to a commit in the workflow.",
+			Warning: WarnMovingRefs,
 			Config:  []Change{{What: ChangeMovingRefs, Line: "[actions] require_pinned = false"}}})
 	}
 	if len(unisolated) > 0 {
 		out = append(out, Item{ID: "unisolated", Title: "remote actions allowed on this machine", Jobs: unisolated,
-			Warning: "They run as you, with everything you can reach, and not in a container. Say yes on a machine that builds only repositories you trust.",
+			Warning: WarnUnisolated,
 			Config:  []Change{{What: ChangeUnisolated, Line: "[actions] allow_unisolated = true"}}})
 	}
 	return out
 }
+
+// WarnMovingRefs and WarnUnisolated say what each of the two settings that
+// widen what may run here gives up. A person reads one before saying yes to
+// it: on the setup screen, under `setup apply`, and under `setup --like`.
+const (
+	WarnMovingRefs = "A tag can be moved to other code after you have read it. The other way is to pin each action to a commit in the workflow."
+	WarnUnisolated = "They run as you, with everything you can reach, and not in a container. Say yes on a machine that builds only repositories you trust."
+)
 
 func merge(into, more []string) []string {
 	for _, m := range more {

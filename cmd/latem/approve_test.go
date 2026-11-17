@@ -49,6 +49,8 @@ type terminalSession struct {
 	typeAhead string
 	prompt    string
 	answer    string
+	// then answers the prompt each time it shows again, in order.
+	then []string
 }
 
 // askedForSHA is the end of the question `latem approve` asks.
@@ -105,6 +107,12 @@ func atTerminal(t *testing.T, s terminalSession, args ...string) (screen, stderr
 			return
 		}
 		_, _ = master.Write([]byte(s.answer + "\n"))
+		for i, answer := range s.then {
+			if !waitForCount(&shown, s.prompt, i+2, done) {
+				return
+			}
+			_, _ = master.Write([]byte(answer + "\n"))
+		}
 	}()
 
 	root := newRootCommand()
@@ -124,6 +132,23 @@ func atTerminal(t *testing.T, s terminalSession, args ...string) (screen, stderr
 		t.Error("the screen was still being read five seconds after the command returned")
 	}
 	return shown.String(), errBuf.String(), err
+}
+
+// waitForCount waits until the screen has shown want n times.
+func waitForCount(shown *lockedBuffer, want string, n int, stop <-chan struct{}) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.Count(shown.String(), want) < n {
+		select {
+		case <-stop:
+			return false
+		default:
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return true
 }
 
 // withStdio runs latem with the given stdin and stdout.
