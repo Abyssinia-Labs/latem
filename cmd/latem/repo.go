@@ -114,7 +114,9 @@ func runRepoAdd(cmd *cobra.Command, f repoAddFlags) error {
 
 	refs := f.refs
 	if !f.noVerify {
-		printf(out, "checking %s the way the agent will fetch it …\n", url)
+		if !f.inSetup {
+			printf(out, "checking %s the way the agent will fetch it …\n", url)
+		}
 		head, err := verifyRepo(cmd.Context(), url)
 		if err != nil {
 			return err
@@ -139,6 +141,15 @@ func runRepoAdd(cmd *cobra.Command, f repoAddFlags) error {
 	if err != nil {
 		return err
 	}
+	if f.inSetup {
+		// Setup says the repository in one line of its own, after checking
+		// it (LAT-30); here it says only what went wrong.
+		if warning != "" {
+			printf(out, "  %s\n", warning)
+		}
+		announceConfigProblem(out, paths)
+		return nil
+	}
 	printf(out, "added repos.%s to %s\n  url           %s\n  allowed refs  %s\n",
 		f.key, paths.File, url, strings.Join(refs, ", "))
 	if warning != "" {
@@ -146,7 +157,7 @@ func runRepoAdd(cmd *cobra.Command, f repoAddFlags) error {
 	}
 	printf(out, "\n")
 	announceConfigChange(out, paths)
-	if !f.inSetup {
+	{
 		printf(out, "\nnext:\n  latem workflows check --repo %s   what this machine can run of it, and what it needs\n"+
 			"  latem secrets set --repo %s <NAME>   a secret its workflows read\n", f.key, f.key)
 	}

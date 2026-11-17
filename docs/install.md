@@ -39,17 +39,12 @@ $ latem setup --plain
 
 2/6 repositories
   a repository this machine should build (owner/name), or Enter to skip: me/myapp
-checking https://github.com/me/myapp.git the way the agent will fetch it …
-added repos.myapp to /Users/me/.latem/config.toml
-
-  6 of 9 jobs in myapp can run on this machine
-    checks.yml: e2e — uses oven-sh/setup-bun@v2: oven-sh/setup-bun is not in [actions] allowed
-    …
-  its workflows need, in config.toml:
-    [label_aliases] "blacksmith-4vcpu-ubuntu-2404" = ["linux"]
-    [actions] allowed += "oven-sh/setup-bun"
-  add them? [Y/n] y
-  added 2 entries
+  myapp: 6 of 9 jobs can run here — see `latem workflows check --repo myapp`
+    its workflows need, in config.toml:
+      [label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]
+      [actions] allowed += "oven-sh/setup-bun"
+    add them? [Y/n] y
+    added them; now 9 of 9 jobs can run here
   another (owner/name), or Enter to go on:
 
 3/6 toolchains

@@ -304,10 +304,13 @@ func TestSetup_AsksForARepositoryAndOffersWhatItsWorkflowsNeed(t *testing.T) {
 	}
 	// Checked again once the entries are in: the job is refused next for its
 	// unpinned action, a setting setup leaves alone and says.
-	for _, want := range []string{"2/6 repositories", "should build (owner/name)", "nope", "added repos.app",
-		"jobs in app can run on this machine", "its workflows need", "add them? [Y/n]", "added 2 entries",
-		"now 0 of 1 can run", `"v2" is a tag or branch`, "which setup leaves to you",
-		"[actions] require_pinned = false", "another (owner/name)", "4/6 register"} {
+	// Each repository is one line, and an offer names every entry it would
+	// add (LAT-30); what is left is counted, and workflows check says it.
+	for _, want := range []string{"2/6 repositories", "should build (owner/name)", "nope",
+		"app: 0 of 1 jobs can run here", "its workflows need", `[label_aliases] blacksmith-4vcpu-ubuntu-2404 = ["linux"]`,
+		`[actions] allowed += "oven-sh/setup-bun"`, "add them? [Y/n]",
+		"added them; now 0 of 1 jobs can run here; 1 setting left to you — see `latem workflows check --repo app`",
+		"another (owner/name)", "4/6 register"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -331,7 +334,7 @@ func TestSetup_RepoFlagAddsWithoutAsking(t *testing.T) {
 	if _, ok := cfg.Repos["app"]; !ok || len(cfg.LabelAliases) != 0 {
 		t.Errorf("repos = %v, aliases = %v: want app added and nothing else written", cfg.Repos, cfg.LabelAliases)
 	}
-	if strings.Contains(out, "add them?") || !strings.Contains(out, "latem workflows check --repo app --fix") {
+	if strings.Contains(out, "add them?") || !strings.Contains(out, "app: 0 of 1 jobs can run here; 1 action to allow, 1 label alias to add") {
 		t.Errorf("output:\n%s", out)
 	}
 
@@ -350,5 +353,59 @@ func TestSetup_NoRepositoriesOffATerminal(t *testing.T) {
 	}
 	if !strings.Contains(out, "none yet; `latem repo add <owner/name>` adds one") || strings.Contains(out, "should build") {
 		t.Errorf("output:\n%s", out)
+	}
+}
+
+// Workflows with more than one job, each refused for a different reason, so
+// that the per-repository report has something to say.
+var setupManyJobsFiles = fstest.MapFS{
+	".github/workflows/checks.yml": {Data: []byte("on: push\njobs:\n" +
+		"  web:\n    runs-on: blacksmith-4vcpu-ubuntu-2404\n    steps:\n      - uses: oven-sh/setup-bun@v2\n      - run: bun test\n" +
+		"  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: dorny/paths-filter@v3\n      - run: make lint\n" +
+		"  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: cloudflare/wrangler-action@v3\n      - run: echo hi\n")},
+}
+
+// Step 2 says one line per repository, so that nine of them do not push the
+// connect code out of sight (LAT-30): how many of its jobs can run here, what
+// is in the way, and where the detail is.
+func TestSetup_SaysOneLinePerRepository(t *testing.T) {
+	fakeSetup(t, true)
+	fakeLsRemote(t, readable("main"))
+	fakeStores(t, false)
+	noAgentRunning(t)
+	fakeRepoFiles(t, setupManyJobsFiles)
+	dir := filepath.Join(privateTempDir(t), "fresh")
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service",
+		"--repo", "me/app", "--repo", "me/web", "--repo", "me/api")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	t.Logf("setup said:\n%s", out)
+	start, end := strings.Index(out, "2/6 repositories"), strings.Index(out, "3/6 toolchains")
+	if start < 0 || end < start {
+		t.Fatalf("no step 2 in:\n%s", out)
+	}
+	var lines []string
+	for _, l := range strings.Split(out[start:end], "\n")[1:] {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 3 {
+		t.Fatalf("step 2 said %d lines, want one per repository:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for i, key := range []string{"app", "web", "api"} {
+		for _, want := range []string{"  " + key + ": 0 of 3 jobs can run here", "3 actions to allow",
+			"1 label alias to add", "`latem workflows check --repo " + key + "`"} {
+			if !strings.Contains(lines[i], want) {
+				t.Errorf("line %d lacks %q: %s", i, want, lines[i])
+			}
+		}
+	}
+	cfg := loadConfigIn(t, dir)
+	if len(cfg.Repos) != 3 || len(cfg.LabelAliases) != 0 || len(cfg.Actions.Allowed) != 0 {
+		t.Errorf("repos %v, aliases %v, allowed %v: want three repos added and nothing else written",
+			cfg.Repos, cfg.LabelAliases, cfg.Actions.Allowed)
 	}
 }
