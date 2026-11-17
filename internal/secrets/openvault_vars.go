@@ -35,14 +35,14 @@ var variableName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // that does not answer is an [*OpenVaultError], as for a secret.
 func (p *OpenVaultProvider) Variables(ctx context.Context, collection string, envs func(env string) bool) (Variables, error) {
 	if !openVaultCollection.MatchString(collection) {
-		return nil, fmt.Errorf("openvault: repository %q cannot be a collection's name: %w", collection, ErrNotFound)
+		return nil, fmt.Errorf("vault: repository %q cannot be a collection's name: %w", collection, ErrNotFound)
 	}
 	entries, err := p.listing(ctx, collection)
 	if err != nil {
 		var ove *OpenVaultError
 		if errors.As(err, &ove) && ove.Refused {
 			if names, cerr := p.Collections(ctx); cerr == nil && !slices.Contains(names, collection) {
-				return nil, fmt.Errorf("openvault: %s: %w", collection, ErrNoCollection)
+				return nil, fmt.Errorf("vault: %s: %w", collection, ErrNoCollection)
 			}
 		}
 		return nil, err

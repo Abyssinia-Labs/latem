@@ -178,7 +178,7 @@ func TestNew_BuildsTheSpecChainInOrder(t *testing.T) {
 
 	// OpenVault straight after the override: it is the copy every machine
 	// shares, and the stores after it are the copies that go stale (A86).
-	want := []string{"env", "openvault", "file", "keychain", "pass", "command"}
+	want := []string{"env", "vault", "file", "keychain", "pass", "command"}
 	if got := c.Providers(); !slices.Equal(got, want) {
 		t.Errorf("Providers() = %q, want %q", got, want)
 	}

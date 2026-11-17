@@ -138,7 +138,7 @@ type Options struct {
 	// Secrets resolves the names a job declares. A *secrets.Chain satisfies it.
 	Secrets secrets.Provider
 	// Vault is OpenVault, read for a workflow job's variables when the
-	// config says `[secrets] openvault = true` (A96). Nil reads config.toml's
+	// config says `[secrets] vault = true` (A96). Nil reads config.toml's
 	// alone.
 	Vault repovars.Vault
 	// Caches provisions cache mounts (gate 18).

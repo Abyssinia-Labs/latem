@@ -966,7 +966,7 @@ Target: Linux x86_64 (desktop) and Linux arm64 (the container role on an Apple s
 - Android emulator jobs need `--device /dev/kvm`; preflight checks it exists and is readable by the daemon's user (§18.2).
 - Disk floor `min_free_gb` defaults to 40 for a docker runner — enough for a base image, a layer cache, and one build's intermediates.
 
-**Step execution.** Each step is one `docker exec` into the run's container. Per §9, that means a **new process every step**: `cd` and `export` do not carry over, the filesystem does. The exec sets `WorkingDir` to `/workspace` and passes the full merged environment explicitly rather than relying on anything the previous exec did. `Step.Run` is passed to the configured shell as a single argument — `["bash", "-c", step.Run]` as an argv slice, never a concatenated string (INV-3).
+**Step execution.** Each step is one `docker exec` into the run's container. Per §9, that means a **new process every step**: `cd` and `export` do not carry over, the filesystem does. The exec sets `WorkingDir` to `/workspace` and passes the full merged environment explicitly rather than relying on anything the previous exec did. `Step.Run` is passed to the configured shell as a single argument — `["bash", "-c", step.Run]` as an argv slice, never a concatenated string (INV-3). Before the first step, the executor waits until the container takes an exec (**A105**): an engine may return from the start before the container has a shell.
 
 **Base image contract.** The container image is the operator's, but three things are required of it, and `latem doctor` checks them by running the image once:
 
@@ -1107,7 +1107,7 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 Resolution chain, first hit wins. Only names declared in the job's `secrets:` block are looked up.
 
 1. `LATEM_SECRET_<NAME>` in the agent's own environment
-2. OpenVault, with `[secrets] openvault = true` — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86); a name that is no secret or variable there may be a file, which a step reads as the path of a private copy (A88)
+2. The vault (latem vault, formerly OpenVault), with `[secrets] vault = true`, or `openvault = true` as before A104 — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86); a name that is no secret or variable there may be a file, which a step reads as the path of a private copy (A88)
 3. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
 4. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
 5. `pass` / `gopass`, if configured
@@ -1134,7 +1134,7 @@ Rules:
 - `latem doctor --secrets` reports resolvable/unresolvable **names only**, never values.
 - A pull request's job resolves no secret from any link of the chain until its commit is approved on the machine with `latem approve`. Until then it waits in `awaiting_approval`, and no store is asked anything (A85).
 - `latem secrets set [--repo R] [--env E] NAME` writes a value where links 2 and 3 read it, under the scoped name the run's lookup builds (A50, A54); the value arrives on stdin or at a prompt that does not echo, never in argv. `latem secrets list` prints names and scopes and reads no value. A value with a control character in it other than tab and a line ending is refused, and so is a variable's (A73).
-- A workflow job's variables are read from OpenVault too, with `[secrets] openvault = true`: a variable entry, never a secret's, in each scope before config.toml's (A96).
+- A workflow job's variables are read from the vault too, with `[secrets] vault = true` (A104): a variable entry, never a secret's, in each scope before config.toml's (A96).
 - `latem secrets copy --to HOST [--repo R] [--env E] NAME...` reads each value from secrets.env or the Keychain here, under exactly that scope, and hands it to `latem secrets set` on HOST over ssh, on its stdin (A73).
 - A name secrets.env defines twice has no value, and the error names its lines; every other name in the file still resolves. `secrets set --store file` keeps one line and `secrets rm --store file` removes them all (A73).
 
@@ -4916,6 +4916,67 @@ action's own steps; here it answers for the job, and an inner step's condition i
 status function runs after a failure before the action, which GitHub would not reach. Telling the two
 apart needs the job's status at the moment the action began, which no condition can read yet.
 
+### Amendment from a vault that is changing its name
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A104 | §15, A86, A96, A97 | **latem reads the vault under either name, the new first. Its directory is `$LATEM_VAULT_HOME`, else `~/.latem-vault` when it exists, else `$OPENVAULT_HOME`, else `~/.openvault`; the socket is `service.sock` in it. Its command is `latem-vault`, else `openvault`, each looked for on `PATH`, then in cargo's bin (`$CARGO_HOME/bin` or `~/.cargo/bin`), then Homebrew's (`$HOMEBREW_PREFIX/bin` and the default prefixes). The config key is `[secrets] vault = true`; `openvault = true` still turns it on. The variables' digests are kept in `vault-vars.json`, and `openvault-vars.json` is read when that is missing. Readiness items `openvault-on`, `openvault-service`, `openvault-join` and `openvault-collection-R` are `vault-…`, with the config change `vault`; `setup apply` takes the old ids for one release. Doctor's checks `openvault.service`, `openvault.collections` and `openvault.collections.absent` are `vault.…`. The store is named `vault` in `latem secrets list`, `latem vars list` and a run's provenance. Every command latem tells a person to type names the vault's command as it was found, `latem-vault` when none was. The service's passphrase note is said only for a key that has a passphrase, or whose key file could not be read** | OpenVault is being renamed latem vault (decided 2026-11-17). latem reads the vault's socket, so a latem that knew only `~/.openvault` would lose every secret on the day a machine's vault moved to `~/.latem-vault`, and every machine's latem has to read both before any vault moves. Onboarding a Mac Studio the same day (LAT-29) found the rest: `cargo install` puts `openvault` in `~/.cargo/bin`, which is on no PATH an agent or an ssh command gets, so setup said the vault was not installed and could not run its service's install; and the service item told a machine whose key is in the Secure Enclave to remove a passphrase it did not have |
+
+**Which name wins.** A variable is taken as set, as the vault takes it. The new default directory is
+taken only once it exists: until a machine's vault is migrated it does not, and the old one is where
+the vault is. Between two commands, `latem-vault` is preferred wherever it is, because a machine that
+has both is part-way through the move and the new one is the one that stays.
+
+**The passphrase.** The key file begins `openvault v1 keys\0` (or `latem-vault v1 keys\0`) and then
+one byte for how the keys are kept: `0x01` a key file, `0x02` the Secure Enclave, `0x03` a key file
+with a passphrase (OpenVault keystore.md). latem reads those bytes and nothing after them, so no key
+is read. Only `0x03`, or a file it cannot read or a kind it does not know, keeps the note.
+
+**What runs the install.** `setup apply vault-service` runs the item's command as `runItem` runs any
+fix, and the command is found as above, so an `openvault` only in `~/.cargo/bin` is the one run.
+
+**Names that leave the machine.** An error that can reach a broker names the command, never its
+path, as before: a run's `E_SECRET_BACKEND` message says `latem-vault service install` or `openvault
+service install`, never `/Users/…/.cargo/bin/openvault`.
+
+**What it costs.** Finding the command is a few `stat` calls, made when setup or doctor builds its
+view and when a secrets chain is built. The key file's first bytes are read once per setup plan or
+doctor run. Nothing is added to a heartbeat, a run or the wire.
+
+**Not in this amendment.** Moving a vault: that is the vault's own migration. Dropping the old names:
+a later release, once every machine has moved; the old readiness ids go first, after one release.
+
+### Amendment from an engine whose start returned before the container could run a shell
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A105 | §13.1, §21 | **After the run container's start returns, the Docker executor waits until it is running with a pid, by inspect, and then until it takes one exec of `/bin/sh -c true` as the run user in `/workspace`. Only that exec is tried again, and only while the engine answers `stat /bin/sh: no such file or directory`: after 10 ms, doubling to at most 500 ms between tries, for 30 s in all. A container that exits before its first step, an exec that fails any other way, and an engine that has not readied the container in 30 s fail the run with `E_EXECUTOR`, retryable, saying what the engine answered. A step's own exit 127 is the step's, as before, and is never tried again** | On Kiri 0.2.1 (LAT-23), the MacBook's `linux` runner failed about one job in ten at its first step, in 0 s: `kiri: cannot start container: exec: "/bin/sh": stat /bin/sh: no such file or directory`, exit 127, reported as `E_STEP`. Docker's API promises that a started container takes an exec, and Docker Desktop kept the promise for thousands of runs. Kiri, it appears, returns from the start while it is still filling the container's new volumes from the image. A run that had failed in no time read as the job's fault, and latem-cloud's flaky detection would have marked the job flaky |
+
+**What was measured.** A one-step job (`uname -m`, `cat /etc/os-release`) in `latem-ubuntu:local`, by
+`latem try` against a second agent on the MacBook. With v0.11.0: the first run on a new runner failed,
+then 40 runs, 20 back to back and 20 three seconds apart, all passed; 10 runs each on a new tool-cache
+volume all failed; 10 runs 30 s apart failed twice. The trigger is a new volume. `latem-ubuntu:local`
+holds 1.1 GB under `/opt/hostedtoolcache`, which a new tool-cache volume is filled from, and an exec
+finds no `/bin/sh` until Kiri has done so. The run's own volume is new every run as well, and
+small. With the wait, counted from `docker events`: of 100 containers with the tool-cache volume already
+there, 21 needed a second exec, 12 to 25 ms after the start, and none needed a third. On a new
+tool-cache volume every container needed several, and was ready after 0.64 to 7.3 s (25 runs). The
+same 60 runs as above then all passed: 40 mixed, 10 on a new volume, 10 thirty seconds apart.
+
+**Why 30 s.** The ticket's first guess was 2 s, ten times the window first seen. It failed one run in
+ten on a new volume. Thirty seconds is four times the slowest seen. An engine that never readies its
+container still fails the run in half a minute, retryably, which costs one exec and one inspect per
+try and nothing else.
+
+**Why one exec, and not every step.** Retrying a step on exit 127 would retry a job's own `command not
+found`, and a step is not always safe to run twice. The readiness exec is the executor's, does
+nothing, and is the only one that can be told apart from a step by its argv.
+
+**Not in this amendment.** Reporting the behaviour to Kiri, which waits for the operator. Probe
+containers (`doctor`'s image checks, the GPU and KVM preflights, a tilde cache target's home probe),
+which run one command as the container's own process and never exec into it. A container step's own
+container (A44), which runs its command as its process too.
+
 
 ### Amendment from a Mac that moved from Docker Desktop to Kiri
 
@@ -4943,3 +5004,4 @@ plane call. The heartbeat's readiness digest changes only when the item comes or
 systemd unit, which would not depend on who owns the system socket at boot. It touches the service
 definition's revision and how a reload treats a changed key, and is left open on LAT-22. Comparing the
 agent's daemon with the command's when both answer stays doctor's `docker.context` warning.
+

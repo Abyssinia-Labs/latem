@@ -142,7 +142,7 @@ latem repo add <owner/name> | list | remove <key|owner/name>
 latem secrets set | list | rm [--repo R] [--env E] NAME   value from stdin or a hidden prompt
 latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   to another machine, on ssh's stdin
 latem vars set | rm --repo R [--env E] NAME [VALUE]
-latem vars list [--repo R] [--env E]   config.toml's and, with [secrets] openvault = true, OpenVault's, and which answers
+latem vars list [--repo R] [--env E]   config.toml's and, with [secrets] vault = true, the vault's, and which answers
 latem workflows check [path | --repo R] [--offline] [--json] [--fix] [-v]   which workflow jobs this machine can run, and the fix for the rest
 latem store check [path | --repo R] [--platform ios|android] [--json]   whether a preview would reach testers from this machine; read-only
 latem doctor [--secrets] [--fix]     check this machine and name the fix for anything wrong
@@ -170,7 +170,7 @@ latem version
 | [Install and set up](docs/install.md) | install.sh and Homebrew, `latem setup` step by step, checking a release by hand, updates, and a machine's git credential |
 | [Jobs](docs/jobs.md) | GitHub workflows (`workflows check`, `latem try`, the steps latem performs itself) and `.latem/jobs.yaml` |
 | [Configuration](docs/configuration.md) | `config.toml`, adding repositories, reloading the agent, metrics |
-| [Secrets](docs/secrets.md) | where values live, scopes, copying them between machines, reading them from OpenVault, the lookup order |
+| [Secrets](docs/secrets.md) | where values live, scopes, copying them between machines, reading them from the vault, the lookup order |
 | [`latem doctor`](docs/doctor.md) | what it checks, and running a Mac headless |
 | [Commands](docs/commands.md) | `latem list`, run states, exit codes, `latem run`'s output |
 | [Why latem](docs/why.md) | why it exists, the executors, caches, the five invariants, and what is built |

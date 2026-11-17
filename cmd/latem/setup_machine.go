@@ -18,6 +18,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -99,13 +100,13 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 	for _, w := range imageWants(ctx, cfg, m.deps) {
 		in.Images = append(in.Images, readiness.Image{Runner: w.runner.Name, Ref: strings.TrimPrefix(w.gap.Missing, "its image, ")})
 	}
-	// OpenVault before the names (A97): a vault here that the config does not
+	// The vault before the names (A97): a vault here that the config does not
 	// read yet is counted as though it were, and turning it on is an item.
 	in.Vault = vaultView(ctx, cfg, stores, m.deps)
 	read := cfg
 	if in.Vault.Ready() {
 		asOn := *cfg
-		asOn.Secrets.OpenVault = true
+		asOn.Secrets.Vault = true
 		read = &asOn
 	}
 	for _, key := range sortedStrings(cfg.Repos) {
@@ -137,19 +138,28 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 	return readiness.Build(in), nil
 }
 
-// vaultView is what setup knows of OpenVault here (A97), from what doctor and
+// vaultView is what setup knows of the vault here (A97), from what doctor and
 // the inventory already read: whether the service answers, and which of the
 // configured repositories it holds a collection for. A machine with neither
-// the command nor a vault is not asked anything.
+// the command nor a vault is not asked anything. The command is latem-vault,
+// else openvault, wherever lookPath finds it (A104).
 func vaultView(ctx context.Context, cfg *config.Config, stores secretStores, deps toolchainDeps) readiness.Vault {
-	v := readiness.Vault{On: cfg.Secrets.OpenVault}
+	v := readiness.Vault{On: cfg.Secrets.Vault}
 	if deps.vaultHere != nil {
 		v.Here = deps.vaultHere()
 	}
-	_, err := deps.lookPath("openvault")
-	v.Installed = err == nil || v.Here
+	for _, name := range secrets.VaultCommands {
+		if _, err := deps.lookPath(name); err == nil {
+			v.Command = name
+			break
+		}
+	}
+	v.Installed = v.Command != "" || v.Here
 	if stores.openvault == nil || (!v.Installed && !v.On) {
 		return v
+	}
+	if passphrase, known := stores.openvault.KeyPassphrase(); known && !passphrase {
+		v.KeyOpensAlone = true
 	}
 	repos := sortedStrings(cfg.Repos)
 	// The inventory's own listing: onceOpenVault answers it once.
@@ -527,9 +537,9 @@ func applyChange(body string, cfg *config.Config, c readiness.Change) (string, e
 			allowed = append(allowed, c.Value)
 		}
 		return setTableKey(body, actions, actions, "allowed", tomlStringList(allowed))
-	case readiness.ChangeOpenVault:
+	case readiness.ChangeVault:
 		secretsTable := []string{"secrets"}
-		return setTableKey(body, secretsTable, secretsTable, "openvault", "true")
+		return setTableKey(body, secretsTable, secretsTable, "vault", "true")
 	case readiness.ChangeNewRunner:
 		return insertAfter(body, []string{"runner"}, fmt.Sprintf(`[[runner]]
 name        = %s

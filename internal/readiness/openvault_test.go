@@ -45,7 +45,7 @@ func TestVaultItems_WithoutOpenVaultTheFixIsThisMachines(t *testing.T) {
 	if got := strings.Join(s.Yours[0], " "); got != "latem secrets set --repo tsedal --env staging CLOUDFLARE_API_TOKEN" {
 		t.Errorf("secret's fix = %q", got)
 	}
-	if len(s.Manual) != 1 || !strings.Contains(s.Manual[0], `docs/secrets.md, "From OpenVault"`) {
+	if len(s.Manual) != 1 || !strings.Contains(s.Manual[0], `docs/secrets.md, "From the vault"`) {
 		t.Errorf("manual = %q, want the way to OpenVault", s.Manual)
 	}
 	v := item(t, k, "vars-tsedal")
@@ -61,7 +61,7 @@ func TestVaultItems_WithoutOpenVaultTheFixIsThisMachines(t *testing.T) {
 // A97: a machine that reads the vault, and holds the repository's
 // collection, is told to set the name in the vault, as the person's.
 func TestVaultItems_ANameTheCollectionLacksIsSetInTheVault(t *testing.T) {
-	v := Vault{Installed: true, Here: true, On: true, Answers: true, Device: "Mini", Held: []string{"tsedal"}}
+	v := Vault{Command: "openvault", Installed: true, Here: true, On: true, Answers: true, Device: "Mini", Held: []string{"tsedal"}}
 	k := vaultPlan(t, v, deployJob())
 	s := item(t, k, "secrets-tsedal")
 	if got := strings.Join(s.Yours[0], " "); got != "openvault set tsedal/staging/CLOUDFLARE_API_TOKEN --secret" {
@@ -79,12 +79,12 @@ func TestVaultItems_ANameTheCollectionLacksIsSetInTheVault(t *testing.T) {
 // an admin device, naming this device as OpenVault knows it; no name can be
 // said missing until it is held.
 func TestVaultItems_ACollectionThisDeviceLacksIsScopedOnAnAdminDevice(t *testing.T) {
-	v := Vault{Installed: true, Here: true, On: true, Answers: true, Device: "Mini", Held: []string{"other"}}
+	v := Vault{Command: "openvault", Installed: true, Here: true, On: true, Answers: true, Device: "Mini", Held: []string{"other"}}
 	k := vaultPlan(t, v, deployJob())
-	if got := ids(k); !slices.Equal(got, []string{"openvault-collection-tsedal"}) {
+	if got := ids(k); !slices.Equal(got, []string{"vault-collection-tsedal"}) {
 		t.Fatalf("items %v, want the collection alone", got)
 	}
-	c := item(t, k, "openvault-collection-tsedal")
+	c := item(t, k, "vault-collection-tsedal")
 	if got := strings.Join(c.Yours[0], " "); got != "openvault scope Mini tsedal read" || !person(c) {
 		t.Errorf("collection item = %+v", c)
 	}
@@ -96,12 +96,12 @@ func TestVaultItems_ACollectionThisDeviceLacksIsScopedOnAnAdminDevice(t *testing
 // A97: a service that does not answer is latem's to start, and every name
 // waits on it.
 func TestVaultItems_AServiceThatDoesNotAnswerIsInstalled(t *testing.T) {
-	v := Vault{Installed: true, Here: true, On: true}
+	v := Vault{Command: "openvault", Installed: true, Here: true, On: true}
 	k := vaultPlan(t, v, deployJob())
-	if got := ids(k); !slices.Equal(got, []string{"openvault-service"}) {
+	if got := ids(k); !slices.Equal(got, []string{"vault-service"}) {
 		t.Fatalf("items %v, want the service alone", got)
 	}
-	s := item(t, k, "openvault-service")
+	s := item(t, k, "vault-service")
 	if len(s.Run) != 1 || strings.Join(s.Run[0], " ") != "openvault service install" || s.Soft {
 		t.Errorf("service item = %+v", s)
 	}
@@ -113,11 +113,11 @@ func TestVaultItems_AServiceThatDoesNotAnswerIsInstalled(t *testing.T) {
 // A97: a machine whose config reads a vault this device is not in is told
 // to join it: the person's, here and on a device already in it.
 func TestVaultItems_ADeviceNotInTheVaultJoinsIt(t *testing.T) {
-	k := vaultPlan(t, Vault{Installed: true, On: true}, deployJob())
-	if got := ids(k); !slices.Equal(got, []string{"openvault-join"}) {
+	k := vaultPlan(t, Vault{Command: "openvault", Installed: true, On: true}, deployJob())
+	if got := ids(k); !slices.Equal(got, []string{"vault-join"}) {
 		t.Fatalf("items %v, want join alone", got)
 	}
-	j := item(t, k, "openvault-join")
+	j := item(t, k, "vault-join")
 	if len(j.Yours) != 1 || strings.Join(j.Yours[0], " ") != "openvault join" || !person(j) || j.Soft ||
 		!strings.Contains(j.Manual[0], "openvault approve") {
 		t.Errorf("join item = %+v", j)
@@ -128,21 +128,21 @@ func TestVaultItems_ADeviceNotInTheVaultJoinsIt(t *testing.T) {
 // repositories, that config.toml does not read yet: turning it on is a
 // config item `setup apply` closes, and the names it holds are not missing.
 func TestVaultItems_AVaultNotReadYetIsTurnedOn(t *testing.T) {
-	v := Vault{Installed: true, Here: true, Answers: true, Device: "Mini", Held: []string{"tsedal"}}
+	v := Vault{Command: "openvault", Installed: true, Here: true, Answers: true, Device: "Mini", Held: []string{"tsedal"}}
 	held := deployJob()
 	held.Secrets, held.Vars, held.FromVault = nil, nil, true
 	k := vaultPlan(t, v, held)
-	if got := ids(k); !slices.Equal(got, []string{"openvault-on"}) {
-		t.Fatalf("items %v, want openvault-on alone", got)
+	if got := ids(k); !slices.Equal(got, []string{"vault-on"}) {
+		t.Fatalf("items %v, want vault-on alone", got)
 	}
-	on := item(t, k, "openvault-on")
-	if len(on.Config) != 1 || on.Config[0].What != ChangeOpenVault || on.Soft || len(on.Yours) > 0 {
+	on := item(t, k, "vault-on")
+	if len(on.Config) != 1 || on.Config[0].What != ChangeVault || on.Soft || len(on.Yours) > 0 {
 		t.Errorf("item %+v, want a config change setup applies", on)
 	}
 
 	// What the vault lacks is set in it, once it is read.
 	k = vaultPlan(t, v, deployJob())
-	if got := ids(k); !slices.Equal(got, []string{"openvault-on", "secrets-tsedal", "vars-tsedal"}) {
+	if got := ids(k); !slices.Equal(got, []string{"vault-on", "secrets-tsedal", "vars-tsedal"}) {
 		t.Fatalf("items %v", got)
 	}
 	if got := item(t, k, "secrets-tsedal").Yours[0][0]; got != "openvault" {
@@ -153,11 +153,11 @@ func TestVaultItems_AVaultNotReadYetIsTurnedOn(t *testing.T) {
 // A97: a device with OpenVault installed and no vault is shown the way in,
 // soft, beside this machine's own fix: it does not read the vault yet.
 func TestVaultItems_InstalledAndNotJoinedIsAWayInBesideTheLocalFix(t *testing.T) {
-	k := vaultPlan(t, Vault{Installed: true}, deployJob())
-	if got := ids(k); !slices.Equal(got, []string{"openvault-join", "secrets-tsedal", "vars-tsedal"}) {
+	k := vaultPlan(t, Vault{Command: "openvault", Installed: true}, deployJob())
+	if got := ids(k); !slices.Equal(got, []string{"vault-join", "secrets-tsedal", "vars-tsedal"}) {
 		t.Fatalf("items %v", got)
 	}
-	if !item(t, k, "openvault-join").Soft {
+	if !item(t, k, "vault-join").Soft {
 		t.Error("joining is one way of two here, and blocks nothing")
 	}
 	if got := item(t, k, "secrets-tsedal").Yours[0][0]; got != "latem" {
@@ -168,7 +168,7 @@ func TestVaultItems_InstalledAndNotJoinedIsAWayInBesideTheLocalFix(t *testing.T)
 // A97, done when: a machine that reads OpenVault and finds every name there
 // plans with no secrets or variables item.
 func TestVaultItems_EveryNameInTheVaultIsNoItem(t *testing.T) {
-	v := Vault{Installed: true, Here: true, On: true, Answers: true, Device: "Mini", Held: []string{"tsedal"}}
+	v := Vault{Command: "openvault", Installed: true, Here: true, On: true, Answers: true, Device: "Mini", Held: []string{"tsedal"}}
 	held := deployJob()
 	held.Secrets, held.Vars, held.FromVault = nil, nil, true
 	k := vaultPlan(t, v, held)
@@ -194,4 +194,57 @@ func TestAdvert_VariablesAreNamed(t *testing.T) {
 		}
 	}
 	t.Fatalf("no variables item in %+v", r.Kinds)
+}
+
+// A104: the items name the vault's command as it was found here, and
+// latem-vault when it was not.
+func TestVaultItems_NameTheCommandFound(t *testing.T) {
+	for _, tc := range []struct{ command, want string }{
+		{"", "latem-vault join"},
+		{"latem-vault", "latem-vault join"},
+		{"openvault", "openvault join"},
+	} {
+		k := vaultPlan(t, Vault{Command: tc.command, Installed: true, On: true}, deployJob())
+		if got := strings.Join(item(t, k, "vault-join").Yours[0], " "); got != tc.want {
+			t.Errorf("command %q: join = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+	k := vaultPlan(t, Vault{Command: "latem-vault", Installed: true, Here: true, On: true}, deployJob())
+	if got := strings.Join(item(t, k, "vault-service").Run[0], " "); got != "latem-vault service install" {
+		t.Errorf("service run = %q", got)
+	}
+}
+
+// A104 (LAT-29): a key that opens with nobody there, such as one in the
+// Secure Enclave, is not told what a passphrase needs.
+func TestVaultItems_ThePassphraseNoteOnlyForAKeyThatMayHaveOne(t *testing.T) {
+	alone := Vault{Command: "openvault", Installed: true, Here: true, On: true, KeyOpensAlone: true}
+	if s := item(t, vaultPlan(t, alone, deployJob()), "vault-service"); len(s.Manual) != 0 {
+		t.Errorf("manual = %q for a key that opens alone", s.Manual)
+	}
+	unknown := alone
+	unknown.KeyOpensAlone = false
+	if s := item(t, vaultPlan(t, unknown, deployJob()), "vault-service"); !strings.Contains(strings.Join(s.Manual, " "), "openvault keys passphrase --remove") {
+		t.Errorf("manual = %q, want what a key with a passphrase needs", s.Manual)
+	}
+}
+
+// A104: the vault's ids before the rename are known for one release, and no
+// other id is changed.
+func TestCurrentID_TheVaultsOldIDs(t *testing.T) {
+	for old, want := range map[string]string{
+		"openvault-on":                "vault-on",
+		"openvault-service":           "vault-service",
+		"openvault-join":              "vault-join",
+		"openvault-collection-tsedal": "vault-collection-tsedal",
+	} {
+		if got, ok := CurrentID(old); !ok || got != want {
+			t.Errorf("CurrentID(%q) = %q, %v; want %q", old, got, ok, want)
+		}
+	}
+	for _, id := range []string{"vault-on", "openvault-other", "secrets-tsedal", "openvault"} {
+		if got, ok := CurrentID(id); ok || got != id {
+			t.Errorf("CurrentID(%q) = %q, %v; want it unchanged", id, got, ok)
+		}
+	}
 }

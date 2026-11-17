@@ -18,8 +18,8 @@ import (
 	"unicode"
 )
 
-// OpenVaultSocketName is the OpenVault service's local socket, in its
-// directory: $OPENVAULT_HOME, or ~/.openvault.
+// OpenVaultSocketName is the vault service's local socket, in its directory,
+// [VaultHome].
 const OpenVaultSocketName = "service.sock"
 
 // openVaultMaxFrame is the service's own limit on a message (service.md,
@@ -81,26 +81,14 @@ func OpenVaultHere(environ []string) bool {
 	return err == nil
 }
 
-// OpenVaultSocket returns the OpenVault service's socket for environ, which is
-// os.Environ's form: $OPENVAULT_HOME/service.sock, else
-// $HOME/.openvault/service.sock, as OpenVault itself finds it.
+// OpenVaultSocket returns the vault service's socket for environ, which is
+// os.Environ's form: service.sock in [VaultHome].
 func OpenVaultSocket(environ []string) (string, error) {
-	var home, ovHome string
-	for _, kv := range environ {
-		switch k, v, _ := strings.Cut(kv, "="); k {
-		case "HOME":
-			home = v
-		case "OPENVAULT_HOME":
-			ovHome = v
-		}
+	home, err := VaultHome(environ)
+	if err != nil {
+		return "", err
 	}
-	switch {
-	case ovHome != "":
-		return filepath.Join(ovHome, OpenVaultSocketName), nil
-	case home != "":
-		return filepath.Join(home, ".openvault", OpenVaultSocketName), nil
-	}
-	return "", errors.New("secrets: openvault: neither OPENVAULT_HOME nor HOME is set, so there is no socket to read")
+	return filepath.Join(home, OpenVaultSocketName), nil
 }
 
 // OpenVaultProvider resolves names from OpenVault (A86), on the machine that
@@ -133,6 +121,9 @@ func OpenVaultSocket(environ []string) (string, error) {
 type OpenVaultProvider struct {
 	socket  string
 	timeout time.Duration
+	// command is the vault's command by name, for what an error tells a
+	// person to type; "" is [VaultCommand].
+	command string
 }
 
 var (
@@ -149,8 +140,33 @@ func NewOpenVaultProvider(socket string, timeout time.Duration) *OpenVaultProvid
 	return &OpenVaultProvider{socket: socket, timeout: timeout}
 }
 
+// WithCommand names the vault's command in what this provider's errors say
+// to type: the one this machine has, [VaultCommandHere]. It returns p.
+func (p *OpenVaultProvider) WithCommand(name string) *OpenVaultProvider {
+	p.command = name
+	return p
+}
+
+// Command is the vault's command by name, as this provider's errors give it.
+func (p *OpenVaultProvider) Command() string {
+	if p.command == "" {
+		return VaultCommand
+	}
+	return p.command
+}
+
+// KeyPassphrase reports whether this device's vault key opens with a
+// passphrase, from the key file beside the socket ([VaultKeyPassphrase]).
+func (p *OpenVaultProvider) KeyPassphrase() (passphrase, known bool) {
+	return VaultKeyPassphrase(filepath.Dir(p.socket))
+}
+
+// VaultStore is the vault's name as a store, in a run's provenance and in
+// `latem secrets list`.
+const VaultStore = "vault"
+
 // Name identifies this provider in diagnostics.
-func (p *OpenVaultProvider) Name() string { return "openvault" }
+func (p *OpenVaultProvider) Name() string { return VaultStore }
 
 // Socket is the socket this provider reads, for diagnostics.
 func (p *OpenVaultProvider) Socket() string { return p.socket }
@@ -165,11 +181,11 @@ func (p *OpenVaultProvider) Resolve(ctx context.Context, name string) (Value, er
 // ResolveIn returns name under scope: a repository, then its environment.
 func (p *OpenVaultProvider) ResolveIn(ctx context.Context, scope []string, name string) (Value, error) {
 	if err := validName(name); err != nil {
-		return nil, fmt.Errorf("openvault: %w", err)
+		return nil, fmt.Errorf("vault: %w", err)
 	}
 	collection, entry, err := OpenVaultEntry(scope, name)
 	if err != nil {
-		return nil, fmt.Errorf("openvault: %w", err)
+		return nil, fmt.Errorf("vault: %w", err)
 	}
 
 	typ, body, err := p.request(ctx, ovGet, ovStr(collection), ovStr(entry))
@@ -183,7 +199,7 @@ func (p *OpenVaultProvider) ResolveIn(ctx context.Context, scope []string, name 
 		r := ovReader{b: body}
 		switch found := r.u8(); {
 		case r.err == nil && found == 0:
-			return nil, fmt.Errorf("openvault: %s has no %s: %w", collection, entry, ErrNotFound)
+			return nil, fmt.Errorf("vault: %s has no %s: %w", collection, entry, ErrNotFound)
 		case found != 1:
 			return nil, p.protocolError("get", "an entry that does not parse")
 		}
@@ -195,10 +211,10 @@ func (p *OpenVaultProvider) ResolveIn(ctx context.Context, scope []string, name 
 		if kind == ovFile {
 			// A file by that very name is read as a file, by the name its path
 			// is set in, not as a value (A88).
-			return nil, fmt.Errorf("openvault: %s/%s is a file, read by its path: %w", collection, entry, ErrNotFound)
+			return nil, fmt.Errorf("vault: %s/%s is a file, read by its path: %w", collection, entry, ErrNotFound)
 		}
 		if kind != ovSecret && kind != ovVar {
-			return nil, fmt.Errorf("openvault: %s/%s is a kind of entry a secret cannot be read from", collection, entry)
+			return nil, fmt.Errorf("vault: %s/%s is a kind of entry a secret cannot be read from", collection, entry)
 		}
 		// Copied out because body is zeroed on return: the caller owns this
 		// buffer and will zero it with the run.
@@ -210,7 +226,7 @@ func (p *OpenVaultProvider) ResolveIn(ctx context.Context, scope []string, name 
 		// that was never scoped to R is a store without the name, not a
 		// broken one.
 		if names, cerr := p.Collections(ctx); cerr == nil && !slices.Contains(names, collection) {
-			return nil, fmt.Errorf("openvault: %s: %w", collection, ErrNoCollection)
+			return nil, fmt.Errorf("vault: %s: %w", collection, ErrNoCollection)
 		}
 		return nil, refused
 	}
@@ -365,11 +381,11 @@ func (p *OpenVaultProvider) listing(ctx context.Context, collection string) ([]o
 // fetched from the machine's other devices first if any are missing.
 func (p *OpenVaultProvider) ResolveFileIn(ctx context.Context, scope []string, name string) (File, error) {
 	if len(scope) == 0 {
-		return File{}, fmt.Errorf("openvault: files are read for a repository: %w", ErrNotFound)
+		return File{}, fmt.Errorf("vault: files are read for a repository: %w", ErrNotFound)
 	}
 	collection := scope[0]
 	if !openVaultCollection.MatchString(collection) {
-		return File{}, fmt.Errorf("openvault: %q is not a collection name: %w", collection, ErrNotFound)
+		return File{}, fmt.Errorf("vault: %q is not a collection name: %w", collection, ErrNotFound)
 	}
 	entries, err := p.listing(ctx, collection)
 	if err != nil {
@@ -380,7 +396,7 @@ func (p *OpenVaultProvider) ResolveFileIn(ctx context.Context, scope []string, n
 		var ove *OpenVaultError
 		if errors.As(err, &ove) && ove.Refused {
 			if names, cerr := p.Collections(ctx); cerr == nil && !slices.Contains(names, collection) {
-				return File{}, fmt.Errorf("openvault: %s: %w", collection, ErrNoCollection)
+				return File{}, fmt.Errorf("vault: %s: %w", collection, ErrNoCollection)
 			}
 		}
 		return File{}, err
@@ -401,15 +417,15 @@ func (p *OpenVaultProvider) ResolveFileIn(ctx context.Context, scope []string, n
 	}
 	switch {
 	case len(found) == 0:
-		return File{}, fmt.Errorf("openvault: no file in %s sets %s: %w", strings.Join(scope, "/"), name, ErrNotFound)
+		return File{}, fmt.Errorf("vault: no file in %s sets %s: %w", strings.Join(scope, "/"), name, ErrNotFound)
 	case len(found) > 1:
-		return File{}, fmt.Errorf("openvault: %s/%s and %s/%s would both set %s",
+		return File{}, fmt.Errorf("vault: %s/%s and %s/%s would both set %s",
 			collection, found[0].name, collection, found[1].name, name)
 	}
 	e := found[0]
 	if e.size > openVaultMaxFile {
-		return File{}, fmt.Errorf("openvault: %s/%s is %d bytes; a run reads files of at most %d as secrets, "+
-			"and `openvault run` reads larger ones", collection, e.name, e.size, openVaultMaxFile)
+		return File{}, fmt.Errorf("vault: %s/%s is %d bytes; a run reads files of at most %d as secrets, "+
+			"and `%s run` reads larger ones", collection, e.name, e.size, openVaultMaxFile, p.Command())
 	}
 	data, err := p.readFile(ctx, collection, e)
 	if err != nil {
@@ -490,7 +506,7 @@ func (p *OpenVaultProvider) fetch(ctx context.Context, collection, entry string)
 			return p.protocolError("fetch", "an answer that does not parse")
 		}
 		if missing > 0 {
-			return fmt.Errorf("openvault: %d chunk(s) of %s/%s are not on this machine, and none of its other "+
+			return fmt.Errorf("vault: %d chunk(s) of %s/%s are not on this machine, and none of its other "+
 				"devices that could be reached had them", missing, collection, entry)
 		}
 		return nil
@@ -615,9 +631,9 @@ func (p *OpenVaultProvider) request(ctx context.Context, typ byte, fields ...[]b
 	op := ovOpName(typ)
 	if err := checkOpenVaultSocket(p.socket); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil, &OpenVaultError{Op: op, NotRunning: true, Socket: p.socket, Err: err}
+			return 0, nil, &OpenVaultError{Command: p.command, Op: op, NotRunning: true, Socket: p.socket, Err: err}
 		}
-		return 0, nil, &OpenVaultError{Op: op, Socket: p.socket, Err: err}
+		return 0, nil, &OpenVaultError{Command: p.command, Op: op, Socket: p.socket, Err: err}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
@@ -628,7 +644,7 @@ func (p *OpenVaultProvider) request(ctx context.Context, typ byte, fields ...[]b
 		// A socket with no service behind it is what a crashed service
 		// leaves; the next one to start replaces it.
 		notRunning := errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, fs.ErrNotExist)
-		return 0, nil, &OpenVaultError{Op: op, NotRunning: notRunning, Socket: p.socket, Err: err}
+		return 0, nil, &OpenVaultError{Command: p.command, Op: op, NotRunning: notRunning, Socket: p.socket, Err: err}
 	}
 	defer func() { _ = conn.Close() }()
 	if deadline, ok := ctx.Deadline(); ok {
@@ -674,11 +690,11 @@ func (p *OpenVaultProvider) ioError(ctx context.Context, op string, err error) e
 		// machine it fires before the context's own timer says so.
 		err = context.DeadlineExceeded
 	}
-	return &OpenVaultError{Op: op, Socket: p.socket, Err: err}
+	return &OpenVaultError{Command: p.command, Op: op, Socket: p.socket, Err: err}
 }
 
 func (p *OpenVaultProvider) protocolError(op, what string) error {
-	return &OpenVaultError{Op: op, Socket: p.socket, Err: fmt.Errorf("the service answered with %s", what)}
+	return &OpenVaultError{Command: p.command, Op: op, Socket: p.socket, Err: fmt.Errorf("the service answered with %s", what)}
 }
 
 // serviceError is the service's error response. Its message is kept out of
@@ -690,7 +706,7 @@ func (p *OpenVaultProvider) serviceError(op string, body []byte) error {
 	if r.err != nil {
 		msg = ""
 	}
-	return &OpenVaultError{Op: op, Refused: true, Code: code, Socket: p.socket, Message: msg}
+	return &OpenVaultError{Command: p.command, Op: op, Refused: true, Code: code, Socket: p.socket, Message: msg}
 }
 
 func ovOpName(typ byte) string {
@@ -715,6 +731,9 @@ func ovOpName(typ byte) string {
 // refusing the request, or saying something this package cannot read. It is
 // always E_SECRET_BACKEND.
 type OpenVaultError struct {
+	// Command is the vault's command by name, for the fix Error() names;
+	// "" is [VaultCommand].
+	Command string
 	// Op is the request: "get", "collections" or "list".
 	Op string
 	// NotRunning is nothing listening on the socket.
@@ -736,13 +755,14 @@ type OpenVaultError struct {
 func (e *OpenVaultError) Error() string {
 	switch {
 	case e.NotRunning:
-		return "openvault: the service is not running; `openvault service install` keeps it running, or start `openvault service`"
+		return fmt.Sprintf("vault: the service is not running; `%s` keeps it running, or start `%s service`",
+			e.ServiceFix(), e.command())
 	case e.Refused:
-		return fmt.Sprintf("openvault: the service refused %s (error 0x%02x)", e.Op, e.Code)
+		return fmt.Sprintf("vault: the service refused %s (error 0x%02x)", e.Op, e.Code)
 	case errors.Is(e.Err, context.DeadlineExceeded):
-		return fmt.Sprintf("openvault: the service did not answer %s within the timeout", e.Op)
+		return fmt.Sprintf("vault: the service did not answer %s within the timeout", e.Op)
 	}
-	return fmt.Sprintf("openvault: %s: %v", e.Op, withoutPath(e.Err))
+	return fmt.Sprintf("vault: %s: %v", e.Op, withoutPath(e.Err))
 }
 
 // withoutPath is err without the path an *fs.PathError or a *net.OpError
@@ -760,6 +780,17 @@ func withoutPath(err error) error {
 }
 
 func (e *OpenVaultError) Unwrap() error { return e.Err }
+
+func (e *OpenVaultError) command() string {
+	if e.Command == "" {
+		return VaultCommand
+	}
+	return e.Command
+}
+
+// ServiceFix is the command that keeps the service running, by the vault's
+// command's name.
+func (e *OpenVaultError) ServiceFix() string { return e.command() + " service install" }
 
 // Diagnostic is what a local terminal may show: the socket, and the service's
 // own message when it sent one.

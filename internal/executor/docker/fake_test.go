@@ -64,6 +64,19 @@ type fakeAPI struct {
 	listedVolumes []*volume.Volume
 	repoDigests   []string
 
+	// LAT-23: the readiness exec Prepare runs before any step. It is kept
+	// out of execOpts and the per-exec queues above, so a test about steps
+	// sees only steps. readyFailures is how many readiness execs the engine
+	// answers as Kiri did, with no /bin/sh; readyNever answers every one so.
+	readyFailures int
+	readyNever    bool
+	readyExecs    []container.ExecOptions
+	readyFailed   bool // the last readiness exec failed; read by its inspect
+	// inspectStates is what ContainerInspect answers, one per call, the last
+	// repeated. Empty means running with a pid.
+	inspectStates []container.State
+	inspects      int
+
 	execSeq  int
 	closed   bool
 	pipeEnds []net.Conn
@@ -122,6 +135,21 @@ func (f *fakeAPI) ContainerStart(context.Context, string, container.StartOptions
 	return f.startErr
 }
 
+func (f *fakeAPI) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := container.State{Status: container.StateRunning, Running: true, Pid: 42}
+	if n := len(f.inspectStates); n > 0 {
+		st = f.inspectStates[min(f.inspects, n-1)]
+	}
+	f.inspects++
+	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: &st}}, nil
+}
+
+// kiriShellMissing is what Kiri 0.2.1 printed for an exec that came too soon
+// after the start (LAT-23).
+const kiriShellMissing = `kiri: cannot start container: exec: "/bin/sh": stat /bin/sh: no such file or directory` + "\n"
+
 func (f *fakeAPI) ContainerKill(_ context.Context, id, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -157,13 +185,30 @@ func (f *fakeAPI) ContainerExecCreate(
 ) (container.ExecCreateResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if isReadyExec(opts.Cmd) {
+		f.readyExecs = append(f.readyExecs, opts)
+		return container.ExecCreateResponse{ID: "ready-exec-id"}, nil
+	}
 	f.execOpts = append(f.execOpts, opts)
 	return container.ExecCreateResponse{ID: "exec-id"}, nil
 }
 
 func (f *fakeAPI) ContainerExecAttach(
-	context.Context, string, container.ExecAttachOptions,
+	_ context.Context, execID string, _ container.ExecAttachOptions,
 ) (types.HijackedResponse, error) {
+	if execID == "ready-exec-id" {
+		f.mu.Lock()
+		f.readyFailed = f.readyNever || len(f.readyExecs) <= f.readyFailures
+		stderr := ""
+		if f.readyFailed {
+			stderr = kiriShellMissing
+		}
+		c1, c2 := net.Pipe()
+		_ = c2.Close()
+		f.pipeEnds = append(f.pipeEnds, c1)
+		f.mu.Unlock()
+		return types.HijackedResponse{Conn: c1, Reader: bufio.NewReader(bytes.NewReader(frame("", stderr)))}, nil
+	}
 	// A real hijack hands back a net.Conn plus a buffered reader over it, and
 	// Close() closes the conn. Both ends of a net.Pipe reproduce that
 	// faithfully enough that the cancellation path — close the response to
@@ -188,9 +233,15 @@ func (f *fakeAPI) ContainerExecAttach(
 	return types.HijackedResponse{Conn: c1, Reader: bufio.NewReader(bytes.NewReader(frame(stdout, stderr)))}, nil
 }
 
-func (f *fakeAPI) ContainerExecInspect(context.Context, string) (container.ExecInspect, error) {
+func (f *fakeAPI) ContainerExecInspect(_ context.Context, execID string) (container.ExecInspect, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if execID == "ready-exec-id" {
+		if f.readyFailed {
+			return container.ExecInspect{ExitCode: 127}, nil
+		}
+		return container.ExecInspect{}, nil
+	}
 	code := 0
 	if len(f.execExitCodes) > 0 {
 		code = f.execExitCodes[0]

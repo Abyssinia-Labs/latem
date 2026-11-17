@@ -182,24 +182,29 @@ not have is exit `2`, and the message lists the ids there are (RUNNER_SPEC
 A94).
 
 **A secret or a variable no store here holds is closed where it will be
-read** (A97). Setup looks at OpenVault first, and the item names the step in
-the way:
+read** (A97). Setup looks at the vault first, and the item names the step in
+the way. Each command is the vault's as latem found it here, `latem-vault` or,
+before the vault is renamed, `openvault` (A104):
 
 | Item | When | Whose |
 |---|---|---|
-| `openvault-on` | a vault here answers and holds one of this machine's repositories, and `config.toml` does not read it | latem's: writes `[secrets] openvault = true`, and the agent restarts for it |
-| `openvault-service` | the config reads OpenVault and its service does not answer | latem's: runs `openvault service install` |
-| `openvault-join` | the config reads OpenVault and this device has no vault | the person's: `openvault join` here, then `openvault approve` on a device already in it |
-| `openvault-collection-R` | this device holds no collection `R` | the person's, on an admin device: `openvault scope <this device> R read` |
-| `secrets-R`, `vars-R` | the collection lacks a name a job reads | the person's, on a device that may write `R`: `openvault set R/E/NAME --secret`, or `--var` |
-| `secrets-R`, `vars-R` | no OpenVault on this machine | the person's: `latem secrets set`, or `latem vars set` |
+| `vault-on` | a vault here answers and holds one of this machine's repositories, and `config.toml` does not read it | latem's: writes `[secrets] vault = true`, and the agent restarts for it |
+| `vault-service` | the config reads the vault and its service does not answer | latem's: runs `latem-vault service install` |
+| `vault-join` | the config reads the vault and this device has no vault | the person's: `latem-vault join` here, then `latem-vault approve` on a device already in it |
+| `vault-collection-R` | this device holds no collection `R` | the person's, on an admin device: `latem-vault scope <this device> R read` |
+| `secrets-R`, `vars-R` | the collection lacks a name a job reads | the person's, on a device that may write `R`: `latem-vault set R/E/NAME --secret`, or `--var` |
+| `secrets-R`, `vars-R` | no vault on this machine | the person's: `latem secrets set`, or `latem vars set` |
+
+These were `openvault-on`, `openvault-service`, `openvault-join` and
+`openvault-collection-R` until A104, and `setup apply` takes those ids for one
+release.
 
 ```console
-$ latem setup apply openvault-on
-openvault-on: wrote [secrets] openvault = true; closed
+$ latem setup apply vault-on
+vault-on: wrote [secrets] vault = true; closed
 The agent restarted with it.
-$ latem setup apply openvault-collection-tsedal
-openvault-collection-tsedal: a person's to type; latem never runs sudo, accepts a licence or sets a secret's value:
+$ latem setup apply vault-collection-tsedal
+vault-collection-tsedal: a person's to type; latem never runs sudo, accepts a licence or sets a secret's value:
   openvault scope Mini tsedal read
   on an admin device of the vault, not this one; …
 ```

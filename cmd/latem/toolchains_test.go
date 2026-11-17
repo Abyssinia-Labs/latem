@@ -47,7 +47,7 @@ func newFakeMachine() *fakeMachine {
 	// No OpenVault unless a test gives it one (A97): the machine running the
 	// suite may well have it, and its answer is not this machine's.
 	return &fakeMachine{dirs: map[string]string{}, absent: map[string]bool{}, gives: map[string][2]string{},
-		notInstalled: map[string]bool{"openvault": true}}
+		notInstalled: map[string]bool{"openvault": true, "latem-vault": true}}
 }
 
 func (m *fakeMachine) deps() toolchainDeps {
