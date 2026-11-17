@@ -1380,11 +1380,7 @@ func (d *doctor) checkXcode(ctx context.Context) check {
 			"xcode-select --install",
 			"sudo xcode-select -s /Applications/Xcode.app/Contents/Developer")
 	case !x.IsFullXcode:
-		return fail("macos.xcode", "Xcode", x.DeveloperDir+" is the Command Line Tools, not Xcode",
-			"sudo xcode-select -s /Applications/Xcode.app/Contents/Developer").
-			withNotes("The Command Line Tools cannot build an iOS app. The failure — \"unable to find " +
-				"a destination matching the provided destination specifier\" — reads as a project " +
-				"problem rather than a machine one.")
+		return d.xcodeNotSelected(ctx, x.DeveloperDir)
 	case !x.LicenseAccepted:
 		return fail("macos.xcode", "Xcode", x.DeveloperDir+" — the licence has not been accepted",
 			"sudo xcodebuild -license accept").
@@ -1397,6 +1393,25 @@ func (d *doctor) checkXcode(ctx context.Context) check {
 		}
 		return pass("macos.xcode", "Xcode", detail+", licence accepted")
 	}
+}
+
+// xcodeNotSelected is xcode-select on the Command Line Tools (A108). With an
+// Xcode installed, the fix is selecting it, named by its real path, and the
+// sudo is the person's. With none, it is installing one.
+func (d *doctor) xcodeNotSelected(ctx context.Context, dir string) check {
+	why := "The Command Line Tools cannot build an iOS app. The failure — \"unable to find " +
+		"a destination matching the provided destination specifier\" — reads as a project " +
+		"problem rather than a machine one."
+	tc := system.Toolchains{Xcodes: d.sys.XcodeInstalls(ctx), DeveloperDir: dir}
+	x, ok := tc.NewestXcode("")
+	if !ok {
+		return fail("macos.xcode", "Xcode", dir+" is the Command Line Tools, and no Xcode is installed").
+			withManual("install Xcode from the App Store, or with xcodes").withNotes(why)
+	}
+	return fail("macos.xcode", "Xcode",
+		fmt.Sprintf("installed but not selected: Xcode %s is at %s, and xcode-select points at %s", x.Version, x.Path, dir),
+		"sudo xcode-select -s "+x.Path+"/Contents/Developer").
+		withNotes("Yours to type: latem never runs sudo.", why)
 }
 
 // ----------------------------------------------------------------- service

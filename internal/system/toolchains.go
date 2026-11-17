@@ -21,10 +21,13 @@ import (
 // internal/needs's to say.
 type Toolchains struct {
 	// Host is the machine these are on, which says how to install the rest.
-	Host        Host
-	Xcodes      []XcodeInstall
-	SimRuntimes []SimRuntime
-	JDKs        []int // majors
+	Host   Host
+	Xcodes []XcodeInstall
+	// DeveloperDir is `xcode-select -p`, on a Mac: the developer directory a
+	// step gets unless its runner sets DEVELOPER_DIR. "" is not asked.
+	DeveloperDir string
+	SimRuntimes  []SimRuntime
+	JDKs         []int // majors
 	// JDKHomes is where each JDK is, which is rarely on a step's PATH: a
 	// second JDK on Linux, SDKMAN's, Android Studio's own (A69).
 	JDKHomes []JDKInstall
@@ -69,6 +72,30 @@ func (t Toolchains) HasXcode(major string) bool {
 		}
 	}
 	return false
+}
+
+// XcodeSelected reports whether the developer directory is inside an
+// Xcode.app, or was not asked. The Command Line Tools build no iOS app, and
+// xcode-select stays on them after Xcode is installed until someone runs
+// `sudo xcode-select -s` (A108).
+func (t Toolchains) XcodeSelected() bool {
+	return t.DeveloperDir == "" || strings.Contains(t.DeveloperDir, ".app/Contents/Developer")
+}
+
+// NewestXcode is the installed Xcode of major with the highest version, or of
+// any major when major is "", and false when there is none.
+func (t Toolchains) NewestXcode(major string) (XcodeInstall, bool) {
+	var best XcodeInstall
+	found := false
+	for _, x := range t.Xcodes {
+		if major != "" && strconv.Itoa(x.Version.Major) != major {
+			continue
+		}
+		if !found || x.Version.AtLeast(best.Version.Major, best.Version.Minor, best.Version.Patch) {
+			best, found = x, true
+		}
+	}
+	return best, found
 }
 
 // XcodeVersions names the installed Xcodes: "26.0.1, 27.0".
@@ -147,6 +174,13 @@ func (s *System) Toolchains(ctx context.Context, stepPath string) Toolchains {
 	}
 	if s.IsMacOS() {
 		t.Xcodes = s.xcodeInstalls(ctx)
+		if len(t.Xcodes) > 0 {
+			// Only where there is an Xcode to select: with none, the gap is
+			// installing one.
+			if out, err := s.Exec(ctx, "xcode-select", "-p"); err == nil {
+				t.DeveloperDir = firstLine(out)
+			}
+		}
 		if rts, err := s.SimulatorRuntimes(ctx); err == nil {
 			t.SimRuntimes = rts
 		}
@@ -178,6 +212,10 @@ func (s *System) Toolchains(ctx context.Context, stepPath string) Toolchains {
 func (s *System) applicationDirs() []string {
 	return []string{s.sysPath("/Applications"), filepath.Join(s.home, "Applications")}
 }
+
+// XcodeInstalls lists every Xcode*.app in /Applications and ~/Applications,
+// with its version.
+func (s *System) XcodeInstalls(ctx context.Context) []XcodeInstall { return s.xcodeInstalls(ctx) }
 
 // xcodeInstalls lists every Xcode*.app, versions read from their Info.plist
 // rather than by running each one's xcodebuild, which can take seconds and

@@ -221,3 +221,42 @@ func TestInstallLine(t *testing.T) {
 		}
 	}
 }
+
+// The Mac Studio of 2026-11-17 (A108): Xcode 27.2 installed, and xcode-select
+// still on the Command Line Tools. Selecting it is the gap, the person's sudo
+// naming the app, and the simulator runtime waits for it: nothing can be said
+// of one, or downloaded, until Xcode is selected.
+func TestGaps_XcodeInstalledButNotSelected(t *testing.T) {
+	studio := system.Toolchains{
+		Xcodes: []system.XcodeInstall{
+			{Path: "/Applications/Xcode-26.app", Version: system.Version{Major: 26, Text: "26.0.1"}},
+			{Path: "/Applications/Xcode.app", Version: system.Version{Major: 27, Minor: 2, Text: "27.2"}},
+		},
+		DeveloperDir: "/Library/Developer/CommandLineTools",
+	}
+	r := Report{Platform: "macOS", Requires: []Requirement{req(Xcode, ""), req(IOSSimulator, "")}}
+	gs := Gaps(r, studio, ExecutorNative)
+	if len(gs) != 1 || gs[0].Missing != XcodeSelectedGap {
+		t.Fatalf("gaps = %+v", gs)
+	}
+	if got := gs[0].YourLines(); len(got) != 1 || got[0] != "sudo xcode-select -s /Applications/Xcode.app/Contents/Developer" {
+		t.Errorf("yours = %q", got)
+	}
+	if len(gs[0].Fix) != 0 || gs[0].Have != "Xcode 27.2.0 installed, and xcode-select points at /Library/Developer/CommandLineTools" {
+		t.Errorf("gap = %+v", gs[0])
+	}
+
+	// A job that asks for 26 is told to select 26.
+	gs = Gaps(Report{Platform: "macOS", Requires: []Requirement{req(Xcode, "26")}}, studio, ExecutorNative)
+	if len(gs) != 1 || gs[0].YourLines()[0] != "sudo xcode-select -s /Applications/Xcode-26.app/Contents/Developer" {
+		t.Errorf("26: gaps = %+v", gs)
+	}
+
+	// Selected, or never asked: no gap.
+	for _, dir := range []string{"/Applications/Xcode.app/Contents/Developer", ""} {
+		studio.DeveloperDir = dir
+		if gs := Gaps(Report{Platform: "macOS", Requires: []Requirement{req(Xcode, "")}}, studio, ExecutorNative); len(gs) != 0 {
+			t.Errorf("%q: gaps = %+v", dir, gs)
+		}
+	}
+}

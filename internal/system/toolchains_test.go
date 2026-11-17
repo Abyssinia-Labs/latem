@@ -57,10 +57,21 @@ func TestToolchains_AMac(t *testing.T) {
 		"xcrun simctl list runtimes -j": {out: `{"runtimes":[{"platform":"iOS","version":"26.0","buildversion":"23A","isAvailable":true}]}`},
 		"/usr/libexec/java_home -V":     {exit: 1, out: "Unable to find any JVMs matching version \"(null)\".\n"},
 		"sudo -n true":                  {exit: 1, out: "sudo: a password is required\n"},
+		"xcode-select -p":               {out: "/Library/Developer/CommandLineTools\n"},
 	})
 	s := New(Options{GOOS: "darwin", Home: home, Root: root, Run: run.run, Getenv: func(string) string { return "" }})
 
 	tc := s.Toolchains(t.Context(), bin+":/nonexistent")
+	// Two Xcodes installed and neither selected (A108).
+	if tc.DeveloperDir != "/Library/Developer/CommandLineTools" || tc.XcodeSelected() {
+		t.Errorf("developer dir = %q", tc.DeveloperDir)
+	}
+	if x, ok := tc.NewestXcode(""); !ok || x.Path != filepath.Join(root, "Applications/Xcode-27.app") {
+		t.Errorf("newest = %+v", x)
+	}
+	if x, ok := tc.NewestXcode("26"); !ok || x.Version.Text != "26.0.1" {
+		t.Errorf("newest 26 = %+v", x)
+	}
 	if !tc.HasXcode("26") || !tc.HasXcode("27") || tc.HasXcode("25") || tc.XcodeVersions() != "26.0.1, 27.0" {
 		t.Errorf("xcodes = %+v", tc.Xcodes)
 	}

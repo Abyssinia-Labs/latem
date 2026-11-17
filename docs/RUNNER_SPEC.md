@@ -5069,3 +5069,18 @@ restarts a running agent onto it. `--json` changes nothing, and `--like` with it
 mini's, with a repository whose job needs the alias `blacksmith-4vcpu-ubuntu-2404`, the action
 `oven-sh/setup-bun` and a tag, went from 0 of 1 jobs to 1 of 1 once the person said yes to the
 aliases and to `require_pinned = false`. The person's no to `allow_unisolated` was left out.
+
+
+### Amendment from a Mac Studio whose Xcode was installed and not selected
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A108 | §19, A59, A69 | **On a Mac with an Xcode installed, the toolchain probe also reads `xcode-select -p`, and a runner's own `DEVELOPER_DIR` stands in for it. A job, or a kind, that needs Xcode has a gap, `Xcode selected`, while that directory is not inside an `Xcode*.app`: the Command Line Tools. Its fix is the person's, `sudo xcode-select -s <the Xcode>/Contents/Developer`, naming the newest installed Xcode of the major the job asks for, or of any. Until it is closed nothing asks for a simulator runtime, which can be neither listed nor downloaded with the Command Line Tools selected. doctor's `macos.xcode` says "installed but not selected" and names the app it found, and with no Xcode installed says to install one instead of selecting a path that is not there** | Onboarding a Mac Studio on 2026-11-17 (LAT-28): Xcode 27.2 was at `/Applications/Xcode.app`, and `xcode-select -p` returned `/Library/Developer/CommandLineTools`. The plan had no item for it. It offered `xcodebuild -downloadPlatform iOS`, which fails with the Command Line Tools selected. doctor's line named `/Applications/Xcode.app` whether or not anything was there |
+
+**What it costs.** One `xcode-select -p` per toolchain probe on a Mac that has an Xcode: the agent's
+beat every 15 minutes (A70), a re-probe when the Xcode fingerprint moves (A64), and a person's setup
+once. A local command, no network.
+
+**Not in this amendment.** A run is not refused for it: a run's note (A59) says the job needs Xcode
+selected, as for any gap.
+
