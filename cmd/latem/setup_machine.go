@@ -89,6 +89,10 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 				tc.Host = in.Host
 				probed[p] = tc
 			}
+			if dir := rr.Env["DEVELOPER_DIR"]; dir != "" {
+				// The runner's own, which a step gets before xcode-select's.
+				tc.DeveloperDir = dir
+			}
 			rr.Toolchains = tc
 		}
 		in.Runners = append(in.Runners, rr)

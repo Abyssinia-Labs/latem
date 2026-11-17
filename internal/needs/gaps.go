@@ -213,9 +213,13 @@ func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 			case q.Version != "" && !t.HasXcode(q.Version):
 				add(q, xcodeName(q.Version), "Xcode "+t.XcodeVersions(), nil,
 					"install "+xcodeName(q.Version)+" beside the one there; a step selects it with DEVELOPER_DIR")
+			case !t.XcodeSelected():
+				gaps = append(gaps, xcodeSelectGap(q, t))
 			}
 		case IOSSimulator:
-			if len(t.Xcodes) > 0 && !t.HasIOSRuntime() {
+			// With the Command Line Tools selected, simctl answers nothing and
+			// xcodebuild cannot download one: selecting Xcode comes first.
+			if len(t.Xcodes) > 0 && t.XcodeSelected() && !t.HasIOSRuntime() {
 				add(q, "an iOS simulator runtime", "", [][]string{{"xcodebuild", "-downloadPlatform", "iOS"}})
 			}
 		case JDK:
@@ -288,6 +292,22 @@ func Gaps(r Report, t system.Toolchains, executor string) []Gap {
 // androidGaps is what stands between a machine and a working Android SDK, one
 // step at a time and in the order they can be done: what is needed next
 // depends on the step before, and sdkmanager runs on a JDK.
+// XcodeSelectedGap is what a Mac wants when Xcode is installed and
+// xcode-select still points at the Command Line Tools (A108).
+const XcodeSelectedGap = "Xcode selected"
+
+// xcodeSelectGap is Xcode installed and not selected: the person's sudo,
+// naming the Xcode the job asks for, or the newest.
+func xcodeSelectGap(q Requirement, t system.Toolchains) Gap {
+	x, ok := t.NewestXcode(q.Version)
+	if !ok {
+		x, _ = t.NewestXcode("")
+	}
+	return Gap{Requirement: q, Missing: XcodeSelectedGap,
+		Have:  "Xcode " + x.Version.String() + " installed, and xcode-select points at " + t.DeveloperDir,
+		Yours: [][]string{{"sudo", "xcode-select", "-s", x.Path + "/Contents/Developer"}}}
+}
+
 func androidGaps(q Requirement, t system.Toolchains, linux bool) []Gap {
 	add := func(g Gap) []Gap {
 		g.Requirement = q
