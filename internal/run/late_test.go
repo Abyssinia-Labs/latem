@@ -195,6 +195,138 @@ func TestExecute_ConditionsOnAGreenRun(t *testing.T) {
 	}
 }
 
+// LAT-24, A99: a step whose condition calls no status function runs only while
+// the job is succeeding, as GitHub reads it — success() && (it). A condition
+// answered at admission (true, env) and one answered at run time (steps) are
+// both skipped after the tests fail, and always() and failure() still run. On
+// 2026-11-16 the steps-guarded deploys ran after a failed test step.
+const guardedDeployWorkflow = `
+on: [push]
+jobs:
+  test:
+    runs-on: [linux]
+    env:
+      X: 'y'
+    steps:
+      - id: changed
+        name: changed
+        run: echo convex=true
+      - name: tests
+        run: make test
+      - name: literal true
+        if: true
+        run: ./deploy.sh literal
+      - name: env matches
+        if: env.X == 'y'
+        run: ./deploy.sh env
+      - name: deploy convex
+        if: steps.changed.outcome == 'success'
+        run: ./deploy.sh convex
+      - name: deploy web
+        if: ${{ steps.changed.conclusion != 'failure' && env.X == 'y' }}
+        run: ./deploy.sh web
+      - name: cleanup
+        if: failure()
+        run: ./cleanup.sh
+      - name: report
+        if: always()
+        run: ./report.sh
+`
+
+func TestExecute_AFailedStepSkipsLaterConditionsWithNoStatusFunction(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.env.exec = func(_ context.Context, step executor.Step, _, _ io.Writer) (int, error) {
+		if step.Name == "tests" {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	o := h.build()
+
+	req := h.request("test")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", guardedDeployWorkflow)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateFailed || res.ErrorCode != protocol.ErrStep {
+		t.Fatalf("got %s/%s, want failed/E_STEP from the tests", res.State, res.ErrorCode)
+	}
+	want := []string{"changed", "tests", "cleanup", "report"}
+	if got := executedNames(h.env.executed()); !slices.Equal(got, want) {
+		t.Fatalf("executed %v, want %v: nothing guarded by a condition without a status function may deploy after the tests fail", got, want)
+	}
+}
+
+// The same workflow with the tests passing deploys everything, so the skips
+// above are the failure's doing and not the conditions'.
+func TestExecute_GuardedStepsRunOnAGreenJob(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	o := h.build()
+
+	req := h.request("test")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", guardedDeployWorkflow)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s, want succeeded", res.State, res.ErrorCode)
+	}
+	want := []string{"changed", "tests", "literal true", "env matches", "deploy convex", "deploy web", "report"}
+	if got := executedNames(h.env.executed()); !slices.Equal(got, want) {
+		t.Errorf("executed %v, want %v", got, want)
+	}
+}
+
+// A step forgiven by continue-on-error leaves the job succeeding (A50), so a
+// condition with no status function still holds after it.
+func TestExecute_ContinueOnErrorKeepsImplicitSuccess(t *testing.T) {
+	h := newHarness(t)
+	h.source.registry = ""
+	h.env.exec = func(_ context.Context, step executor.Step, _, _ io.Writer) (int, error) {
+		if step.Name == "flaky" {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	o := h.build()
+
+	req := h.request("test")
+	r := h.admitAndClaim(o, req)
+	h.writeWorkspaceFile(req.ID, ".github/workflows/ci.yml", `
+on: [push]
+jobs:
+  test:
+    runs-on: [linux]
+    steps:
+      - id: flaky
+        name: flaky
+        run: exit 1
+        continue-on-error: true
+      - name: deploy
+        if: steps.flaky.outcome == 'failure'
+        run: ./deploy.sh
+`)
+
+	res, err := o.Execute(t.Context(), r)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.State != protocol.StateSucceeded {
+		t.Fatalf("got %s/%s, want succeeded", res.State, res.ErrorCode)
+	}
+	if got := executedNames(h.env.executed()); !slices.Equal(got, []string{"flaky", "deploy"}) {
+		t.Errorf("executed %v, want flaky then deploy", got)
+	}
+}
+
 // The whole channel end to end: a step writes $GITHUB_OUTPUT, and a later
 // step's expression reads it as data — from a failed step too, which is the
 // `if: failure()` idiom.

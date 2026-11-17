@@ -695,7 +695,12 @@ func compileStep(st Step, where string, d jobDefaults, sc expr.Scope) (registry.
 		}
 		switch w {
 		case whenLate:
-			cond = newLate(prog, sc)
+			// GitHub reads a condition that calls no status function as
+			// success() && (it) (A99). One answered at admission already
+			// gets that rule from the run loop: a true one leaves a step with
+			// no condition, which a failure skips. One left to the run would
+			// not, so the success() is written into it.
+			cond = newLate(withImplicitSuccess(prog), sc)
 		default:
 			v, err := prog.Eval(sc)
 			if err != nil {
@@ -1003,6 +1008,35 @@ func classify(p *expr.Program, sc expr.Scope) (when, error) {
 		}
 	}
 	return result, nil
+}
+
+// callsStatus reports whether a condition calls a status function: success(),
+// failure(), cancelled() or always().
+func callsStatus(prog *expr.Program) bool {
+	_, funcs := prog.References()
+	return slices.ContainsFunc(funcs, func(f string) bool { return lateFuncs[f] })
+}
+
+// successProgram is the implicit condition of a step: success().
+var successProgram = mustParse("success()")
+
+func mustParse(src string) *expr.Program {
+	p, err := expr.Parse(src)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// withImplicitSuccess is a step's condition as GitHub reads it (A99): one that
+// calls no status function is success() && (it), so a failed step skips it
+// whatever it says. One that calls a status function is left as written —
+// always() and failure() are how a step asks to run after a failure.
+func withImplicitSuccess(prog *expr.Program) *expr.Program {
+	if callsStatus(prog) {
+		return prog
+	}
+	return expr.And(successProgram, prog)
 }
 
 // conditionProgram compiles an `if:`, which may be written bare or wrapped in

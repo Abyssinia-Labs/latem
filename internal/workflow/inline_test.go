@@ -197,6 +197,38 @@ jobs:
 	}
 }
 
+// A99 reaches a composite action's steps: the uses: step's condition, with no
+// status function, is success() && (it) on every step it became, so a failed
+// step before the action skips all of them.
+func TestAnInlinedStepKeepsTheImplicitSuccess(t *testing.T) {
+	job, err := compileWith(t, `
+jobs:
+  b:
+    runs-on: [macos]
+    steps:
+      - id: changed
+        run: make
+      - uses: ./a
+        if: steps.changed.outcome == 'success'
+        with: {who: x}
+`, mapLoader{"a": greet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range job.Steps[1:] {
+		if st.If == nil {
+			t.Fatalf("%q lost the uses: step's condition", st.Name)
+		}
+		changed := map[string]registry.StepResult{"changed": {Outcome: "success", Conclusion: "success"}}
+		if ok, _ := st.If.Holds(registry.StepScope{Status: registry.StatusSuccess, Results: changed}); !ok {
+			t.Errorf("%q should run on a green job", st.Name)
+		}
+		if ok, _ := st.If.Holds(registry.StepScope{Status: registry.StatusFailure, Results: changed}); ok {
+			t.Errorf("%q ran after a failure", st.Name)
+		}
+	}
+}
+
 func TestCompositeRefusals(t *testing.T) {
 	const wf = "jobs:\n  b:\n    runs-on: [macos]\n    steps:\n      - uses: ./a\n        id: act\n%s      - run: echo ${{ steps.act.outputs.%s }}\n"
 	cases := map[string]struct {
