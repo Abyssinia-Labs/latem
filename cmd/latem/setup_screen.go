@@ -199,6 +199,8 @@ func (s *setupScreen) toggle(k readiness.Kind) {
 	switch {
 	case k.State == readiness.Impossible:
 		s.status = fmt.Sprintf("%s %s.", k.Title, k.Why)
+	case k.Label == "" && k.Blocking() > 0:
+		s.status = fmt.Sprintf("%d to do before this machine can take %s jobs.", k.Blocking(), k.Title)
 	case k.Label == "":
 		s.status = fmt.Sprintf("%s comes with the %s runner's labels; config.toml is where to change them.", k.Title, orDash(k.Runner))
 	case k.Labelled:

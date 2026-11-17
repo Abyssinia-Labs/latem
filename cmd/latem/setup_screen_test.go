@@ -342,3 +342,28 @@ func TestProveKind(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// macOS apps has no label of its own. Off, its space bar points at what is in
+// the way, and the runs-on item asks with the line it writes (A107).
+func TestScreen_AKindWithNoLabelOffersItsJobsLabels(t *testing.T) {
+	it := readiness.Item{ID: readiness.ItemRunsOn, Title: "the macos runner labelled for macOS apps jobs",
+		Warning: "Every job of this machine's repositories whose runs-on names these labels will come to the macos runner.",
+		Config: []readiness.Change{{What: readiness.ChangeRunsOnLabel, Runner: "macos", Value: "blacksmith-6vcpu-macos-26",
+			Line: "the macos runner gains the label blacksmith-6vcpu-macos-26"}}}
+	p := readiness.Plan{Kinds: []readiness.Kind{{Name: "macos-app", Title: "macOS apps", State: readiness.Off, Runner: "macos",
+		Items: []readiness.Item{it}}}}
+	w := &screenWorld{plans: []readiness.Plan{p}}
+	s := newSetupScreen(p, w.hooks(), styler{})
+	press(s, space)
+	if s.status != "1 to do before this machine can take macOS apps jobs." {
+		t.Errorf("status = %q", s.status)
+	}
+	press(s, enter, enter)
+	if s.ask == nil || !strings.Contains(strings.Join(s.ask.lines, "\n"), "gains the label blacksmith-6vcpu-macos-26") {
+		t.Fatalf("ask = %+v", s.ask)
+	}
+	press(s, keyPress{code: keyRune, r: 'y'})
+	if len(w.applied) != 1 || w.applied[0].What != readiness.ChangeRunsOnLabel {
+		t.Errorf("applied = %+v", w.applied)
+	}
+}

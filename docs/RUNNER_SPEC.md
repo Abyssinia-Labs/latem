@@ -4915,3 +4915,19 @@ action's own steps; here it answers for the job, and an inner step's condition i
 `uses:` step's with `&&`. So an inner `if: always()` under a `uses:` step whose condition calls no
 status function runs after a failure before the action, which GitHub would not reach. Telling the two
 apart needs the job's status at the moment the action began, which no condition can read yet.
+
+
+### Amendment from a kind that stayed off with nothing to accept
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A107 | §19, A50, A69, A89, A94 | **A kind with no label of its own (iOS, macOS apps, Xcode builds, macOS) that is off, while a native runner here could take it, gets an item, `runs-on-labels`: the labels its jobs' runs-on names, aliases applied, that the runner lacks. Its config is one `runs-on-label` change per label, which adds it to that runner, and its warning says the runner's labels line as it would then read. Like `allow_unisolated` and `require_pinned = false`, only a person at a terminal may write it: `setup apply` asks there, and off a terminal exits 4 with the command to type; the screen asks before it writes. `setup apply --kind` and the screen's space bar now say what is in the way of such a kind before saying it has no label** | Onboarding a Mac Studio on 2026-11-17 (LAT-27): `latem setup apply --kind macos-app` exited 4 with "macOS apps comes with the macos runner's labels, and which labels a runner carries is said in config.toml", and named no line. `latem setup` at a terminal showed "macOS apps off, 2 to do" with nothing to accept. take-one's macOS release asks for `blacksmith-6vcpu-macos-26`, which no runner there carried |
+
+**Why a person's.** A label on a runner sends this machine every job of its repositories that asks for it,
+which is a wider change than switching on a kind whose label latem chose. A job's runs-on is the
+repository's word, and the label it names may be another vendor's.
+
+**With LAT-26's item.** An alias in `[label_aliases]` closes the same gap for a label no runner carries.
+Either one, once written, brings the jobs here, and the plan made next shows neither.
+
+**What it costs.** Nothing is probed: the item is read from the jobs and the runners setup already has.

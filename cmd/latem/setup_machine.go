@@ -499,13 +499,13 @@ func applyChange(body string, cfg *config.Config, c readiness.Change) (string, e
 	switch c.What {
 	case readiness.ChangeEnv:
 		return setRunnerKey(body, cfg, c.Runner, []string{"native", "env"}, c.Key, tomlString(c.Value))
-	case readiness.ChangeLabelAdd, readiness.ChangeLabelDrop:
+	case readiness.ChangeLabelAdd, readiness.ChangeLabelDrop, readiness.ChangeRunsOnLabel:
 		r, ok := cfg.Runner(c.Runner)
 		if !ok {
 			return "", fmt.Errorf("config.toml has no runner %q", c.Runner)
 		}
 		labels := slices.DeleteFunc(slices.Clone(r.Labels), func(l string) bool { return strings.EqualFold(l, c.Value) })
-		if c.What == readiness.ChangeLabelAdd {
+		if c.What != readiness.ChangeLabelDrop {
 			labels = append(labels, c.Value)
 		}
 		if len(labels) == 0 {
