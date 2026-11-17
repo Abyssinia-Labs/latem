@@ -122,7 +122,7 @@ $ latem update                                     # the latest release (Homebre
 ## Commands
 
 ```
-latem setup [--repo owner/name] [--url U] [--no-register] [--no-service] [--plain]   config, repositories, toolchains, registration, service and doctor; safe to run again
+latem setup [--repo owner/name] [--like HOST|FILE] [--url U] [--no-register] [--no-service] [--plain]   config, repositories, toolchains, registration, service and doctor; safe to run again. --like copies another machine's actions allowlist, and asks for its label aliases and two settings
 latem setup --json                   what this machine builds and what is in the way; changes nothing
 latem setup apply <id>... [--kind K] [--json]   close what is in the way, as the setup screen would; a person's item exits 4
 latem setup android-sdk              Google's Android command-line tools in $ANDROID_HOME or ~/Android/Sdk, on Linux
