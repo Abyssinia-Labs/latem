@@ -13,6 +13,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
@@ -37,6 +38,9 @@ type fakeMachine struct {
 	vault     *fakeOpenVault
 	vaultHere bool
 	then      map[string]func()
+	// docker is the agent's daemon as agentDocker would find it (A106); nil
+	// is not asked.
+	docker *readiness.Docker
 }
 
 func newFakeMachine() *fakeMachine {
@@ -90,6 +94,12 @@ func (m *fakeMachine) deps() toolchainDeps {
 			return secretStores{file: secrets.NewFileStore(p.SecretsEnv), openvault: m.vault}, nil
 		},
 		vaultHere: func() bool { return m.vaultHere },
+		docker: func(context.Context) readiness.Docker {
+			if m.docker == nil {
+				return readiness.Docker{}
+			}
+			return *m.docker
+		},
 	}
 }
 

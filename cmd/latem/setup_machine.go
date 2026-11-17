@@ -94,6 +94,9 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 		}
 		in.Runners = append(in.Runners, rr)
 	}
+	if m.deps.docker != nil && slices.ContainsFunc(cfg.Runners, func(r *config.Runner) bool { return r.Executor == config.ExecutorDocker }) {
+		in.Docker = m.deps.docker(ctx)
+	}
 	for _, w := range imageWants(ctx, cfg, m.deps) {
 		in.Images = append(in.Images, readiness.Image{Runner: w.runner.Name, Ref: strings.TrimPrefix(w.gap.Missing, "its image, ")})
 	}

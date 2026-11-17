@@ -3,7 +3,8 @@
 A base image for latem's docker executor (RUNNER_SPEC §13.1) that stands in for
 GitHub's `ubuntu-latest` closely enough to run workflows written against it. It
 is multi-arch, linux/amd64 and linux/arm64, because the same jobs run on an
-x86_64 Linux desktop and, through Docker Desktop, on an Apple silicon Mac.
+x86_64 Linux desktop and, through Docker Desktop or Kiri, on an Apple silicon
+Mac.
 
 It is published to `ghcr.io/abyssinia-labs/latem-ubuntu` by
 `.github/workflows/images.yml`, which builds each architecture natively on its
@@ -101,9 +102,11 @@ This differs by platform, and the difference comes from latem, not the image.
   and the toolcache is writable. That matches `ubuntu-latest`. With any other
   uid, sudo fails with "you do not exist in the passwd database" and
   `npm install -g` fails with EACCES.
-- **Docker Desktop (macOS).** latem passes no user, so steps run as the image's
-  default user, which is root. Everything above still works, because root needs
-  no sudo. But `HOME` is `/root`, and files a job creates are root's.
+- **Docker Desktop or Kiri (macOS).** latem passes no user, so steps run as the
+  image's default user, which is root. Everything above still works, because
+  root needs no sudo. But `HOME` is `/root`, and files a job creates are root's
+  inside the container. On Kiri they reach the Mac owned by you (checked on
+  Kiri 0.2.1).
 
 The image cannot fix the second case by declaring `USER runner`. On Linux, latem
 chowns each run's fresh volumes in a probe container that runs as the image's
