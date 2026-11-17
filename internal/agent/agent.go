@@ -184,7 +184,7 @@ type Options struct {
 	// touched.
 	Secrets secrets.Provider
 	// Vault overrides OpenVault as a workflow job's variables are read from
-	// it (A96), used only when the config says `[secrets] openvault = true`.
+	// it (A96), used only when the config says `[secrets] vault = true`.
 	// Nil reads the service's own socket.
 	Vault repovars.Vault
 
@@ -345,7 +345,7 @@ type Agent struct {
 	machine atomic.Pointer[capacity.Machine]
 
 	// vault is OpenVault, read for variables (A96); nil unless the config
-	// the agent started with says `[secrets] openvault = true`, which, like
+	// the agent started with says `[secrets] vault = true`, which, like
 	// every [secrets] change, takes a restart.
 	vault repovars.Vault
 	// vaultVars is the vault's part of the heartbeat's digests, as varsLoop

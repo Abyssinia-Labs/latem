@@ -152,7 +152,7 @@ func (x *execution) repoVars(ctx context.Context) func(environment string) (map[
 	}
 	if x.vars == nil {
 		var vault repovars.Vault
-		if cfg.Secrets.OpenVault {
+		if cfg.Secrets.Vault {
 			vault = x.o.vault
 		}
 		key := x.req.Repo

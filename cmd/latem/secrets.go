@@ -123,9 +123,9 @@ func storedName(name string, scope secretScope) (string, error) {
 type secretStores struct {
 	keychain secrets.Store
 	file     secrets.Store
-	// openvault lists what OpenVault holds, and is read only when config.toml
-	// says `[secrets] openvault = true`. latem never writes to it: a value
-	// goes in with `openvault set`, on whichever machine may write the
+	// openvault lists what the vault holds, and is read only when config.toml
+	// says `[secrets] vault = true`. latem never writes to it: a value
+	// goes in with `latem-vault set`, on whichever machine may write the
 	// collection, and syncs from there (A86).
 	openvault openVaultLister
 }
@@ -135,8 +135,11 @@ type secretStores struct {
 type openVaultLister interface {
 	Names(ctx context.Context, repos []string) (names, absent []string, err error)
 	Variables(ctx context.Context, collection string, envs func(string) bool) (secrets.Variables, error)
-	// ThisDevice names this device as `openvault scope` takes it (A97).
+	// ThisDevice names this device as `latem-vault scope` takes it (A97).
 	ThisDevice(ctx context.Context) (string, error)
+	// KeyPassphrase reports whether this device's key opens with a
+	// passphrase, and whether that could be told (A104).
+	KeyPassphrase() (passphrase, known bool)
 }
 
 // onceOpenVault answers each listing once. A readiness beat reads the
@@ -161,6 +164,8 @@ type onceVars struct {
 }
 
 // ThisDevice asks the service once.
+func (o *onceOpenVault) KeyPassphrase() (bool, bool) { return o.inner.KeyPassphrase() }
+
 func (o *onceOpenVault) ThisDevice(ctx context.Context) (string, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -222,7 +227,7 @@ func (o *onceOpenVault) Names(ctx context.Context, repos []string) ([]string, []
 var newSecretStores = func(paths config.Paths) (secretStores, error) {
 	st := secretStores{file: secrets.NewFileStore(paths.SecretsEnv)}
 	if socket, err := secrets.OpenVaultSocket(os.Environ()); err == nil {
-		st.openvault = &onceOpenVault{inner: secrets.NewOpenVaultProvider(socket, 0)}
+		st.openvault = &onceOpenVault{inner: secrets.NewOpenVaultProvider(socket, 0).WithCommand(vaultCommand())}
 	}
 	if runtime.GOOS == "darwin" {
 		kc, err := secrets.NewKeychainStore("", secrets.ExecRunner{})
@@ -333,10 +338,10 @@ Setting a name that already has a value replaces it.`,
 						"  latem secrets rm --store file %s\n", paths.SecretsEnv, stored, scopeArgs(sc, name))
 				}
 			}
-			// And OpenVault, when it is read, before both (A86).
+			// And the vault, when it is read, before both (A86).
 			if where := openVaultShadow(cmd.Context(), stores, sc, name); where != "" {
-				printf(out, "\nwarning: OpenVault holds %s, and is read first — this value is used only once it is "+
-					"gone from there:\n  openvault delete %s\n", where, where)
+				printf(out, "\nwarning: the vault holds %s, and is read first — this value is used only once it is "+
+					"gone from there:\n  %s delete %s\n", where, vaultCommand(), where)
 			}
 			return nil
 		},
@@ -354,7 +359,7 @@ func openVaultShadow(ctx context.Context, stores secretStores, sc secretScope, n
 		return ""
 	}
 	cfg, err := loadConfig()
-	if err != nil || !cfg.Secrets.OpenVault {
+	if err != nil || !cfg.Secrets.Vault {
 		return ""
 	}
 	collection, entry, err := secrets.OpenVaultEntry(sc.parts(), name)
@@ -571,8 +576,8 @@ func newSecretsListCommand() *cobra.Command {
 
 Names only, never values: nothing is decrypted to list them. The Keychain's
 items are read from their attributes, secrets.env's from the names its lines
-declare, and [secrets.commands] from config.toml. With [secrets] openvault =
-true, OpenVault's are listed too, from each repository's collection, and a
+declare, and [secrets.commands] from config.toml. With [secrets] vault =
+true, the vault's are listed too, as store "vault", from each repository's collection, and a
 repository this machine has no collection for is named. LATEM_SECRET_* variables in
 the agent's own environment answer too and are not listed: that environment
 is the service manager's, not this shell's.`,
@@ -695,13 +700,13 @@ type inventory struct {
 // [secrets.commands].
 func secretInventory(ctx context.Context, cfg *config.Config, stores secretStores) (inventory, error) {
 	inv := inventory{byName: map[string][]string{}}
-	if cfg.Secrets.OpenVault && stores.openvault != nil {
+	if cfg.Secrets.Vault && stores.openvault != nil {
 		// First, as the chain reads it (A86). Only the configured
 		// repositories' collections: the vault's others are not latem's.
 		names, absent, err := stores.openvault.Names(ctx, slices.Sorted(maps.Keys(cfg.Repos)))
 		inv.noCollection, inv.openvaultErr = absent, err
 		for _, n := range names {
-			inv.byName[n] = append(inv.byName[n], "openvault")
+			inv.byName[n] = append(inv.byName[n], secrets.VaultStore)
 		}
 	}
 	for _, s := range stores.all() {
@@ -722,17 +727,17 @@ func secretInventory(ctx context.Context, cfg *config.Config, stores secretStore
 	return inv, nil
 }
 
-// printOpenVault says what OpenVault could not list for sc, by name: a
+// printOpenVault says what the vault could not list for sc, by name: a
 // service that is not running, or a repository this machine has no
 // collection for.
 func (inv inventory) printOpenVault(w io.Writer, sc secretScope) {
 	if inv.openvaultErr != nil {
-		printf(w, "%v — OpenVault's names are not listed\n", inv.openvaultErr)
+		printf(w, "%v — the vault's names are not listed\n", inv.openvaultErr)
 		return
 	}
 	for _, repo := range inv.noCollection {
 		if sc.repo == "" || sc.repo == repo {
-			printf(w, "openvault: this machine has no collection %s, so none of %s's secrets come from OpenVault here\n",
+			printf(w, "vault: this machine has no collection %s, so none of %s's secrets come from the vault here\n",
 				repo, repo)
 		}
 	}
@@ -756,13 +761,13 @@ func (inv inventory) has(name, repo, env string) bool {
 	return false
 }
 
-// onlyInVault reports whether OpenVault alone holds name for a job of repo in
+// onlyInVault reports whether the vault alone holds name for a job of repo in
 // env, so that without reading the vault it would read as unset (A97).
 func (inv inventory) onlyInVault(name, repo, env string) bool {
 	found := false
 	for _, sc := range lookupScopes(repo, env) {
 		for _, store := range inv.byName[secrets.ScopedName(name, sc...)] {
-			if store != "openvault" {
+			if store != secrets.VaultStore {
 				return false
 			}
 			found = true

@@ -382,7 +382,7 @@ func (s *storeChecker) resolver() (secretResolver, error) {
 	opts := secrets.Options{FilePath: paths.SecretsEnv}
 	if s.cfg != nil {
 		opts.FilePath, opts.Commands = s.cfg.Paths.SecretsEnv, s.cfg.Secrets.Commands
-		opts.OpenVault = s.cfg.Secrets.OpenVault
+		opts.OpenVault = s.cfg.Secrets.Vault
 	}
 	chain, err := s.newSecrets(opts)
 	if err != nil {
