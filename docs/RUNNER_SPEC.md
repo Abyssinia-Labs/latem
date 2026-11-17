@@ -5140,6 +5140,13 @@ it means is the person's call, and the job may be meant for another machine. A l
 produced (`linux`, `macos`, `arm64`, or an alias's target) is a platform this machine lacks, and no
 alias supplies it.
 
+**Beside A107.** A107's `runs-on-labels` puts a label on a runner, for a label-less kind that is off.
+A label this item covers is left out of it: one fix per label, and for a vendor's label that names
+a platform, the alias is the right one. It maps the label once, on every runner that carries the
+target, and the heartbeat says it (A68), where a label added to one runner is that runner's alone.
+take-one's macOS release on the Mac Studio, which A107 cites, asks for `blacksmith-6vcpu-macos-26`,
+and is this item's. A label whose name names no runner stays A107's.
+
 **One item per label.** Several jobs asking for one label share an item, which lists them. An
 alias is for a label, not a job.
 
