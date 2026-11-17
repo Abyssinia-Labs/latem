@@ -23,7 +23,7 @@ import (
 
 // Where a variable's value came from.
 const (
-	FromOpenVault = "openvault"
+	FromOpenVault = "vault"
 	FromConfig    = "config.toml"
 )
 
@@ -64,7 +64,7 @@ func ReadWhere(ctx context.Context, vault Vault, key string, repo *config.Repo, 
 	case errors.Is(err, secrets.ErrNotFound):
 		return s, nil
 	case err != nil:
-		return s, fmt.Errorf("reading %s's variables from OpenVault: %w", key, err)
+		return s, fmt.Errorf("reading %s's variables from the vault: %w", key, err)
 	}
 	s.vault = v
 	return s, nil

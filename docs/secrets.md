@@ -50,7 +50,7 @@ wins:
 | | Source | Set by |
 |---|---|---|
 | 1 | Environment | `LATEM_SECRET_<NAME>` in the agent's environment — the override, useful for `LATEM_SECRET_X=… latem run` to answer "is it the secret or is it the build?" |
-| 2 | OpenVault | `openvault set <repo>/<env>/<NAME>`, on any machine that may write the collection; read only with `[secrets] openvault = true`; see [From OpenVault](#from-openvault) |
+| 2 | the vault | `latem-vault set <repo>/<env>/<NAME>`, on any machine that may write the collection; read only with `[secrets] vault = true`; see [From the vault](#from-the-vault) |
 | 3 | File | `latem secrets set --store file`, or a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
 | 4 | Keychain | `latem secrets set` on a Mac |
 | 5 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
@@ -89,7 +89,7 @@ to another host leaves no trace in the log.
 So a pull request's job that asks for a secret waits in `awaiting_approval`
 before any store is asked for anything. So does one that would run on a native
 runner, whether it asks or not, because a native step runs as this machine's
-user, with `secrets.env`, the Keychain and OpenVault's socket in reach:
+user, with `secrets.env`, the Keychain and the vault's socket in reach:
 
 ```console
 $ latem list --state awaiting_approval     # the runs waiting, and their refs
@@ -108,82 +108,94 @@ event says about the pull request. A fork and a branch of the repository are
 treated alike: the payload that tells them apart is relayed by the control
 plane, and nothing on the machine can check it.
 
-## From OpenVault
+## From the vault
 
-[OpenVault](https://github.com/Abyssinia-Labs/openvault) keeps one encrypted
-copy of the values and syncs it between your machines, so a value is set once
-rather than on each machine that builds the repository. A machine reads it
-when its `config.toml` says so (A86):
+latem vault, which was [OpenVault](https://github.com/Abyssinia-Labs/openvault)
+until it was renamed, keeps one encrypted copy of the values and syncs it
+between your machines, so a value is set once rather than on each machine
+that builds the repository. A machine reads it when its `config.toml` says
+so (A86):
 
 ```toml
 [secrets]
-openvault = true
+vault = true
 ```
+
+**Either name works** (A104). `openvault = true`, the key before the rename,
+still turns it on. latem finds the vault's directory as `$LATEM_VAULT_HOME`,
+then `~/.latem-vault` once it exists, then `$OPENVAULT_HOME`, then
+`~/.openvault`, and its command as `latem-vault`, then `openvault`, each on
+`PATH`, in `~/.cargo/bin` (or `$CARGO_HOME/bin`), and in Homebrew's `bin`.
+What latem tells you to type names the command it found; the examples here
+use `latem-vault`, which is `openvault` on a vault not renamed yet.
 
 Each repository is a collection named exactly as its `[repos.<key>]` key,
 hyphens included, and an entry is named by environment:
 
-| A job of repo `R` looks for | In OpenVault |
+| A job of repo `R` looks for | In the vault |
 |---|---|
 | `R__E__NAME` (environment `E`) | collection `R`, entry `E/NAME` |
 | `R__NAME` | collection `R`, entry `NAME`, at the top of the collection |
 | `NAME`, machine-wide | nothing: a machine-wide name is in no collection, and comes from the stores below |
 
 ```console
-$ openvault collections create latem-cloud                      # once, on an admin device
-$ openvault set latem-cloud/production/CONVEX_DEPLOY_KEY --secret < key.txt
-$ openvault scope <device> latem-cloud read                     # each machine that builds it
+$ latem-vault collections create latem-cloud                      # once, on an admin device
+$ latem-vault set latem-cloud/production/CONVEX_DEPLOY_KEY --secret < key.txt
+$ latem-vault scope <device> latem-cloud read                     # each machine that builds it
 ```
 
-OpenVault comes straight after the environment, before secrets.env and the
-Keychain: the vault is the copy every machine shares, and a machine's own copy
+The vault comes straight after the environment, before secrets.env and the
+Keychain: it is the copy every machine shares, and a machine's own copy
 is the one that goes stale. So a value both hold is the vault's, `latem
-secrets list` shows `openvault` first, and `latem secrets set` warns when the
+secrets list` shows store `vault` first, and `latem secrets set` warns when the
 value it stores will not be read.
 
-The value is read when the job starts, over the OpenVault service's socket
-(`~/.openvault/service.sock`, or `$OPENVAULT_HOME/service.sock`), and never
-sits in the agent's environment. latem never runs the `openvault` command,
+The value is read when the job starts, over the vault service's socket,
+`service.sock` in the vault's directory, and never sits in the agent's
+environment. latem never runs the vault's command to read a value, as it
 which can stop to ask for a passphrase. **If the service is not running, a
 job that needs a value from it fails with `E_SECRET_BACKEND` and can be
 retried**, as for a locked Keychain. It does not read as unset: a deploy
-should not run without its token. `openvault service install` (OpenVault 0.2.2
+should not run without its token. `latem-vault service install` (OpenVault 0.2.2
 and later) has the system start the service at login, and again if it stops. It
-needs a key that opens with nobody there: on a machine whose key file has a
-passphrase, remove it with `openvault keys passphrase --remove`, or start
-`openvault service` by hand after each reboot. A job that reads only
-machine-wide names never asks OpenVault.
+needs a key that opens with nobody there, as a key in the Secure Enclave
+does: on a machine whose key file has a passphrase, remove it with
+`latem-vault keys passphrase --remove`, or start `latem-vault service` by hand
+after each reboot. latem says so only for a key that has one, or whose key
+file it could not read. A job that reads only machine-wide names never asks
+the vault.
 
 `latem doctor` says whether the service answers and which repositories this
 machine has no collection for — "no collection wake" — by name. For those
-repositories, OpenVault simply holds nothing, and the stores after it answer.
+repositories, the vault simply holds nothing, and the stores after it answer.
 
-**`latem setup` looks at OpenVault first** (A97). For a secret or a variable
+**`latem setup` looks at the vault first** (A97). For a secret or a variable
 that no store here holds, it names the step that closes the gap. With a vault
 on this device that holds one of the machine's repositories and a config that
 does not read it yet, that step is turning it on, which `latem setup apply
-openvault-on` writes. Otherwise it is the service (`openvault service
-install`), joining the vault (`openvault join`, then `openvault approve`
-elsewhere), the collection (`openvault scope <this device> R read` on an admin
-device), or the name itself (`openvault set R/E/NAME --secret`). Without
-OpenVault, it is still `latem secrets set`. [Commands](commands.md#latem-setup-apply-closing-what-is-in-the-way-from-a-shell)
+vault-on` writes (`openvault-on` until A104, which `setup apply` still takes
+for one release). Otherwise it is the service (`latem-vault service
+install`), joining the vault (`latem-vault join`, then `latem-vault approve`
+elsewhere), the collection (`latem-vault scope <this device> R read` on an admin
+device), or the name itself (`latem-vault set R/E/NAME --secret`). Without
+the vault, it is still `latem secrets set`. [Commands](commands.md#latem-setup-apply-closing-what-is-in-the-way-from-a-shell)
 has the table.
 
-A pull request's job asks OpenVault nothing until its commit is approved, as
+A pull request's job asks the vault nothing until its commit is approved, as
 for every other store; see [Pull requests](#pull-requests).
 
 ### Variables
 
-A workflow's `${{ vars.NAME }}` is read from OpenVault too, on the same
-machines, with the same `openvault = true` (A96). Only an entry of kind
+A workflow's `${{ vars.NAME }}` is read from the vault too, on the same
+machines, with the same `vault = true` (A96). Only an entry of kind
 variable answers: a secret is masked in a log and a variable is not, so a
 secret never reaches `vars`, whatever it is called.
 
 | A job of repo `R` in environment `E` reads `vars.NAME` from, first that holds it |
 |---|
-| OpenVault, collection `R`, entry `E/NAME` |
+| the vault, collection `R`, entry `E/NAME` |
 | `config.toml`, `[repos.R.environments.E.vars]` |
-| OpenVault, collection `R`, entry `NAME` |
+| the vault, collection `R`, entry `NAME` |
 | `config.toml`, `[repos.R.vars]` |
 
 To move them, put each in the vault on a device that may write the
@@ -191,13 +203,13 @@ collection. Nothing needs taking out of `config.toml` first: the vault's
 value is read before it, and `config.toml`'s only where the vault holds none.
 
 ```console
-$ printf %s true | openvault set tsedal/LATEM --var        # the repository's own
-$ printf %s https://staging.example.com | openvault set tsedal/staging/BASE_URL --var
-$ openvault import-env --collection tsedal --env staging --var BASE_URL --var REGION staging.env
+$ printf %s true | latem-vault set tsedal/LATEM --var        # the repository's own
+$ printf %s https://staging.example.com | latem-vault set tsedal/staging/BASE_URL --var
+$ latem-vault import-env --collection tsedal --env staging --var BASE_URL --var REGION staging.env
 $ latem vars list --repo tsedal
 REPO    ENVIRONMENT  NAME      VALUE                        SOURCE
-tsedal  -            LATEM     true                         openvault, config.toml (openvault answers)
-tsedal  staging      BASE_URL  https://staging.example.com  openvault
+tsedal  -            LATEM     true                         vault, config.toml (vault answers)
+tsedal  staging      BASE_URL  https://staging.example.com  vault
 ```
 
 `import-env` reads a file of `NAME=value` lines into one environment's
@@ -220,15 +232,16 @@ variables, so that a job goes only to machines that would answer it alike
 (A68). The agent reads them from the vault once a minute rather than on every
 beat. While the service does not answer, it goes on saying the digests it
 read last, so a service that restarts does not set the machine apart from
-the others. It keeps them, digests only, in `~/.latem/openvault-vars.json`
-for the next start.
+the others. It keeps them, digests only, in `~/.latem/vault-vars.json`
+for the next start, reading `openvault-vars.json` once when that is all
+there is.
 
 ### Files
 
-An OpenVault file (OpenVault 0.4 and later), such as a keystore, a `.p8` or a
+A vault file (OpenVault 0.4 and later), such as a keystore, a `.p8` or a
 service account's JSON, reaches a step as the path of a private copy in the
 job's temporary directory, never as its bytes (A88). A workflow reads it by
-the name `openvault run` gives it: the last part of its name, upper-cased,
+the name `latem-vault run` gives it: the last part of its name, upper-cased,
 with everything but A–Z and 0–9 turned into `_`.
 
 | A job of repo `R` reads | It is |
@@ -237,7 +250,7 @@ with everything but A–Z and 0–9 turned into `_`.
 | `secrets.GOOGLE_SERVICES_JSON` | a file `google-services.json` at the top of collection `R` |
 
 ```console
-$ openvault import upload.jks --collection app --into production
+$ latem-vault import upload.jks --collection app --into production
 ```
 
 ```yaml
@@ -253,4 +266,4 @@ and goes with the job. A secret or variable of the same name comes first. Only
 a native runner gets files: a docker job that reads one fails with
 `E_MISSING_SECRET`, because a docker job's temporary files can be read by
 every user in its container. A file larger than 16 MiB is refused; read those
-with `openvault run`.
+with `latem-vault run`.

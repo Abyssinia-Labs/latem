@@ -20,7 +20,21 @@ type fakeOpenVault struct {
 	// device is this device as the vault names it.
 	device string
 	err    error
+	// command is the vault's command as found; "" is latem-vault.
+	command string
+	// passphrase and keyKnown are what the key file says (A104): the zero
+	// value is a key file that could not be read.
+	passphrase, keyKnown bool
 }
+
+func (f *fakeOpenVault) Command() string {
+	if f.command == "" {
+		return secrets.VaultCommand
+	}
+	return f.command
+}
+
+func (f *fakeOpenVault) KeyPassphrase() (bool, bool) { return f.passphrase, f.keyKnown }
 
 func (f *fakeOpenVault) ThisDevice(context.Context) (string, error) {
 	if f.err != nil {
@@ -86,7 +100,7 @@ func openVaultDoctor(t *testing.T, ov *fakeOpenVault, enabled bool) *doctor {
 	cfg := testConfig(dir)
 	cfg.Repos["latem-cloud"] = &config.Repo{URL: "https://example.invalid/latem-cloud.git", AllowedRefs: []string{"main"}}
 	cfg.Repos["wake"] = &config.Repo{URL: "https://example.invalid/wake.git", AllowedRefs: []string{"main"}}
-	cfg.Secrets.OpenVault = enabled
+	cfg.Secrets.Vault = enabled
 	d := newTestDoctor("linux", dir, nil, cfg, nil)
 	d.openVault = func() (openVaultCollections, error) { return ov, nil }
 	return d
@@ -101,11 +115,11 @@ func TestDoctorOpenVault_SaysNothingUnlessConfigReadsIt(t *testing.T) {
 
 func TestDoctorOpenVault_AStoppedServiceFailsWithTheCommandThatStartsIt(t *testing.T) {
 	got := openVaultDoctor(t, &fakeOpenVault{err: stoppedOpenVault}, true).checkOpenVault(context.Background())
-	c := checkByID(got, "openvault.service")
+	c := checkByID(got, "vault.service")
 	if c == nil || c.Level != levelFail {
-		t.Fatalf("checks = %+v, want openvault.service failing", got)
+		t.Fatalf("checks = %+v, want vault.service failing", got)
 	}
-	if !slices.Contains(c.Fix, "openvault service install") {
+	if !slices.Contains(c.Fix, "latem-vault service install") {
 		t.Errorf("fix = %q, want the command that starts it", c.Fix)
 	}
 	if !strings.Contains(strings.Join(c.Notes, "\n"), "service.sock") {
@@ -119,20 +133,20 @@ func TestDoctorOpenVault_NamesEachRepositoryThisMachineHasNoCollectionFor(t *tes
 	ov := &fakeOpenVault{names: map[string][]string{"latem-cloud": nil, "ssh": nil}}
 	got := openVaultDoctor(t, ov, true).checkOpenVault(context.Background())
 
-	if c := checkByID(got, "openvault.service"); c == nil || c.Level != levelPass {
+	if c := checkByID(got, "vault.service"); c == nil || c.Level != levelPass {
 		t.Errorf("service check = %+v, want a pass", c)
 	}
-	if c := checkByID(got, "openvault.collections"); c == nil || c.Detail != "latem-cloud" {
+	if c := checkByID(got, "vault.collections"); c == nil || c.Detail != "latem-cloud" {
 		t.Errorf("collections check = %+v, want latem-cloud alone: ssh is not a repository here", c)
 	}
-	c := checkByID(got, "openvault.collections.absent")
+	c := checkByID(got, "vault.collections.absent")
 	if c == nil || c.Level != levelWarn {
 		t.Fatalf("checks = %+v, want a warning for the absent collections", got)
 	}
 	if !strings.Contains(c.Detail, "no collection app, wake") {
 		t.Errorf("detail = %q, want app and wake named", c.Detail)
 	}
-	if len(c.Fix) == 0 || !strings.Contains(c.Fix[0], "openvault scope") {
+	if len(c.Fix) == 0 || !strings.Contains(c.Fix[0], "latem-vault scope") {
 		t.Errorf("fix = %q", c.Fix)
 	}
 }
@@ -159,7 +173,7 @@ func TestSecretsList_ListsOpenVaultFirstAndNamesARepositoryWithNoCollection(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "latem-cloud / production\tCONVEX_DEPLOY_KEY\topenvault, keychain (openvault answers)") {
+	if !strings.Contains(out, "latem-cloud / production\tCONVEX_DEPLOY_KEY\tvault, keychain (vault answers)") {
 		t.Errorf("secrets list does not say OpenVault answers first:\n%s", out)
 	}
 	if !strings.Contains(out, "this machine has no collection app") {
@@ -176,7 +190,7 @@ func TestSecretsList_AStoppedOpenVaultIsSaidAndTheOtherStoresStillList(t *testin
 	if err != nil {
 		t.Fatalf("secrets list: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "openvault service") || !strings.Contains(out, "*\tTOKEN\tkeychain") {
+	if !strings.Contains(out, "latem-vault service") || !strings.Contains(out, "*\tTOKEN\tkeychain") {
 		t.Errorf("secrets list =\n%s\nwant the stopped service said and the Keychain's names listed", out)
 	}
 }
@@ -188,7 +202,7 @@ func TestSecretsList_OpenVaultIsNotAskedUnlessConfigReadsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, "openvault") {
+	if strings.Contains(out, "vault") {
 		t.Errorf("OpenVault was asked on a machine that does not read it:\n%s", out)
 	}
 }
@@ -203,7 +217,7 @@ func TestSecretsSet_WarnsWhenOpenVaultHoldsTheNameAndIsReadFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("secrets set: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "OpenVault holds latem-cloud/production/CONVEX_DEPLOY_KEY, and is read first") {
+	if !strings.Contains(out, "the vault holds latem-cloud/production/CONVEX_DEPLOY_KEY, and is read first") {
 		t.Errorf("no warning that OpenVault answers first:\n%s", out)
 	}
 }
@@ -234,5 +248,34 @@ func TestOnceOpenVault_AsksOncePerSetOfRepositories(t *testing.T) {
 	}
 	if inner.calls != 2 {
 		t.Errorf("asked %d times, want once per set of repositories", inner.calls)
+	}
+}
+
+// A104 (LAT-29): the note on a key that opens with a passphrase is for a key
+// that has one, or may; a key in the Secure Enclave has none. The fix names
+// the command this machine has.
+func TestDoctorOpenVault_ThePassphraseNoteOnlyForAKeyThatMayHaveOne(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		passphrase, known bool
+		// quiet: the note is left out.
+		quiet bool
+	}{
+		{"the Secure Enclave", false, true, true},
+		{"a passphrase", true, true, false},
+		{"a key file that could not be read", false, false, false},
+	} {
+		ov := &fakeOpenVault{err: stoppedOpenVault, command: "openvault", passphrase: tc.passphrase, keyKnown: tc.known}
+		c := checkByID(openVaultDoctor(t, ov, true).checkOpenVault(context.Background()), "vault.service")
+		if c == nil {
+			t.Fatalf("%s: no vault.service check", tc.name)
+		}
+		said := strings.Contains(strings.Join(c.Notes, "\n"), "openvault keys passphrase --remove")
+		if said == tc.quiet {
+			t.Errorf("%s: passphrase note said = %v; notes %q", tc.name, said, c.Notes)
+		}
+		if !slices.Contains(c.Fix, "openvault service install") {
+			t.Errorf("%s: fix = %q, want the command this machine has", tc.name, c.Fix)
+		}
 	}
 }

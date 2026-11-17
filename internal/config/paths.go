@@ -59,11 +59,14 @@ type Paths struct {
 	// what a reload applied and to know that the agent holding the lock is one
 	// that reloads at all (A54).
 	ReloadStatus string
-	// VarDigests is the digest of each variable OpenVault last answered for
+	// VarDigests is the digest of each variable the vault last answered for
 	// each repository, kept so that the heartbeat a restart sends while the
 	// service does not answer yet says what it said before (A96). Digests
 	// only, which the heartbeat sends anyway; never a value.
 	VarDigests string
+	// OldVarDigests is where VarDigests was before latem vault was renamed,
+	// read when VarDigests is not there yet (A104).
+	OldVarDigests string
 }
 
 // Base filenames under the config directory.
@@ -81,7 +84,9 @@ const (
 	secretsEnvName = "secrets.env"
 	tokenName      = "agent.key"
 	reloadName     = "agent.reload"
-	varDigestsName = "openvault-vars.json"
+	varDigestsName = "vault-vars.json"
+	// oldVarDigestsName is varDigestsName before A104.
+	oldVarDigestsName = "openvault-vars.json"
 )
 
 // maxSocketPathLen is the shorter of the two platform limits on a Unix socket
@@ -136,8 +141,9 @@ func derivePaths(dir string) Paths {
 		SecretsEnv: filepath.Join(dir, secretsEnvName),
 		TokenFile:  filepath.Join(dir, tokenName),
 
-		ReloadStatus: filepath.Join(dir, reloadName),
-		VarDigests:   filepath.Join(dir, varDigestsName),
+		ReloadStatus:  filepath.Join(dir, reloadName),
+		VarDigests:    filepath.Join(dir, varDigestsName),
+		OldVarDigests: filepath.Join(dir, oldVarDigestsName),
 	}
 }
 

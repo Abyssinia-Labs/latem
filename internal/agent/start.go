@@ -265,7 +265,7 @@ func (a *Agent) buildOrchestrator() error {
 		chain, err := secrets.New(secrets.Options{
 			FilePath:  a.cfg.Paths.SecretsEnv,
 			Commands:  a.cfg.Secrets.Commands,
-			OpenVault: a.cfg.Secrets.OpenVault,
+			OpenVault: a.cfg.Secrets.Vault,
 		})
 		if err != nil {
 			return wrapStartup("secrets", err)
@@ -274,14 +274,14 @@ func (a *Agent) buildOrchestrator() error {
 	}
 	// The variables' store is the secrets', decided as the chain is, at start
 	// (A96).
-	if a.cfg.Secrets.OpenVault {
+	if a.cfg.Secrets.Vault {
 		a.vault = a.opts.Vault
 		if a.vault == nil {
 			socket, err := secrets.OpenVaultSocket(os.Environ())
 			if err != nil {
-				return wrapStartup("openvault", err)
+				return wrapStartup("vault", err)
 			}
-			a.vault = secrets.NewOpenVaultProvider(socket, 0)
+			a.vault = secrets.NewOpenVaultProvider(socket, 0).WithCommand(secrets.VaultCommandHere())
 		}
 		a.loadVarDigests()
 	}

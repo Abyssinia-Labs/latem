@@ -35,6 +35,10 @@ type APIClient interface {
 
 	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, name string) (container.CreateResponse, error)
 	ContainerStart(ctx context.Context, id string, options container.StartOptions) error
+	// ContainerInspect arrived with LAT-23: Prepare reads State after the
+	// start, because Kiri's start can return before the container will take
+	// an exec (see ready.go).
+	ContainerInspect(ctx context.Context, id string) (container.InspectResponse, error)
 	ContainerKill(ctx context.Context, id, signal string) error
 	ContainerRemove(ctx context.Context, id string, options container.RemoveOptions) error
 	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)

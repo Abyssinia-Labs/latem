@@ -58,23 +58,23 @@ func TestSetupOpenVault_AVaultNotReadYetIsTurnedOnByApply(t *testing.T) {
 	dir, _ := vaultMachine(t, ov)
 
 	k := kindIn(t, setupPlanIn(t, dir), "macos")
-	if got := itemIDs(k); !slices.Equal(got, []string{"openvault-on"}) {
+	if got := itemIDs(k); !slices.Equal(got, []string{"vault-on"}) {
 		t.Fatalf("items %v, want openvault-on alone: the vault holds both names", got)
 	}
 
-	_, stderr, err := applyIn(t, dir, "openvault-on")
+	_, stderr, err := applyIn(t, dir, "vault-on")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
-	if !strings.Contains(stderr, "openvault-on: wrote [secrets] openvault = true; closed") {
+	if !strings.Contains(stderr, "vault-on: wrote [secrets] vault = true; closed") {
 		t.Errorf("stderr:\n%s", stderr)
 	}
-	if !loadConfigIn(t, dir).Secrets.OpenVault {
+	if !loadConfigIn(t, dir).Secrets.Vault {
 		t.Errorf("config.toml does not read OpenVault:\n%s", readConfigFile(t, dir))
 	}
 	k = kindIn(t, setupPlanIn(t, dir), "macos")
 	if slices.ContainsFunc(itemIDs(k), func(id string) bool {
-		return strings.HasPrefix(id, "secrets-") || strings.HasPrefix(id, "vars-") || strings.HasPrefix(id, "openvault")
+		return strings.HasPrefix(id, "secrets-") || strings.HasPrefix(id, "vars-") || strings.HasPrefix(id, "vault")
 	}) {
 		t.Errorf("items %v, want none of the vault's or the names'", itemIDs(k))
 	}
@@ -118,10 +118,10 @@ func TestSetupOpenVault_ACollectionThisDeviceLacksIsScopedByThePerson(t *testing
 	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nopenvault = true\n")
 
 	k := kindIn(t, setupPlanIn(t, dir), "macos")
-	if got := itemIDs(k); !slices.Equal(got, []string{"openvault-collection-app"}) {
+	if got := itemIDs(k); !slices.Equal(got, []string{"vault-collection-app"}) {
 		t.Fatalf("items %v", got)
 	}
-	_, stderr, err := applyIn(t, dir, "openvault-collection-app")
+	_, stderr, err := applyIn(t, dir, "vault-collection-app")
 	if exitCode(err) != ExitNoTerminal || !strings.Contains(stderr, "  openvault scope Mini app read") {
 		t.Errorf("exit %d (%v)\n%s", exitCode(err), err, stderr)
 	}
@@ -139,10 +139,10 @@ func TestSetupOpenVault_AServiceThatDoesNotAnswerIsInstalledByApply(t *testing.T
 	rec.machine.then = map[string]func(){"openvault service install": func() { ov.err = nil }}
 
 	k := kindIn(t, setupPlanIn(t, dir), "macos")
-	if got := itemIDs(k); !slices.Equal(got, []string{"openvault-service"}) {
+	if got := itemIDs(k); !slices.Equal(got, []string{"vault-service"}) {
 		t.Fatalf("items %v, want the service alone", got)
 	}
-	_, stderr, err := applyIn(t, dir, "openvault-service")
+	_, stderr, err := applyIn(t, dir, "vault-service")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
@@ -161,7 +161,7 @@ func TestSetupOpenVault_NoVaultOnThisDeviceIsJoinedByThePerson(t *testing.T) {
 	rec.machine.vaultHere = false
 	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nopenvault = true\n")
 
-	_, stderr, err := applyIn(t, dir, "openvault-join")
+	_, stderr, err := applyIn(t, dir, "vault-join")
 	if exitCode(err) != ExitNoTerminal || !strings.Contains(stderr, "  openvault join") ||
 		!strings.Contains(stderr, "openvault approve") {
 		t.Errorf("exit %d (%v)\n%s", exitCode(err), err, stderr)
@@ -184,10 +184,62 @@ func TestSetupOpenVault_WithoutItTheFixIsThisMachines(t *testing.T) {
 	for _, want := range []string{
 		"  latem secrets set --repo app --env staging TOKEN",
 		`  latem vars set --repo app --env staging BASE_URL "<value>"`,
-		`docs/secrets.md, "From OpenVault"`,
+		`docs/secrets.md, "From the vault"`,
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}
 	}
+}
+
+// A104 (LAT-29): `setup apply` runs the service's install itself, by the
+// command found here, and takes the item's id before the rename for one
+// release. A key known to open alone is not told what a passphrase needs.
+func TestSetupOpenVault_ApplyTakesTheOldIDAndRunsTheInstallItself(t *testing.T) {
+	ov := &fakeOpenVault{device: "Mini", err: stoppedOpenVault, keyKnown: true,
+		names: map[string][]string{"app": {secrets.ScopedName("TOKEN", "app", "staging")}},
+		vars:  map[string]secrets.Variables{"app": {"staging": {"BASE_URL": "https://staging.example.invalid"}}}}
+	dir, rec := vaultMachine(t, ov)
+	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nvault = true\n")
+	rec.machine.gives["openvault service install"] = [2]string{"openvault", "/opt/homebrew/bin"}
+	rec.machine.then = map[string]func(){"openvault service install": func() { ov.err = nil }}
+
+	s := itemIn(t, kindIn(t, setupPlanIn(t, dir), "macos"), "vault-service")
+	if len(s.Manual) != 0 {
+		t.Errorf("manual = %q for a key in the Secure Enclave", s.Manual)
+	}
+	_, stderr, err := applyIn(t, dir, "openvault-service")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !slices.Equal(rec.machine.installs, []string{"openvault service install"}) {
+		t.Errorf("ran %q, want the install by the command this machine has", rec.machine.installs)
+	}
+	if !strings.Contains(stderr, "vault-service: ran openvault service install; closed") {
+		t.Errorf("stderr:\n%s", stderr)
+	}
+}
+
+// A104: latem-vault is the command a machine that has both is told to type.
+func TestSetupOpenVault_TheNewCommandBeforeTheOld(t *testing.T) {
+	ov := &fakeOpenVault{device: "Mini", names: map[string][]string{"app": {}}}
+	dir, rec := vaultMachine(t, ov)
+	delete(rec.machine.notInstalled, "latem-vault")
+	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nvault = true\n")
+
+	s := itemIn(t, kindIn(t, setupPlanIn(t, dir), "macos"), "secrets-app")
+	if got := strings.Join(s.Yours[0], " "); got != "latem-vault set app/staging/TOKEN --secret" {
+		t.Errorf("fix = %q, want latem-vault's", got)
+	}
+}
+
+func itemIn(t *testing.T, k readiness.Kind, id string) readiness.Item {
+	t.Helper()
+	for _, it := range k.Items {
+		if it.ID == id {
+			return it
+		}
+	}
+	t.Fatalf("no item %s in %v", id, itemIDs(k))
+	return readiness.Item{}
 }

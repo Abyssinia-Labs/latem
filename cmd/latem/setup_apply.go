@@ -14,6 +14,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
+	"github.com/Abyssinia-Labs/latem/internal/secrets"
 )
 
 // `latem setup apply` (A94): what the setup screen does to close an item, for
@@ -181,6 +182,10 @@ func applyTargets(plan readiness.Plan, ids []string, kind string) ([]applyTarget
 	}
 	var out []applyTarget
 	for _, id := range ids {
+		// An id the vault's items had before A104, taken for one release.
+		if now, old := readiness.CurrentID(id); old {
+			id = now
+		}
 		if slices.ContainsFunc(out, func(t applyTarget) bool { return t.id == id }) {
 			continue
 		}
@@ -355,9 +360,9 @@ func (a *applier) person(id string, at []found) {
 	where := ", on this machine"
 	for _, f := range at {
 		for _, argv := range f.item.Yours {
-			// What OpenVault's admin or a writer of the collection types is
+			// What the vault's admin or a writer of the collection types is
 			// typed on that device, which the item's words name (A97).
-			if len(argv) > 1 && argv[0] == "openvault" && (argv[1] == "scope" || argv[1] == "set") {
+			if len(argv) > 1 && secrets.IsVaultCommand(argv[0]) && (argv[1] == "scope" || argv[1] == "set") {
 				where = ""
 			}
 		}

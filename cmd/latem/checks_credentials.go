@@ -30,7 +30,7 @@ func (d *doctor) checkCredentials(ctx context.Context) []check {
 	chain, err := d.newSecrets(secrets.Options{
 		FilePath:  d.cfg.Paths.SecretsEnv,
 		Commands:  d.cfg.Secrets.Commands,
-		OpenVault: d.cfg.Secrets.OpenVault,
+		OpenVault: d.cfg.Secrets.Vault,
 	})
 	if err != nil {
 		return nil // checkSecrets has already reported the chain itself

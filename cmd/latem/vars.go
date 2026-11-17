@@ -25,13 +25,13 @@ and a job in an environment from [repos.<key>.environments.<env>.vars] over
 them (A50). Variables are not secrets: they may appear in a compiled job and
 in its log. For anything that may not, use ` + "`latem secrets`" + `.
 
-With [secrets] openvault = true, OpenVault comes first (A96): a variable
+With [secrets] vault = true, the vault comes first (A96): a variable
 entry of collection <key>, <env>/NAME for an environment and NAME for the
-repository, each before config.toml's in its scope. ` + "`openvault set`" + `
+repository, each before config.toml's in its scope. ` + "`latem-vault set`" + `
 <key>/<env>/NAME --var writes one there, and list shows which answers.
 
 set and rm edit config.toml as text, keeping the rest of it as it was, then
-ask the running agent to reload. latem never writes to OpenVault.`,
+ask the running agent to reload. latem never writes to the vault.`,
 		Args: noArgs,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
@@ -53,7 +53,7 @@ func readRepoVars(ctx context.Context, cfg *config.Config, key string) (repovars
 // varStores are the stores variables are read from: none but config.toml's
 // unless the config reads OpenVault.
 func varStores(cfg *config.Config) (secretStores, error) {
-	if !cfg.Secrets.OpenVault {
+	if !cfg.Secrets.Vault {
 		return secretStores{}, nil
 	}
 	return newSecretStores(cfg.Paths)
@@ -66,7 +66,7 @@ func repoVarsIn(ctx context.Context, cfg *config.Config, stores secretStores, t 
 		return repovars.Of(nil, nil), nil
 	}
 	var vault repovars.Vault
-	if cfg.Secrets.OpenVault && stores.openvault != nil {
+	if cfg.Secrets.Vault && stores.openvault != nil {
 		vault = stores.openvault
 	}
 	set, err := repovars.Read(ctx, vault, t.repoKey, t.repo)
@@ -178,14 +178,14 @@ func newVarsListCommand() *cobra.Command {
 				if err != nil {
 					// config.toml's are still listed: they are this machine's
 					// own, and the vault's are what a job would fail on now.
-					printf(cmd.ErrOrStderr(), "%v — OpenVault's variables are not listed, and a job that reads one fails until it answers\n", err)
+					printf(cmd.ErrOrStderr(), "%v — the vault's variables are not listed, and a job that reads one fails until it answers\n", err)
 				}
 				for _, v := range set.List() {
 					if sc.env != "" && v.Env != sc.env {
 						continue
 					}
 					row := []string{key, orDash(v.Env), v.Name, v.Value}
-					if cfg.Secrets.OpenVault {
+					if cfg.Secrets.Vault {
 						row = append(row, sourcesText(v.Sources))
 					}
 					rows = append(rows, row)
@@ -196,7 +196,7 @@ func newVarsListCommand() *cobra.Command {
 				return nil
 			}
 			header := []string{"REPO", "ENVIRONMENT", "NAME", "VALUE"}
-			if cfg.Secrets.OpenVault {
+			if cfg.Secrets.Vault {
 				// Which store a job reads it from, only where there are two.
 				header = append(header, "SOURCE")
 			}
@@ -209,7 +209,7 @@ func newVarsListCommand() *cobra.Command {
 }
 
 // sourcesText is where a variable is held, the one a job reads first named
-// when there are two: "openvault, config.toml (openvault answers)".
+// when there are two: "vault, config.toml (vault answers)".
 func sourcesText(sources []string) string {
 	if len(sources) < 2 {
 		return strings.Join(sources, ", ")
@@ -217,13 +217,13 @@ func sourcesText(sources []string) string {
 	return strings.Join(sources, ", ") + " (" + sources[0] + " answers)"
 }
 
-// openVaultVarShadow says when OpenVault holds the variable just set in
+// openVaultVarShadow says when the vault holds the variable just set in
 // config.toml, in the same scope: a job reads the vault's first (A96), so
 // the value written is read only once the vault no longer holds one. Names
 // only are compared.
 func openVaultVarShadow(ctx context.Context, sc secretScope, name string) string {
 	cfg, err := loadConfig()
-	if err != nil || !cfg.Secrets.OpenVault {
+	if err != nil || !cfg.Secrets.Vault {
 		return ""
 	}
 	set, err := readRepoVars(ctx, cfg, sc.repo)
@@ -236,9 +236,9 @@ func openVaultVarShadow(ctx context.Context, sc secretScope, name string) string
 			if sc.env != "" {
 				where = sc.repo + "/" + sc.env + "/" + name
 			}
-			return fmt.Sprintf("warning: OpenVault holds %s, and a job reads it before config.toml's; "+
-				"this value is read only once the vault holds none (`openvault set %s --var` changes the vault's)",
-				where, where)
+			return fmt.Sprintf("warning: the vault holds %s, and a job reads it before config.toml's; "+
+				"this value is read only once the vault holds none (`%s set %s --var` changes the vault's)",
+				where, vaultCommand(), where)
 		}
 	}
 	return ""

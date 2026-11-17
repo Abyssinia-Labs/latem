@@ -51,7 +51,7 @@ func vaultHarness(t *testing.T, vault *fakeVault, on bool) *harness {
 	t.Helper()
 	h := newHarness(t)
 	h.source.registry = ""
-	h.cfg.Secrets.OpenVault = on
+	h.cfg.Secrets.Vault = on
 	h.cfg.Repos["app"].Vars = map[string]string{"ACCOUNT": "from-config", "REGION": "us"}
 	h.opts.Vault = vault
 	return h
@@ -119,7 +119,7 @@ func TestExecute_AJobThatReadsAVariableFailsRetryablyWhileTheVaultIsDown(t *test
 	if res.ErrorCode != protocol.ErrSecretBackend || res.State != protocol.StateFailed || !res.ErrorCode.Retryable() {
 		t.Fatalf("got %s/%s (%s), want failed with a retryable E_SECRET_BACKEND", res.State, res.ErrorCode, res.ErrorMsg)
 	}
-	if !strings.Contains(res.ErrorMsg, "openvault service") || !strings.Contains(res.ErrorMsg, "variables") {
+	if !strings.Contains(res.ErrorMsg, "vault service") || !strings.Contains(res.ErrorMsg, "variables") {
 		t.Errorf("message = %q, want what could not be read and the command that starts the service", res.ErrorMsg)
 	}
 	if strings.Contains(res.ErrorMsg, "service.sock") {
