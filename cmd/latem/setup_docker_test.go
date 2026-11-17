@@ -60,7 +60,7 @@ func setupJSON(t *testing.T, dir string) readiness.Plan {
 }
 
 // doctor's docker.daemon names the engine's fix, as the plan does, and not
-// Docker Desktop's `open -a Docker` on a Mac that runs Kiri (A100).
+// Docker Desktop's `open -a Docker` on a Mac that runs Kiri (A106).
 func TestDoctor_ADeadAgentSocketNamesTheEnginesFix(t *testing.T) {
 	dir := privateDir(t)
 	d := newTestDoctor("darwin", dir, map[string]fakeCmd{"docker --version": {out: "Docker version 29.0.0, build x"}}, testConfig(dir), nil)

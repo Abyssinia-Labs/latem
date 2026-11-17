@@ -69,7 +69,7 @@ func advertItem(it Item, jobs int) protocol.ReadinessItem {
 	case it.ID == itemMovingRefs:
 		out.Have = ""
 	case it.ID == ItemDockerAgent:
-		// Its own words name a socket's path, which stays here (A100).
+		// Its own words name a socket's path, which stays here (A106).
 		out.Have = "nothing answers"
 	}
 	count := ""

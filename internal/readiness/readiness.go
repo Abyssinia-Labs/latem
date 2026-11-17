@@ -61,7 +61,7 @@ type Input struct {
 	// Vault is what this machine has of OpenVault, which decides what closes
 	// a secret or a variable no store here holds (A97).
 	Vault Vault
-	// Docker is the daemon the agent's docker runners use (A100).
+	// Docker is the daemon the agent's docker runners use (A106).
 	Docker Docker
 }
 
@@ -881,7 +881,7 @@ func proofOf(d definition, tc system.Toolchains, r *Runner, dk Docker) []Probe {
 		if r != nil && r.Executor == needs.ExecutorDocker {
 			// The agent's daemon, not the context's: the command follows
 			// DOCKER_HOST before its context, and the agent reads nothing else
-			// (A100).
+			// (A106).
 			p := Probe{Title: "Docker answers", Argv: []string{"docker", "info", "--format", "{{.ServerVersion}}"}}
 			if dk.Host != "" {
 				p.Title = "Docker answers where the agent looks"

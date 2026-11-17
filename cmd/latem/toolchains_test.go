@@ -38,7 +38,7 @@ type fakeMachine struct {
 	vault     *fakeOpenVault
 	vaultHere bool
 	then      map[string]func()
-	// docker is the agent's daemon as agentDocker would find it (A100); nil
+	// docker is the agent's daemon as agentDocker would find it (A106); nil
 	// is not asked.
 	docker *readiness.Docker
 }

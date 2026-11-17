@@ -83,7 +83,7 @@ type doctor struct {
 	loadCfg   func() (*config.Config, error)
 	newDocker func(docker.Options) (dockerProbe, error)
 	// agentDocker reads, when the daemon does not answer, what names its fix
-	// (A100). Nil keeps the generic one.
+	// (A106). Nil keeps the generic one.
 	agentDocker func(ctx context.Context) readiness.Docker
 	newSecrets  func(secrets.Options) (secretResolver, error)
 	sameFS      func(mirrorDir, workDir string) error
@@ -1500,7 +1500,7 @@ func (d *doctor) installCommand(tool string) string {
 }
 
 // daemonDown is docker.daemon failing, with the fix setup's plan names for
-// the engine the `docker` command reaches (A100): Docker Desktop's
+// the engine the `docker` command reaches (A106): Docker Desktop's
 // `open -a Docker` is no fix on a Mac that runs Kiri or OrbStack.
 func (d *doctor) daemonDown(ctx context.Context, level func(id, title, detail string, fix ...string) check, detail string) check {
 	if d.agentDocker == nil {

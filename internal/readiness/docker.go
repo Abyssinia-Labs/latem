@@ -7,7 +7,7 @@ import (
 )
 
 // Docker is the daemon a docker runner's jobs go to, as setup found it
-// (A100). The agent dials DOCKER_HOST, or else the system socket, and never
+// (A106). The agent dials DOCKER_HOST, or else the system socket, and never
 // reads `docker context`; the `docker` command follows the context. So the
 // command can answer while the agent reaches nothing, which is what an engine
 // other than Docker Desktop leaves behind until the system socket points at
@@ -67,7 +67,7 @@ func dockerAgentItem(d Docker, h system.Host, jobs []string) []Item {
 // DockerAgentItem is what stands between a docker runner and its daemon, and
 // false when the daemon answers or nobody asked. It names the fix for the
 // engine the `docker` command reaches, which is the one a person is running.
-// doctor says the same (A100).
+// doctor says the same (A106).
 func DockerAgentItem(d Docker, h system.Host) (Item, bool) {
 	if !d.Asked || d.Answers {
 		return Item{}, false

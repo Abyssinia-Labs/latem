@@ -23,7 +23,7 @@ const agentDockerWait = 5 * time.Second
 // at every boot and points the system socket at Docker Desktop's own.
 const desktopHelperPlist = "/Library/LaunchDaemons/com.docker.socket.plist"
 
-// agentDocker asks the daemon the agent's docker runners will use (A100): the
+// agentDocker asks the daemon the agent's docker runners will use (A106): the
 // one client.FromEnv resolves to, DOCKER_HOST or else the system socket, never
 // the `docker` command's context. It runs once per plan, and the agent's plan
 // is made every 15 minutes (A70), so it is one ping when Docker answers. Only
