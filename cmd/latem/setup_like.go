@@ -211,7 +211,7 @@ func setupLike(cmd *cobra.Command, p *prompter, m likeMachine, cfg *config.Confi
 	}
 
 	if len(aliasLines) > 0 {
-		yes, err := ask(fmt.Sprintf("%s's label aliases. %s", m.name, likeAliasWarning), aliasLines)
+		yes, err := ask(fmt.Sprintf("%s's label aliases. %s", m.name, readiness.AliasWarning), aliasLines)
 		if err != nil {
 			return res, err
 		}
@@ -253,11 +253,6 @@ func setupLike(cmd *cobra.Command, p *prompter, m likeMachine, cfg *config.Confi
 	}
 	return res, nil
 }
-
-// likeAliasWarning is said before an alias --like copies is written. It is
-// why an alias is the person's to agree to (A100).
-const likeAliasWarning = "An alias sends this machine every job of its repositories that asks for the label, " +
-	"and tells the control plane to send them here."
 
 // likeLine is the command a person types at a terminal to finish what --like
 // left: setup again, which writes nothing twice and asks only what is left.

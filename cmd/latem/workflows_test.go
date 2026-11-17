@@ -11,6 +11,7 @@ import (
 	"testing/fstest"
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 )
 
@@ -227,7 +228,7 @@ func TestWorkflowsCheck_FixWritesTheAliasOnAYesAndTheAllowlist(t *testing.T) {
 	// What it asks, exactly as it will be written, before writing it. What
 	// it prints after the answer is the off-terminal test's to read: the
 	// screen's last lines can still be in the terminal when it closes.
-	asked := aliasWarning + "\r\n" +
+	asked := readiness.AliasWarning + "\r\n" +
 		"  [label_aliases] blacksmith-2vcpu-ubuntu-2204 = [\"linux\"]\r\n  [label_aliases] blacksmith-4vcpu-ubuntu-2404 = [\"linux\"]\r\n" + aliasQuestion
 	if !strings.Contains(out, asked) {
 		t.Errorf("output lacks %q:\n%s", asked, out)

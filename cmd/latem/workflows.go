@@ -24,6 +24,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/config"
 	"github.com/Abyssinia-Labs/latem/internal/needs"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/registry"
 	"github.com/Abyssinia-Labs/latem/internal/repovars"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
@@ -296,11 +297,6 @@ func checkAndReport(cmd *cobra.Command, cfg *config.Config, target checkTarget, 
 	return nil
 }
 
-// aliasWarning is said before a [label_aliases] line is written, by --fix
-// and by setup (A100). It is why an alias is the person's to agree to.
-const aliasWarning = "An alias sends this machine every job of its repositories that asks for the label, " +
-	"and tells the control plane to send them here."
-
 // aliasAnswer is what came of asking about the aliases --fix would write.
 type aliasAnswer struct {
 	lines []string // the [label_aliases] lines, as config.toml will read them
@@ -331,7 +327,7 @@ func askAboutAliases(cmd *cobra.Command, rep checkReport) (aliasAnswer, error) {
 		a.notOne = notOne
 		return a, nil
 	}
-	printf(out, "\n%s\n", aliasWarning)
+	printf(out, "\n%s\n", readiness.AliasWarning)
 	for _, l := range indented(a.lines) {
 		printf(out, "%s\n", l)
 	}
@@ -491,6 +487,9 @@ type jobReport struct {
 	// fromVault says a name it reads is held by OpenVault alone (A97).
 	vars      []string
 	fromVault bool
+	// aliases are the labels it asks for that no runner carries, each with
+	// the alias --fix suggests for it (A101).
+	aliases map[string][]string
 	// artifactsFrom is the jobs whose uploads its downloads read (A84).
 	artifactsFrom []string
 	environment   string
@@ -964,6 +963,16 @@ func checkJob(
 
 	jr.labels, jr.unisolated = job.RunsOn, job.RequiresIsolation
 	jr.runner, jr.carrier = checkRunner(cfg, job, rep, fail)
+	if jr.carrier == "" {
+		for _, l := range job.RunsOn {
+			if to, ok := rep.aliases[l]; ok {
+				if jr.aliases == nil {
+					jr.aliases = map[string][]string{}
+				}
+				jr.aliases[l] = to
+			}
+		}
+	}
 	checkSecrets(t, inv, job, &jr)
 	checkJobVars(fsys, w, pj.Key, t, set, job.Environment, &jr)
 	return jr

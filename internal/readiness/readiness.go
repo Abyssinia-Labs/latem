@@ -12,6 +12,7 @@ package readiness
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -145,6 +146,10 @@ type Job struct {
 	// FromVault: a name it reads is held by the vault alone, so reading the
 	// vault is what gives it one (A97).
 	FromVault bool
+	// Aliases are the labels it asks for that no runner here carries, each
+	// with the labels of the runner its name says should take it: the
+	// [label_aliases] entry that brings it here (A101).
+	Aliases map[string][]string
 }
 
 // Image is a docker runner's image.
@@ -237,6 +242,8 @@ const (
 	ItemRunsOn  = "runs-on-labels"
 	itemSecrets = "secrets-"
 	itemVars    = "vars-"
+	// itemLabelAlias is followed by the label (A101).
+	itemLabelAlias = "label-alias-"
 	// The vault's, the last followed by a repository (A97). Each was
 	// openvault-… before latem vault was renamed (A104).
 	itemVaultOn      = "vault-on"
@@ -270,6 +277,8 @@ type Change struct {
 	Runner string `json:"runner,omitempty"`
 	Key    string `json:"key,omitempty"`
 	Value  string `json:"value,omitempty"`
+	// Labels are what an alias maps Key onto (A101).
+	Labels []string `json:"labels,omitempty"`
 	// Line is how it reads, for a person.
 	Line string `json:"line"`
 }
@@ -288,7 +297,15 @@ const (
 	// names. It sends the machine every job that asks for it, so only a
 	// person at a terminal says yes to it (A107).
 	ChangeRunsOnLabel = "runs-on-label"
+	// ChangeLabelAlias is [label_aliases] Key = Labels (A101). Like the two
+	// [actions] settings, it is a person's to agree to at a terminal (A100).
+	ChangeLabelAlias = "label-alias"
 )
+
+// AliasWarning is said before a [label_aliases] entry is written (A100): it is
+// why an alias is the person's to agree to.
+const AliasWarning = "An alias sends this machine every job of its repositories that asks for the label, " +
+	"and tells the control plane to send them here."
 
 // Probe is one command that has to work in a step's environment.
 type Probe struct {
@@ -393,6 +410,7 @@ func kindOn(d definition, jobs []Job, in Input) Kind {
 	if executor == needs.ExecutorNative {
 		k.Items = append(k.Items, wiring(k, reports, tc, r)...)
 	}
+	k.Items = append(k.Items, aliasItems(jobs)...)
 	k.Items = append(k.Items, settings(jobs, executor)...)
 	if !k.On && d.label == "" && r != nil && r.Executor == needs.ExecutorNative {
 		k.Items = append(k.Items, runsOnItem(k.Title, jobs, r)...)
@@ -499,6 +517,11 @@ func runsOnItem(title string, jobs []Job, r *Runner) []Item {
 		}
 		var mine []string
 		for _, l := range j.Labels {
+			// A label an alias would bring here is the alias item's: an
+			// alias names a vendor's label once, for every runner (A101).
+			if _, aliased := j.Aliases[l]; aliased {
+				continue
+			}
 			if !hasLabel(r.Labels, l) {
 				mine = append(mine, l)
 			}
@@ -661,6 +684,42 @@ func hasHome(tc system.Toolchains, major int, home string) bool {
 	return home != "" && slices.ContainsFunc(tc.JDKHomes, func(j system.JDKInstall) bool {
 		return j.Major == major && j.Home == home
 	})
+}
+
+// aliasItems is one item for each label these jobs ask for that no runner here
+// carries and whose name says which runner should (A101): the alias that
+// brings them here. Without it a kind can look ready and never be sent its
+// jobs. It is a person's to agree to, so it carries AliasWarning.
+func aliasItems(jobs []Job) []Item {
+	var out []Item
+	at := map[string]int{}
+	for _, j := range jobs {
+		for _, label := range slices.Sorted(maps.Keys(j.Aliases)) {
+			n, seen := at[label]
+			if !seen {
+				n = len(out)
+				at[label] = n
+				targets := j.Aliases[label]
+				line := fmt.Sprintf("[label_aliases] %q = %s", label, quotedList(targets))
+				out = append(out, Item{ID: itemLabelAlias + label, Title: "a label alias for " + label,
+					Have: "no runner here carries it", Warning: AliasWarning,
+					Config: []Change{{What: ChangeLabelAlias, Key: label, Labels: slices.Clone(targets), Line: line}}})
+			}
+			if !slices.Contains(out[n].Jobs, j.Ref) {
+				out[n].Jobs = append(out[n].Jobs, j.Ref)
+			}
+		}
+	}
+	return out
+}
+
+// quotedList is labels as a TOML array of strings.
+func quotedList(labels []string) string {
+	q := make([]string, len(labels))
+	for i, l := range labels {
+		q[i] = fmt.Sprintf("%q", l)
+	}
+	return "[" + strings.Join(q, ", ") + "]"
 }
 
 // settings is what this machine refuses of these jobs until config.toml says
