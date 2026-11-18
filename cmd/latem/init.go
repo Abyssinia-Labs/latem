@@ -136,6 +136,11 @@ type initParams struct {
 	// Docker adds a linux docker runner on macOS, beside the native one.
 	// Linux always has one; it is the only executor there.
 	Docker bool
+	// DockerHost is [docker] host, the socket of an engine that does not
+	// answer at the system socket (A111); empty writes no [docker] table.
+	DockerHost string
+	// DockerName names the docker runner; empty is "linux".
+	DockerName string
 	// Image is the docker runner's default_image; empty is latem-ubuntu.
 	Image string
 	// DockerConcurrency is the docker runner's concurrency, capacity's

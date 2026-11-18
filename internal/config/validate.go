@@ -46,6 +46,7 @@ func validate(cfg *Config, md *toml.MetaData, opts Options) []error {
 	problems = append(problems, validateRepos(cfg)...)
 	problems = append(problems, validateRunners(cfg)...)
 	problems = append(problems, validateSecrets(cfg)...)
+	problems = append(problems, validateDockerHost(cfg, opts)...)
 	problems = append(problems, validateLabelAliases(cfg)...)
 	if !opts.skipFilesystem {
 		problems = append(problems, validateFilesystem(cfg)...)
@@ -490,6 +491,40 @@ func validateDocker(d *DockerRunner, label string) []error {
 	}
 	problems = append(problems, checkMinFree(&d.MinFreeGB, DefaultDockerMinFreeGB, label, "docker")...)
 	return problems
+}
+
+// validateDockerHost accepts a Unix socket and nothing else, and writes the
+// value back as `unix://<absolute path>` (A111).
+//
+// A tcp:// daemon is refused rather than passed through. Without TLS it is
+// root on this machine for anyone who can reach the port, and with TLS it
+// needs a certificate directory this key does not carry; DOCKER_HOST, with
+// DOCKER_CERT_PATH beside it, still reaches one. Every engine latem knows on a
+// Mac or on Linux listens on a socket.
+func validateDockerHost(cfg *Config, opts Options) []error {
+	raw := cfg.Docker.Host
+	if raw == "" {
+		return nil
+	}
+	fail := func(why string) []error {
+		return []error{fmt.Errorf("docker.host is %q; %s", raw, why)}
+	}
+	path, isUnix := strings.CutPrefix(raw, "unix://")
+	if !isUnix && strings.Contains(raw, "://") {
+		return fail(`it must be a Unix socket, "unix:///path/to/docker.sock" — a tcp:// daemon is reached through DOCKER_HOST, with its TLS settings beside it`)
+	}
+	if strings.ContainsRune(path, 0) {
+		return fail("the path contains a NUL byte")
+	}
+	expanded, err := expandPath(path, opts.Home)
+	if err != nil {
+		return fail(err.Error())
+	}
+	if !filepath.IsAbs(expanded) {
+		return fail(`the socket's path must be absolute, "unix:///Users/me/.colima/default/docker.sock"`)
+	}
+	cfg.Docker.Host = "unix://" + filepath.Clean(expanded)
+	return nil
 }
 
 func validateTart(t *TartRunner, label string) []error {

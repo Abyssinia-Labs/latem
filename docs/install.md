@@ -92,17 +92,29 @@ that is already done, so it is safe to run again:
    [`latem-ubuntu`](../images/ubuntu/README.md) pinned by digest (`--image`
    names another).
 
-   The agent finds Docker at `DOCKER_HOST`, or else at `/var/run/docker.sock`,
-   and never reads `docker context`. On a Mac any engine that answers there
-   will do: Docker Desktop, Kiri, OrbStack, Colima or
-   Rancher Desktop. Docker Desktop links the system socket to itself. Kiri does
-   with `kiri setup --docker-socket`, OrbStack and Rancher Desktop when they
-   may use admin rights, and Colima only by hand. If the `docker` command
-   answers and the agent's socket does not, setup and doctor say so and name
-   the fix for the engine they find. Moving from Docker Desktop to another
-   engine, disable Docker Desktop's helper too (`sudo launchctl disable
-   system/com.docker.socket`) or uninstall it: at every boot the helper points
-   `/var/run/docker.sock` back at Docker Desktop.
+   The agent finds Docker at config.toml's `[docker] host`, or else at
+   `DOCKER_HOST`, or else at `/var/run/docker.sock`, and never reads `docker
+   context`. Any engine will do: Docker Desktop, Colima, OrbStack, Kiri or
+   Rancher Desktop. When nothing answers at `/var/run/docker.sock` and one of
+   them answers at its own socket (`~/.colima/default/docker.sock`,
+   `~/.orbstack/run/docker.sock`, `~/.kiri/run/docker.sock`,
+   `~/.rd/docker.sock`, `~/.docker/run/docker.sock`, or the `docker` command's
+   context), setup writes that socket into config.toml:
+
+   ```toml
+   [docker]
+   host = "unix:///Users/me/.colima/default/docker.sock"
+   ```
+
+   No sudo, no link to `/var/run/docker.sock`, and nothing in the agent's
+   service definition, which `latem service install` rewrites whole. A native
+   step is given the same address as `DOCKER_HOST`, so a job that runs
+   `docker buildx` on the Mac reaches the engine the linux runner uses.
+
+   On a machine that already has a config.toml, `latem setup apply
+   no-linux-runner` writes the `[docker]` table and the linux runner, and
+   `latem setup apply docker-agent` writes the table when the agent's daemon
+   has stopped answering and another engine answers at its own socket.
 2. **repositories** — adds the repositories `--repo owner/name` names, or on
    a terminal with none configured asks which, and checks each one's
    workflows without a checkout: how many jobs this machine can run, why not
@@ -188,6 +200,23 @@ two settings that give something up (`allow_unisolated` and
 `require_pinned = false`), which only you, at a terminal, can write. The agent
 then stops and asks you. [Commands](commands.md#latem-setup-apply-closing-what-is-in-the-way-from-a-shell)
 has a transcript.
+
+### A `DOCKER_HOST` added to the service by hand
+
+Before `[docker] host`, the one way to reach Colima or OrbStack without sudo
+was to add `DOCKER_HOST` to `~/Library/LaunchAgents/com.latem.agent.plist` (or
+`Environment=DOCKER_HOST=…` to the systemd unit). latem writes neither, and
+`latem service install` rewrites the file from scratch, so the next install
+dropped the line and the agent lost Docker. `latem doctor` names such a line
+(`service.docker_host`). To move it into config.toml, either:
+
+```console
+$ latem setup apply docker-host    # writes [docker] host from the agent's DOCKER_HOST
+$ latem service install            # carries it to [docker] host itself, then rewrites the definition
+```
+
+Once `[docker] host` is written the agent no longer reads the service's
+`DOCKER_HOST`, so the install that drops it changes nothing.
 
 ## Verify what you installed
 

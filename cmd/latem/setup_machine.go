@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
+	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
@@ -98,8 +101,11 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 		}
 		in.Runners = append(in.Runners, rr)
 	}
-	if m.deps.docker != nil && slices.ContainsFunc(cfg.Runners, func(r *config.Runner) bool { return r.Executor == config.ExecutorDocker }) {
-		in.Docker = m.deps.docker(ctx)
+	if m.deps.docker != nil {
+		// Asked whether or not a docker runner is configured: a machine with
+		// none is told whether one would work, and where (A111).
+		in.Docker = m.deps.docker(ctx, cfg.Docker.Host)
+		in.Docker.Asked = slices.ContainsFunc(cfg.Runners, func(r *config.Runner) bool { return r.Executor == config.ExecutorDocker })
 	}
 	for _, w := range imageWants(ctx, cfg, m.deps) {
 		in.Images = append(in.Images, readiness.Image{Runner: w.runner.Name, Ref: strings.TrimPrefix(w.gap.Missing, "its image, ")})
@@ -516,6 +522,27 @@ func tellAgent(paths config.Paths) agentHeard {
 	return heard
 }
 
+// dockerRunnerSlots is the concurrency a docker runner setup adds is given:
+// capacity's recommendation for the daemon at config.toml's [docker] host, or
+// else where the agent's service would find one (A63, A111), or 0, the
+// template's two, when no daemon answers there. Without the daemon's own
+// figures the recommendation would be the whole Mac's, and Docker's VM is
+// usually half of it or less. A variable so a test measures nothing.
+var dockerRunnerSlots = func(cfg *config.Config, name string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sys := system.New(system.Options{})
+	host, _ := dockerhost.Resolve(cfg.Docker.Host, serviceEnv(sys))
+	if dockerhost.SocketPath(host) == "" {
+		host = cfg.Docker.Host
+	}
+	m := measureMachine(ctx, sys, host)
+	if m.CPUs == 0 || m.MemoryGB == 0 || m.Docker == nil {
+		return 0
+	}
+	return capacity.Recommend(m, []*config.Runner{{Name: name, Executor: config.ExecutorDocker}})[0].Recommended
+}
+
 func applyChange(body string, cfg *config.Config, c readiness.Change) (string, error) {
 	actions := []string{"actions"}
 	switch c.What {
@@ -552,6 +579,14 @@ func applyChange(body string, cfg *config.Config, c readiness.Change) (string, e
 	case readiness.ChangeVault:
 		secretsTable := []string{"secrets"}
 		return setTableKey(body, secretsTable, secretsTable, "vault", "true")
+	case readiness.ChangeDockerHost:
+		docker := []string{"docker"}
+		return setTableKey(body, docker, docker, "host", tomlString(c.Value))
+	case readiness.ChangeDockerRunner:
+		var b strings.Builder
+		writeDockerRunner(&b, initParams{GOARCH: runtime.GOARCH, DockerName: c.Value,
+			DockerConcurrency: dockerRunnerSlots(cfg, c.Value)}, dockerEngineVM(cfg.Docker.Host))
+		return insertAfter(body, []string{"runner"}, b.String()), nil
 	case readiness.ChangeNewRunner:
 		return insertAfter(body, []string{"runner"}, fmt.Sprintf(`[[runner]]
 name        = %s

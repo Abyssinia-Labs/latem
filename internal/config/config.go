@@ -175,6 +175,9 @@ type Config struct {
 	Runners       []*Runner        `toml:"runner"`
 	Secrets       Secrets          `toml:"secrets"`
 	Actions       Actions          `toml:"actions"`
+	// Docker is the machine's Docker daemon, which every docker runner, the
+	// volume caches and a native step's `docker` reach (A111).
+	Docker Docker `toml:"docker"`
 	// LabelAliases maps a workflow's runs-on label onto this machine's runner
 	// labels (A50): `"blacksmith-4vcpu-ubuntu-2404" = ["linux"]`. GitHub's own
 	// hosted labels — ubuntu-latest, macos-latest and their versions — map
@@ -222,6 +225,26 @@ type Actions struct {
 // `false` zero value would silently accept moving references on every machine
 // whose config predates the block.
 func (a Actions) PinningRequired() bool { return a.RequirePinned == nil || *a.RequirePinned }
+
+// Docker says where this machine's Docker daemon is (A111).
+//
+// It is the machine's and not a runner's. The agent holds one connection for
+// every docker runner's containers and volumes, a native runner's steps run
+// `docker` against the same engine, and doctor and setup ask one daemon. A
+// [runner.docker] key would have to be repeated on every docker runner, could
+// disagree between them, and would have no place on a native runner at all.
+//
+// It lives here rather than in the service definition because `latem service
+// install` writes that whole, from nothing the operator added by hand: a
+// DOCKER_HOST put into the LaunchAgent or the systemd unit was lost at the
+// next install.
+type Docker struct {
+	// Host is the daemon's socket, `unix:///Users/me/.colima/default/docker.sock`.
+	// A bare absolute path, or one under `~/`, is read as that socket. Empty
+	// leaves the address to DOCKER_HOST in the agent's environment, and then
+	// to the system socket, /var/run/docker.sock.
+	Host string `toml:"host"`
+}
 
 // Machine is display and identity, not behaviour.
 type Machine struct {

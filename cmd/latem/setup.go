@@ -10,14 +10,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
-	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/broker/remote"
 	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/readiness"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
@@ -136,13 +135,16 @@ Exit codes:
 // is a seam, because the machine running the tests may be a build machine
 // whose own agent must not be reinstalled, restarted or re-registered.
 type setupDeps struct {
-	dockerAnswers func(ctx context.Context) bool
-	service       setupService
-	register      func(cmd *cobra.Command, f registerFlags) error
-	doctor        func(cmd *cobra.Command) error
-	toolchains    toolchainDeps
-	// measure is the machine, for the docker runner's concurrency (A63).
-	measure func(ctx context.Context) capacity.Machine
+	// findDocker is the daemon a docker runner would use, and the socket to
+	// write as [docker] host when it is an engine's own (A111).
+	findDocker func(ctx context.Context) (host string, ok bool)
+	service    setupService
+	register   func(cmd *cobra.Command, f registerFlags) error
+	doctor     func(cmd *cobra.Command) error
+	toolchains toolchainDeps
+	// measure is the machine, for the docker runner's concurrency (A63),
+	// with Docker asked at dockerHost (A111).
+	measure func(ctx context.Context, dockerHost string) capacity.Machine
 }
 
 type setupService interface {
@@ -153,13 +155,13 @@ type setupService interface {
 
 var newSetupDeps = func() setupDeps {
 	return setupDeps{
-		dockerAnswers: dockerAnswers,
-		service:       systemService{sys: system.New(system.Options{})},
-		register:      runRegister,
-		doctor:        runDoctorFor,
-		toolchains:    realToolchainDeps(),
-		measure: func(ctx context.Context) capacity.Machine {
-			return measureMachine(ctx, system.New(system.Options{}))
+		findDocker: findDocker,
+		service:    systemService{sys: system.New(system.Options{})},
+		register:   runRegister,
+		doctor:     runDoctorFor,
+		toolchains: realToolchainDeps(),
+		measure: func(ctx context.Context, dockerHost string) capacity.Machine {
+			return measureMachine(ctx, system.New(system.Options{}), dockerHost)
 		},
 	}
 }
@@ -190,21 +192,27 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	step("1/6 config")
 	if _, err := os.Stat(paths.File); os.IsNotExist(err) {
 		docker := runtime.GOOS != "darwin"
-		if runtime.GOOS == "darwin" && !f.noDocker {
-			docker = deps.dockerAnswers(ctx)
+		var dockerHost string
+		if docker || !f.noDocker {
+			// An engine at a socket of its own, Colima's or OrbStack's, is
+			// written down as [docker] host rather than left to a
+			// DOCKER_HOST the service would not keep (A111).
+			var found bool
+			dockerHost, found = deps.findDocker(ctx)
+			docker = docker || found
 		}
 		slots, sized := 0, ""
 		if docker {
 			// The docker runner takes as many jobs at once as Docker has room
 			// for (A63), not a fixed two: Docker Desktop's VM on an 8 GB Mac
 			// holds one.
-			if m := deps.measure(ctx); m.CPUs > 0 && m.MemoryGB > 0 {
+			if m := deps.measure(ctx, dockerHost); m.CPUs > 0 && m.MemoryGB > 0 {
 				a := capacity.Recommend(m, []*config.Runner{{Name: "linux", Executor: config.ExecutorDocker}})[0]
 				slots = a.Recommended
 				sized = fmt.Sprintf("  linux runner: concurrency %d — %s\n", slots, a.Why)
 			}
 		}
-		if err := writeSetupConfig(paths, f, docker, slots); err != nil {
+		if err := writeSetupConfig(paths, f, docker, dockerHost, slots); err != nil {
 			return err
 		}
 		changed = true
@@ -214,11 +222,14 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 			if docker {
 				printf(out, ", linux (docker)")
 			} else if !f.noDocker {
-				printf(out, " — no Docker daemon answered, so no linux runner; start Docker and add one by hand")
+				printf(out, " — no Docker daemon answered, so no linux runner; start Docker, then `latem setup apply %s`", readiness.ItemNoLinuxRunner)
 			}
 			printf(out, "\n")
 		} else {
 			printf(out, "  runners: linux (docker)\n")
+		}
+		if dockerHost != "" {
+			printf(out, "  docker: [docker] host = %s, where %s answers\n", tomlString(dockerHost), dockerEngine(dockerHost))
 		}
 		printf(out, "%s", sized)
 	} else if err != nil {
@@ -563,7 +574,7 @@ func registered(cfg *config.Config) bool {
 
 // writeSetupConfig is `latem init` with no repositories, which setup's config
 // step is: the same template, the same modes, the same proof that it loads.
-func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerSlots int) error {
+func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerHost string, dockerSlots int) error {
 	name := f.name
 	if name == "" {
 		if name = defaultMachineName(); name == "" {
@@ -572,7 +583,7 @@ func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerSlots
 	}
 	body := renderInitConfig(initParams{
 		Machine: name, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Refs: []string{"main"},
-		Docker: docker, Image: f.image, DockerConcurrency: dockerSlots,
+		Docker: docker, DockerHost: dockerHost, Image: f.image, DockerConcurrency: dockerSlots,
 	})
 	if _, err := config.Parse([]byte(body), config.Options{Dir: paths.Dir}); err != nil {
 		return fmt.Errorf("the config setup would write does not load — this is a bug in `latem setup`:\n%w", err)
@@ -586,17 +597,12 @@ func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerSlots
 	return writeFileAtomic(paths.File, []byte(body), 0o600)
 }
 
-// dockerAnswers pings the daemon the docker executor would use.
-func dockerAnswers(ctx context.Context) bool {
-	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
-	if err != nil {
-		return false
+// dockerEngine names the engine at a socket, for a person.
+func dockerEngine(host string) string {
+	if e := readiness.Engine(host); e != "" {
+		return e
 	}
-	defer func() { _ = cli.Close() }()
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	_, err = cli.Ping(ctx)
-	return err == nil
+	return "a Docker daemon"
 }
 
 // systemService is the real service manager, through internal/system.
@@ -609,6 +615,9 @@ func (s systemService) Status(ctx context.Context) (system.ServiceState, error) 
 func (s systemService) Install(ctx context.Context, w io.Writer) error {
 	spec, err := serviceSpec(s.sys, "")
 	if err != nil {
+		return err
+	}
+	if err := carryDockerHost(s.sys, w, false); err != nil {
 		return err
 	}
 	rep, err := s.sys.InstallService(ctx, spec, system.InstallOptions{})

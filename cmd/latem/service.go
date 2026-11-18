@@ -12,6 +12,7 @@ import (
 
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
@@ -79,6 +80,9 @@ review or for a configuration management tool.
 				return err
 			}
 
+			if err := carryDockerHost(sys, cmd.OutOrStdout(), dryRun); err != nil {
+				return err
+			}
 			rep, err := sys.InstallService(cmd.Context(), spec, system.InstallOptions{
 				DryRun:     dryRun,
 				SkipLinger: skipLinger,
@@ -383,6 +387,46 @@ func serviceSpec(sys *system.System, execPath string) (system.ServiceSpec, error
 		spec.StopTimeout = system.StopTimeoutFor(cfg.Agent.ShutdownGrace.Duration())
 	}
 	return spec, nil
+}
+
+// carryDockerHost moves a DOCKER_HOST added by hand to the installed service
+// definition into config.toml's [docker] host, before an install rewrites
+// the definition without it (A111). latem writes no DOCKER_HOST, so without
+// this an install, which doctor recommends to move a definition onto a new
+// revision, left an agent on Colima or OrbStack with no Docker. An edit that
+// would not load stops the install, since going on would lose the address.
+func carryDockerHost(sys *system.System, w io.Writer, dryRun bool) error {
+	host := sys.ServiceDockerHost()
+	if host == "" {
+		return nil
+	}
+	cfg, err := loadConfig()
+	switch {
+	case err != nil:
+		printf(w, "the installed definition sets DOCKER_HOST=%s, which the new one does not; "+
+			"config.toml does not load, so it was not carried to [docker] host\n\n", host)
+		return nil
+	case cfg.Docker.Host != "":
+		// The agent already reads config.toml's, before DOCKER_HOST.
+		return nil
+	case dockerhost.SocketPath(host) == "":
+		printf(w, "the installed definition sets DOCKER_HOST=%s, which the new one does not, and "+
+			"config.toml's [docker] host takes only a Unix socket; the agent will not have it\n\n", host)
+		return nil
+	case dryRun:
+		printf(w, "would write [docker] host = %s to %s, carried from the installed definition's DOCKER_HOST\n\n",
+			tomlString(host), configFile())
+		return nil
+	}
+	paths := config.DerivePaths(configDir())
+	docker := []string{"docker"}
+	if _, err := editConfig(paths, func(body string) (string, error) {
+		return setTableKey(body, docker, docker, "host", tomlString(host))
+	}); err != nil {
+		return fmt.Errorf("carrying DOCKER_HOST=%s from the installed definition to config.toml: %w", host, err)
+	}
+	printf(w, "carried DOCKER_HOST from the installed definition to %s: [docker] host = %s\n\n", paths.File, tomlString(host))
+	return nil
 }
 
 func printServiceReport(w io.Writer, rep system.ServiceReport, dryRun bool) {

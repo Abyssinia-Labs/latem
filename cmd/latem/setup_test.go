@@ -44,7 +44,12 @@ type setupRecorder struct {
 	registers int
 	doctors   int
 	docker    bool
-	machine   *fakeMachine
+	// dockerHost is the engine's socket findDocker reports, "" for the
+	// system's (A111).
+	dockerHost string
+	// measuredAt is the host the machine was measured at.
+	measuredAt string
+	machine    *fakeMachine
 }
 
 // fakeSetup routes setup's outward steps to fakes: registration still runs
@@ -55,8 +60,8 @@ func fakeSetup(t *testing.T, docker bool) *setupRecorder {
 	prev := newSetupDeps
 	newSetupDeps = func() setupDeps {
 		return setupDeps{
-			dockerAnswers: func(context.Context) bool { return rec.docker },
-			service:       rec.svc,
+			findDocker: func(context.Context) (string, bool) { return rec.dockerHost, rec.docker },
+			service:    rec.svc,
 			register: func(cmd *cobra.Command, f registerFlags) error {
 				rec.registers++
 				return runRegister(cmd, f)
@@ -67,7 +72,8 @@ func fakeSetup(t *testing.T, docker bool) *setupRecorder {
 				return nil
 			},
 			toolchains: rec.machine.deps(),
-			measure: func(context.Context) capacity.Machine {
+			measure: func(_ context.Context, dockerHost string) capacity.Machine {
+				rec.measuredAt = dockerHost
 				return capacity.Machine{CPUs: 8, MemoryGB: 16, Docker: &capacity.Docker{CPUs: 8, MemoryGB: 8}}
 			},
 		}

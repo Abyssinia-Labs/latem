@@ -129,6 +129,25 @@ whose jobs you would let that agent run. Without the line the tool refuses and
 names it. `latem run --changes`, typed by a person, needs no line: running it is
 the approval, as with `latem try`.
 
+**`[docker] host` is where this machine's Docker daemon is** (A111), for an
+engine that does not answer at `/var/run/docker.sock`: Colima, OrbStack, Kiri,
+Rancher Desktop.
+
+```toml
+[docker]
+host = "unix:///Users/me/.colima/default/docker.sock"
+```
+
+The agent dials it before `DOCKER_HOST` and the system socket, for every docker
+runner, the volume caches, doctor and setup, and gives it to native steps as
+`DOCKER_HOST`, beneath a runner's `[runner.native] env` and the job's own. It is
+the machine's, not a runner's: one engine serves every runner here. It takes a
+Unix socket only — `unix:///…`, an absolute path, or one under `~/` — because a
+`tcp://` daemon needs TLS settings this key does not carry; `DOCKER_HOST` still
+reaches one. `latem setup` writes it when it finds an engine's socket. Changing
+it needs a restart. It belongs here rather than in the agent's LaunchAgent or
+systemd unit, which `latem service install` rewrites whole.
+
 `warm_retention` (7 days unless set) is how long a warm workspace, one a job
 keeps with `workspace: warm`, stays on disk with no run using it. It needs a
 restart to change.

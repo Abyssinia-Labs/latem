@@ -55,6 +55,12 @@ LaunchAgent pointing its log destination at a directory nothing created, which
 launchd reports by failing to start and writing the reason to the file it could
 not open.
 
+latem writes no `DOCKER_HOST` into the definition: the agent's Docker daemon is
+config.toml's `[docker] host` (A111). An install that finds a `DOCKER_HOST`
+added to the installed definition by hand, while config.toml has no
+`[docker] host`, writes it there first and says so; `--dry-run` says it would.
+`--print` writes nothing.
+
 ## Exit codes
 
 Exit codes are contract:
@@ -189,6 +195,15 @@ that did not close: a command failed, the check failed (no label is written),
 or the answer was no. What came after it was not tried. An id the plan does
 not have is exit `2`, and the message lists the ids there are (RUNNER_SPEC
 A94).
+
+**The agent's Docker** has three items, each latem's to close by writing
+config.toml (A111):
+
+| Item | When | What it writes |
+|---|---|---|
+| `no-linux-runner` | no runner here takes Linux jobs, and a Docker daemon answers | the linux docker runner, sized for that daemon, and `[docker] host` first when the daemon is an engine's at its own socket (Colima's, OrbStack's, Kiri's) or a `DOCKER_HOST` the service carries |
+| `docker-agent` | a docker runner's daemon does not answer where the agent looks, and an engine answers at its own socket | `[docker] host` = that socket; with none answering, it says which engine to start |
+| `docker-host` | the agent reaches Docker through a `DOCKER_HOST` in its environment, usually added to the service by hand | `[docker] host` = that address, which `latem service install` cannot drop. Soft: nothing is in the way today |
 
 **A secret or a variable no store here holds is closed where it will be
 read** (A97). Setup looks at the vault first, and the item names the step in

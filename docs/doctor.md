@@ -49,6 +49,15 @@ Among the checks worth knowing about:
   and in `latem-ubuntu` no node. Volumes no run mounts again, an earlier
   latem's or an image's since rebuilt, are named with their
   `docker volume rm`.
+- **Where the agent's Docker is** (`docker.daemon`, A106, A111). The agent
+  dials `[docker] host`, else `DOCKER_HOST`, else `/var/run/docker.sock`, and
+  never `docker context`. When nothing answers there and an engine answers at
+  its own socket (Colima's, OrbStack's, Kiri's), the fix is `latem setup apply
+  docker-agent`, which writes that socket as `[docker] host` in config.toml —
+  no sudo, and nothing in the service definition. A `DOCKER_HOST` added to the
+  LaunchAgent or systemd unit by hand is a warning (`service.docker_host`):
+  `latem service install` drops it, and `latem setup apply docker-host` moves it
+  to config.toml first.
 - **FileVault**, which quietly falsifies "survives reboots". See below.
 - **Every configured repo, reachable with the credentials this machine has.**
   An agent started by launchd does not inherit your interactive ssh agent.

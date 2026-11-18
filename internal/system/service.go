@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -163,6 +164,45 @@ func DefinitionRevision(content string) int {
 		return 1
 	}
 	return n
+}
+
+var (
+	plistDockerHost   = regexp.MustCompile(`<key>DOCKER_HOST</key>\s*<string>([^<]*)</string>`)
+	systemdDockerHost = regexp.MustCompile(`(?m)^Environment="?DOCKER_HOST=([^"\s]*)"?\s*$`)
+)
+
+// DefinitionDockerHost is the DOCKER_HOST an installed unit or plist sets, or
+// "". latem never writes one: it is a line added by hand, which the next
+// `latem service install` drops, and doctor and setup offer to move it to
+// config.toml's [docker] host (A111).
+func DefinitionDockerHost(content string) string {
+	if m := plistDockerHost.FindStringSubmatch(content); m != nil {
+		return html.UnescapeString(strings.TrimSpace(m[1]))
+	}
+	if m := systemdDockerHost.FindStringSubmatch(content); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// ServiceDockerHost is [DefinitionDockerHost] of this machine's installed
+// definition, read from disk and nothing else: the address the service
+// manager gives the agent, whatever the shell asking has.
+func (s *System) ServiceDockerHost() string {
+	var path string
+	switch {
+	case s.IsMacOS():
+		path = LaunchAgentPath(s.home)
+	case s.IsLinux():
+		path = SystemdUnitPath(s.home)
+	default:
+		return ""
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // the agent's own service definition
+	if err != nil {
+		return ""
+	}
+	return DefinitionDockerHost(string(data))
 }
 
 var systemdTemplate = template.Must(template.New("unit").Parse(

@@ -322,6 +322,9 @@ type ServiceState struct {
 	// Revision is the installed definition's ServiceRevision, 0 when there
 	// is none on disk.
 	Revision int
+	// DockerHost is a DOCKER_HOST the installed definition sets, which
+	// latem never writes and `latem service install` drops (A111).
+	DockerHost string
 	// PID is the agent process, or 0 when the service manager did not name
 	// one. It is what lets a caller ask the operating system about the
 	// process — when it started, above all — without the agent having to
@@ -350,6 +353,7 @@ func (s *System) ServiceStatus(ctx context.Context) (ServiceState, error) {
 	if data, err := os.ReadFile(st.Path); err == nil {
 		st.Installed = true
 		st.Revision = DefinitionRevision(string(data))
+		st.DockerHost = DefinitionDockerHost(string(data))
 	} else if _, err := os.Stat(st.Path); err == nil {
 		// There and unreadable: installed, of a revision nobody can say.
 		st.Installed = true

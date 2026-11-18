@@ -623,3 +623,41 @@ func stepText(r ServiceReport) string {
 	}
 	return b.String()
 }
+
+// A DOCKER_HOST added by hand to a LaunchAgent or a systemd unit is read, so
+// that an install can carry it to config.toml before it rewrites the file
+// without it (A111). latem's own definitions carry none.
+func TestDefinitionDockerHost(t *testing.T) {
+	plist := `<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin</string>
+		<key>DOCKER_HOST</key>
+		<string>unix:///Users/me/.colima/default/docker.sock</string>
+	</dict>`
+	if got := DefinitionDockerHost(plist); got != "unix:///Users/me/.colima/default/docker.sock" {
+		t.Errorf("plist: %q", got)
+	}
+	for unit, want := range map[string]string{
+		"[Service]\nEnvironment=DOCKER_HOST=unix:///run/user/1000/docker.sock\n":     "unix:///run/user/1000/docker.sock",
+		"[Service]\nEnvironment=\"DOCKER_HOST=unix:///run/user/1000/docker.sock\"\n": "unix:///run/user/1000/docker.sock",
+		"[Service]\nEnvironment=PATH=/usr/bin\n":                                     "",
+	} {
+		if got := DefinitionDockerHost(unit); got != want {
+			t.Errorf("unit %q: %q, want %q", unit, got, want)
+		}
+	}
+	for _, spec := range []ServiceSpec{{ExecPath: "/usr/local/bin/latem", Home: "/Users/me", User: "me", LogDir: "/Users/me/.latem/logs"}} {
+		plist, err := spec.LaunchAgentPlist()
+		if err != nil {
+			t.Fatal(err)
+		}
+		unit, err := spec.SystemdUnit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if DefinitionDockerHost(plist) != "" || DefinitionDockerHost(unit) != "" {
+			t.Error("latem's own definition sets DOCKER_HOST")
+		}
+	}
+}

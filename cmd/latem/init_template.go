@@ -32,6 +32,9 @@ schema_version = %d
 name = %q
 
 `, config.SchemaVersion, p.Machine)
+	if p.DockerHost != "" {
+		writeDockerHost(&b, p.DockerHost)
+	}
 
 	b.WriteString(`# --- repos: the allowlist -------------------------------------------------
 #
@@ -89,7 +92,7 @@ concurrency = 1
 `, p.GOARCH)
 		if p.Docker {
 			b.WriteString("\n")
-			writeDockerRunner(&b, p, "Docker Desktop's Linux VM")
+			writeDockerRunner(&b, p, dockerEngineVM(p.DockerHost))
 		}
 	default:
 		writeDockerRunner(&b, p, "")
@@ -139,6 +142,32 @@ concurrency = 1
 // digest to put here.
 const defaultDockerImage = "ghcr.io/abyssinia-labs/latem-ubuntu:24.04@sha256:ea43a6e728814f5df5a65eb7fbd94e79a45cc48963d0c6040cccb2221cfc5bf1"
 
+// writeDockerHost is the [docker] table, for an engine whose socket is not
+// the system's (A111).
+func writeDockerHost(b *strings.Builder, host string) {
+	fmt.Fprintf(b, `# --- docker: where this machine's Docker daemon is ------------------------
+#
+# %s answers here, and nothing does at /var/run/docker.sock, where Docker
+# looks when nothing says otherwise. The agent dials this before DOCKER_HOST,
+# and a native step is given it as DOCKER_HOST. It lives here, not in the
+# agent's service, because "latem service install" rewrites the service whole.
+
+[docker]
+host = %s
+
+`, dockerEngine(host), tomlString(host))
+}
+
+// dockerEngineVM is where a Mac's docker runner runs its containers: the
+// Linux VM of the engine at host, which with no host is Docker Desktop's.
+func dockerEngineVM(host string) string {
+	e := "Docker Desktop"
+	if host != "" {
+		e = dockerEngine(host)
+	}
+	return e + "'s Linux VM"
+}
+
 // writeDockerRunner is the linux docker runner: the only runner on Linux, and
 // on a Mac the second one, beside native, when a Docker daemon answers.
 func writeDockerRunner(b *strings.Builder, p initParams, where string) {
@@ -149,6 +178,10 @@ func writeDockerRunner(b *strings.Builder, p initParams, where string) {
 	slots := p.DockerConcurrency
 	if slots == 0 {
 		slots = 2
+	}
+	name := p.DockerName
+	if name == "" {
+		name = "linux"
 	}
 	intro := "docker is the Linux executor (§13.1)."
 	if where != "" {
@@ -163,7 +196,7 @@ func writeDockerRunner(b *strings.Builder, p initParams, where string) {
 # 1000 and a writable $HOME, plus bash, git and ca-certificates.
 
 [[runner]]
-name        = "linux"
+name        = %q
 executor    = "docker"
 labels      = ["linux", %q, "docker"]
 concurrency = %d
@@ -175,7 +208,7 @@ concurrency = %d
   # mutable reference, so the digest it resolved to is always written to the
   # run log. Set this to refuse anything not named by digest instead.
   # require_pinned_images = true
-`, intro, p.GOARCH, slots, image)
+`, intro, name, p.GOARCH, slots, image)
 }
 
 func configSecretsName() string { return "secrets.env" }

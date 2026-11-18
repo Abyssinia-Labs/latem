@@ -5,25 +5,25 @@ import (
 	"fmt"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
-
 	"github.com/Abyssinia-Labs/latem/internal/capacity"
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
 // measureMachine is what capacity's recommendation is worked out from: this
 // machine's CPUs and memory, and what its Docker daemon is given when one
-// answers (A63).
-func measureMachine(ctx context.Context, sys *system.System) capacity.Machine {
+// answers (A63), at dockerHost, config.toml's [docker] host, when it is set
+// (A111).
+func measureMachine(ctx context.Context, sys *system.System, dockerHost string) capacity.Machine {
 	cpus, mem := sys.Resources(ctx)
-	return capacity.Machine{CPUs: cpus, MemoryGB: capacity.BytesToGB(mem), Docker: dockerShare(ctx)}
+	return capacity.Machine{CPUs: cpus, MemoryGB: capacity.BytesToGB(mem), Docker: dockerShare(ctx, dockerHost)}
 }
 
 // dockerShare is what the Docker daemon says it can use: on a Mac, the VM
 // Docker Desktop runs, which is usually half the Mac or less. Nil when no
 // daemon answers within a few seconds.
-func dockerShare(ctx context.Context) *capacity.Docker {
-	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+func dockerShare(ctx context.Context, host string) *capacity.Docker {
+	cli, err := dockerhost.NewClient(host)
 	if err != nil {
 		return nil
 	}
@@ -48,7 +48,7 @@ func (d *doctor) checkCapacity(ctx context.Context) []check {
 	}
 	measure := d.machine
 	if measure == nil {
-		measure = func(ctx context.Context) capacity.Machine { return measureMachine(ctx, d.sys) }
+		measure = func(ctx context.Context) capacity.Machine { return measureMachine(ctx, d.sys, d.dockerHost()) }
 	}
 	m := measure(ctx)
 	if m.CPUs == 0 || m.MemoryGB == 0 {
