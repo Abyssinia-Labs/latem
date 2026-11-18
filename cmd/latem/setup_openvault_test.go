@@ -243,3 +243,52 @@ func itemIn(t *testing.T, k readiness.Kind, id string) readiness.Item {
 	t.Fatalf("no item %s in %v", id, itemIDs(k))
 	return readiness.Item{}
 }
+
+// A110 (LAT-33): a machine that reads the vault and has no vault command is
+// offered latem vault from the tap, trusted first, which `setup apply` runs.
+// Joining the vault is the person's after it, as before.
+func TestSetupOpenVault_AVaultWantedAndNotInstalledIsInstalledFromTheTap(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{".github/workflows/deploy.yml": {Data: []byte(deployRepo)}})
+	noAgentRunning(t)
+	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nvault = true\n")
+	trust := "brew trust --formula " + readiness.VaultFormula
+	install := "brew install " + readiness.VaultFormula
+	rec.machine.gives[trust] = [2]string{"trusted", "/"}
+	rec.machine.gives[install] = [2]string{"latem-vault", "/opt/homebrew/bin"}
+	rec.machine.then = map[string]func(){install: func() { delete(rec.machine.notInstalled, "latem-vault") }}
+
+	k := kindIn(t, setupPlanIn(t, dir), "macos")
+	if got := itemIDs(k); !slices.Equal(got, []string{"vault-install", "vault-join"}) {
+		t.Fatalf("items %v, want the install, then the join", got)
+	}
+	_, stderr, err := applyIn(t, dir, "vault-install")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !slices.Equal(rec.machine.installs, []string{trust, install}) {
+		t.Errorf("ran %q, want the trust, then the install", rec.machine.installs)
+	}
+	if !strings.Contains(stderr, "vault-install: ran "+trust+"; "+install+"; closed") {
+		t.Errorf("stderr:\n%s", stderr)
+	}
+	if got := itemIDs(kindIn(t, setupPlanIn(t, dir), "macos")); !slices.Equal(got, []string{"vault-join"}) {
+		t.Errorf("items %v after the install, want the join", got)
+	}
+}
+
+// A110: without Homebrew there is nothing for latem to run; the item says so,
+// and is the person's.
+func TestSetupOpenVault_WithoutHomebrewTheInstallIsThePersons(t *testing.T) {
+	dir, rec := setupMachine(t, fstest.MapFS{".github/workflows/deploy.yml": {Data: []byte(deployRepo)}})
+	noAgentRunning(t)
+	rec.machine.notInstalled["brew"] = true
+	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nvault = true\n")
+
+	_, stderr, err := applyIn(t, dir, "vault-install")
+	if exitCode(err) != ExitNoTerminal || !strings.Contains(stderr, "https://brew.sh") {
+		t.Errorf("exit %d (%v)\n%s", exitCode(err), err, stderr)
+	}
+	if len(rec.machine.installs) != 0 {
+		t.Errorf("ran %q with no Homebrew", rec.machine.installs)
+	}
+}

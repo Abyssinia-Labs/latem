@@ -90,6 +90,9 @@ type Vault struct {
 	// Held are the configured repositories this device holds a collection
 	// for, when it answered.
 	Held []string `json:"held,omitempty"`
+	// Homebrew: brew is here, to install the vault with when it is wanted
+	// and not installed (A110). Only asked then.
+	Homebrew bool `json:"homebrew,omitempty"`
 }
 
 // command is the vault's command, by the name it was found by.
@@ -102,6 +105,19 @@ func (v Vault) command() string {
 
 // VaultCommand is the vault's command when none was found.
 const VaultCommand = "latem-vault"
+
+// VaultFormula is the vault's Homebrew formula, in Abyssinia Labs' tap
+// (A110).
+const VaultFormula = "abyssinia-labs/tap/latem-vault"
+
+// VaultInstall is what installs the vault with Homebrew, in order: a formula
+// from a tap that is not Homebrew's own is refused until it is trusted.
+func VaultInstall() [][]string {
+	return [][]string{{"brew", "trust", "--formula", VaultFormula}, {"brew", "install", VaultFormula}}
+}
+
+// VaultInstallLine says how to install the vault, for a person.
+const VaultInstallLine = "`brew trust --formula " + VaultFormula + "`, then `brew install " + VaultFormula + "`"
 
 // Ready reports a vault this machine could read and does not: here, its
 // service answering, and holding a collection for one of the machine's
@@ -249,6 +265,8 @@ const (
 	itemVaultOn      = "vault-on"
 	itemVaultService = "vault-service"
 	itemVaultJoin    = "vault-join"
+	// ItemVaultInstall is the vault's command, wanted and not here (A110).
+	ItemVaultInstall = "vault-install"
 	itemCollection   = "vault-collection-"
 	oldVaultPrefix   = "openvault-"
 )
@@ -795,6 +813,9 @@ func secretItems(jobs []Job, v Vault) []Item {
 		if len(lacking) == 0 {
 			return nil
 		}
+		if !v.Installed {
+			return []Item{installItem(v, lacking), joinItem(v, lacking, false)}
+		}
 		if !v.Here {
 			return []Item{joinItem(v, lacking, false)}
 		}
@@ -833,6 +854,21 @@ func secretItems(jobs []Job, v Vault) []Item {
 		}
 	}
 	return out
+}
+
+// installItem is a vault the machine reads and has no command for (A110):
+// latem installs it from Abyssinia Labs' tap, trusting the formula first,
+// when Homebrew is here, and says that Homebrew is not when it is not.
+func installItem(v Vault, jobs []string) Item {
+	it := Item{ID: ItemVaultInstall, Title: "latem vault installed", Have: "not installed", Jobs: jobs}
+	if v.Homebrew {
+		it.Run = VaultInstall()
+		return it
+	}
+	it.Have = "not installed, and Homebrew is not here to install it with"
+	it.Manual = []string{"install Homebrew from https://brew.sh, then " + VaultInstallLine +
+		"; or put latem-vault on PATH from https://github.com/Abyssinia-Labs/latem-vault/releases"}
+	return it
 }
 
 // joinItem is a device not in the vault: the person's, here and on a device

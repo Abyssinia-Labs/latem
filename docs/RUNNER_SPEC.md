@@ -1315,6 +1315,7 @@ latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   To another machine's `secrets set`, on ssh's stdin (A73)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54); list shows OpenVault's too, and which answers (A96)
+latem vault <args>...               The vault's own command, latem-vault, run with these arguments; says how to install it when it is missing (A110)
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59); --fix writes a label alias only on a person's yes at a terminal (A100)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
@@ -5210,3 +5211,32 @@ neither tag nor digest, whose volume a reap can take between its fill and its co
 is not the image's: unchanged from A51, the mount point is the step user's and what the image put
 there keeps the image's owners.
 
+
+
+### Amendment from the vault becoming a program of its own
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A110 | §15, §19, A69, A97, A104 | **`latem vault <args>…` runs the vault's command with the same arguments, every flag included, as `git foo` runs `git-foo`. The command is the one A104 finds: `latem-vault`, else `openvault`, on `PATH`, then in cargo's bin, then in Homebrew's. On macOS and Linux latem execs it, so its stdin, stdout, stderr, signals and exit status are the vault's own and latem prints nothing. With neither name found it exits 1 and says, in one sentence, ``latem vault is not installed here; install it with `brew trust --formula abyssinia-labs/tap/latem-vault`, then `brew install abyssinia-labs/tap/latem-vault`.`` A machine whose `config.toml` reads the vault and that has no vault command gets a blocking item, `vault-install`, before `vault-join`: with Homebrew here it is latem's, and runs `brew trust --formula abyssinia-labs/tap/latem-vault`, then `brew install abyssinia-labs/tap/latem-vault`; without it, it is the person's, and says Homebrew is not here and how to install it, or where the release is** | Decision D2 (accepted 2026-11-17): the vault's binary is `latem-vault`, and `latem vault …` reaches it, so that a person learns one command. latem vault 0.6.0 was released on 2026-11-18 to the public tap `abyssinia-labs/tap`. Until then a machine set up by `latem setup --like` from one that reads the vault was told to `latem-vault join` with no `latem-vault` to run, and nothing said where to get it. Current Homebrew refuses a formula from a tap that is not its own until it is trusted, so the install is two commands, and the trust is the formula's alone, not the whole tap's |
+
+**Why exec.** The vault asks for a passphrase at a terminal, prints tables a person reads and exits
+with codes a script branches on. A child process in between would have to pass on each of those and
+every signal; an exec has nothing in between. latem's own update notice is not said after
+`latem vault`, which is the vault's output alone.
+
+**Where it is looked for.** As A104 says, and no further: a vault in a directory not on that list
+is run by its path.
+
+**When it is offered.** Only to a machine that reads the vault (`[secrets] vault = true`, or
+`openvault = true`) and has a job that reads a name no store here holds, the case in which setup
+already said `vault-join` or `vault-service`. A machine that does not read the vault is not offered
+it: its secrets are `latem secrets set`, and the vault is one way among several, said in the
+secrets item. `brew` is looked for only then.
+
+**Its id.** `vault-install`. After it, the plan has the vault's next step, `vault-join` on a device
+new to the vault; the item closes when the command is found where A104 looks, which is where
+Homebrew puts it.
+
+**Not in this amendment.** doctor's `vault.service` still names `latem-vault service install` on a
+machine with no vault command. Moving a machine's vault to `~/.latem-vault`, and dropping the old
+names, are the vault's own tickets.

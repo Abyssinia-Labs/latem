@@ -168,6 +168,7 @@ func newRootCommand() *cobra.Command {
 		newRepoCommand(),
 		newSecretsCommand(),
 		newVarsCommand(),
+		newVaultCommand(),
 		newWorkflowsCommand(),
 		newStoreCommand(),
 		newDoctorCommand(),
