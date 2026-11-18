@@ -197,6 +197,7 @@ before the vault is renamed, `openvault` (A104):
 
 | Item | When | Whose |
 |---|---|---|
+| `vault-install` | the config reads the vault and no vault command is here | latem's, with Homebrew: runs `brew trust --formula abyssinia-labs/tap/latem-vault`, then `brew install abyssinia-labs/tap/latem-vault` (A110); without Homebrew, the person's |
 | `vault-on` | a vault here answers and holds one of this machine's repositories, and `config.toml` does not read it | latem's: writes `[secrets] vault = true`, and the agent restarts for it |
 | `vault-service` | the config reads the vault and its service does not answer | latem's: runs `latem-vault service install` |
 | `vault-join` | the config reads the vault and this device has no vault | the person's: `latem-vault join` here, then `latem-vault approve` on a device already in it |

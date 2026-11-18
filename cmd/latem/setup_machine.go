@@ -159,6 +159,11 @@ func vaultView(ctx context.Context, cfg *config.Config, stores secretStores, dep
 		}
 	}
 	v.Installed = v.Command != "" || v.Here
+	if v.On && !v.Installed {
+		// What installs it, which only a vault that is wanted asks (A110).
+		_, err := deps.lookPath("brew")
+		v.Homebrew = err == nil
+	}
 	if stores.openvault == nil || (!v.Installed && !v.On) {
 		return v
 	}

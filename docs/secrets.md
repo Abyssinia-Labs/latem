@@ -121,6 +121,19 @@ so (A86):
 vault = true
 ```
 
+Install it from Abyssinia Labs' tap. Homebrew refuses a formula from a tap
+that is not its own until you trust it:
+
+```console
+$ brew trust --formula abyssinia-labs/tap/latem-vault
+$ brew install abyssinia-labs/tap/latem-vault
+```
+
+`latem setup` offers to run both on a machine that reads the vault and has no
+vault command, as the item `vault-install`. `latem vault …` runs the vault's
+command with the same arguments: `latem vault collections` is
+`latem-vault collections` (A110).
+
 **Either name works** (A104). `openvault = true`, the key before the rename,
 still turns it on. latem finds the vault's directory as `$LATEM_VAULT_HOME`,
 then `~/.latem-vault` once it exists, then `$OPENVAULT_HOME`, then

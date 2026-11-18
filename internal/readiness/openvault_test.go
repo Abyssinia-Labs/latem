@@ -248,3 +248,39 @@ func TestCurrentID_TheVaultsOldIDs(t *testing.T) {
 		}
 	}
 }
+
+// A110: a vault the machine reads and has no command for is installed from
+// the tap, trusting the formula first, before this device can join it.
+func TestVaultItems_WantedAndNotInstalledIsInstalledFromTheTap(t *testing.T) {
+	k := vaultPlan(t, Vault{On: true, Homebrew: true}, deployJob())
+	if got, want := ids(k), []string{"vault-install", "vault-join"}; !slices.Equal(got, want) {
+		t.Fatalf("items %v, want %v", got, want)
+	}
+	it := item(t, k, "vault-install")
+	want := [][]string{{"brew", "trust", "--formula", "abyssinia-labs/tap/latem-vault"},
+		{"brew", "install", "abyssinia-labs/tap/latem-vault"}}
+	if !slices.EqualFunc(it.Run, want, slices.Equal) || person(it) || it.Soft {
+		t.Errorf("install item = %+v", it)
+	}
+	if k.State != Missing {
+		t.Errorf("state %s, want missing", k.State)
+	}
+}
+
+// A110: with no Homebrew, the item says so and names the way by hand.
+func TestVaultItems_WithoutHomebrewTheInstallSaysSo(t *testing.T) {
+	it := item(t, vaultPlan(t, Vault{On: true}, deployJob()), "vault-install")
+	if len(it.Run) != 0 || !strings.Contains(it.Have, "Homebrew is not here") ||
+		len(it.Manual) != 1 || !strings.Contains(it.Manual[0], "https://brew.sh") ||
+		!strings.Contains(it.Manual[0], "brew install abyssinia-labs/tap/latem-vault") {
+		t.Errorf("install item = %+v", it)
+	}
+}
+
+// A110: a machine that does not read the vault is not offered it.
+func TestVaultItems_NotWantedIsNotOffered(t *testing.T) {
+	k := vaultPlan(t, Vault{Homebrew: true}, deployJob())
+	if slices.Contains(ids(k), "vault-install") {
+		t.Errorf("items %v offer the vault to a machine that does not read it", ids(k))
+	}
+}
