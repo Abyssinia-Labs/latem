@@ -362,7 +362,7 @@ func (m *Manager) syncWarm(ctx context.Context, mi *Mirror, dir, runID, sha stri
 	}
 	stage := filepath.Join(dir, warmStagePrefix+runID)
 	defer func() { _ = os.RemoveAll(stage) }()
-	if _, err := m.run(ctx, "", "clone", "--local", "--no-checkout", "--", mi.path, stage); err != nil {
+	if err := m.cloneLocal(ctx, mi, stage); err != nil {
 		return 0, 0, gitErr(err, "cloning %s for a warm workspace", mi.repo.Key)
 	}
 	dotGit := filepath.Join(tree, ".git")

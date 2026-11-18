@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Abyssinia-Labs/latem/internal/mirrorlock"
 )
 
 // vmPrefix is the name every Tart VM the agent creates carries, from
@@ -264,9 +266,24 @@ func (l *Local) collectMirrors(ctx context.Context, _ PruneOptions, report *Repo
 		if l.opts.MirrorBusy(mirror) {
 			continue
 		}
+		// gc deletes the packs it repacks, so it holds the mirror's lock
+		// exclusively, which a clone out of it holds shared (A112). The lock is
+		// what reaches the agent from `latem cache prune`, a process MirrorBusy
+		// cannot ask, and it closes the moment between MirrorBusy's answer and
+		// the gc. One it cannot have now is skipped, as a busy mirror is: the
+		// next sweep will come.
+		unlock, locked, err := mirrorlock.TryLock(mirror, true)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cache: %w", err))
+			continue
+		}
+		if !locked {
+			continue
+		}
 
 		before := treeSize(mirror)
 		out, err := l.opts.Exec(ctx, l.opts.Git, "-C", mirror, "gc", mirrorGCPrune)
+		unlock()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("cache: git gc in %s: %w: %s", mirror, err, strings.TrimSpace(string(out))))
 			continue

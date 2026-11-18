@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/mirrorlock"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -298,6 +299,36 @@ func TestPrune_CollectsIdleMirrorsAndSkipsBusyOnes(t *testing.T) {
 	}
 	if len(report.MirrorsCollected) != 1 || report.MirrorsCollected[0] != "idle.git" {
 		t.Errorf("MirrorsCollected = %v", report.MirrorsCollected)
+	}
+}
+
+// A112: gc deletes the packs it repacks, and a clone out of the mirror holds
+// its lock shared. MirrorBusy cannot see a run in another process, or one that
+// started after it answered; a mirror whose lock is held is skipped as a busy
+// one is.
+func TestPrune_SkipsAMirrorWhoseLockIsHeld(t *testing.T) {
+	root := t.TempDir()
+	rec := &recorder{}
+	l := newLocal(t, root, time.Second, func(o *Options) { o.Exec = rec.run })
+
+	for _, name := range []string{"idle.git", "cloning.git"} {
+		writeSized(t, filepath.Join(root, "mirrors", name, "FETCH_HEAD"), 10, time.Now())
+	}
+	release, ok, err := mirrorlock.TryLock(filepath.Join(root, "mirrors", "cloning.git"), false)
+	if err != nil || !ok {
+		t.Fatalf("TryLock = %v, %v", ok, err)
+	}
+	defer release()
+
+	report, err := l.Prune(context.Background(), PruneOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ran("cloning.git") {
+		t.Error("gc ran inside a mirror a clone holds")
+	}
+	if len(report.MirrorsCollected) != 1 || report.MirrorsCollected[0] != "idle.git" {
+		t.Errorf("MirrorsCollected = %v, want [idle.git]: the lock file beside a mirror is not a mirror", report.MirrorsCollected)
 	}
 }
 

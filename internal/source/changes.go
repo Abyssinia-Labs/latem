@@ -86,9 +86,11 @@ func (m *Manager) CommitChanges(ctx context.Context, repo Repo, c Changes) (Chan
 	if err != nil {
 		return Changed{}, err
 	}
-	lock := m.repoLock(repo.Key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := m.lockMirror(ctx, repo.Key, true)
+	if err != nil {
+		return Changed{}, err
+	}
+	defer unlock()
 
 	if _, statErr := os.Stat(path); statErr != nil {
 		if !os.IsNotExist(statErr) {

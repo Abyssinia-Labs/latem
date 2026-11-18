@@ -49,7 +49,7 @@ func NewReader(cfg Config) (*Manager, error) {
 		return nil, err
 	}
 	cfg.MirrorDir = filepath.Clean(cfg.MirrorDir)
-	return &Manager{cfg: cfg, git: resolved, repoMu: map[string]*sync.Mutex{}, readOnly: true}, nil
+	return &Manager{cfg: cfg, git: resolved, repoMu: map[string]*sync.RWMutex{}, readOnly: true}, nil
 }
 
 // Open returns the mirror the agent made of repo, without fetching. It wraps

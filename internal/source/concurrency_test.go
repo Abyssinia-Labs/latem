@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Abyssinia-Labs/latem/internal/mirrorlock"
 )
 
 // TestConcurrent_SameRepo runs several acquisitions of one repo at once.
@@ -164,5 +167,90 @@ func TestClonesDoNotQueueBehindEachOther(t *testing.T) {
 		if err != nil {
 			t.Errorf("run %d: %v", i, err)
 		}
+	}
+}
+
+// TestClonesDoNotOverlapMirrorWrites is the race of 2026-11-18 (A112): runs of
+// one repository checking out while the mirror they clone from is being
+// written. A writer here is what it is on a machine: the agent's own fetch,
+// and a gc that deletes the packs it repacks — from `latem cache prune`, a
+// second process, which is why it takes the lock through the file
+// ([mirrorlock]) and not through the Manager.
+//
+// `git clone --local` lists objects/ and hard-links what it listed. A pack or
+// a loose object a repack deletes between the two leaves the workspace without
+// it, and the clone fails, or the checkout after it says "unable to read
+// tree". With Checkout's clone holding the mirror's lock shared, the writes
+// wait for it and it waits for them, and no run fails. Take the lock out of
+// [Manager.cloneLocal] and this fails within a few rounds.
+func TestClonesDoNotOverlapMirrorWrites(t *testing.T) {
+	f := newFixture(t)
+	mirror := f.fetch()
+	ctx := context.Background()
+	// The upstream stands still between its commits. git 2.54 otherwise
+	// repacks it, detached, after each one, under the next one and under the
+	// fetch reading it: a race of git's own this test is not about.
+	runGit(t, f.up.dir, "config", "maintenance.auto", "false")
+
+	const readers = 4
+	const rounds = 40
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []error
+	clones := 0
+
+	for r := range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := 0; ; k++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				ws, err := mirror.Acquire(ctx, fmt.Sprintf("run_w%d_%d", r, k), "refs/heads/main")
+				mu.Lock()
+				if err != nil {
+					failures = append(failures, err)
+				} else {
+					clones++
+				}
+				mu.Unlock()
+				if err == nil {
+					_ = ws.Remove()
+				}
+			}
+		}()
+	}
+
+	for i := range rounds {
+		// Enough objects per round that a fetch, and the repack after it,
+		// rewrite real files rather than one small one.
+		for j := range 8 {
+			f.up.commit(fmt.Sprintf("dir%d/file%d.txt", j, i),
+				strings.Repeat(fmt.Sprintf("round %d file %d\n", i, j), 200), fmt.Sprintf("round %d.%d", i, j))
+		}
+		if _, err := f.mgr.Fetch(ctx, f.repo); err != nil {
+			t.Errorf("round %d: Fetch: %v", i, err)
+			break
+		}
+		unlock, err := mirrorlock.Lock(ctx, mirror.Path(), true)
+		if err != nil {
+			t.Errorf("round %d: locking the mirror for gc: %v", i, err)
+			break
+		}
+		runGit(t, mirror.Path(), "repack", "-a", "-d", "-q")
+		unlock()
+	}
+	close(stop)
+	wg.Wait()
+
+	for _, err := range failures {
+		t.Errorf("a run failed while the mirror was being written: %v", err)
+	}
+	if clones == 0 {
+		t.Fatal("no clone completed: the test raced nothing")
 	}
 }

@@ -16,6 +16,8 @@ import (
 // out of a mirror (listing refs, resolving a SHA, cloning a workspace) are
 // concurrent by design, because git objects are immutable and the whole point
 // of the model is that two runs on one repo do not queue behind each other.
+// What a clone does wait for is a write — a fetch, or a gc — since it takes
+// the object store's files as files (A112, [Manager.lockMirror]).
 type Mirror struct {
 	mgr  *Manager
 	repo Repo
@@ -35,12 +37,13 @@ func (mi *Mirror) Repo() Repo { return mi.repo }
 
 // Fetch is gate 6 of RUNNER_SPEC §10: make the mirror exist and make it fresh.
 //
-// The per-repo mutex is held for the whole of this call and released before it
-// returns. Concurrent `git fetch` into one bare repository is not reliably
-// safe — two fetches racing on packed-refs and on the same tmp pack names — so
-// fetches serialise. Nothing else does. In particular the clone in
-// [Mirror.Checkout] runs outside this lock, so a repo with four queued runs
-// pays for one fetch and then clones four workspaces in parallel.
+// The mirror's lock is held exclusively for the whole of this call and
+// released before it returns ([Manager.lockMirror]). Concurrent `git fetch`
+// into one bare repository is not reliably safe — two fetches racing on
+// packed-refs and on the same tmp pack names — so fetches serialise. The clone
+// in [Mirror.Checkout] takes the same lock shared: it waits for a fetch, and
+// not for another clone, so a repo with four queued runs pays for one fetch
+// and then clones four workspaces in parallel.
 func (m *Manager) Fetch(ctx context.Context, repo Repo) (*Mirror, error) {
 	if m.readOnly {
 		return nil, errReader
@@ -53,9 +56,11 @@ func (m *Manager) Fetch(ctx context.Context, repo Repo) (*Mirror, error) {
 		return nil, err
 	}
 
-	lock := m.repoLock(repo.Key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := m.lockMirror(ctx, repo.Key, true)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	if _, statErr := os.Stat(path); statErr != nil {
 		if !os.IsNotExist(statErr) {
@@ -67,10 +72,10 @@ func (m *Manager) Fetch(ctx context.Context, repo Repo) (*Mirror, error) {
 		return &Mirror{mgr: m, repo: repo, path: path}, nil
 	}
 
-	// gc.auto before fetch, not after. `git fetch` is one of the commands that
-	// triggers automatic gc, so a mirror created before this rule existed —
-	// or by an older agent — must be repaired before the fetch that would
-	// otherwise collect the commit an in-flight run is building.
+	// Before fetch, not after. `git fetch` is one of the commands that
+	// triggers automatic maintenance, so a mirror created before this rule
+	// existed — or by an older agent — must be repaired before the fetch that
+	// would otherwise repack it.
 	if err := m.disableAutoGC(ctx, path); err != nil {
 		return nil, err
 	}
@@ -83,7 +88,11 @@ func (m *Manager) Fetch(ctx context.Context, repo Repo) (*Mirror, error) {
 		return nil, gitErr(err, "pointing mirror %s at %s", path, repo.URL)
 	}
 
-	if _, err := m.runRemote(ctx, repo, path, "fetch", "--prune", "--tags", "--", "origin"); err != nil {
+	// --no-auto-maintenance as well as the config disableAutoGC writes: a
+	// fetch must leave nothing running in the mirror once it returns and the
+	// lock is released (A112).
+	if _, err := m.runRemote(ctx, repo, path,
+		"fetch", "--prune", "--tags", "--no-auto-maintenance", "--", "origin"); err != nil {
 		return nil, gitErr(err, "fetching %s", repo.Key)
 	}
 
@@ -125,7 +134,8 @@ func (m *Manager) createMirror(ctx context.Context, repo Repo, path string) erro
 	return nil
 }
 
-// disableAutoGC turns off git's automatic garbage collection for a repository.
+// disableAutoGC turns off git's automatic garbage collection and automatic
+// maintenance for a repository.
 //
 // RUNNER_SPEC §12 calls this not optional, and the reasoning is worth keeping
 // next to the code. A force-push followed by `fetch --prune` can make the
@@ -134,9 +144,19 @@ func (m *Manager) createMirror(ctx context.Context, repo Repo, path string) erro
 // resolved and is building. The mirror is instead compacted by an explicit
 // `git gc --prune=30.days.ago` from the daily ticker (§14.4), at a moment when
 // no run holds the mirror.
+//
+// gc.auto 0 alone stopped being enough (A112). On git 2.54 the automatic
+// maintenance a fetch starts runs the geometric strategy, which does not ask
+// gc.auto: it runs `git repack -d --geometric=2 --write-midx` and a cruft
+// repack that expires unreachable objects after two weeks, detached, after the
+// fetch has returned. -d deletes the packs it combined, under any clone that
+// is linking them. maintenance.auto false is what turns that off.
 func (m *Manager) disableAutoGC(ctx context.Context, dir string) error {
 	if _, err := m.run(ctx, dir, "config", "gc.auto", "0"); err != nil {
 		return gitErr(err, "disabling automatic gc in %s", dir)
+	}
+	if _, err := m.run(ctx, dir, "config", "maintenance.auto", "false"); err != nil {
+		return gitErr(err, "disabling automatic maintenance in %s", dir)
 	}
 	return nil
 }
@@ -208,16 +228,19 @@ func (mi *Mirror) Resolve(ctx context.Context, normalizedRef string) (string, er
 // under no ref; gc.auto is off and the daily gc keeps an unreachable object for
 // thirty days, longer than any run that wants it.
 //
-// It takes the per-repo lock that Fetch holds, because it is a fetch into the
-// same bare repository.
+// It takes the mirror's lock exclusively, as Fetch does, because it is a
+// fetch into the same bare repository.
 func (mi *Mirror) FetchCommit(ctx context.Context, sha string) error {
 	if err := validateSHA(sha); err != nil {
 		return err
 	}
-	lock := mi.mgr.repoLock(mi.repo.Key)
-	lock.Lock()
-	defer lock.Unlock()
-	if _, err := mi.mgr.runRemote(ctx, mi.repo, mi.path, "fetch", "--no-tags", "--", "origin", sha); err != nil {
+	unlock, err := mi.mgr.lockMirror(ctx, mi.repo.Key, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := mi.mgr.runRemote(ctx, mi.repo, mi.path,
+		"fetch", "--no-tags", "--no-auto-maintenance", "--", "origin", sha); err != nil {
 		return gitErr(err, "fetching commit %s of %s", sha, mi.repo.Key)
 	}
 	return nil
@@ -233,7 +256,9 @@ func (mi *Mirror) FetchCommit(ctx context.Context, sha string) error {
 // FETCH_HEAD under a lock only the agent holds. This fetch names no
 // destination, so it writes no ref; it writes no FETCH_HEAD, runs no
 // maintenance and writes no commit graph. What is left is objects, which git
-// writes under their content's name by rename.
+// writes under their content's name by rename. It takes the mirror's file
+// lock all the same (A112), which since then is held across processes, so
+// it is ordered with the agent's fetches and clones and with gc.
 //
 // Protocol v2 is pinned: v0 refuses to serve a commit no ref advertises, and
 // git clears config from a local transport's environment, so the side that
@@ -256,9 +281,13 @@ func (m *Manager) AddCommit(ctx context.Context, repo Repo, from, sha string) (*
 	if err != nil {
 		return nil, err
 	}
-	lock := m.repoLock(repo.Key)
-	lock.Lock()
-	defer lock.Unlock()
+	// The mirror's file lock, exclusive, is what the agent's clones meet
+	// across the process line (A112).
+	unlock, err := m.lockMirror(ctx, repo.Key, true)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	if _, statErr := os.Stat(path); statErr != nil {
 		if !os.IsNotExist(statErr) {

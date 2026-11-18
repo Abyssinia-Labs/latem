@@ -48,6 +48,7 @@
 package source
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -55,6 +56,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Abyssinia-Labs/latem/internal/mirrorlock"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -187,9 +189,10 @@ type Manager struct {
 	git string
 
 	// mu guards repoMu only. It is held for the map lookup and never across a
-	// git invocation.
+	// git invocation. repoMu is each repo's in-process half of
+	// [Manager.lockMirror].
 	mu     sync.Mutex
-	repoMu map[string]*sync.Mutex
+	repoMu map[string]*sync.RWMutex
 	// warmGates is one turn per warm workspace, by its directory (A90).
 	warmGates map[string]chan struct{}
 
@@ -261,7 +264,7 @@ func New(cfg Config) (*Manager, error) {
 	return &Manager{
 		cfg:    cfg,
 		git:    resolved,
-		repoMu: make(map[string]*sync.Mutex),
+		repoMu: make(map[string]*sync.RWMutex),
 	}, nil
 }
 
@@ -298,21 +301,62 @@ func (m *Manager) workspacePath(runID string) (string, error) {
 	return path, nil
 }
 
-// repoLock returns the mutex serialising writes into one repo's mirror.
-//
-// In-process is sufficient: RUNNER_SPEC §6 takes ~/.latem/agent.lock at
-// startup, so exactly one agent owns a config directory and therefore exactly
-// one process writes these mirrors. A second agent on the same machine is a
-// different config dir with its own mirrors.
-func (m *Manager) repoLock(key string) *sync.Mutex {
+// repoLock returns the in-process half of one repo's mirror lock.
+func (m *Manager) repoLock(key string) *sync.RWMutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l, ok := m.repoMu[key]
 	if !ok {
-		l = new(sync.Mutex)
+		l = new(sync.RWMutex)
 		m.repoMu[key] = l
 	}
 	return l
+}
+
+// lockMirror takes one repo's mirror lock and returns its release: exclusive
+// for anything that writes into the mirror, shared for a `git clone --local`
+// out of it (A112).
+//
+// A clone is not a read in the sense git's own commands read. `git
+// rev-parse` or `git cat-file` that misses a pack a repack just removed looks
+// again and finds the pack that replaced it; `clone --local` lists objects/
+// once and hard-links what it listed, so a pack deleted between the two
+// leaves the workspace without it. That is what happened on 2026-11-18: one
+// run of take-one fetched, and the `git maintenance run --auto` that fetch
+// left behind repacked the mirror while another run's clone was linking it.
+// Its checkout said "unable to read tree".
+//
+// Two halves. This process's RWMutex keeps its own goroutines from polling a
+// file, and a waiting writer from being starved by a stream of clones. The
+// flock beside the mirror is what `latem cache prune`'s gc and `latem try`,
+// in other processes, meet ([mirrorlock]). The mutex is taken first, so the
+// file lock is only ever contended across processes.
+//
+// A wait that ctx ends is E_SOURCE, which the broker retries.
+func (m *Manager) lockMirror(ctx context.Context, key string, exclusive bool) (func(), error) {
+	path, err := m.mirrorPath(key)
+	if err != nil {
+		return nil, err
+	}
+	l := m.repoLock(key)
+	if exclusive {
+		l.Lock()
+	} else {
+		l.RLock()
+	}
+	unlockMu := l.Unlock
+	if !exclusive {
+		unlockMu = l.RUnlock
+	}
+	unlockFile, err := mirrorlock.Lock(ctx, path, exclusive)
+	if err != nil {
+		unlockMu()
+		return nil, wrapErr(protocol.ErrSource, err, "locking the mirror of %s", key)
+	}
+	return func() {
+		unlockFile()
+		unlockMu()
+	}, nil
 }
 
 func validateSHA(sha string) error {
