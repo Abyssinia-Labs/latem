@@ -49,7 +49,9 @@ type setupRecorder struct {
 	dockerHost string
 	// measuredAt is the host the machine was measured at.
 	measuredAt string
-	machine    *fakeMachine
+	// goos is the platform setup writes a config for; "" is this one.
+	goos    string
+	machine *fakeMachine
 }
 
 // fakeSetup routes setup's outward steps to fakes: registration still runs
@@ -72,6 +74,7 @@ func fakeSetup(t *testing.T, docker bool) *setupRecorder {
 				return nil
 			},
 			toolchains: rec.machine.deps(),
+			goos:       rec.goos,
 			measure: func(_ context.Context, dockerHost string) capacity.Machine {
 				rec.measuredAt = dockerHost
 				return capacity.Machine{CPUs: 8, MemoryGB: 16, Docker: &capacity.Docker{CPUs: 8, MemoryGB: 8}}

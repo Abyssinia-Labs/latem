@@ -103,8 +103,11 @@ func TestFindDocker(t *testing.T) {
 
 // `latem setup` on a fresh Mac running Colima writes [docker] host and the
 // linux docker runner itself, sized from the daemon at that socket (A111).
+// The machine is a Mac whatever runs the test: on Linux the template has no
+// native runner and names no engine's VM.
 func TestSetup_AFreshMacOnColimaWritesDockerHostAndTheLinuxRunner(t *testing.T) {
 	rec := fakeSetup(t, true)
+	rec.goos = "darwin"
 	rec.dockerHost = colimaSock
 	noAgentRunning(t)
 	dir := filepath.Join(privateTempDir(t), "fresh")
@@ -120,6 +123,9 @@ func TestSetup_AFreshMacOnColimaWritesDockerHostAndTheLinuxRunner(t *testing.T) 
 	if r, ok := cfg.Runner("linux"); !ok || r.Executor != config.ExecutorDocker {
 		t.Errorf("no linux docker runner:\n%s", readConfigFile(t, dir))
 	}
+	if r, ok := cfg.Runner("macos"); !ok || r.Executor != config.ExecutorNative {
+		t.Errorf("no macos native runner beside it:\n%s", readConfigFile(t, dir))
+	}
 	if rec.measuredAt != colimaSock {
 		t.Errorf("measured Docker at %q", rec.measuredAt)
 	}
@@ -128,6 +134,30 @@ func TestSetup_AFreshMacOnColimaWritesDockerHostAndTheLinuxRunner(t *testing.T) 
 	}
 	if !strings.Contains(readConfigFile(t, dir), "in Colima's Linux VM") {
 		t.Errorf("the runner's comment names another engine:\n%s", readConfigFile(t, dir))
+	}
+}
+
+// The same on Linux, where a rootless daemon answers at its own socket: the
+// host is written, and the docker runner is the machine's only one.
+func TestSetup_AFreshLinuxMachineWritesItsDaemonsSocket(t *testing.T) {
+	const rootless = "unix:///run/user/1000/docker.sock"
+	rec := fakeSetup(t, true)
+	rec.goos = "linux"
+	rec.dockerHost = rootless
+	noAgentRunning(t)
+	dir := filepath.Join(privateTempDir(t), "fresh")
+
+	out, err := latemIn(t, dir, "", "setup", "--no-register", "--no-service")
+	if err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+	cfg := loadConfigIn(t, dir)
+	if cfg.Docker.Host != rootless || len(cfg.Runners) != 1 || cfg.Runners[0].Name != "linux" ||
+		cfg.Runners[0].Executor != config.ExecutorDocker {
+		t.Errorf("docker %+v, runners %d:\n%s", cfg.Docker, len(cfg.Runners), readConfigFile(t, dir))
+	}
+	if !strings.Contains(out, "runners: linux (docker)") || !strings.Contains(out, "where a Docker daemon answers") {
+		t.Errorf("out:\n%s", out)
 	}
 }
 

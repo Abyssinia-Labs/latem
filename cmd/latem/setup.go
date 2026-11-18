@@ -145,6 +145,10 @@ type setupDeps struct {
 	// measure is the machine, for the docker runner's concurrency (A63),
 	// with Docker asked at dockerHost (A111).
 	measure func(ctx context.Context, dockerHost string) capacity.Machine
+	// goos is the platform the config step writes for: a Mac's native
+	// runner beside the docker one, or Linux's docker runner alone. Empty is
+	// this one, so that a test can say which machine it is.
+	goos string
 }
 
 type setupService interface {
@@ -191,7 +195,11 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 	// 1 — config.
 	step("1/6 config")
 	if _, err := os.Stat(paths.File); os.IsNotExist(err) {
-		docker := runtime.GOOS != "darwin"
+		goos := deps.goos
+		if goos == "" {
+			goos = runtime.GOOS
+		}
+		docker := goos != "darwin"
 		var dockerHost string
 		if docker || !f.noDocker {
 			// An engine at a socket of its own, Colima's or OrbStack's, is
@@ -212,12 +220,12 @@ func runSetup(cmd *cobra.Command, f setupFlags, deps setupDeps) error {
 				sized = fmt.Sprintf("  linux runner: concurrency %d — %s\n", slots, a.Why)
 			}
 		}
-		if err := writeSetupConfig(paths, f, docker, dockerHost, slots); err != nil {
+		if err := writeSetupConfig(paths, f, goos, docker, dockerHost, slots); err != nil {
 			return err
 		}
 		changed = true
 		printf(out, "  wrote %s\n", paths.File)
-		if runtime.GOOS == "darwin" {
+		if goos == "darwin" {
 			printf(out, "  runners: macos (native)")
 			if docker {
 				printf(out, ", linux (docker)")
@@ -574,7 +582,7 @@ func registered(cfg *config.Config) bool {
 
 // writeSetupConfig is `latem init` with no repositories, which setup's config
 // step is: the same template, the same modes, the same proof that it loads.
-func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerHost string, dockerSlots int) error {
+func writeSetupConfig(paths config.Paths, f setupFlags, goos string, docker bool, dockerHost string, dockerSlots int) error {
 	name := f.name
 	if name == "" {
 		if name = defaultMachineName(); name == "" {
@@ -582,7 +590,7 @@ func writeSetupConfig(paths config.Paths, f setupFlags, docker bool, dockerHost 
 		}
 	}
 	body := renderInitConfig(initParams{
-		Machine: name, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Refs: []string{"main"},
+		Machine: name, GOOS: goos, GOARCH: runtime.GOARCH, Refs: []string{"main"},
 		Docker: docker, DockerHost: dockerHost, Image: f.image, DockerConcurrency: dockerSlots,
 	})
 	if _, err := config.Parse([]byte(body), config.Options{Dir: paths.Dir}); err != nil {
