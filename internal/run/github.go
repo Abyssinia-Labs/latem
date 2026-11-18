@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/repovars"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/workflow"
@@ -122,7 +123,7 @@ func (x *execution) toolCache() string {
 	}
 	switch x.runner.Executor.Name() {
 	case "docker":
-		return toolCacheVolumePrefix + x.runner.Name
+		return docker.ToolCacheVolumePrefix + x.runner.Name
 	case "native":
 		if x.o.cfg == nil || x.o.cfg.Paths.Dir == "" {
 			return ""
@@ -131,11 +132,6 @@ func (x *execution) toolCache() string {
 	}
 	return ""
 }
-
-// toolCacheVolumePrefix names a docker runner's tool cache volume. Not the
-// cache volumes' prefix, so §14.4's pruning, which is about caches, leaves it
-// alone.
-const toolCacheVolumePrefix = "latem-toolcache-"
 
 // repoVars answers the vars context from OpenVault and this repository's
 // config (A50, A96), or nil without a config, which leaves vars empty as it

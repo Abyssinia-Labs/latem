@@ -51,7 +51,9 @@ type Executor interface {
 // found nothing.
 type Reaped struct {
 	RunID string
-	// Kind is "container", "vm", or "workspace".
+	// Kind is "container", "vm", "workspace", "volume" (a run's), or
+	// "toolcache" (a docker tool cache no run mounts again, A109). The last
+	// has no RunID.
 	Kind string
 	// Ref identifies it to the underlying tool: a container id, a VM name.
 	Ref string

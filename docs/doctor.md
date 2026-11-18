@@ -42,6 +42,13 @@ Among the checks worth knowing about:
   that uid 1000 exists, `$HOME` is writable, and `bash` and `git` are present.
   An image missing them fails forty minutes into a build as npm `EACCES` or a
   Gradle daemon that will not start — errors that look like tooling bugs.
+- **The tool cache a docker runner's next run mounts** (`toolcache.<runner>`,
+  A109). One volume per image, filled by the agent, with a marker written
+  last. A volume whose fill was cut short is a warning: until the next run
+  fills it again, a step finds part of the image's `/opt/hostedtoolcache`,
+  and in `latem-ubuntu` no node. Volumes no run mounts again, an earlier
+  latem's or an image's since rebuilt, are named with their
+  `docker volume rm`.
 - **FileVault**, which quietly falsifies "survives reboots". See below.
 - **Every configured repo, reachable with the credentials this machine has.**
   An agent started by launchd does not inherit your interactive ssh agent.

@@ -54,6 +54,8 @@ var shellCallSites = map[string]string{
 	"internal/executor/docker/image.go": "a fixed image-probe script, no interpolation",
 	"internal/executor/docker/executor.go": "two fixed literals: the idle entrypoint and the " +
 		"/dev/kvm readability probe",
+	"internal/executor/docker/toolcache.go": "A109's fill and read scripts, compile-time constants; " +
+		"the image id and the two paths reach them as environment variables, never in argv",
 	"internal/executor/docker/ready.go": "LAT-23's readiness exec, the fixed literal " +
 		"`/bin/sh -c true`: nothing from a run, a step or a broker reaches its argv",
 	"cmd/latem/checks_locale.go": "A33's locale probe: `env LANG=… bash -lc <fixed script>`, " +

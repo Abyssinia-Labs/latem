@@ -60,6 +60,7 @@ type dockerProbe interface {
 	Preflight(ctx context.Context) error
 	DaemonID(ctx context.Context) (string, error)
 	CheckImage(ctx context.Context, ref string) (docker.ImageReport, error)
+	CheckToolCache(ctx context.Context, base, img string) (docker.ToolCacheState, error)
 	Close() error
 }
 
@@ -776,6 +777,7 @@ func (d *doctor) checkExecutors(ctx context.Context) []check {
 	}
 	var out []check
 	out = append(out, d.checkDockerImages(ctx)...)
+	out = append(out, d.checkToolCaches(ctx)...)
 	out = append(out, d.checkGPU(ctx)...)
 	out = append(out, d.checkTartImages(ctx)...)
 	if len(out) == 0 {
@@ -820,6 +822,57 @@ func (d *doctor) checkDockerImages(ctx context.Context) []check {
 				"bugs and send you to the wrong repository entirely.")
 		c.Fix = append(c.Fix,
 			"add to your image: RUN useradd -u 1000 -m runner && apt-get install -y bash git ca-certificates")
+		out = append(out, c)
+	}
+	return out
+}
+
+// checkToolCaches says, for each docker runner, whether the tool cache its
+// next run mounts was filled from its default image (A109). A volume whose
+// fill was cut short, or one an older image filled, hides the image's own
+// /opt/hostedtoolcache, and in latem-ubuntu node with it: every JavaScript
+// action then fails with exit 127. Since A109 the agent mends both before the
+// run, so they are warnings, and the check is how a person sees it happen.
+func (d *doctor) checkToolCaches(ctx context.Context) []check {
+	var out []check
+	for _, r := range d.runnersFor(config.ExecutorDocker) {
+		if r.Docker == nil || r.Docker.DefaultImage == "" {
+			continue
+		}
+		id, title := "toolcache."+r.Name, "tool cache / "+r.Name
+		probe, err := d.newDocker(docker.Options{DefaultImage: r.Docker.DefaultImage})
+		if err != nil {
+			out = append(out, fail(id, title, err.Error(), d.startDockerCommand()))
+			continue
+		}
+		st, err := probe.CheckToolCache(ctx, docker.ToolCacheVolumePrefix+r.Name, r.Docker.DefaultImage)
+		_ = probe.Close()
+		if err != nil {
+			// The image's own check above says why it cannot be read.
+			out = append(out, skip(id, title, firstLineOf(err.Error())))
+			continue
+		}
+		var c check
+		switch {
+		case !st.Exists:
+			c = pass(id, title, fmt.Sprintf("%s is filled from %s at its next run", st.Volume, r.Docker.DefaultImage))
+		case st.Filled:
+			c = pass(id, title, fmt.Sprintf("%s is filled from %s", st.Volume, r.Docker.DefaultImage))
+		default:
+			c = warn(id, title, fmt.Sprintf("%s was not filled to the end; the next run empties and fills it", st.Volume)).
+				withNotes("Until then a step that mounts it finds part of the image's /opt/hostedtoolcache, " +
+					"and in latem-ubuntu no node.")
+		}
+		if len(st.Stale) > 0 {
+			if c.Level == levelPass {
+				c = warn(id, title, c.Detail)
+			}
+			c.Notes = append(c.Notes, fmt.Sprintf("no run mounts %s again: an earlier latem's, or an image's since rebuilt. "+
+				"The agent removes them at its next fill or daily reap.", strings.Join(st.Stale, ", ")))
+			for _, v := range st.Stale {
+				c.Fix = append(c.Fix, "docker volume rm "+v)
+			}
+		}
 		out = append(out, c)
 	}
 	return out

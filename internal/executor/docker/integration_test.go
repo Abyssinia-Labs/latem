@@ -753,3 +753,109 @@ echo removed`)
 		t.Errorf("the step's user could not read and remove what came in: exit %d\n%s", code, out)
 	}
 }
+
+// buildNodeImage builds, as tag, an image shaped like latem-ubuntu where it
+// matters to A109: a node under /opt/hostedtoolcache, reached through the
+// link /usr/local/node, which is on PATH. The node is a script that prints
+// version. It returns the image's id.
+func buildNodeImage(t *testing.T, tag, version string) string {
+	t.Helper()
+	dir := "/opt/hostedtoolcache/node/" + version + "/x64"
+	dockerfile := "FROM " + testImage + "\n" +
+		"RUN mkdir -p " + dir + "/bin && printf '#!/bin/sh\\necho v" + version + "\\n' > " + dir + "/bin/node && " +
+		"chmod +x " + dir + "/bin/node && ln -s " + dir + " /usr/local/node\n" +
+		"ENV PATH=/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+	cmd := exec.Command("docker", "build", "-q", "-t", tag, "-")
+	cmd.Stdin = strings.NewReader(dockerfile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker build: %v\n%s", err, out)
+	}
+	id, err := exec.Command("docker", "image", "inspect", "--format", "{{.Id}}", tag).Output()
+	if err != nil {
+		t.Fatalf("docker image inspect: %v", err)
+	}
+	return strings.TrimSpace(string(id))
+}
+
+// A109, against a real engine: a tool cache volume whose fill was cut short,
+// and one filled from the image before a rebuild, both give the step a
+// working node. Without A109 the first runs `node` through a dangling link
+// and the second runs the old image's node, or none.
+func TestIntegration_ToolCacheFollowsTheImage(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("no docker command to build the test image with")
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tag := "latem-it-toolcache:" + suffix
+	base := "latem-it-toolcache-" + suffix
+	e := newIntegrationExecutor(t, func(o *Options) { o.DefaultImage = tag })
+
+	var ids []string
+	t.Cleanup(func() {
+		out, _ := exec.Command("docker", "volume", "ls", "-q", "--filter", "name="+base).Output()
+		for _, v := range strings.Fields(string(out)) {
+			_ = exec.Command("docker", "volume", "rm", "-f", v).Run()
+		}
+		_ = exec.Command("docker", "image", "rm", "-f", tag).Run()
+		for _, id := range ids {
+			_ = exec.Command("docker", "image", "rm", "-f", id).Run()
+		}
+	})
+
+	oldID := buildNodeImage(t, tag, "22.21.0")
+	ids = append(ids, oldID)
+
+	// The MacBook's volume on 2026-11-16: made, as latem makes it, and
+	// holding one Python's lib.
+	halfFilled := ToolCacheVolume(base, oldID)
+	if out, err := exec.Command("docker", "volume", "create",
+		"--label", LabelManaged+"=true", "--label", LabelToolCache+"="+base,
+		"--label", LabelToolCacheImage+"="+oldID, halfFilled).CombinedOutput(); err != nil {
+		t.Fatalf("docker volume create: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("docker", "run", "--rm", "-v", halfFilled+":/v", testImage,
+		"mkdir", "-p", "/v/Python/3.13.18/arm64/lib").CombinedOutput(); err != nil {
+		t.Fatalf("half-filling the volume: %v\n%s", err, out)
+	}
+
+	first, _ := prepareRun(t, e, "int-toolcache-1", func(s *executor.Spec) { s.ToolCache = base })
+	code, out := run(t, first, "node", "node")
+	if code != 0 || strings.TrimSpace(out) != "v22.21.0" {
+		t.Fatalf("node on a half-filled volume: exit %d, %q", code, out)
+	}
+	if code, out := run(t, first, "stray", "test ! -e "+ToolCachePath+"/Python/3.13.18/arm64"); code != 0 {
+		t.Errorf("the cut-short fill's files survived: %s", out)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The rebuild with a new default Node, under the same tag.
+	newID := buildNodeImage(t, tag, "24.11.1")
+	ids = append(ids, newID)
+	if newID == oldID {
+		t.Fatal("the rebuild produced the same image")
+	}
+	second, _ := prepareRun(t, e, "int-toolcache-2", func(s *executor.Spec) { s.ToolCache = base })
+	code, out = run(t, second, "node", "node")
+	if code != 0 || strings.TrimSpace(out) != "v24.11.1" {
+		t.Fatalf("node after the rebuild: exit %d, %q", code, out)
+	}
+	if err := second.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The old image is left untagged by the rebuild, so its volume went with
+	// the new fill; doctor's view agrees.
+	if out, _ := exec.Command("docker", "volume", "ls", "-q", "--filter", "name="+halfFilled).Output(); strings.TrimSpace(string(out)) != "" {
+		t.Errorf("the old image's volume %s was not removed", halfFilled)
+	}
+	st, err := e.CheckToolCache(context.Background(), base, tag)
+	if err != nil {
+		t.Fatalf("CheckToolCache: %v", err)
+	}
+	if !st.Exists || !st.Filled || len(st.Stale) != 0 {
+		t.Errorf("doctor's view = %+v", st)
+	}
+}

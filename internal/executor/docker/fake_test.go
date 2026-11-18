@@ -64,6 +64,18 @@ type fakeAPI struct {
 	listedVolumes []*volume.Volume
 	repoDigests   []string
 
+	// A109: the tool cache. images, when set, is every image the daemon has,
+	// by reference or id; otherwise every reference is one image, imageID.
+	// volumeCreatedAt is what VolumeCreate reports. probeLogs is what each
+	// probe container prints, one per probe, before falling back to
+	// execStdout. volumeRemoveErrs fails VolumeRemove by name.
+	images           map[string]image.InspectResponse
+	imageID          string
+	volumeCreatedAt  string
+	probeLogs        []string
+	probeLogsRead    int
+	volumeRemoveErrs map[string]error
+
 	// LAT-23: the readiness exec Prepare runs before any step. It is kept
 	// out of execOpts and the per-exec queues above, so a test about steps
 	// sees only steps. readyFailures is how many readiness execs the engine
@@ -101,8 +113,22 @@ func (f *fakeAPI) ImageInspect(_ context.Context, ref string) (image.InspectResp
 	if f.imageMissing {
 		return image.InspectResponse{}, errdefs.NotFound(errors.New("no such image: " + ref))
 	}
-	return image.InspectResponse{RepoDigests: f.repoDigests}, nil
+	if f.images != nil {
+		img, ok := f.images[ref]
+		if !ok {
+			return image.InspectResponse{}, errdefs.NotFound(errors.New("no such image: " + ref))
+		}
+		return img, nil
+	}
+	id := f.imageID
+	if id == "" {
+		id = fakeImageID
+	}
+	return image.InspectResponse{ID: id, RepoTags: []string{ref}, RepoDigests: f.repoDigests}, nil
 }
+
+// fakeImageID is the image every reference names when a test sets none.
+const fakeImageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func (f *fakeAPI) ImagePull(_ context.Context, _ string, _ image.PullOptions) (io.ReadCloser, error) {
 	if f.pullErr != nil {
@@ -177,6 +203,13 @@ func (f *fakeAPI) ContainerWait(
 }
 
 func (f *fakeAPI) ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.probeLogsRead < len(f.probeLogs) {
+		out := f.probeLogs[f.probeLogsRead]
+		f.probeLogsRead++
+		return io.NopCloser(bytes.NewReader(frame(out, ""))), nil
+	}
 	return io.NopCloser(bytes.NewReader(frame(strings.Join(f.execStdout, ""), ""))), nil
 }
 
@@ -301,20 +334,48 @@ func (f *fakeAPI) VolumeCreate(_ context.Context, opts volume.CreateOptions) (vo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.volumes = append(f.volumes, opts)
-	return volume.Volume{Name: opts.Name}, nil
+	return volume.Volume{Name: opts.Name, Labels: opts.Labels, CreatedAt: f.volumeCreatedAt}, nil
 }
 
 func (f *fakeAPI) VolumeRemove(_ context.Context, name string, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.volumeRemoveErrs[name]; err != nil {
+		return err
+	}
 	f.removedVolumes = append(f.removedVolumes, name)
 	return nil
 }
 
-func (f *fakeAPI) VolumeList(context.Context, volume.ListOptions) (volume.ListResponse, error) {
+// VolumeList answers listedVolumes, filtered as the daemon filters: every
+// label filter must match, as key or key=value, and a name filter is a
+// substring.
+func (f *fakeAPI) VolumeList(_ context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return volume.ListResponse{Volumes: f.listedVolumes}, nil
+	var out []*volume.Volume
+	for _, v := range f.listedVolumes {
+		if v == nil || volumeMatches(v, opts) {
+			out = append(out, v)
+		}
+	}
+	return volume.ListResponse{Volumes: out}, nil
+}
+
+func volumeMatches(v *volume.Volume, opts volume.ListOptions) bool {
+	for _, l := range opts.Filters.Get("label") {
+		key, want, hasValue := strings.Cut(l, "=")
+		got, ok := v.Labels[key]
+		if !ok || (hasValue && got != want) {
+			return false
+		}
+	}
+	for _, n := range opts.Filters.Get("name") {
+		if !strings.Contains(v.Name, n) {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *fakeAPI) Close() error {
