@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -154,6 +155,11 @@ type Executor struct {
 	// readyBudget bounds how long Prepare waits for a started container to
 	// take its first exec. [ReadyBudget] unless a test shortens it.
 	readyBudget time.Duration
+
+	// toolCacheMu serialises filling tool cache volumes, and toolCacheSeen
+	// remembers each volume found filled, by its creation time (A109).
+	toolCacheMu   sync.Mutex
+	toolCacheSeen map[string]string
 }
 
 var _ executor.Executor = (*Executor)(nil)
@@ -180,6 +186,7 @@ func New(opts Options) (*Executor, error) {
 		gpuProbeImage: orDefault(opts.GPUProbeImage, "nvidia/cuda:12.4.1-base-ubuntu22.04"),
 		init:          opts.Init == nil || *opts.Init,
 		readyBudget:   ReadyBudget,
+		toolCacheSeen: map[string]string{},
 	}
 	if e.pidsLimit == 0 {
 		e.pidsLimit = DefaultPidsLimit
@@ -265,8 +272,9 @@ func (e *Executor) Prepare(ctx context.Context, spec executor.Spec) (executor.En
 	if err := e.ensureImage(ctx, img); err != nil {
 		return nil, err
 	}
-	mounts, err := e.ensureMounts(ctx, spec)
+	mounts, err := e.ensureMounts(ctx, spec, img)
 	if err != nil {
+		e.removeRunVolume(ctx, spec.RunID)
 		return nil, err
 	}
 	if err := e.ensureCacheOwnership(ctx, img, mounts); err != nil {
@@ -538,7 +546,7 @@ func (e *Executor) stepHome(ctx context.Context, img string) (string, error) {
 // Caches are mounted, never archived (§14): there is no save step and no
 // restore step, so a volume that does not exist simply gets created empty and
 // the first run that uses it warms it.
-func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec) ([]mount.Mount, error) {
+func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec, img string) ([]mount.Mount, error) {
 	mounts := []mount.Mount{{
 		Type:   mount.TypeBind,
 		Source: spec.Workspace,
@@ -573,15 +581,17 @@ func (e *Executor) ensureMounts(ctx context.Context, spec executor.Spec) ([]moun
 
 	// The runner's tool cache (A51): a volume of its own, never locked, and —
 	// being a volume — handed to the step user by ensureCacheOwnership with
-	// the caches.
+	// the caches. One per image, filled by latem before anything mounts it
+	// here, and so NoCopy: the engine's own fill is what went wrong (A109).
 	if spec.ToolCache != "" {
-		if _, err := e.api.VolumeCreate(ctx, volume.CreateOptions{
-			Name:   spec.ToolCache,
-			Labels: map[string]string{LabelManaged: "true"},
-		}); err != nil {
-			return nil, wrapErr(protocol.ErrCache, err, "tool cache volume %q", spec.ToolCache)
+		name, err := e.ensureToolCache(ctx, spec.ToolCache, img)
+		if err != nil {
+			return nil, err
 		}
-		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: spec.ToolCache, Target: ToolCachePath})
+		mounts = append(mounts, mount.Mount{
+			Type: mount.TypeVolume, Source: name, Target: ToolCachePath,
+			VolumeOptions: &mount.VolumeOptions{NoCopy: true},
+		})
 	}
 
 	for _, c := range spec.Caches {
@@ -729,6 +739,14 @@ func (e *Executor) Reap(ctx context.Context, live func(runID string) bool) ([]ex
 			continue
 		}
 		reaped = append(reaped, executor.Reaped{RunID: runID, Kind: "volume", Ref: v.Name})
+	}
+
+	// Tool cache volumes of images rebuilt or removed since, and A51's single
+	// one (A109): about a gigabyte each that no run will mount again.
+	pruned, err := e.pruneToolCaches(ctx, "")
+	reaped = append(reaped, pruned...)
+	if err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return reaped, firstErr
 }
@@ -921,7 +939,10 @@ type probeSpec struct {
 	// `git /bin/sh -c …`. Nil leaves the image's entrypoint alone.
 	entrypoint []string
 	user       string
-	mutate     func(*container.HostConfig)
+	// env is the probe's environment, for values a constant script reads
+	// (INV-3).
+	env    []string
+	mutate func(*container.HostConfig)
 }
 
 type probeResult struct {
@@ -948,6 +969,7 @@ func (e *Executor) runProbe(ctx context.Context, p probeSpec) (probeResult, erro
 		Image:      p.image,
 		Entrypoint: p.entrypoint,
 		Cmd:        p.cmd,
+		Env:        p.env,
 		User:       p.user,
 		Labels:     map[string]string{LabelManaged: "true", "latem.probe": "true"},
 	}, hostCfg, "")

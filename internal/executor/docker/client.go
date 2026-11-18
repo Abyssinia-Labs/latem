@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
@@ -108,4 +109,13 @@ func newSDKClient() (APIClient, error) {
 //nolint:staticcheck // SA1019: see above — the replacement lives in a module this workstream may not add to go.mod.
 func isNotFound(err error) bool {
 	return err != nil && client.IsErrNotFound(err)
+}
+
+// isConflict reports whether err is the daemon refusing because the object is
+// in use: a volume a container still holds (A109). The same deprecation as
+// [isNotFound], for the same reason.
+//
+//nolint:staticcheck // SA1019: see isNotFound.
+func isConflict(err error) bool {
+	return err != nil && errdefs.IsConflict(err)
 }

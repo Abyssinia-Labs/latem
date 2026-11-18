@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
 
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -566,10 +565,9 @@ func TestContainerID_IsExposedForReconciliation(t *testing.T) {
 func TestPrepare_ToolCacheVolume(t *testing.T) {
 	f := &fakeAPI{envFileMissing: true}
 	env := prepared(t, f, executor.Spec{RunID: "run-1", Workspace: t.TempDir(), ToolCache: "latem-toolcache-linux"})
-	if !slices.Contains(f.createdHosts[0].Mounts, mount.Mount{
-		Type: mount.TypeVolume, Source: "latem-toolcache-linux", Target: ToolCachePath,
-	}) {
-		t.Errorf("mounts = %v, want the tool cache volume", f.createdHosts[0].Mounts)
+	// A109: the volume is the image's, and filled by latem, not the engine.
+	if !hasNoCopyVolume(runHost(t, f, "run-1").Mounts, ToolCacheVolume("latem-toolcache-linux", fakeImageID), ToolCachePath) {
+		t.Errorf("mounts = %v, want the tool cache volume", runHost(t, f, "run-1").Mounts)
 	}
 	if env.ToolCacheDir() != ToolCachePath {
 		t.Errorf("ToolCacheDir() = %q", env.ToolCacheDir())

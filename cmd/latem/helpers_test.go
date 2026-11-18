@@ -117,6 +117,11 @@ type fakeDocker struct {
 	report       docker.ImageReport
 	reportErr    error
 	closed       bool
+
+	// A109: what CheckToolCache answers, and the base it was asked about.
+	toolCache     docker.ToolCacheState
+	toolCacheErr  error
+	toolCacheBase string
 }
 
 func (f *fakeDocker) Preflight(context.Context) error { return f.preflightErr }
@@ -125,6 +130,10 @@ func (f *fakeDocker) DaemonID(context.Context) (string, error) {
 }
 func (f *fakeDocker) CheckImage(context.Context, string) (docker.ImageReport, error) {
 	return f.report, f.reportErr
+}
+func (f *fakeDocker) CheckToolCache(_ context.Context, base, _ string) (docker.ToolCacheState, error) {
+	f.toolCacheBase = base
+	return f.toolCache, f.toolCacheErr
 }
 func (f *fakeDocker) Close() error { f.closed = true; return nil }
 

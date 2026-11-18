@@ -2266,7 +2266,8 @@ later step of the same use of the action receives it as `STATE_name`.
 **The tool cache.** `setup-node`, `setup-python` and their kind install into `$RUNNER_TOOL_CACHE`
 and expect to find the result there next time. It is a directory per runner that outlives
 runs: on the native executor a directory under the agent's own state, in a container a named
-volume `latem-toolcache-<runner>` mounted at `/opt/hostedtoolcache`, GitHub's path. Two runs on
+volume `latem-toolcache-<runner>` mounted at `/opt/hostedtoolcache`, GitHub's path (since A109,
+one such volume per image, filled by latem). Two runs on
 one runner writing the same tool rely on the toolkit's own extract-then-mark-complete; a runner
 at concurrency 1, which is every native runner, never has two. `AGENT_TOOLSDIRECTORY` names
 the same directory, for the actions that read that instead.
@@ -5163,3 +5164,49 @@ title; the alias stays on the machine.
 **Not in this amendment.** A label whose name implies no runner. It is a note at most: which
 runner it means, or whether it is another machine's, is the person's to say, and a guess would
 send jobs here that were meant elsewhere.
+
+
+### Amendment from a tool cache that hid the image's node
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A109 | §13.1, §14, §19, A51, A105 | **A docker runner's tool cache is one volume per image, `latem-toolcache-<runner>-<first 12 hex digits of the image id>`, labelled with the runner's name for it and the image's id. latem fills it before the run's container is made, not the engine: a probe from the run's image, as root, mounts the volume at `/latem-toolcache` and, unless the file `.latem-toolcache` there already names the image, empties it, copies the image's `/opt/hostedtoolcache` into it with `cp -a`, and writes that file last. The run's container and its container steps mount it with `NoCopy`. A fill that fails fails the run with `E_CACHE` before its container exists. What was seen filled is remembered by the agent, per volume, by the creation time the engine reports, so a warm runner probes once per volume and not once per run. A volume whose image the engine no longer has, or has left with neither tag nor digest, as a rebuild leaves the image it replaced, is removed after the next fill of that runner and at the agent's reap, unless a container holds it. So is A51's single volume. doctor's `toolcache.<runner>` says whether the volume the next run mounts was filled to the end, and names the volumes no run mounts again** | On 2026-11-17 every take-one Linux job with a JavaScript action failed on the MacBook at its first step with exit 127, runs 671 to 677: `NodeRun`'s "there is no node on this step's PATH". `latem-ubuntu:local` had been rebuilt the evening before, and the engine had moved to Kiri. Docker fills an empty named volume from the image the first time a container mounts it, and never again. The MacBook's first fill, of a new `latem-toolcache-linux`, was cut short, probably by the start-before-ready race of A105, and left 184 KB: one Python's `lib`. The volume then hid the image's 1.1 GB `/opt/hostedtoolcache`, where `/usr/local/node` links to. A rebuild with a new default Node does the same to a volume filled whole. A fresh volume over the same image had all of it. `workflows check` and `doctor` said all clear |
+
+**Why per image, and not one volume refilled.** One volume that is emptied and filled when the image
+changes would be emptied under a run still on the old image, and two images on one runner (a job's
+own `container:` image) would take turns emptying it. A volume per image has neither: a volume is
+only ever filled before any run mounts it, and the old one goes when nothing holds it and no tag
+names its image.
+
+**Why latem fills it, and not the engine.** The engine's fill cannot be seen to finish. latem's writes
+its marker after two `sync`s, so a volume with the marker was filled to the end, and one without is
+started over: emptied, so a cut-short fill's files do not stay, then filled. What setup-* actions
+install into a filled volume stays, which is what the tool cache is for. `NoCopy` keeps an engine
+from starting a fill of its own over latem's.
+
+**What was measured.** On the MacBook with Kiri and `latem-ubuntu:local`: a fill of the 1.1 GB took
+1.9 s, and the probe over a filled volume 0.01 s. `TestIntegration_ToolCacheFollowsTheImage` builds
+an image shaped like `latem-ubuntu` (a node under `/opt/hostedtoolcache`, reached through
+`/usr/local/node` on PATH), cuts a fill short as the MacBook's was, and rebuilds the image with
+another node: the step runs the image's node both times, and the old image's volume is gone after
+the rebuild. The unit tests run the fill script itself on directories.
+
+**What it costs.** A run on a warm runner: one image inspect more than before, against the local
+engine. After an agent start, a volume made again, or a new image: one probe container, and on a
+new image the copy, about 2 s per gigabyte here. The reap (at start and daily): one volume list,
+and one image inspect per tool cache volume. On disk, one volume per image a runner uses, where
+before there was one per runner. A rebuild's old volume is removed at the first fill on the new
+image when no run still holds it, else at the next reap.
+
+**Upgrading.** The first run after the upgrade fills a new volume and removes `latem-toolcache-<runner>`,
+A51's, when no run holds it. Nothing is to be done by hand. The MacBook's half-filled volume is that
+volume.
+
+**Not in this amendment.** A volume that has its marker and was damaged after, which a person
+removes (`docker volume rm`); the next run fills it again. Two agents on one engine filling the same
+volume at once, which the agent's lock does not cover: `latem try`'s second agent, with the same
+runner name, at the same moment as a new image. A run of an image named only by its id, which has
+neither tag nor digest, whose volume a reap can take between its fill and its container. Ownership of the tool cache's contents for a uid that
+is not the image's: unchanged from A51, the mount point is the step user's and what the image put
+there keeps the image's owners.
+

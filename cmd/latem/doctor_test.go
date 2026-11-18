@@ -15,6 +15,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/agent"
 	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/secrets"
 	"github.com/Abyssinia-Labs/latem/internal/system"
@@ -285,6 +286,65 @@ func TestDoctorBaseImageContract(t *testing.T) {
 		got := d.checkDockerImages(context.Background())
 		if len(got) != 1 || got[0].Level != levelFail {
 			t.Fatalf("an unreachable daemon = %+v, want one failure", got)
+		}
+	})
+}
+
+// A109: doctor sees what the agent mends before a run, a tool cache volume
+// whose fill was cut short and the volumes no run mounts again, and says it.
+func TestDoctorToolCache(t *testing.T) {
+	dir := privateDir(t)
+	cfg := testConfig(dir)
+	runner := cfg.Runners[0].Name
+	base := docker.ToolCacheVolumePrefix + runner
+	volume := base + "-0123456789ab"
+
+	check := func(t *testing.T, st docker.ToolCacheState, err error) []check {
+		t.Helper()
+		d := newTestDoctor("linux", dir, healthyRunner("linux"), cfg, nil)
+		fake := &fakeDocker{toolCache: st, toolCacheErr: err}
+		d.newDocker = fake.factory()
+		got := d.checkToolCaches(context.Background())
+		if fake.toolCacheBase != base {
+			t.Errorf("asked about %q, want the runner's tool cache %q", fake.toolCacheBase, base)
+		}
+		if len(got) != 1 || got[0].ID != "toolcache."+runner {
+			t.Fatalf("checks = %+v, want one toolcache.%s", got, runner)
+		}
+		return got
+	}
+
+	t.Run("filled", func(t *testing.T) {
+		got := check(t, docker.ToolCacheState{Volume: volume, Exists: true, Filled: true}, nil)
+		if got[0].Level != levelPass {
+			t.Errorf("a filled volume = %+v, want pass", got[0])
+		}
+	})
+	t.Run("not made yet", func(t *testing.T) {
+		got := check(t, docker.ToolCacheState{Volume: volume}, nil)
+		if got[0].Level != levelPass || !strings.Contains(got[0].Detail, "next run") {
+			t.Errorf("no volume yet = %+v, want a pass that says the next run fills it", got[0])
+		}
+	})
+	t.Run("cut short", func(t *testing.T) {
+		got := check(t, docker.ToolCacheState{Volume: volume, Exists: true}, nil)
+		if got[0].Level != levelWarn || !strings.Contains(got[0].Detail, volume) {
+			t.Errorf("a cut-short fill = %+v, want a warning naming the volume", got[0])
+		}
+		if !strings.Contains(strings.Join(got[0].Notes, " "), "node") {
+			t.Errorf("the note should say what a step then lacks: %v", got[0].Notes)
+		}
+	})
+	t.Run("stale", func(t *testing.T) {
+		got := check(t, docker.ToolCacheState{Volume: volume, Exists: true, Filled: true, Stale: []string{base}}, nil)
+		if got[0].Level != levelWarn || !slices.Contains(got[0].Fix, "docker volume rm "+base) {
+			t.Errorf("a stale volume = %+v, want a warning with its removal", got[0])
+		}
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		got := check(t, docker.ToolCacheState{}, errors.New("no such image"))
+		if got[0].Level != levelSkip {
+			t.Errorf("an image that cannot be read = %+v, want skip: the image check says why", got[0])
 		}
 	})
 }
