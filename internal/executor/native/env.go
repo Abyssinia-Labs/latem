@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/workflow/ghcmd"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
@@ -499,11 +500,17 @@ func mergeEnv(layers ...map[string]string) map[string]string {
 // runnerLayer is a native runner's env with its path_prepend applied, in
 // front of the agent's own PATH or the PATH the runner's env sets (A60). A job
 // that sets PATH replaces all of it, as it would replace the agent's.
-func runnerLayer(env map[string]string, prepend []string) map[string]string {
-	if len(env) == 0 && len(prepend) == 0 {
+//
+// The machine's Docker daemon is beneath the runner's env (A111): a runner
+// that names its own DOCKER_HOST meant that one.
+func runnerLayer(env map[string]string, prepend []string, dockerHost string) map[string]string {
+	if len(env) == 0 && len(prepend) == 0 && dockerHost == "" {
 		return nil
 	}
-	out := make(map[string]string, len(env)+1)
+	out := make(map[string]string, len(env)+2)
+	for k, v := range dockerhost.StepEnv(dockerHost) {
+		out[k] = v
+	}
 	for k, v := range env {
 		out[k] = v
 	}

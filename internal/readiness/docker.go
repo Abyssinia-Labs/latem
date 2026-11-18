@@ -1,24 +1,30 @@
 package readiness
 
 import (
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Abyssinia-Labs/latem/internal/system"
 )
 
 // Docker is the daemon a docker runner's jobs go to, as setup found it
-// (A106). The agent dials DOCKER_HOST, or else the system socket, and never
-// reads `docker context`; the `docker` command follows the context. So the
-// command can answer while the agent reaches nothing, which is what an engine
-// other than Docker Desktop leaves behind until the system socket points at
-// it. Its zero value is a machine where nobody asked.
+// (A106, A111). The agent dials config.toml's `[docker] host`, else
+// DOCKER_HOST, else the system socket, and never reads `docker context`; the
+// `docker` command follows the context. So the command can answer while the
+// agent reaches nothing, which is what Colima, OrbStack, Kiri and Rancher
+// Desktop leave behind on a Mac: their socket is under the home directory.
+// Its zero value is a machine where nobody asked.
 type Docker struct {
-	// Asked: a docker runner is configured, so the agent's daemon was asked.
+	// Asked: a docker runner is configured, so the agent's daemon is one
+	// its jobs need.
 	Asked bool
-	// Host is where the agent dials: DOCKER_HOST's value, or the system
-	// socket's address. FromEnv says it is DOCKER_HOST's.
-	Host    string
-	FromEnv bool
+	// Host is where the agent dials. FromConfig says it is config.toml's
+	// [docker] host, FromEnv that it is DOCKER_HOST's; neither, the system
+	// socket.
+	Host       string
+	FromConfig bool
+	FromEnv    bool
 	// Answers: a ping there was answered.
 	Answers bool
 	// Link is where the system socket points, when it is a link. The rest are
@@ -27,15 +33,28 @@ type Docker struct {
 	// CLIHost is the endpoint of the `docker` command's current context, which
 	// names the engine a person is running.
 	CLIHost string
-	// DesktopHelper: Docker Desktop's privileged helper, com.docker.socket, is
-	// installed and enabled. It points the system socket back at Docker
-	// Desktop's own at every boot.
-	DesktopHelper bool
+	// Found is an engine's socket that answers where the agent does not look:
+	// the context's endpoint, or one of the places Colima, OrbStack, Kiri,
+	// Rancher Desktop and Docker Desktop put theirs (A111). Writing it as
+	// [docker] host is the fix, and needs no sudo.
+	Found string
 }
 
-// ItemDockerAgent is the item for a docker runner whose daemon does not
-// answer where the agent looks.
-const ItemDockerAgent = "docker-agent"
+// Item IDs for the agent's daemon.
+const (
+	// ItemDockerAgent is the item for a docker runner whose daemon does not
+	// answer where the agent looks.
+	ItemDockerAgent = "docker-agent"
+	// ItemDockerHost is a daemon the agent reaches through a DOCKER_HOST in
+	// its environment, which `latem service install` does not keep (A111).
+	ItemDockerHost = "docker-host"
+	// ItemNoLinuxRunner is a machine with no runner for Linux jobs.
+	ItemNoLinuxRunner = "no-linux-runner"
+)
+
+// LinuxRunner is the name of the docker runner setup adds, as `latem setup`
+// names the one it writes into a new config.toml.
+const LinuxRunner = "linux"
 
 // Engine names the Docker engine whose socket an address is, or "".
 func Engine(host string) string {
@@ -55,8 +74,16 @@ func Engine(host string) string {
 	return ""
 }
 
+// DockerHostChange writes host as config.toml's [docker] host (A111).
+func DockerHostChange(host string) Change {
+	return Change{What: ChangeDockerHost, Value: host, Line: "[docker] host = " + strconv.Quote(host)}
+}
+
 func dockerAgentItem(d Docker, h system.Host, jobs []string) []Item {
 	it, ok := DockerAgentItem(d, h)
+	if !ok {
+		it, ok = DockerHostItem(d)
+	}
 	if !ok {
 		return nil
 	}
@@ -65,9 +92,10 @@ func dockerAgentItem(d Docker, h system.Host, jobs []string) []Item {
 }
 
 // DockerAgentItem is what stands between a docker runner and its daemon, and
-// false when the daemon answers or nobody asked. It names the fix for the
-// engine the `docker` command reaches, which is the one a person is running.
-// doctor says the same (A106).
+// false when the daemon answers or nobody asked. When an engine answers at a
+// socket of its own, the fix is config.toml's [docker] host, which latem
+// writes; otherwise it is starting the engine. doctor says the same (A106,
+// A111).
 func DockerAgentItem(d Docker, h system.Host) (Item, bool) {
 	if !d.Asked || d.Answers {
 		return Item{}, false
@@ -75,6 +103,8 @@ func DockerAgentItem(d Docker, h system.Host) (Item, bool) {
 	it := Item{ID: ItemDockerAgent, Title: "Docker answering where the agent looks"}
 	where := socketPath(d.Host)
 	switch {
+	case d.FromConfig:
+		it.Have = "nothing answers at [docker] host, " + d.Host
 	case d.FromEnv:
 		it.Have = "nothing answers at DOCKER_HOST, " + d.Host
 	case d.Link != "":
@@ -83,69 +113,92 @@ func DockerAgentItem(d Docker, h system.Host) (Item, bool) {
 		it.Have = "nothing answers at " + where
 	}
 
+	if d.Found != "" {
+		it.Have += "; " + engineAt(d.Found) + " answers at " + socketPath(d.Found)
+		it.Config = []Change{DockerHostChange(d.Found)}
+		return it, true
+	}
+
 	cli := ""
 	if d.CLIHost != "" && d.CLIHost != d.Host {
 		cli = d.CLIHost
 	}
-	engine := Engine(cli)
-	dockerHost := "or give the agent's service DOCKER_HOST=" + cli + ": the agent reads DOCKER_HOST or " +
-		system.DockerSocket + ", and never `docker context`"
-
+	then := "; `latem setup apply " + ItemDockerAgent + "` then writes it as [docker] host in config.toml"
 	switch {
-	case d.FromEnv && cli != "":
-		it.Manual = []string{"start what serves " + d.Host + ", or change DOCKER_HOST in the agent's service to " + cli +
-			", which the `docker` command reaches"}
-		return it, true
+	case cli != "":
+		// The context names an engine, and it did not answer either.
+		it.Manual = []string{"start " + engineAt(cli) + ", which the `docker` command's context names" + then}
+	case d.FromConfig:
+		it.Manual = []string{"start what serves " + d.Host + ", or change [docker] host in config.toml"}
 	case d.FromEnv:
-		it.Manual = []string{"start what serves " + d.Host + ", or change DOCKER_HOST in the agent's service"}
-		return it, true
-	case cli == "" && h.Linux():
+		it.Manual = []string{"start what serves " + d.Host + ", or set [docker] host in config.toml, " +
+			"which the agent reads before DOCKER_HOST"}
+	case h.Linux():
 		it.Yours = [][]string{{"sudo", "systemctl", "start", "docker"}}
-		return it, true
-	case cli == "":
-		// The `docker` command reaches nothing else either, so the engine is
-		// not running: the one the link names, if it names one.
-		if e := Engine(d.Link); e != "" {
-			it.Manual = []string{"start " + e + ", which " + where + " points at"}
-			if e == "Docker Desktop" {
-				it.Yours = [][]string{{"open", "-a", "Docker"}}
-				it.Manual = nil
-			}
-			return it, true
-		}
-		it.Manual = []string{"start your Docker engine (Docker Desktop, Kiri, OrbStack, Colima or Rancher Desktop), " +
-			"and point " + where + " at it"}
-		return it, true
-	}
-
-	// The `docker` command reaches an engine at another socket.
-	if h.Mac() && d.DesktopHelper && engine != "Docker Desktop" {
-		it.Have += "; Docker Desktop's com.docker.socket points it back at Docker Desktop at every boot"
-		it.Yours = append(it.Yours, []string{"sudo", "launchctl", "disable", "system/com.docker.socket"})
-		it.Manual = append(it.Manual, "uninstalling Docker Desktop removes com.docker.socket too")
-	}
-	sock := socketPath(cli)
-	switch engine {
-	case "Kiri":
-		if d.Link != "" && d.Link != sock {
-			// kiri setup refuses while another engine's link is there.
-			it.Yours = append(it.Yours, []string{"sudo", "rm", where})
-		}
-		it.Yours = append(it.Yours, []string{"kiri", "setup", "--docker-socket"})
-	case "OrbStack":
-		it.Manual = append(it.Manual, "in OrbStack's settings, allow it admin privileges, with which it links "+where+" to itself")
-	case "Rancher Desktop":
-		it.Manual = append(it.Manual, "in Rancher Desktop's preferences, turn on administrative access, with which it links "+where+" to itself")
-	case "Docker Desktop":
-		it.Manual = append(it.Manual, "in Docker Desktop's settings, Advanced, allow the default Docker socket to be used")
 	default:
-		if h.Mac() {
-			// Colima, and an engine latem does not know, link by hand.
-			it.Yours = append(it.Yours, []string{"sudo", "ln", "-sf", sock, where})
+		// The `docker` command reaches nothing either, so the engine is not
+		// running: the one the link names, if it names one.
+		switch e := Engine(d.Link); e {
+		case "Docker Desktop":
+			it.Yours = [][]string{{"open", "-a", "Docker"}}
+		case "":
+			it.Manual = []string{"start your Docker engine (Docker Desktop, Colima, OrbStack, Kiri or Rancher Desktop)" + then}
+		default:
+			it.Manual = []string{"start " + e + ", which " + where + " points at"}
 		}
 	}
-	it.Manual = append(it.Manual, dockerHost)
 	return it, true
+}
+
+// DockerHostItem is a daemon that answers at a DOCKER_HOST in the agent's
+// environment, which on a machine set up by hand is a line added to the
+// service definition. `latem service install` writes that definition whole
+// and drops the line, so the item moves it to config.toml (A111). It is soft:
+// the agent reaches Docker today. Only a Unix socket moves; config.toml takes
+// nothing else.
+func DockerHostItem(d Docker) (Item, bool) {
+	if !d.Answers || !d.FromEnv || !strings.HasPrefix(d.Host, "unix://") {
+		return Item{}, false
+	}
+	return Item{ID: ItemDockerHost, Title: "the Docker daemon's address in config.toml", Soft: true,
+		Have:   "DOCKER_HOST=" + d.Host + " in the agent's environment, which `latem service install` does not keep",
+		Config: []Change{DockerHostChange(d.Host)}}, true
+}
+
+// noLinuxRunnerItem adds a docker runner when a daemon answers, the agent's
+// or an engine's at a socket of its own, and says to start one otherwise
+// (A111).
+func noLinuxRunnerItem(d Docker, runners []Runner) Item {
+	it := Item{ID: ItemNoLinuxRunner, Title: "a runner labelled linux"}
+	name := LinuxRunner
+	if slices.ContainsFunc(runners, func(r Runner) bool { return r.Name == name }) {
+		name = "docker"
+	}
+	runner := Change{What: ChangeDockerRunner, Value: name,
+		Line: "a docker runner named " + name + ", which runs Linux jobs in containers"}
+	switch {
+	case d.Answers && d.FromEnv && strings.HasPrefix(d.Host, "unix://"):
+		// A DOCKER_HOST the service carries, which an install drops: the
+		// runner would lose its daemon at the next one.
+		it.Config = []Change{DockerHostChange(d.Host), runner}
+	case d.Answers:
+		it.Config = []Change{runner}
+	case d.Found != "":
+		it.Have = engineAt(d.Found) + " answers at " + socketPath(d.Found) + ", where the agent does not look"
+		it.Config = []Change{DockerHostChange(d.Found), runner}
+	default:
+		it.Manual = []string{"start Docker (Docker Desktop, Colima, OrbStack, Kiri or Rancher Desktop); " +
+			"`latem setup apply " + ItemNoLinuxRunner + "` then adds a docker runner"}
+	}
+	return it
+}
+
+// engineAt names the engine at host, or the socket itself.
+func engineAt(host string) string {
+	if e := Engine(host); e != "" {
+		return e
+	}
+	return "what serves " + host
 }
 
 func socketPath(host string) string {

@@ -18,6 +18,7 @@ import (
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/capacity"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/logstream"
 	"github.com/Abyssinia-Labs/latem/internal/metrics"
@@ -84,8 +85,9 @@ type doctor struct {
 	loadCfg   func() (*config.Config, error)
 	newDocker func(docker.Options) (dockerProbe, error)
 	// agentDocker reads, when the daemon does not answer, what names its fix
-	// (A106). Nil keeps the generic one.
-	agentDocker func(ctx context.Context) readiness.Docker
+	// (A106), asking at config.toml's [docker] host when it is set (A111).
+	// Nil keeps the generic one.
+	agentDocker func(ctx context.Context, configured string) readiness.Docker
 	newSecrets  func(secrets.Options) (secretResolver, error)
 	sameFS      func(mirrorDir, workDir string) error
 	// newAppStore and clock exist for A35's checks: one talks to Apple and the
@@ -282,7 +284,7 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 
 	// The daemon, not the CLI. A CLI with no daemon behind it is the single
 	// most common "docker is installed" false positive.
-	probe, err := d.newDocker(docker.Options{})
+	probe, err := d.newDocker(docker.Options{Host: d.dockerHost()})
 	if err != nil {
 		out = append(out, fail("docker.daemon", "docker daemon", err.Error(), d.startDockerCommand()))
 	} else {
@@ -294,7 +296,7 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 			}
 			out = append(out, d.daemonDown(ctx, level, firstLineOf(err.Error())))
 		} else {
-			out = append(out, pass("docker.daemon", "docker daemon", "reachable"))
+			out = append(out, pass("docker.daemon", "docker daemon", "reachable"+d.dockerWhere()))
 			out = append(out, d.checkDockerContext(ctx, probe)...)
 		}
 	}
@@ -322,10 +324,46 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 	return out
 }
 
+// configDockerHost is config.toml's [docker] host, or "" (A111).
+func (d *doctor) configDockerHost() string {
+	if d.cfg == nil {
+		return ""
+	}
+	return d.cfg.Docker.Host
+}
+
+// dockerHost is where the agent dials, as far as doctor can tell (A111):
+// config.toml's [docker] host, else a socket the installed service
+// definition gives it as DOCKER_HOST, which this shell does not have, else ""
+// for this process's DOCKER_HOST or the system socket.
+func (d *doctor) dockerHost() string {
+	if h := d.configDockerHost(); h != "" {
+		return h
+	}
+	if h := d.sys.ServiceDockerHost(); dockerhost.SocketPath(h) != "" {
+		return h
+	}
+	return ""
+}
+
+// dockerWhere says where the daemon was reached, when it is not this
+// shell's.
+func (d *doctor) dockerWhere() string {
+	switch h := d.dockerHost(); {
+	case h == "":
+		return ""
+	case h == d.configDockerHost():
+		return " at [docker] host, " + h
+	default:
+		return " at the service's DOCKER_HOST, " + h
+	}
+}
+
 // checkDockerContext asks whether a `docker` command reaches the daemon the
 // agent does.
 //
-// The agent reads DOCKER_HOST or the system socket and nothing else. The CLI
+// The agent reads [docker] host, DOCKER_HOST or the system socket and nothing
+// else (A111). The CLI
 // follows `docker context`, which installing Docker Desktop moves. So a step
 // that asks `docker` about a container its job's agent started can be asking
 // another daemon, and both answer healthily. Daemon ids rather than socket
@@ -334,6 +372,11 @@ func (d *doctor) checkDocker(ctx context.Context) []check {
 // No verdict means nothing to report, not a pass: whichever end did not answer
 // is docker.daemon's to say.
 func (d *doctor) checkDockerContext(ctx context.Context, probe dockerProbe) []check {
+	if h := d.dockerHost(); h != "" {
+		// A native step is given it as DOCKER_HOST, which the command reads
+		// before its context, so the context is this shell's business only.
+		return []check{pass("docker.context", "docker command", "a native step is given DOCKER_HOST="+h+", the agent's daemon")}
+	}
 	agent, err := probe.DaemonID(ctx)
 	if err != nil || agent == "" {
 		return nil
@@ -353,7 +396,9 @@ func (d *doctor) checkDockerContext(ctx context.Context, probe dockerProbe) []ch
 			"A `docker` command follows the context, so a step that looks for something the "+
 			"agent's daemon holds finds nothing, with no error from either.",
 			"Docker Desktop is the usual reason: installing it switches the context to its own "+
-				"daemon. A job can also pin itself with DOCKER_CONTEXT=default in its env.")}
+				"daemon. A job can also pin itself with DOCKER_CONTEXT=default in its env.",
+			"Or name the daemon both should use in config.toml, `[docker] host = \"unix:///…/docker.sock\"`: "+
+				"the agent dials it, and a native step is given it as DOCKER_HOST (A111).")}
 }
 
 // serviceGroupsNote is why a group added to the account does not reach the
@@ -371,7 +416,8 @@ const serviceGroupsNote = "The agent is not in your shell. A user service has th
 // wrong one to ask: a shell with the group and an agent without it pass every
 // other check while the docker runner reports unavailable to the control plane.
 // No verdict means nothing to report, not a pass: the service is down, which
-// checkService says, or Docker is somewhere other than the default socket.
+// checkService says, or Docker is somewhere other than the socket the agent
+// dials.
 func (d *doctor) checkServiceDocker(ctx context.Context) []check {
 	st, err := d.sys.ServiceStatus(ctx)
 	if err != nil || !st.Running || st.PID == 0 {
@@ -381,7 +427,11 @@ func (d *doctor) checkServiceDocker(ctx context.Context) []check {
 	if connects == nil {
 		connects = d.sys.ProcessCanConnect
 	}
-	ok, err := connects(st.PID, system.DockerSocket)
+	sock := system.DockerSocket
+	if p := dockerhost.SocketPath(d.dockerHost()); p != "" {
+		sock = p // the agent dials [docker] host (A111)
+	}
+	ok, err := connects(st.PID, sock)
 	switch {
 	case err != nil:
 		return nil
@@ -794,7 +844,7 @@ func (d *doctor) checkDockerImages(ctx context.Context) []check {
 			continue
 		}
 		id, title := "image."+r.Name, "base image / "+r.Name
-		probe, err := d.newDocker(docker.Options{DefaultImage: r.Docker.DefaultImage})
+		probe, err := d.newDocker(docker.Options{Host: d.dockerHost(), DefaultImage: r.Docker.DefaultImage})
 		if err != nil {
 			out = append(out, fail(id, title, err.Error(), d.startDockerCommand()))
 			continue
@@ -840,7 +890,7 @@ func (d *doctor) checkToolCaches(ctx context.Context) []check {
 			continue
 		}
 		id, title := "toolcache."+r.Name, "tool cache / "+r.Name
-		probe, err := d.newDocker(docker.Options{DefaultImage: r.Docker.DefaultImage})
+		probe, err := d.newDocker(docker.Options{Host: d.dockerHost(), DefaultImage: r.Docker.DefaultImage})
 		if err != nil {
 			out = append(out, fail(id, title, err.Error(), d.startDockerCommand()))
 			continue
@@ -885,7 +935,7 @@ func (d *doctor) checkGPU(ctx context.Context) []check {
 			continue
 		}
 		id, title := "gpu."+r.Name, "nvidia toolkit / "+r.Name
-		probe, err := d.newDocker(docker.Options{GPU: true})
+		probe, err := d.newDocker(docker.Options{Host: d.dockerHost(), GPU: true})
 		if err != nil {
 			out = append(out, fail(id, title, err.Error(), d.startDockerCommand()))
 			continue
@@ -1469,6 +1519,25 @@ func (d *doctor) xcodeNotSelected(ctx context.Context, dir string) check {
 
 // ----------------------------------------------------------------- service
 
+// checkServiceDockerHost names a DOCKER_HOST added to the service definition
+// by hand, which `latem service install` drops (A111). With [docker] host
+// set the agent no longer reads it, and the next install removes it
+// harmlessly; without, the install leaves the agent with no Docker.
+func (d *doctor) checkServiceDockerHost(st system.ServiceState) []check {
+	if st.DockerHost == "" || d.configDockerHost() != "" {
+		return nil
+	}
+	c := warn("service.docker_host", "service DOCKER_HOST",
+		fmt.Sprintf("%s sets DOCKER_HOST=%s by hand; `latem service install` rewrites the file and drops it", st.Path, st.DockerHost))
+	if dockerhost.SocketPath(st.DockerHost) == "" {
+		return []check{c.withManual("config.toml's [docker] host takes a Unix socket only; " +
+			"keep this daemon's DOCKER_HOST in the shell that runs `latem agent`, or move to a socket")}
+	}
+	c.Fix = []string{"latem setup apply " + readiness.ItemDockerHost + "   # writes [docker] host = " + tomlString(st.DockerHost) + " to config.toml"}
+	return []check{c.withNotes("The agent reads [docker] host before DOCKER_HOST, and gives it to native steps " +
+		"as DOCKER_HOST, so once it is written the line in the service definition is not needed.")}
+}
+
 func (d *doctor) checkService(ctx context.Context) []check {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return []check{skip("service.installed", "agent service", "no service integration on "+runtime.GOOS)}
@@ -1490,6 +1559,7 @@ func (d *doctor) checkService(ctx context.Context) []check {
 	default:
 		out = append(out, pass("service.installed", "agent service", "running from "+st.Path))
 	}
+	out = append(out, d.checkServiceDockerHost(st)...)
 	// Nothing rewrites an installed definition, so one an older latem wrote
 	// keeps what that latem got wrong: before revision 2, a LaunchAgent that
 	// macOS throttled.
@@ -1579,13 +1649,22 @@ func (d *doctor) installCommand(tool string) string {
 
 // daemonDown is docker.daemon failing, with the fix setup's plan names for
 // the engine the `docker` command reaches (A106): Docker Desktop's
-// `open -a Docker` is no fix on a Mac that runs Kiri or OrbStack.
+// `open -a Docker` is no fix on a Mac that runs Kiri or OrbStack. An engine
+// that answers at a socket of its own is written as config.toml's
+// [docker] host, by `latem setup apply docker-agent` (A111).
 func (d *doctor) daemonDown(ctx context.Context, level func(id, title, detail string, fix ...string) check, detail string) check {
 	if d.agentDocker == nil {
 		return level("docker.daemon", "docker daemon", detail, d.startDockerCommand())
 	}
-	it, ok := readiness.DockerAgentItem(d.agentDocker(ctx), d.sys.Host())
-	if !ok || len(it.Yours)+len(it.Manual) == 0 {
+	dk := d.agentDocker(ctx, d.dockerHost())
+	dk.Asked = true
+	it, ok := readiness.DockerAgentItem(dk, d.sys.Host())
+	switch {
+	case ok && len(it.Config) > 0:
+		return level("docker.daemon", "docker daemon", it.Have,
+			"latem setup apply "+readiness.ItemDockerAgent+"   # writes "+strings.Join(changeLines(it.Config), "; ")).
+			withNotes(detail)
+	case !ok || len(it.Yours)+len(it.Manual) == 0:
 		return level("docker.daemon", "docker daemon", detail, d.startDockerCommand())
 	}
 	return level("docker.daemon", "docker daemon", it.Have, commandLines(it.Yours)...).withManual(it.Manual...).withNotes(detail)

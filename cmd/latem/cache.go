@@ -12,11 +12,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/source"
 )
 
@@ -359,7 +359,7 @@ func removeCache(ctx context.Context, out io.Writer, name, runner string) error 
 	}
 
 	if r.Executor == config.ExecutorDocker {
-		api, closeAPI, err := openDockerCacheAPI()
+		api, closeAPI, err := openDockerCacheAPI(cfg.Docker.Host)
 		if err != nil {
 			return err
 		}
@@ -406,7 +406,7 @@ func openCacheManager() (*cache.Local, func(), error) {
 	opts := cache.Options{Root: cfg.Paths.Dir, Runners: runners}
 	closeFn := func() {}
 	if needDocker {
-		api, closeAPI, err := openDockerCacheAPI()
+		api, closeAPI, err := openDockerCacheAPI(cfg.Docker.Host)
 		if err == nil {
 			opts.Docker, closeFn = api, closeAPI
 		}
@@ -422,8 +422,8 @@ func openCacheManager() (*cache.Local, func(), error) {
 	return mgr, closeFn, nil
 }
 
-func openDockerCacheAPI() (cache.DockerAPI, func(), error) {
-	cli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+func openDockerCacheAPI(host string) (cache.DockerAPI, func(), error) {
+	cli, err := dockerhost.NewClient(host)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connecting to the Docker daemon: %w", err)
 	}

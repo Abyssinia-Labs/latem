@@ -94,9 +94,14 @@ func (m *fakeMachine) deps() toolchainDeps {
 			return secretStores{file: secrets.NewFileStore(p.SecretsEnv), openvault: m.vault}, nil
 		},
 		vaultHere: func() bool { return m.vaultHere },
-		docker: func(context.Context) readiness.Docker {
+		docker: func(_ context.Context, configured string) readiness.Docker {
 			if m.docker == nil {
-				return readiness.Docker{}
+				// Docker answers, wherever config.toml says it is.
+				return readiness.Docker{Host: configured, FromConfig: configured != "", Answers: true}
+			}
+			if configured != "" && configured == m.docker.Found {
+				// Written down, the engine's socket is where the agent looks.
+				return readiness.Docker{Host: configured, FromConfig: true, Answers: true}
 			}
 			return *m.docker
 		},

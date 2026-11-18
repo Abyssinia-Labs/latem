@@ -368,3 +368,14 @@ func TestRequiresRestart_IdenticalConfigsNeedNothing(t *testing.T) {
 		t.Errorf("two loads of one file disagree: %v", got)
 	}
 }
+
+// The docker runners and the volume caches dial [docker] host once, at
+// start, so a change to it waits for a restart and says so (A111).
+func TestRequiresRestart_DockerHost(t *testing.T) {
+	a := &Config{}
+	b := &Config{Docker: Docker{Host: "unix:///Users/me/.colima/default/docker.sock"}}
+	got := RequiresRestart(a, b)
+	if len(got) != 1 || !strings.Contains(got[0], "docker.host changed") {
+		t.Errorf("RequiresRestart = %q", got)
+	}
+}

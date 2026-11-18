@@ -147,6 +147,10 @@ func RequiresRestart(old, next *Config) []string {
 	if old.Agent.AutoUpdate != next.Agent.AutoUpdate {
 		note("agent.auto_update changed from %v to %v", old.Agent.AutoUpdate, next.Agent.AutoUpdate)
 	}
+	if old.Docker.Host != next.Docker.Host {
+		// The docker runners and the volume caches dial it once, at start.
+		note("docker.host changed from %q to %q", old.Docker.Host, next.Docker.Host)
+	}
 	if !reflect.DeepEqual(old.Secrets, next.Secrets) {
 		// Named, not diffed: [secrets.commands] values are command lines, and
 		// a command line is where an operator who should not have pasted a

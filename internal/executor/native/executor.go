@@ -86,6 +86,12 @@ type Options struct {
 	// service's environment does not (A60).
 	Env         map[string]string
 	PathPrepend []string
+
+	// DockerHost is config.toml's [docker] host (A111). A step gets it as
+	// DOCKER_HOST, beneath Env and the job's own env, so that the `docker` a
+	// step runs reaches the daemon the agent's docker runners use. Empty
+	// leaves DOCKER_HOST to what the agent inherited.
+	DockerHost string
 }
 
 // Executor runs every step of a run directly on this host. One Executor serves
@@ -281,7 +287,7 @@ func (e *Executor) Prepare(_ context.Context, spec executor.Spec) (executor.Env,
 		summaryFile: filepath.Join(dir, SummaryFileName),
 		tempDir:     filepath.Join(dir, TempDirName),
 		toolCache:   spec.ToolCache,
-		runner:      runnerLayer(e.opts.Env, e.opts.PathPrepend),
+		runner:      runnerLayer(e.opts.Env, e.opts.PathPrepend, e.opts.DockerHost),
 		grace:       e.grace,
 		drain:       e.drain,
 		carried:     map[string]string{},

@@ -9,13 +9,12 @@ import (
 	"slices"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
-
 	"github.com/Abyssinia-Labs/latem/internal/artifact"
 	"github.com/Abyssinia-Labs/latem/internal/broker/local"
 	"github.com/Abyssinia-Labs/latem/internal/broker/remote"
 	"github.com/Abyssinia-Labs/latem/internal/cache"
 	"github.com/Abyssinia-Labs/latem/internal/config"
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/internal/executor"
 	"github.com/Abyssinia-Labs/latem/internal/executor/docker"
 	"github.com/Abyssinia-Labs/latem/internal/executor/native"
@@ -37,9 +36,25 @@ import (
 // and then failed every build would be worse than a runner that says it is not
 // there.
 func DefaultExecutor(r *config.Runner, paths config.Paths) (executor.Executor, error) {
+	return newExecutor(r, paths, "")
+}
+
+// ExecutorsFor is [DefaultExecutor] for a machine whose config.toml names its
+// Docker daemon, `[docker] host` (A111): its docker runners dial it, and its
+// native runners' steps get it as DOCKER_HOST. A change to the host is one the
+// agent restarts for, so reading it once here is reading it for the life of
+// the process.
+func ExecutorsFor(cfg *config.Config) func(*config.Runner, config.Paths) (executor.Executor, error) {
+	host := cfg.Docker.Host
+	return func(r *config.Runner, paths config.Paths) (executor.Executor, error) {
+		return newExecutor(r, paths, host)
+	}
+}
+
+func newExecutor(r *config.Runner, paths config.Paths, dockerHost string) (executor.Executor, error) {
 	switch r.Executor {
 	case config.ExecutorDocker:
-		opts := docker.Options{}
+		opts := docker.Options{Host: dockerHost}
 		if r.Docker != nil {
 			opts.DefaultImage = r.Docker.DefaultImage
 			opts.GPU = r.Docker.GPU
@@ -65,6 +80,7 @@ func DefaultExecutor(r *config.Runner, paths config.Paths) (executor.Executor, e
 			RequireGUISession: hasLabel(r.Labels, "ios"),
 			Env:               r.NativeEnv(),
 			PathPrepend:       r.NativePathPrepend(),
+			DockerHost:        dockerHost,
 		})
 
 	case config.ExecutorTart:
@@ -241,8 +257,7 @@ func (a *Agent) buildDependencies() error {
 		// An unreachable daemon is the docker runner's preflight problem, not
 		// a reason the whole cache subsystem should refuse to start: every
 		// other runner's host-directory caches still work.
-		if cli, cerr := dockerclient.NewClientWithOpts(
-			dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()); cerr == nil {
+		if cli, cerr := dockerhost.NewClient(a.cfg.Docker.Host); cerr == nil {
 			opts.Docker = cache.NewDockerAPI(cli)
 			a.closers = append(a.closers, cli)
 		} else {

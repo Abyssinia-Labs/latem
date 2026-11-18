@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 
+	"github.com/Abyssinia-Labs/latem/internal/dockerhost"
 	"github.com/Abyssinia-Labs/latem/pkg/protocol"
 )
 
@@ -85,11 +86,11 @@ func (c sdkClient) ContainerCreate(
 	return c.Client.ContainerCreate(ctx, config, hostConfig, nil, nil, name)
 }
 
-// newSDKClient builds a client from the ambient DOCKER_* environment, with API
-// version negotiation so one agent binary works against the range of daemons
-// an operator might actually be running.
-func newSDKClient() (APIClient, error) {
-	c, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+// newSDKClient builds a client for host, config.toml's [docker] host, or else
+// for DOCKER_HOST or the system socket (A111), as every other Docker client
+// latem builds does.
+func newSDKClient(host string) (APIClient, error) {
+	c, err := dockerhost.NewClient(host)
 	if err != nil {
 		return nil, wrapErr(protocol.ErrExecutor, err, "docker client")
 	}

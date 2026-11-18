@@ -741,6 +741,37 @@ func TestExec_RunnerEnvAndPath(t *testing.T) {
 	}
 }
 
+// config.toml's [docker] host reaches a step as DOCKER_HOST (A111), over the
+// one the agent inherited: take-one's render job, on a native macOS runner,
+// builds with buildx and must reach the engine the docker runner uses. A
+// runner's own env and the job's both name a DOCKER_HOST of their own over it.
+func TestExec_DockerHostReachesAStepAsDOCKER_HOST(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///var/run/inherited.sock")
+	const colima = "unix:///Users/me/.colima/default/docker.sock"
+	say := executor.Step{Shell: executor.ShellGitHubBash, Run: `echo "$DOCKER_HOST"`}
+
+	env, _ := live(t, executor.Spec{}, Options{DockerHost: colima})
+	if _, out, _ := run(t, env, say); out != colima+"\n" {
+		t.Errorf("[docker] host: %q", out)
+	}
+
+	env, _ = live(t, executor.Spec{}, Options{DockerHost: colima, Env: map[string]string{"DOCKER_HOST": "unix:///runner.sock"}})
+	if _, out, _ := run(t, env, say); out != "unix:///runner.sock\n" {
+		t.Errorf("the runner's own: %q", out)
+	}
+
+	env, _ = live(t, executor.Spec{Env: map[string]string{"DOCKER_HOST": "unix:///job.sock"}}, Options{DockerHost: colima})
+	if _, out, _ := run(t, env, say); out != "unix:///job.sock\n" {
+		t.Errorf("the job's own: %q", out)
+	}
+
+	// None configured: the step inherits the agent's, as before A111.
+	env, _ = live(t, executor.Spec{}, Options{})
+	if _, out, _ := run(t, env, say); out != "unix:///var/run/inherited.sock\n" {
+		t.Errorf("inherited: %q", out)
+	}
+}
+
 // The four GitHub files, through real shells (A42 phase 2, A43). $GITHUB_ENV
 // is $LATEM_ENV under its other name and now speaks the heredoc; $GITHUB_PATH
 // goes in front of the next step's PATH; $GITHUB_OUTPUT comes back on the

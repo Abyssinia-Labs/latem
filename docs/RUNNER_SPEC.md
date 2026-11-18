@@ -475,7 +475,7 @@ WebSocket to the control plane. `Authorization: Bearer <machine-token>`.
 
 ## 8. Configuration
 
-`~/.latem/config.toml`, mode `0600`. Reloaded on `SIGHUP` — `latem service reload` sends it and prints the answer — which applies `[repos.*]` with their refs, vars and environments, `[label_aliases]`, `[actions]` and `log_retention`; changes to `[[runner]]`, `[machine] id`, `[broker.*]`, `[secrets]` and the other `[agent]` keys require a restart, and the agent names each one it read and did not apply (amendment A54).
+`~/.latem/config.toml`, mode `0600`. Reloaded on `SIGHUP` — `latem service reload` sends it and prints the answer — which applies `[repos.*]` with their refs, vars and environments, `[label_aliases]`, `[actions]` and `log_retention`; changes to `[[runner]]`, `[machine] id`, `[broker.*]`, `[secrets]`, `[docker]` and the other `[agent]` keys require a restart, and the agent names each one it read and did not apply (amendment A54).
 
 ```toml
 schema_version = 1
@@ -498,6 +498,14 @@ metrics_addr   = "127.0.0.1:9838"   # loopback only; "" disables (INV-1)
 [broker.local]
 enabled = true
 socket  = "~/.latem/agent.sock"
+
+# The machine's Docker daemon (A111). Every docker runner and the volume
+# caches dial it before DOCKER_HOST and the system socket, and a native step
+# is given it as DOCKER_HOST. Needed where nothing answers at
+# /var/run/docker.sock: Colima, OrbStack, Kiri, Rancher Desktop. `latem setup`
+# writes it when it finds one of their sockets.
+[docker]
+host = "unix:///Users/me/.colima/default/docker.sock"
 
 [broker.remote]
 enabled    = true
@@ -597,6 +605,7 @@ Running two agents on one machine is possible and unsupported-by-default: pass `
 - `token_file` is mode `0600`, and `~/.latem` itself is mode `0700`. A world-readable config directory holding `secrets.env` and a machine token is the whole threat model failing quietly.
 - `metrics_addr`, when non-empty, resolves to a loopback address. A non-loopback value is rejected at load — that is INV-1 enforced in the parser, which is the only place it can be enforced cheaply.
 - `remote_logs` is one of the two declared values; `derived_data` is one of `vm`|`shared`.
+- `[docker] host`, when set, is a Unix socket: `unix:///abs/path`, or a bare absolute path or one under `~/`, stored as `unix://<absolute path>`. A `tcp://` daemon is refused here and reached through `DOCKER_HOST`, with its TLS settings beside it (A111).
 
 ---
 
@@ -965,6 +974,7 @@ Target: Linux x86_64 (desktop) and Linux arm64 (the container role on an Apple s
 - GPU: when `runner.docker.gpu = true`, add `DeviceRequests` for all GPUs (equivalent to `--gpus all`). Preflight must verify NVIDIA Container Toolkit by running `nvidia-smi` in a throwaway container; fail the runner at startup, not mid-build.
 - Android emulator jobs need `--device /dev/kvm`; preflight checks it exists and is readable by the daemon's user (§18.2).
 - Disk floor `min_free_gb` defaults to 40 for a docker runner — enough for a base image, a layer cache, and one build's intermediates.
+- The daemon is the machine's: `[docker] host` in config.toml, else `DOCKER_HOST` in the agent's environment, else the system socket, `/var/run/docker.sock` (**A111**). Every Docker client latem builds — the executor's, the volume caches', doctor's, setup's, capacity's — goes through one helper, `internal/dockerhost`, in that order. `docker context` is read by none of them.
 
 **Step execution.** Each step is one `docker exec` into the run's container. Per §9, that means a **new process every step**: `cd` and `export` do not carry over, the filesystem does. The exec sets `WorkingDir` to `/workspace` and passes the full merged environment explicitly rather than relying on anything the previous exec did. `Step.Run` is passed to the configured shell as a single argument — `["bash", "-c", step.Run]` as an argv slice, never a concatenated string (INV-3). Before the first step, the executor waits until the container takes an exec (**A105**): an engine may return from the start before the container has a shell.
 
@@ -1052,6 +1062,7 @@ Being the default raises the stakes on everything below rather than lowering the
 - Every step runs `bash -lc` as a **new process**, so the login environment (Homebrew paths, rbenv, nvm) is present and, per §9, nothing else carries between steps.
 - **`LANG=en_US.UTF-8` is set in the step's environment** (§9, amendment A33), below the run environment so a job can override it. The hole this leaves is worth stating: `-lc` is a *login* shell, and a profile runs after execve, so an `export LC_ALL=C` in `~/.bash_profile` still wins. `latem doctor` therefore probes the locale by running this same shell the same way rather than by reading the executor's code — the only answer that accounts for the profile is the one the shell gives.
 - **The runner's `[runner.native]` `env` and `path_prepend`** (amendment A60) lie beneath the run environment, with `LANG`: `env` is set unless the job or step sets the name, and `path_prepend` goes in front of the PATH the step inherits from the agent — a job that sets PATH replaces both, and `$GITHUB_PATH` additions go in front of them. They say where a toolchain lives that launchd's PATH does not reach, which on a Mac is every keg-only Homebrew install.
+- **`[docker] host` is set as `DOCKER_HOST`** (amendment A111), beneath the runner's `env` and the job's: a native step that runs `docker` or `docker buildx` reaches the daemon the agent's docker runners use. With no `[docker] host`, the step inherits the agent's own `DOCKER_HOST`, if it has one, as before.
 - Workspace is the run's clone directly; no copy. Because §12 produces a self-contained repository, the workspace looks identical here and inside a container.
 - Disk floor defaults to 60 GB.
 
@@ -1330,8 +1341,9 @@ latem version
 **`latem doctor` is a first-class deliverable, not a nice-to-have.** It is what makes G6 achievable and what turns the failure table in §18.1 into a self-service fix. It must check, and for each failure print the exact command to run:
 
 - git, docker, tart availability and versions
-- Docker daemon reachable; current user in the `docker` group. The daemon is the agent's: `DOCKER_HOST`, or the system socket. One that does not answer names the fix for the engine the `docker` command reaches, as setup's `docker-agent` item does (A106)
-- **`docker` and the agent reach one daemon**, compared by daemon id: the agent uses `DOCKER_HOST` or the system socket and ignores `docker context`, which Docker Desktop moves, so a step's `docker` command can be asking another daemon. A warning, because a job that does not call `docker` is unaffected
+- Docker daemon reachable; current user in the `docker` group. The daemon is the agent's: `[docker] host`, else `DOCKER_HOST`, else the system socket. One that does not answer names the fix setup's `docker-agent` item does: with an engine answering at a socket of its own, `latem setup apply docker-agent`, which writes `[docker] host`; otherwise starting the engine (A106, A111)
+- **`docker` and the agent reach one daemon**, compared by daemon id: the agent ignores `docker context`, which Docker Desktop moves, so a step's `docker` command can be asking another daemon. A warning, because a job that does not call `docker` is unaffected. With `[docker] host` set it passes: a native step is given it as `DOCKER_HOST`, which the command reads before its context (A111)
+- **A `DOCKER_HOST` in the service definition**, which latem never writes and `latem service install` drops, while config.toml has no `[docker] host`: a warning, with `latem setup apply docker-host` as its fix (A111)
 - Docker base image satisfies the §13.1 contract — runs the image once and checks uid 1000 exists, `$HOME` is writable, and `bash`/`git` are present
 - NVIDIA toolkit functional when `gpu = true`; `/dev/kvm` present and readable when an emulator job is configured
 - macOS: LaunchAgent vs LaunchDaemon context, auto-login enabled, **FileVault status** (§23), keychain unlockable, Xcode selected, licence accepted
@@ -5240,3 +5252,54 @@ Homebrew puts it.
 **Not in this amendment.** doctor's `vault.service` still names `latem-vault service install` on a
 machine with no vault command. Moving a machine's vault to `~/.latem-vault`, and dropping the old
 names, are the vault's own tickets.
+
+
+### Amendment from a Mac Studio whose Docker lived in its LaunchAgent
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A111 | §8, §13.1, §13.3, §19, A63, A106 | **config.toml has a table `[docker]` with one key, `host`: the machine's Docker daemon, a Unix socket, stored as `unix://<absolute path>`. Every Docker client latem builds dials it first, then `DOCKER_HOST`, then the system socket, through one helper, `internal/dockerhost`: the docker executor's, the volume caches', doctor's, setup's and capacity's. A native step is given it as `DOCKER_HOST`, beneath the runner's `env` and the job's. The service definition carries nothing about Docker. `latem setup` finds an engine's socket where the agent does not look — the `docker` command's context, then `~/.colima/default/`, `~/.orbstack/run/`, `~/.kiri/run/`, `~/.rd/` and `~/.docker/run/` — and writes it as `[docker] host` with the linux docker runner into a new config.toml; on an existing one, `no-linux-runner` and `docker-agent` are latem's config items that write the same lines. A daemon the agent reaches through a `DOCKER_HOST` in its environment gets a soft item, `docker-host`, that writes it to config.toml, and `latem service install` carries a `DOCKER_HOST` it finds in the installed definition to `[docker] host` before it rewrites the definition without it. doctor's `docker.daemon` names `latem setup apply docker-agent`, and a `DOCKER_HOST` in the definition is `service.docker_host`'s warning** | On 2026-11-18 the Mac Studio was set up to take Linux jobs and Docker builds through Colima, whose socket is `~/.colima/default/docker.sock`. Nothing answered at `/var/run/docker.sock`, and the only way to reach Colima without sudo was `DOCKER_HOST` added by hand to `~/Library/LaunchAgents/com.latem.agent.plist`. take-one's production and staging deploys then ran there and passed. But `latem service install`, which doctor recommended to move that plist from revision 1 to 2, writes the definition whole from `PATH` and `LATEM_CONFIG_DIR`, and would have dropped the line, leaving the linux runner and take-one's `render` deploy job, a native macOS job that builds with buildx, with no Docker. `latem setup` said "start Docker, then add a docker runner to config.toml" and left both lines to a person |
+
+**Why the machine's and not a runner's.** The agent holds one Docker connection for every docker runner's
+containers and volumes, a native runner's steps reach the same engine, and doctor and setup ask one daemon.
+`[runner.docker] host` would be repeated on every docker runner, could disagree between them, and has no
+place on a native runner, whose steps need it most.
+
+**Why a socket only.** A `tcp://` daemon without TLS is root on this machine for anyone who can reach the
+port, and with TLS needs the certificate directory `DOCKER_CERT_PATH` names, which this key does not carry.
+Every engine latem knows listens on a socket. `DOCKER_HOST`, with its TLS settings, still reaches anything
+else.
+
+**What is asked.** As A106, with two changes. The agent's address is `[docker] host`, else the
+`DOCKER_HOST` the installed service definition sets, else this process's, else the system socket: a person's
+shell does not have the agent's environment, and the definition says what the agent was given. And it is
+asked whether or not a docker runner is configured, so that `no-linux-runner` can say whether a runner would
+work. When the agent's daemon does not answer, each engine socket above that exists is pinged, the context's
+first; none needs sudo. Docker Desktop's `com.docker.socket` helper is no longer read: it moves the system
+socket, which a machine with `[docker] host` does not use. doctor asks at the same address: run from a
+shell, its own environment is not the agent's, and on the Mac Studio it said `open -a Docker` while the agent
+reached Colima through its LaunchAgent.
+
+**What `no-linux-runner` writes.** The runner, and `[docker] host` before it when the daemon that answers
+is an engine's own socket, or a `DOCKER_HOST` the service carries: a runner whose daemon only the service
+definition names loses it at the next install. Its concurrency is capacity's recommendation for that daemon
+(A63), or the template's two when no daemon answers there to say how big it is: measured without one, the
+recommendation is the whole Mac's, nine on the Mac Studio, where Colima's VM has 6 CPUs and 12 GB.
+
+**Which fixes are gone.** A106's `sudo ln -sf`, `sudo rm` before `kiri setup --docker-socket`, the engines'
+admin settings and `sudo launchctl disable system/com.docker.socket` all made the system socket point at the
+running engine. Writing that engine's socket as `[docker] host` reaches it without moving anything owned by
+root, and survives a reboot that Docker Desktop's helper would have undone. With no engine answering, the
+item says to start the one the context or the link names, as before.
+
+**The way off a definition edited by hand.** Either `latem setup apply docker-host`, or `latem service
+install`, which writes the line to config.toml, says so, and then writes the new definition. With
+`[docker] host` written the agent no longer reads the definition's `DOCKER_HOST`, so the install that drops it
+changes nothing. An edit that would not load stops the install, since going on would lose the address.
+
+**Reload.** A changed `[docker] host` is one the agent restarts for, and says so (A54): the docker runners and
+the volume caches dial it once, at start.
+
+**Not in this amendment.** Several daemons on one machine, one per docker runner. `latem service install
+--print` prints what it printed before.
+

@@ -71,6 +71,10 @@ func advertItem(it Item, jobs int) protocol.ReadinessItem {
 	case it.ID == ItemDockerAgent:
 		// Its own words name a socket's path, which stays here (A106).
 		out.Have = "nothing answers"
+	case it.ID == ItemDockerHost:
+		out.Have = "DOCKER_HOST in the agent's environment" // and not its path (A111)
+	case it.ID == ItemNoLinuxRunner:
+		out.Have = ""
 	}
 	count := ""
 	if n := len(it.Jobs); n > 0 && n < jobs {

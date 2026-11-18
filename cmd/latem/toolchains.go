@@ -57,9 +57,9 @@ type toolchainDeps struct {
 	stores func(config.Paths) (secretStores, error)
 	// vaultHere reports whether this device holds a vault (A97).
 	vaultHere func() bool
-	// docker asks the daemon the agent's docker runners use (A106). Nil asks
-	// nothing.
-	docker func(ctx context.Context) readiness.Docker
+	// docker asks the daemon the agent's docker runners use, at config.toml's
+	// [docker] host when it is set (A106, A111). Nil asks nothing.
+	docker func(ctx context.Context, configured string) readiness.Docker
 }
 
 func realToolchainDeps() toolchainDeps {

@@ -1014,3 +1014,46 @@ func TestValidate_OneNativeRunnerAMachine(t *testing.T) {
 		t.Errorf("problems = %v, want the second native runner refused", problems)
 	}
 }
+
+// [docker] host is a Unix socket, written back as unix://<absolute path>
+// (A111). A bare path and one under ~/ are read as that socket.
+func TestLoad_DockerHost(t *testing.T) {
+	for raw, want := range map[string]string{
+		"unix:///Users/me/.colima/default/docker.sock": "unix:///Users/me/.colima/default/docker.sock",
+		"/Users/me/.orbstack/run/docker.sock":          "unix:///Users/me/.orbstack/run/docker.sock",
+		"~/.colima/default/docker.sock":                "unix:///home/me/.colima/default/docker.sock",
+		"unix:///var/run/../run/docker.sock":           "unix:///var/run/docker.sock",
+	} {
+		cfg, err := Parse([]byte(minimalValid+"\n[docker]\nhost = \""+raw+"\"\n"), Options{Dir: "/home/me/.latem", Home: "/home/me"})
+		if err != nil {
+			t.Errorf("%s: %v", raw, err)
+			continue
+		}
+		if cfg.Docker.Host != want {
+			t.Errorf("%s: host = %q, want %q", raw, cfg.Docker.Host, want)
+		}
+	}
+	cfg, err := Parse([]byte(minimalValid), Options{Dir: "/home/me/.latem", Home: "/home/me"})
+	if err != nil || cfg.Docker.Host != "" {
+		t.Errorf("absent: %v, %q", err, cfg.Docker.Host)
+	}
+}
+
+func TestLoad_DockerHostRefusals(t *testing.T) {
+	for raw, want := range map[string]string{
+		"tcp://10.0.0.2:2375":   "it must be a Unix socket",
+		"ssh://me@box":          "it must be a Unix socket",
+		"docker.sock":           "must be absolute",
+		"unix://relative.sock":  "must be absolute",
+		"~other/.colima/d.sock": "~user expansion is not supported",
+	} {
+		_, err := Parse([]byte(minimalValid+"\n[docker]\nhost = \""+raw+"\"\n"), Options{Dir: "/home/me/.latem", Home: "/home/me"})
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "docker.host") {
+			t.Errorf("%s: err = %v, want %q", raw, err, want)
+		}
+	}
+	_, err := Parse([]byte(minimalValid+"\n[docker]\nhots = \"unix:///x.sock\"\n"), Options{Dir: "/home/me/.latem", Home: "/home/me"})
+	if err == nil || !strings.Contains(err.Error(), `unknown key "docker.hots"`) {
+		t.Errorf("a misspelt key: %v", err)
+	}
+}

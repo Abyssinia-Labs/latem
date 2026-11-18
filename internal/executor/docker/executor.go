@@ -74,9 +74,13 @@ const (
 // Options configures an [Executor]. The zero value is usable: it builds a
 // client from the environment and uses safe defaults.
 type Options struct {
-	// Client is the daemon connection. Nil means "build one from the
-	// DOCKER_* environment". Tests inject a fake.
+	// Client is the daemon connection. Nil means "build one for Host".
+	// Tests inject a fake.
 	Client APIClient
+
+	// Host is config.toml's [docker] host, which the client dials before
+	// DOCKER_HOST and the system socket (A111). Empty reads those two.
+	Host string
 
 	// DefaultImage is used for a run whose [executor.Spec.Image] is empty.
 	DefaultImage string
@@ -171,7 +175,7 @@ func New(opts Options) (*Executor, error) {
 	api := opts.Client
 	if api == nil {
 		var err error
-		if api, err = newSDKClient(); err != nil {
+		if api, err = newSDKClient(opts.Host); err != nil {
 			return nil, err
 		}
 	}

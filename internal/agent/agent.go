@@ -171,7 +171,7 @@ type Options struct {
 	DrainAfter time.Duration
 
 	// NewExecutor builds the executor behind one runner. Nil uses
-	// [DefaultExecutor]. A test substitutes one that needs no daemon.
+	// [ExecutorsFor] Config. A test substitutes one that needs no daemon.
 	//
 	// An error here is not fatal to the agent: the runner is registered
 	// permanently unavailable with the error as its reason (§20), so a machine
@@ -376,7 +376,7 @@ func New(opts Options) (*Agent, error) {
 		opts.Now = time.Now
 	}
 	if opts.NewExecutor == nil {
-		opts.NewExecutor = DefaultExecutor
+		opts.NewExecutor = ExecutorsFor(opts.Config)
 	}
 
 	grace := opts.ShutdownGrace

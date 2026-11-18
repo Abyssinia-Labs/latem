@@ -62,7 +62,9 @@ type Input struct {
 	// Vault is what this machine has of the vault, which decides what closes
 	// a secret or a variable no store here holds (A97).
 	Vault Vault
-	// Docker is the daemon the agent's docker runners use (A106).
+	// Docker is the daemon the agent's docker runners use (A106), asked
+	// whether or not one is configured, so that a machine with none is told
+	// whether one would work (A111).
 	Docker Docker
 }
 
@@ -318,6 +320,11 @@ const (
 	// ChangeLabelAlias is [label_aliases] Key = Labels (A101). Like the two
 	// [actions] settings, it is a person's to agree to at a terminal (A100).
 	ChangeLabelAlias = "label-alias"
+	// ChangeDockerHost is [docker] host = Value, the daemon's socket (A111).
+	ChangeDockerHost = "docker-host"
+	// ChangeDockerRunner is a docker runner named Value, labelled linux
+	// (A111).
+	ChangeDockerRunner = "docker-runner"
 )
 
 // AliasWarning is said before a [label_aliases] entry is written (A100): it is
@@ -413,8 +420,7 @@ func kindOn(d definition, jobs []Job, in Input) Kind {
 	}
 	if d.name == needs.KindLinux && r == nil {
 		k.Why = "no runner here takes Linux jobs"
-		k.Items = append(k.Items, Item{ID: "no-linux-runner", Title: "a runner labelled linux",
-			Manual: []string{"start Docker, then add a docker runner to config.toml"}})
+		k.Items = append(k.Items, noLinuxRunnerItem(in.Docker, in.Runners))
 	}
 
 	reports := make([]needs.Report, 0, len(jobs))
@@ -1072,6 +1078,15 @@ func proofOf(d definition, tc system.Toolchains, r *Runner, dk Docker) []Probe {
 			{Title: "the SDK's tools run", Argv: []string{sdk + "/platform-tools/adb", "version"}, Env: env},
 		}
 	case needs.KindLinuxDocker:
+		// A native step is given config.toml's [docker] host as DOCKER_HOST,
+		// beneath the runner's env (A111).
+		if dk.FromConfig && env["DOCKER_HOST"] == "" {
+			env = maps.Clone(env)
+			if env == nil {
+				env = map[string]string{}
+			}
+			env["DOCKER_HOST"] = dk.Host
+		}
 		return []Probe{{Title: "Docker answers", Argv: []string{"docker", "info", "--format", "{{.ServerVersion}}"}, Env: env}}
 	case needs.KindLinux:
 		if r != nil && r.Executor == needs.ExecutorDocker {
