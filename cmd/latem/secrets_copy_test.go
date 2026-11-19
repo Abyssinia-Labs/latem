@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,7 +77,7 @@ func TestSecretsCopy_SendsEachValueOnStdin(t *testing.T) {
 		t.Errorf("the value left stdin:\nargv %s\nout %s", argv, out)
 	}
 	want := []string{"ssh", "-i", "/keys/latem", "-o", "IdentitiesOnly=yes", "--", "mini",
-		`PATH="$HOME/.local/bin:$PATH" latem secrets set --repo me/app --env staging -- CLOUDFLARE_API_TOKEN`}
+		`PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$PATH" latem secrets set --repo me/app --env staging -- CLOUDFLARE_API_TOKEN`}
 	if strings.Join(want, "\x00") != strings.Join(first.argv, "\x00") {
 		t.Errorf("argv =\n%q\nwant\n%q", first.argv, want)
 	}
@@ -140,5 +141,21 @@ func TestShellWord(t *testing.T) {
 		if got := shellWord(in); got != want {
 			t.Errorf("shellWord(%q) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+// A Mac's sshd hands a command to a shell whose PATH is /usr/bin:/bin:/usr/sbin:/sbin,
+// so a latem that came from Homebrew was "command not found" on the other
+// machine (found moving a Mac mini's secrets to a Mac Studio, 2026-11-18).
+func TestRemoteSetCommand_FindsLatemWhereInstallersPutIt(t *testing.T) {
+	cmd := remoteSetCommand("", "", "", "X")
+	path, _, ok := strings.Cut(strings.TrimPrefix(cmd, `PATH="`), `"`)
+	if !ok {
+		t.Fatalf("no PATH= prefix: %q", cmd)
+	}
+	dirs := strings.Split(path, ":")
+	want := []string{"$HOME/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "$PATH"}
+	if !slices.Equal(dirs, want) {
+		t.Errorf("PATH = %q, want %q: install.sh's first, then Homebrew's, then the shell's own", dirs, want)
 	}
 }

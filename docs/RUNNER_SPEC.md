@@ -5319,3 +5319,23 @@ the volume caches dial it once, at start.
 **Why maintenance off as well as the lock.** Maintenance a fetch starts is detached and outlives the fetch, and so the lock. Nothing in the agent can hold a lock for it, so it must not run. The cruft repack would also have collected an unreachable commit after two weeks, under F11's thirty days.
 
 **Not in this amendment.** Reads through git's own commands — `rev-parse`, `cat-file`, `ls-tree`, `pack-objects` — take no lock: git looks again for a pack that moved. The lock file is never removed.
+
+### Amendment from moving a Mac mini's secrets to a Mac Studio
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A113 | §15, A73 | **`latem secrets copy` runs `latem secrets set` on the other machine with `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"`: install.sh's directory first, then Homebrew's on Apple silicon, Intel and Linux. And when `security` answers errSecInteractionNotAllowed, as exit 36 or as -25308 on `security -i`'s stderr, the Keychain store and provider say the login keychain is locked, as it is over ssh, and name the way past it: `security unlock-keychain`, and for a write `--store file`** | The Mac mini was retired for a Mac Studio whose latem came from Homebrew. A73's copy found latem only in `~/.local/bin` or on the PATH of a shell sshd starts, which on a Mac is `/usr/bin:/bin:/usr/sbin:/sbin`, so the first name failed with `command not found`. With latem found, `secrets set` wrote to the Keychain by default and failed with `keychain: security exited 36`, which named neither the locked keychain nor `--store file`. Both took a person reading source to get past |
+
+**Why install.sh's directory first.** A machine with both has the one `latem update` keeps current in
+`~/.local/bin`, and a Homebrew latem that `brew upgrade` has not yet reached. The order is the one A73
+already gave `~/.local/bin` over the shell's PATH.
+
+**Why not fall back to secrets.env.** A locked keychain that quietly sent a value to a file would move a
+secret somewhere less protected than the operator asked for, on a machine they cannot see. The error says
+so and names `--store file`, which is the same choice made on purpose.
+
+**Why not the vault.** latem never writes to OpenVault (A86): a value goes in with `latem-vault set`, on a
+machine that may write the collection, and OpenVault syncs it.
+
+**Not in this amendment.** `latem mcp`'s `ssh HOST .local/bin/latem mcp`, which names its path because
+an MCP client runs no shell to set PATH in (A87).

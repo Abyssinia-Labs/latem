@@ -64,8 +64,14 @@ never in a file on the way. The other machine files it under the same
 scope; --repo goes as owner/name, so its key for the repository may differ.
 
 HOST is anything ssh takes, an alias from ~/.ssh/config included. The other
-machine's latem is found on its PATH, or in ~/.local/bin, where install.sh
-puts it. The first name that does not copy stops the rest.`,
+machine's latem is found in ~/.local/bin, where install.sh puts it, in
+Homebrew's bin, or on its PATH. The first
+name that does not copy stops the rest.
+
+On a Mac the other machine keeps a value in its login keychain, which an
+ssh session finds locked unless someone unlocked it there. Unlock it on that
+machine (security unlock-keychain), or pass --store file to keep the values
+in its secrets.env instead.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return usageErrorf("%s needs the NAME of at least one secret", cmd.CommandPath())
@@ -144,8 +150,11 @@ func sshArgv(host, identity, command string) []string {
 }
 
 // remoteSetCommand is the command line `secrets set` runs as on the other
-// machine. ssh hands it to that machine's shell, which is not a login shell
-// and on a Mac has no ~/.local/bin on its PATH.
+// machine. ssh hands it to that machine's shell, which is not a login shell:
+// on a Mac its PATH is /usr/bin:/bin:/usr/sbin:/sbin, with neither
+// ~/.local/bin, where install.sh puts latem, nor Homebrew's bin, where
+// `brew install` does (/opt/homebrew on Apple silicon, /usr/local on Intel,
+// /home/linuxbrew/.linuxbrew on Linux).
 func remoteSetCommand(repo, env, store, name string) string {
 	words := []string{"latem", "secrets", "set"}
 	if repo != "" {
@@ -161,8 +170,13 @@ func remoteSetCommand(repo, env, store, name string) string {
 	for i, w := range words {
 		words[i] = shellWord(w)
 	}
-	return `PATH="$HOME/.local/bin:$PATH" ` + strings.Join(words, " ")
+	return remotePath + " " + strings.Join(words, " ")
 }
+
+// remotePath puts install.sh's directory ahead of Homebrew's, as on a
+// machine where both have a latem the one `latem update` keeps current wins.
+// Homebrew's are the ones secrets.homebrewBins names, Linuxbrew's included (A113).
+const remotePath = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"`
 
 // shellWord quotes w for a POSIX shell when it needs it.
 func shellWord(w string) string {

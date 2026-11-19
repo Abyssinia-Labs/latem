@@ -312,3 +312,34 @@ func TestKeychainStore_NamesAreOnlyLatemsGenericPasswords(t *testing.T) {
 		t.Errorf("names = %v, want %v", names, want)
 	}
 }
+
+// Over ssh a Mac's login keychain is locked unless someone unlocked it there,
+// and security says so as exit 36 or as -25308 on stderr. Either way the
+// operator is told why and given both ways past it (found moving a Mac mini's
+// secrets to a Mac Studio, 2026-11-18, when all it said was "security exited 36").
+func TestKeychainStore_SetNamesALockedKeychain(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stderr string
+		err    error
+	}{
+		{"exit 36", "", exited("security", keychainInteractionNotAllowed)},
+		{"-25308 on stderr", "add-generic-password: returned -25308\n", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &inputRunner{fakeRunner: fakeRunner{fn: func([]string) ([]byte, []byte, error) {
+				return nil, []byte(tc.stderr), tc.err
+			}}}
+			s, _ := NewKeychainStore("", r)
+			err := s.Set(context.Background(), "X", Value("v"))
+			if err == nil {
+				t.Fatal("a locked keychain passed as success")
+			}
+			for _, want := range []string{"locked", "ssh", "security unlock-keychain", "--store file"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error does not say %q: %v", want, err)
+				}
+			}
+		})
+	}
+}
