@@ -13,7 +13,7 @@ import (
 // returns only when the exec fails.
 func execVault(path string, args, environ []string) error {
 	argv := append([]string{filepath.Base(path)}, args...)
-	// #nosec G204 -- path is latem-vault or openvault, found where A104 looks.
+	// #nosec G204 -- path is pinkvault, latem-vault or openvault, found where A104 looks.
 	if err := syscall.Exec(path, argv, environ); err != nil {
 		return fmt.Errorf("could not run %s: %w", path, err)
 	}

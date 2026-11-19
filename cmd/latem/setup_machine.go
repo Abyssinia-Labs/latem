@@ -151,8 +151,8 @@ func (m *machineView) planFor(ctx context.Context, cfg *config.Config) (readines
 // vaultView is what setup knows of the vault here (A97), from what doctor and
 // the inventory already read: whether the service answers, and which of the
 // configured repositories it holds a collection for. A machine with neither
-// the command nor a vault is not asked anything. The command is latem-vault,
-// else openvault, wherever lookPath finds it (A104).
+// the command nor a vault is not asked anything. The command is pinkvault,
+// else latem-vault, else openvault, wherever lookPath finds it (A104, A113).
 func vaultView(ctx context.Context, cfg *config.Config, stores secretStores, deps toolchainDeps) readiness.Vault {
 	v := readiness.Vault{On: cfg.Secrets.Vault}
 	if deps.vaultHere != nil {
@@ -167,8 +167,11 @@ func vaultView(ctx context.Context, cfg *config.Config, stores secretStores, dep
 	v.Installed = v.Command != "" || v.Here
 	if v.On && !v.Installed {
 		// What installs it, which only a vault that is wanted asks (A110).
-		_, err := deps.lookPath("brew")
+		brew, err := deps.lookPath("brew")
 		v.Homebrew = err == nil
+		if v.Homebrew {
+			v.Formula = vaultFormulaFor(brew)
+		}
 	}
 	if stores.openvault == nil || (!v.Installed && !v.On) {
 		return v

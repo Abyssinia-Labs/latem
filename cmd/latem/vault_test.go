@@ -52,15 +52,29 @@ func onlyIn(t *testing.T, dirs ...string) *[]string {
 	return &ran
 }
 
-// A110: `latem vault …` runs latem-vault with the same arguments, flags
-// included, and takes none of them for itself.
-func TestVault_RunsLatemVaultWithEveryArgument(t *testing.T) {
-	dir := fakeVaultDir(t, "latem-vault", "openvault")
-	ran := onlyIn(t, t.TempDir(), dir)
+// A110, A113: `latem vault …` runs pinkvault with the same arguments, flags
+// included, and takes none of them for itself, though the old names are
+// here too and in an earlier directory.
+func TestVault_RunsPinkvaultWithEveryArgument(t *testing.T) {
+	old := fakeVaultDir(t, "latem-vault", "openvault")
+	dir := fakeVaultDir(t, "pinkvault")
+	ran := onlyIn(t, t.TempDir(), old, dir)
 	if _, err := executeCommand(t, "vault", "collections", "--json", "--help"); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{filepath.Join(dir, "latem-vault"), "collections", "--json", "--help"}; !slices.Equal(*ran, want) {
+	if want := []string{filepath.Join(dir, "pinkvault"), "collections", "--json", "--help"}; !slices.Equal(*ran, want) {
+		t.Errorf("ran %q, want %q", *ran, want)
+	}
+}
+
+// A110: a machine whose vault is still latem-vault runs that (A104).
+func TestVault_RunsLatemVaultWhenThatIsTheNewest(t *testing.T) {
+	dir := fakeVaultDir(t, "latem-vault", "openvault")
+	ran := onlyIn(t, dir)
+	if _, err := executeCommand(t, "vault", "list"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{filepath.Join(dir, "latem-vault"), "list"}; !slices.Equal(*ran, want) {
 		t.Errorf("ran %q, want %q", *ran, want)
 	}
 }
@@ -84,10 +98,56 @@ func TestVault_MissingSaysHowToInstallIt(t *testing.T) {
 	if exitCode(err) != ExitFailure || len(*ran) != 0 {
 		t.Fatalf("exit %d (%v), ran %q", exitCode(err), err, *ran)
 	}
-	want := "latem vault is not installed here; install it with " +
+	want := "PinkVault is not installed here; install it with " +
 		"`brew trust --formula abyssinia-labs/tap/latem-vault`, then `brew install abyssinia-labs/tap/latem-vault`."
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// A113: the formula is pinkvault once the Homebrew tap has it, and
+// latem-vault until then, read from the tap's checkout beside brew, whether
+// brew is the repository's own (Apple silicon) or a link to it (Intel macOS,
+// Linux).
+func TestVaultFormula_PinkvaultOnceTheTapHasIt(t *testing.T) {
+	if vaultFormula("") != "abyssinia-labs/tap/latem-vault" {
+		t.Error("with no brew, want latem-vault")
+	}
+	prefix := t.TempDir()
+	repo := filepath.Join(prefix, "Homebrew")
+	brew := filepath.Join(repo, "bin", "brew")
+	if err := os.MkdirAll(filepath.Dir(brew), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(brew, []byte("#!/bin/sh\n"), 0o755); err != nil { // #nosec G306 -- a test's program
+		t.Fatal(err)
+	}
+	link := filepath.Join(prefix, "bin", "brew")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(brew, link); err != nil {
+		t.Fatal(err)
+	}
+	formulas := filepath.Join(repo, "Library", "Taps", "abyssinia-labs", "homebrew-tap", "Formula")
+	if err := os.MkdirAll(formulas, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formulas, "latem-vault.rb"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []string{brew, link} {
+		if got := vaultFormula(b); got != "abyssinia-labs/tap/latem-vault" {
+			t.Errorf("%s, before 0.7.0: %q", b, got)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(formulas, "pinkvault.rb"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []string{brew, link} {
+		if got := vaultFormula(b); got != "abyssinia-labs/tap/pinkvault" {
+			t.Errorf("%s, after 0.7.0: %q", b, got)
+		}
 	}
 }
 

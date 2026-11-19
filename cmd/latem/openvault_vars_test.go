@@ -61,7 +61,7 @@ func TestVarsList_AStoppedOpenVaultIsSaidAndConfigsStillList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vars list: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "latem-vault service") || !strings.Contains(out, "app\t-\tLATEM\tfalse\tconfig.toml") {
+	if !strings.Contains(out, "pinkvault service") || !strings.Contains(out, "app\t-\tLATEM\tfalse\tconfig.toml") {
 		t.Errorf("vars list =\n%s\nwant the stopped service said and config.toml's listed", out)
 	}
 }
@@ -78,7 +78,7 @@ func TestVarsSet_WarnsWhenOpenVaultHoldsTheSameVariable(t *testing.T) {
 		t.Fatalf("vars set: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "the vault holds app/production/REGION") ||
-		!strings.Contains(out, "latem-vault set app/production/REGION --var") {
+		!strings.Contains(out, "pinkvault set app/production/REGION --var") {
 		t.Errorf("vars set =\n%s\nwant a warning naming the vault's entry", out)
 	}
 	out, err = latemIn(t, dir, "", "vars", "set", "--repo", "app", "REGION", "us")
@@ -111,7 +111,7 @@ func TestWorkflowsCheck_AStoppedOpenVaultIsSaidWhereVarsAreRead(t *testing.T) {
 	withOpenVaultStores(t, &fakeOpenVault{err: stoppedOpenVault})
 
 	out, _ := latemIn(t, dir, "", "workflows", "check", repo, "--no-color")
-	for _, want := range []string{"a job here that reads vars fails", "latem-vault service install"} {
+	for _, want := range []string{"a job here that reads vars fails", "pinkvault service install"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}

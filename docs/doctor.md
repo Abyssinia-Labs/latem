@@ -75,8 +75,9 @@ Among the checks worth knowing about:
   `vault.collections.absent`, `openvault.*` until A104. A stopped service fails
   every job that needs a value only it holds, and a passphrase-protected key
   stops it at every reboot, which is said only for a key that has one. The fix
-  it names is `latem-vault service install`, or `openvault service install`
-  where the vault is not renamed yet, which keeps the service running.
+  it names is `pinkvault service install`, or `latem-vault` or `openvault`
+  where the vault is not moved to its final name yet (A113), which keeps the
+  service running.
 - **The locale a step's shell actually resolves to.** The agent sets
   `LANG=en_US.UTF-8`, and a login shell's profile can still overrule it, so
   `doctor` asks the shell rather than trusting the executor. Without it

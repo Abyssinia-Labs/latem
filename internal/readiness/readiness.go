@@ -68,26 +68,27 @@ type Input struct {
 	Docker Docker
 }
 
-// Vault is latem vault, formerly OpenVault, on this machine, as setup found
-// it (A86, A96, A97, A104). Its zero value is a machine without it.
+// Vault is PinkVault, formerly latem vault and OpenVault, on this machine, as
+// setup found it (A86, A96, A97, A104, A113). Its zero value is a machine
+// without it.
 type Vault struct {
 	// Installed: the vault's command is here, or a vault is, or its service
 	// answers.
 	Installed bool `json:"installed"`
-	// Command is the vault's command by name, latem-vault or openvault, as
-	// it was found; "" is latem-vault (A104).
+	// Command is the vault's command by name, pinkvault, latem-vault or
+	// openvault, as it was found; "" is pinkvault (A104, A113).
 	Command string `json:"command,omitempty"`
 	// KeyOpensAlone: this device's key is known to open with nobody there,
 	// in the Secure Enclave or a key file without a passphrase, so a service
 	// started at login can open it (A104).
 	KeyOpensAlone bool `json:"key_opens_alone,omitempty"`
-	// Here: this device holds a vault, which `latem-vault join` makes.
+	// Here: this device holds a vault, which `pinkvault join` makes.
 	Here bool `json:"here"`
 	// On: config.toml says `[secrets] vault = true`.
 	On bool `json:"on"`
 	// Answers: its service answered on its socket.
 	Answers bool `json:"answers"`
-	// Device is this device as `latem-vault scope` names it, when it answered.
+	// Device is this device as `pinkvault scope` names it, when it answered.
 	Device string `json:"device,omitempty"`
 	// Held are the configured repositories this device holds a collection
 	// for, when it answered.
@@ -95,6 +96,10 @@ type Vault struct {
 	// Homebrew: brew is here, to install the vault with when it is wanted
 	// and not installed (A110). Only asked then.
 	Homebrew bool `json:"homebrew,omitempty"`
+	// Formula is the formula that installs it with Homebrew: pinkvault once
+	// Abyssinia Labs' tap here has it, else latem-vault; "" is latem-vault
+	// (A113).
+	Formula string `json:"formula,omitempty"`
 }
 
 // command is the vault's command, by the name it was found by.
@@ -106,20 +111,37 @@ func (v Vault) command() string {
 }
 
 // VaultCommand is the vault's command when none was found.
-const VaultCommand = "latem-vault"
+const VaultCommand = "pinkvault"
 
-// VaultFormula is the vault's Homebrew formula, in Abyssinia Labs' tap
-// (A110).
-const VaultFormula = "abyssinia-labs/tap/latem-vault"
-
-// VaultInstall is what installs the vault with Homebrew, in order: a formula
-// from a tap that is not Homebrew's own is refused until it is trusted.
-func VaultInstall() [][]string {
-	return [][]string{{"brew", "trust", "--formula", VaultFormula}, {"brew", "install", VaultFormula}}
+// formula is the formula that installs the vault here.
+func (v Vault) formula() string {
+	if v.Formula == "" {
+		return LatemVaultFormula
+	}
+	return v.Formula
 }
 
-// VaultInstallLine says how to install the vault, for a person.
-const VaultInstallLine = "`brew trust --formula " + VaultFormula + "`, then `brew install " + VaultFormula + "`"
+// The vault's Homebrew formulas, in Abyssinia Labs' tap (A110, A113).
+// PinkVault 0.7.0 brings the pinkvault formula and keeps latem-vault as its
+// alias for one release, so latem-vault installs the vault both before and
+// after it: latem offers pinkvault where the tap is known to have it, and
+// latem-vault elsewhere.
+const (
+	VaultFormula      = "abyssinia-labs/tap/pinkvault"
+	LatemVaultFormula = "abyssinia-labs/tap/latem-vault"
+)
+
+// VaultInstall is what installs the vault with Homebrew's formula, in order:
+// a formula from a tap that is not Homebrew's own is refused until it is
+// trusted.
+func VaultInstall(formula string) [][]string {
+	return [][]string{{"brew", "trust", "--formula", formula}, {"brew", "install", formula}}
+}
+
+// VaultInstallLine says how to install the vault with formula, for a person.
+func VaultInstallLine(formula string) string {
+	return "`brew trust --formula " + formula + "`, then `brew install " + formula + "`"
+}
 
 // Ready reports a vault this machine could read and does not: here, its
 // service answering, and holding a collection for one of the machine's
@@ -866,14 +888,14 @@ func secretItems(jobs []Job, v Vault) []Item {
 // latem installs it from Abyssinia Labs' tap, trusting the formula first,
 // when Homebrew is here, and says that Homebrew is not when it is not.
 func installItem(v Vault, jobs []string) Item {
-	it := Item{ID: ItemVaultInstall, Title: "latem vault installed", Have: "not installed", Jobs: jobs}
+	it := Item{ID: ItemVaultInstall, Title: "PinkVault installed", Have: "not installed", Jobs: jobs}
 	if v.Homebrew {
-		it.Run = VaultInstall()
+		it.Run = VaultInstall(v.formula())
 		return it
 	}
 	it.Have = "not installed, and Homebrew is not here to install it with"
-	it.Manual = []string{"install Homebrew from https://brew.sh, then " + VaultInstallLine +
-		"; or put latem-vault on PATH from https://github.com/Abyssinia-Labs/latem-vault/releases"}
+	it.Manual = []string{"install Homebrew from https://brew.sh, then " + VaultInstallLine(v.formula()) +
+		"; or put pinkvault on PATH from https://github.com/Abyssinia-Labs/latem-vault/releases"}
 	return it
 }
 
