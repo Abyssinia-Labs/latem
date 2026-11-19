@@ -69,7 +69,7 @@ func (mi *Mirror) Acquire(ctx context.Context, runID, normalizedRef string) (*Wo
 //	                              real upstream rather than a host path that
 //	                              does not exist in the container
 //	config gc.auto 0              a gc inside a run would unpick the hardlinks
-//	                              it was cloned with, turning a 300 KB
+//	config maintenance.auto false it was cloned with, turning a 300 KB
 //	                              workspace into a full copy mid-build
 //
 // Submodules and LFS follow, in that order and only when the checked-out tree
@@ -117,7 +117,7 @@ func (mi *Mirror) Checkout(ctx context.Context, runID, normalizedRef, sha string
 		}
 	}()
 
-	if _, err := m.run(ctx, "", "clone", "--local", "--no-checkout", "--", mi.path, path); err != nil {
+	if err := m.cloneLocal(ctx, mi, path); err != nil {
 		return nil, gitErr(err, "cloning %s into %s", mi.repo.Key, path)
 	}
 	// No options terminator here, deliberately, and this is the one argv in the
@@ -162,6 +162,21 @@ func (mi *Mirror) Checkout(ctx context.Context, runID, normalizedRef, sha string
 	}, nil
 }
 
+// cloneLocal is `git clone --local --no-checkout` out of the mirror, under
+// the mirror's lock held shared (A112): no fetch, LFS fetch or gc can change
+// which files objects/ holds while the clone lists and links them, and other
+// clones go on alongside. Once it returns the clone holds its own links and
+// needs nothing more from the mirror, so the checkout after it runs unlocked.
+func (m *Manager) cloneLocal(ctx context.Context, mi *Mirror, dest string) error {
+	unlock, err := m.lockMirror(ctx, mi.repo.Key, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = m.run(ctx, "", "clone", "--local", "--no-checkout", "--", mi.path, dest)
+	return err
+}
+
 // initSubmodules populates submodules, and only when there are any.
 //
 // The guard is not an optimisation. `git submodule update` on a repo without
@@ -199,12 +214,14 @@ func (m *Manager) fetchLFS(ctx context.Context, mi *Mirror, path string) error {
 		return err
 	}
 
-	// This writes into the mirror, so it takes the per-repo lock that
-	// [Manager.Fetch] uses. The workspace half below does not.
-	lock := m.repoLock(mi.repo.Key)
-	lock.Lock()
+	// This writes into the mirror, so it takes the mirror's lock exclusively,
+	// as [Manager.Fetch] does. The workspace half below does not.
+	unlock, err := m.lockMirror(ctx, mi.repo.Key, true)
+	if err != nil {
+		return err
+	}
 	fetchErr := func() error {
-		defer lock.Unlock()
+		defer unlock()
 		if _, err := m.runRemote(ctx, mi.repo, mi.path, "lfs", "fetch", "--all"); err != nil {
 			return gitErr(err, "fetching LFS objects for %s", mi.repo.Key)
 		}

@@ -191,3 +191,21 @@ func (f *fixture) fetch() *Mirror {
 	}
 	return mirror
 }
+
+// mirrorDirNames lists a mirrors directory without its mirrors' lock files,
+// which stay once made (A112): removing one would race a process opening it.
+func mirrorDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") && strings.HasSuffix(e.Name(), mirrorSuffix+".lock") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	return names
+}

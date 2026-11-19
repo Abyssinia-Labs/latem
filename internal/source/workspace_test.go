@@ -254,6 +254,9 @@ func TestCheckout_DetachesAndRewritesOrigin(t *testing.T) {
 	if got := runGit(t, ws.Path, "config", "--get", "gc.auto"); got != "0" {
 		t.Errorf("workspace gc.auto = %q, want 0 — a gc inside a run unpicks the hardlinks", got)
 	}
+	if got := runGit(t, ws.Path, "config", "--get", "maintenance.auto"); got != "false" {
+		t.Errorf("workspace maintenance.auto = %q, want false — a repack inside a run unpicks the hardlinks", got)
+	}
 }
 
 // TestCheckout_RefusesRunIDsThatEscapeTheWorkDir is amendment A6: a run id is
