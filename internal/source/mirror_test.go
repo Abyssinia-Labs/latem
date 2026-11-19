@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,9 @@ func TestFetch_CreatesABareMirrorWithAutoGCOff(t *testing.T) {
 	}
 	if got := runGit(t, mirror.Path(), "config", "--get", "gc.auto"); got != "0" {
 		t.Fatalf("gc.auto = %q, want 0", got)
+	}
+	if got := runGit(t, mirror.Path(), "config", "--get", "maintenance.auto"); got != "false" {
+		t.Fatalf("maintenance.auto = %q, want false", got)
 	}
 	if got := runGit(t, mirror.Path(), "config", "--get", "remote.origin.mirror"); got != "true" {
 		t.Errorf("remote.origin.mirror = %q, want true", got)
@@ -58,6 +62,38 @@ func TestFetch_RepairsAutoGCOnAMirrorThatPredatesTheRule(t *testing.T) {
 
 	if got := runGit(t, mirror.Path(), "config", "--get", "gc.auto"); got != "0" {
 		t.Errorf("gc.auto = %q after a second fetch, want 0", got)
+	}
+}
+
+// TestFetch_LeavesNoMaintenanceBehind is A112. gc.auto 0 does not reach the
+// automatic maintenance a fetch starts: on git 2.54 its geometric strategy
+// repacks, deleting the packs it combines, in a process that outlives
+// the fetch and so the lock. Here maintenance is configured to run after
+// every write, in the foreground, as a mirror an older agent made would let it
+// — and a fetch still repacks nothing.
+func TestFetch_LeavesNoMaintenanceBehind(t *testing.T) {
+	f := newFixture(t)
+	mirror := f.fetch()
+	gitStatus(t, mirror.Path(), "config", "--unset", "maintenance.auto")
+	for k, v := range map[string]string{
+		"maintenance.strategy":              "geometric",
+		"maintenance.geometric-repack.auto": "-1",
+		"maintenance.autoDetach":            "false",
+		"fetch.unpackLimit":                 "1",
+	} {
+		runGit(t, mirror.Path(), "config", k, v)
+	}
+
+	for i := range 3 {
+		f.up.commit(fmt.Sprintf("more%d.txt", i), "more\n", "another commit")
+		f.fetch()
+	}
+
+	if _, err := os.Stat(filepath.Join(mirror.Path(), "objects", "pack", "multi-pack-index")); err == nil {
+		t.Error("the mirror has a multi-pack-index: a fetch ran a geometric repack in it")
+	}
+	if got := runGit(t, mirror.Path(), "config", "--get", "maintenance.auto"); got != "false" {
+		t.Errorf("maintenance.auto = %q after a fetch, want false", got)
 	}
 }
 
@@ -102,15 +138,7 @@ func TestFetch_NeverLeavesAPartialMirrorAtTheFinalPath(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.mgr.MirrorDir(), "myapp.git")); !os.IsNotExist(err) {
 		t.Errorf("a failed clone left something at the final mirror path (err=%v)", err)
 	}
-	entries, err := os.ReadDir(f.mgr.MirrorDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		names := make([]string, len(entries))
-		for i, e := range entries {
-			names[i] = e.Name()
-		}
+	if names := mirrorDirNames(t, f.mgr.MirrorDir()); len(names) != 0 {
 		t.Errorf("mirror dir holds %v after a failed clone, want nothing", names)
 	}
 }

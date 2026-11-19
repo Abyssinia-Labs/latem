@@ -865,15 +865,17 @@ A local clone is self-contained, costs almost nothing, and gives all three execu
 # once per repo
 git clone --mirror -- "$URL" "$MIRRORS/$KEY.git"
 git -C "$MIRRORS/$KEY.git" config gc.auto 0
+git -C "$MIRRORS/$KEY.git" config maintenance.auto false   # A112
 
 # per run
-git -C "$MIRRORS/$KEY.git" fetch --prune --tags -- origin
+git -C "$MIRRORS/$KEY.git" fetch --prune --tags --no-auto-maintenance -- origin
 SHA=$(git -C "$MIRRORS/$KEY.git" rev-parse --verify --end-of-options "${NORMALIZED_REF}^{commit}")
 
 git clone --local --no-checkout -- "$MIRRORS/$KEY.git" "$WORK/$RUN_ID"
 git -C "$WORK/$RUN_ID" checkout --detach --end-of-options "$SHA"
 git -C "$WORK/$RUN_ID" remote set-url origin -- "$URL"
 git -C "$WORK/$RUN_ID" config gc.auto 0
+git -C "$WORK/$RUN_ID" config maintenance.auto false
 ```
 
 Note the two `--end-of-options` (amendment A7). Draft 02 wrote `--` on both of those lines and neither command would have run: to `checkout` and `rev-parse`, `--` announces a pathspec. `clone` and `remote set-url` genuinely do take paths and URLs, so they keep `--`.
@@ -897,7 +899,7 @@ Three requirements make the hardlinking safe and keep it fast:
 - **`gc.auto 0` on the mirror is not optional.** A force-push followed by `fetch --prune` can make the previously-fetched tip unreachable, and git's automatic gc is free to collect it — mid-run, 40 minutes into a build, on a repo the run already resolved. Disable automatic gc and run `git gc --prune=30.days.ago` from the daily ticker (§14.4) only when no run holds that mirror.
 - Submodules: `git submodule update --init --recursive --depth 1` inside the workspace, only when `.gitmodules` exists.
 - LFS: `git lfs fetch --all` in the mirror, `git lfs checkout` in the workspace, only when `.gitattributes` mentions LFS.
-- A per-repo mutex serialises fetches into one mirror; concurrent `fetch` into a bare repo is not reliably safe. Clones out of the mirror are reads and need no lock, so parallel runs on the same repo do not queue behind each other.
+- A per-repo mutex serialises fetches into one mirror; concurrent `fetch` into a bare repo is not reliably safe. Clones out of the mirror take its lock shared, and fetches and gc take it exclusive, so parallel runs on the same repo do not queue behind each other and none clones a pack a repack is deleting (amendment A112).
 - Credentials are the machine's own — SSH agent or a credential helper. The agent never stores or forwards git credentials, and receives two kinds, both held in memory only: a workflow run's job token (A52), which a checkout step makes the workspace's credential for that job, from a file outside the workspace (A53); and a read-only fetch token that comes with a plan or a job (A72), which the agent's own fetches into the mirror authenticate with, through one git process's environment.
 - The agent exports `LATEM_SHA`, `LATEM_REF` (normalized), `LATEM_REPO`, `LATEM_RUN_ID`, `LATEM_JOB`, and `LATEM_BUILD_NUMBER` (§22's run counter, amendment A36) into the run environment regardless, so a job that wants the commit does not have to shell out to git at all.
 - Startup reconciliation deletes `work/<run-id>` for any run id not in a non-terminal state. With clones there is no worktree administrative state in the mirror, so there is nothing to prune and nothing to leak — one of the smaller reasons this model is easier to make crash-safe.
@@ -5303,6 +5305,20 @@ the volume caches dial it once, at start.
 **Not in this amendment.** Several daemons on one machine, one per docker runner. `latem service install
 --print` prints what it printed before.
 
+
+### Amendment from a checkout that read a pack a repack had deleted
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A112 | §12, §14.4, F11, A76 | **Each mirror has a lock beside it, `mirrors/.<repo-key>.git.lock`, a flock(2): exclusive for anything that writes into the mirror — the agent's fetch, a fetch of one commit, `git lfs fetch`, `latem try`'s added commit, a changes run's base — and for the mirror gc of §14.4, from the agent or from `latem cache prune`; shared for `git clone --local` out of it, the fresh workspace's and the warm one's. The agent also keeps the per-repo mutex, now a read/write one, taken before the file. A clone holds the lock for the clone alone; the checkout after it reads the workspace's own links. gc that cannot have the lock skips that mirror, as it skips a busy one. Mirrors and workspaces get `maintenance.auto false` beside `gc.auto 0`, and the agent's fetches pass `--no-auto-maintenance`. A wait for the lock that the run's context ends is `E_SOURCE`, retryable as before** | On 2026-11-18 take-one's Checks and Deploy Staging put about ten jobs on the Mac Studio within three seconds. The `convex` job fetched, resolved `a5b9cf4`, cloned, and its `git checkout --detach` said `fatal: unable to read tree (2378a24…)`, E_SOURCE, while the `extension` job's fetch was running. Afterwards the tree was in the mirror and `git fsck` was clean. §12 said a clone is a read and needs no lock. It is not a read as git's commands read: `clone --local` lists `objects/` once and hard-links what it listed, so a pack or loose object removed between the two is missing from the workspace. Something did remove them. On the Mac Studio's git, 2.54, the automatic maintenance `git fetch` starts runs the geometric strategy, which `gc.auto 0` does not reach: `git repack -d --geometric=2 --write-midx`, and a cruft repack expiring unreachable objects after two weeks, detached, after the fetch returns. The mirror had a `multi-pack-index` written at 18:21, which only such a repack writes. The same gap was open to the gc `latem cache prune` runs from a shell, a process whose `MirrorBusy` is always false, and to the agent's own gc between `MirrorBusy` answering and the gc starting |
+
+**Why a file and not only the mutex.** §12's mutex was sufficient for fetches because one agent owns a config directory. The writers that delete files are not all the agent: `latem cache prune` is a second process, and `latem try` (A76) writes objects from one. flock is held by an open file description, so it also orders the agent's own goroutines, and a crash drops it.
+
+**Why shared for clones.** §12's property stands: runs of one repository clone in parallel. A clone waits for a write and a write waits for clones; a writer waiting is not passed by later clones, since the agent's mutex prefers writers.
+
+**Why maintenance off as well as the lock.** Maintenance a fetch starts is detached and outlives the fetch, and so the lock. Nothing in the agent can hold a lock for it, so it must not run. The cruft repack would also have collected an unreachable commit after two weeks, under F11's thirty days.
+
+**Not in this amendment.** Reads through git's own commands — `rev-parse`, `cat-file`, `ls-tree`, `pack-objects` — take no lock: git looks again for a pack that moved. The lock file is never removed.
 
 ### Amendment from moving a Mac mini's secrets to a Mac Studio
 

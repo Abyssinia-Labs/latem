@@ -120,7 +120,7 @@ func TestCreateMirror_LosingTheRenameKeepsTheWinner(t *testing.T) {
 	if got := runGit(t, mirror.Path(), "rev-parse", "refs/heads/main"); got != head {
 		t.Errorf("the mirror changed under the loser: %s, was %s", got, head)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(f.root, "mirrors")); len(entries) != 1 {
-		t.Errorf("the loser left its staging directory behind: %v", entries)
+	if names := mirrorDirNames(t, filepath.Join(f.root, "mirrors")); len(names) != 1 {
+		t.Errorf("the loser left its staging directory behind: %v", names)
 	}
 }
