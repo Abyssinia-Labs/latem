@@ -358,7 +358,7 @@ func TestOpenVault_AServiceThatIsNotRunningIsABackendFailureNotAMiss(t *testing.
 			if errors.Is(err, ErrNotFound) {
 				t.Error("a stopped service read as a miss: a workflow job would get an empty secret")
 			}
-			if !strings.Contains(err.Error(), "latem-vault service") {
+			if !strings.Contains(err.Error(), "pinkvault service") {
 				t.Errorf("err = %q, want the command that starts it", err)
 			}
 			if strings.Contains(err.Error(), socket) {
@@ -700,7 +700,7 @@ func TestOpenVault_AFileThatCannotBeReadIsAFailure(t *testing.T) {
 		},
 		"larger than a run reads": {
 			files: []ovFileListed{{name: "production/upload.jks", size: openVaultMaxFile + 1}},
-			says:  "latem-vault run",
+			says:  "pinkvault run",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

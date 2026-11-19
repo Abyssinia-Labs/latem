@@ -1120,7 +1120,7 @@ Two runs writing one `~/.gradle` or `~/.cargo` corrupt each other, and the resul
 Resolution chain, first hit wins. Only names declared in the job's `secrets:` block are looked up.
 
 1. `LATEM_SECRET_<NAME>` in the agent's own environment
-2. The vault (latem vault, formerly OpenVault), with `[secrets] vault = true`, or `openvault = true` as before A104 — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86); a name that is no secret or variable there may be a file, which a step reads as the path of a private copy (A88)
+2. The vault (PinkVault, formerly latem vault and OpenVault; A113), with `[secrets] vault = true`, or `openvault = true` as before A104 — a workflow job's secret of repo `R` in environment `E` as entry `E/NAME`, then `NAME`, of collection `R`, from the service's local socket (A86); a name that is no secret or variable there may be a file, which a step reads as the path of a private copy (A88)
 3. `~/.latem/secrets.env` — `KEY=value`, mode `0600` enforced, agent refuses to start otherwise
 4. macOS Keychain — `security find-generic-password -s latem -a <NAME> -g`
 5. `pass` / `gopass`, if configured
@@ -1328,7 +1328,7 @@ latem repo add <owner/name> | list | remove <key>   Edit [repos.*] and reload (A
 latem secrets set | list | rm [--repo R] [--env E] NAME   Values from stdin or a hidden prompt (A54)
 latem secrets copy --to HOST [-i KEY] [--repo R] [--env E] NAME...   To another machine's `secrets set`, on ssh's stdin (A73)
 latem vars set | list | rm --repo R [--env E] NAME [VALUE]   Edit [repos.*.vars] and reload (A54); list shows OpenVault's too, and which answers (A96)
-latem vault <args>...               The vault's own command, latem-vault, run with these arguments; says how to install it when it is missing (A110)
+latem vault <args>...               The vault's own command, pinkvault (else latem-vault, else openvault), run with these arguments; says how to install it when it is missing (A110, A113)
 latem workflows check [path] [--repo R] [--offline] [--json] [-v] [--fix]   Plan and compile a checkout's workflows, or with --repo and no path a repository's, read without a checkout, and say what each job needs (A54, A57, A59); --fix writes a label alias only on a person's yes at a terminal (A100)
 latem store check [path | --repo R] [--env E] [--app D] [--bundle-id B] [--package P] [--track T] [--platform ios|android] [--offline] [--json]   Whether a preview would reach testers from this machine, and the fix for what would stop it; read-only (A65)
 latem doctor [--secrets] [--fix]     Preflight, diagnose, name the fix
@@ -5319,3 +5319,34 @@ the volume caches dial it once, at start.
 **Why maintenance off as well as the lock.** Maintenance a fetch starts is detached and outlives the fetch, and so the lock. Nothing in the agent can hold a lock for it, so it must not run. The cruft repack would also have collected an unreachable commit after two weeks, under F11's thirty days.
 
 **Not in this amendment.** Reads through git's own commands — `rev-parse`, `cat-file`, `ls-tree`, `pack-objects` — take no lock: git looks again for a pack that moved. The lock file is never removed.
+
+
+### Amendment from the vault's final name
+
+| # | Section | Change | Why |
+|---|---|---|---|
+| A113 | §15, §19, A104, A110 | **The vault is PinkVault, and latem reads it under any of its three names, the newest first. Its directory is `$PINKVAULT_HOME`, else `~/.pinkvault` when it exists, else A104's: `$LATEM_VAULT_HOME`, else `~/.latem-vault` when it exists, else `$OPENVAULT_HOME`, else `~/.openvault`. Its command is `pinkvault`, else `latem-vault`, else `openvault`, each looked for where A104 looks. `latem vault …` runs the command found so. A command a person is told to type is the one found, and `pinkvault` when none is. The `vault-install` item installs from `abyssinia-labs/tap/pinkvault` when Abyssinia Labs' tap is checked out beside the `brew` found and has that formula, and from `abyssinia-labs/tap/latem-vault` otherwise; `latem vault` with no vault names the same formula. The store id `vault`, `[secrets] vault = true` and the `vault-*` item ids do not change** | On 2026-11-18 Michael chose PinkVault as the vault's final name (plan "rename latem vault to PinkVault", P1–P8): binary `pinkvault`, short name `pink`, home `~/.pinkvault`, variable `PINKVAULT_HOME`. PinkVault 0.7.0 moves a machine's vault to `~/.pinkvault` on its first run, and latem reads the vault's socket, so latem has to know the new home before any machine's vault moves there. The ids stay: they are generic, and renaming them again would cost every machine a migration for no gain |
+
+**Which name wins.** As in A104, one step further. A variable is taken as set. A newer default
+directory is taken only once it exists, because until a machine's vault is moved it does not. A
+`pinkvault` anywhere on the list is preferred to an older name in an earlier directory: a machine
+that has both is part-way through the move, and the new one is the one that stays. The short name
+`pink` is a link to `pinkvault` and is not looked for.
+
+**Which formula.** The `pinkvault` formula comes with PinkVault 0.7.0, and the tap keeps
+`latem-vault` as its alias for one release, so `latem-vault` installs the vault before 0.7.0 and
+after it. latem reads the tap's checkout, `<brew's repository>/Library/Taps/abyssinia-labs/homebrew-tap`,
+for `Formula/pinkvault.rb` or `pinkvault.rb`, following `brew`'s link to the repository where the
+prefix's `bin/brew` is one. It runs nothing: it neither taps nor updates. A machine that has not
+tapped since 0.7.0 installs from `latem-vault`, which is the alias then.
+
+**The key file.** Its header stays `openvault v1 keys\0`, a frozen label that the rename does not
+touch, and `latem-vault v1 keys\0` is still read.
+
+**What it costs.** Two more `stat` calls when the vault's directory is found, one more name looked
+for in each directory, and two `stat` calls for the formula, made only when `vault-install` is
+offered or `latem vault` finds no vault.
+
+**Not in this amendment.** Dropping `latem-vault` and `openvault`, their variables and homes, and
+the `latem-vault` formula: LAT-34, one release after PinkVault 0.7.0. doctor's `vault.service` on a
+machine with no vault command, as A110 left it, now names `pinkvault service install`.

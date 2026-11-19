@@ -27,7 +27,7 @@ in its log. For anything that may not, use ` + "`latem secrets`" + `.
 
 With [secrets] vault = true, the vault comes first (A96): a variable
 entry of collection <key>, <env>/NAME for an environment and NAME for the
-repository, each before config.toml's in its scope. ` + "`latem-vault set`" + `
+repository, each before config.toml's in its scope. ` + "`pinkvault set`" + `
 <key>/<env>/NAME --var writes one there, and list shows which answers.
 
 set and rm edit config.toml as text, keeping the rest of it as it was, then

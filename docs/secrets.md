@@ -50,7 +50,7 @@ wins:
 | | Source | Set by |
 |---|---|---|
 | 1 | Environment | `LATEM_SECRET_<NAME>` in the agent's environment — the override, useful for `LATEM_SECRET_X=… latem run` to answer "is it the secret or is it the build?" |
-| 2 | the vault | `latem-vault set <repo>/<env>/<NAME>`, on any machine that may write the collection; read only with `[secrets] vault = true`; see [From the vault](#from-the-vault) |
+| 2 | the vault | `pinkvault set <repo>/<env>/<NAME>`, on any machine that may write the collection; read only with `[secrets] vault = true`; see [From the vault](#from-the-vault) |
 | 3 | File | `latem secrets set --store file`, or a `NAME=value` line in `~/.latem/secrets.env`, mode `0600` |
 | 4 | Keychain | `latem secrets set` on a Mac |
 | 5 | Command | a `[secrets.commands]` entry in `config.toml` that prints the value |
@@ -110,8 +110,8 @@ plane, and nothing on the machine can check it.
 
 ## From the vault
 
-latem vault, which was [OpenVault](https://github.com/Abyssinia-Labs/openvault)
-until it was renamed, keeps one encrypted copy of the values and syncs it
+PinkVault, which was [OpenVault](https://github.com/Abyssinia-Labs/openvault)
+and then latem vault, keeps one encrypted copy of the values and syncs it
 between your machines, so a value is set once rather than on each machine
 that builds the repository. A machine reads it when its `config.toml` says
 so (A86):
@@ -125,22 +125,27 @@ Install it from Abyssinia Labs' tap. Homebrew refuses a formula from a tap
 that is not its own until you trust it:
 
 ```console
-$ brew trust --formula abyssinia-labs/tap/latem-vault
-$ brew install abyssinia-labs/tap/latem-vault
+$ brew trust --formula abyssinia-labs/tap/pinkvault
+$ brew install abyssinia-labs/tap/pinkvault
 ```
 
+The `pinkvault` formula arrives with PinkVault 0.7.0. Until then, install
+`abyssinia-labs/tap/latem-vault`, which stays as its alias for one release.
 `latem setup` offers to run both on a machine that reads the vault and has no
-vault command, as the item `vault-install`. `latem vault …` runs the vault's
-command with the same arguments: `latem vault collections` is
-`latem-vault collections` (A110).
+vault command, as the item `vault-install`, with whichever of the two formulas
+the tap here has. `latem vault …` runs the vault's command with the same
+arguments: `latem vault collections` is `pinkvault collections`, or
+`pink collections` for short (A110, A113).
 
-**Either name works** (A104). `openvault = true`, the key before the rename,
-still turns it on. latem finds the vault's directory as `$LATEM_VAULT_HOME`,
-then `~/.latem-vault` once it exists, then `$OPENVAULT_HOME`, then
-`~/.openvault`, and its command as `latem-vault`, then `openvault`, each on
-`PATH`, in `~/.cargo/bin` (or `$CARGO_HOME/bin`), and in Homebrew's `bin`.
-What latem tells you to type names the command it found; the examples here
-use `latem-vault`, which is `openvault` on a vault not renamed yet.
+**Every name it has had works** (A104, A113). `openvault = true`, the key
+before the first rename, still turns it on. latem finds the vault's directory
+as `$PINKVAULT_HOME`, then `~/.pinkvault` once it exists, then
+`$LATEM_VAULT_HOME`, then `~/.latem-vault` once it exists, then
+`$OPENVAULT_HOME`, then `~/.openvault`. It finds its command as `pinkvault`,
+then `latem-vault`, then `openvault`, each on `PATH`, in `~/.cargo/bin` (or
+`$CARGO_HOME/bin`), and in Homebrew's `bin`. What latem tells you to type
+names the command it found; the examples here use `pinkvault`, which is
+`latem-vault` or `openvault` on a vault not moved yet.
 
 Each repository is a collection named exactly as its `[repos.<key>]` key,
 hyphens included, and an entry is named by environment:
@@ -152,9 +157,9 @@ hyphens included, and an entry is named by environment:
 | `NAME`, machine-wide | nothing: a machine-wide name is in no collection, and comes from the stores below |
 
 ```console
-$ latem-vault collections create latem-cloud                      # once, on an admin device
-$ latem-vault set latem-cloud/production/CONVEX_DEPLOY_KEY --secret < key.txt
-$ latem-vault scope <device> latem-cloud read                     # each machine that builds it
+$ pinkvault collections create latem-cloud                      # once, on an admin device
+$ pinkvault set latem-cloud/production/CONVEX_DEPLOY_KEY --secret < key.txt
+$ pinkvault scope <device> latem-cloud read                     # each machine that builds it
 ```
 
 The vault comes straight after the environment, before secrets.env and the
@@ -169,11 +174,11 @@ environment. latem never runs the vault's command to read a value, as it
 which can stop to ask for a passphrase. **If the service is not running, a
 job that needs a value from it fails with `E_SECRET_BACKEND` and can be
 retried**, as for a locked Keychain. It does not read as unset: a deploy
-should not run without its token. `latem-vault service install` (OpenVault 0.2.2
-and later) has the system start the service at login, and again if it stops. It
+should not run without its token. `pinkvault service install` (OpenVault 0.2.2
+and later, under any of its names) has the system start the service at login, and again if it stops. It
 needs a key that opens with nobody there, as a key in the Secure Enclave
 does: on a machine whose key file has a passphrase, remove it with
-`latem-vault keys passphrase --remove`, or start `latem-vault service` by hand
+`pinkvault keys passphrase --remove`, or start `pinkvault service` by hand
 after each reboot. latem says so only for a key that has one, or whose key
 file it could not read. A job that reads only machine-wide names never asks
 the vault.
@@ -187,10 +192,10 @@ that no store here holds, it names the step that closes the gap. With a vault
 on this device that holds one of the machine's repositories and a config that
 does not read it yet, that step is turning it on, which `latem setup apply
 vault-on` writes (`openvault-on` until A104, which `setup apply` still takes
-for one release). Otherwise it is the service (`latem-vault service
-install`), joining the vault (`latem-vault join`, then `latem-vault approve`
-elsewhere), the collection (`latem-vault scope <this device> R read` on an admin
-device), or the name itself (`latem-vault set R/E/NAME --secret`). Without
+for one release). Otherwise it is the service (`pinkvault service
+install`), joining the vault (`pinkvault join`, then `pinkvault approve`
+elsewhere), the collection (`pinkvault scope <this device> R read` on an admin
+device), or the name itself (`pinkvault set R/E/NAME --secret`). Without
 the vault, it is still `latem secrets set`. [Commands](commands.md#latem-setup-apply-closing-what-is-in-the-way-from-a-shell)
 has the table.
 
@@ -216,9 +221,9 @@ collection. Nothing needs taking out of `config.toml` first: the vault's
 value is read before it, and `config.toml`'s only where the vault holds none.
 
 ```console
-$ printf %s true | latem-vault set tsedal/LATEM --var        # the repository's own
-$ printf %s https://staging.example.com | latem-vault set tsedal/staging/BASE_URL --var
-$ latem-vault import-env --collection tsedal --env staging --var BASE_URL --var REGION staging.env
+$ printf %s true | pinkvault set tsedal/LATEM --var        # the repository's own
+$ printf %s https://staging.example.com | pinkvault set tsedal/staging/BASE_URL --var
+$ pinkvault import-env --collection tsedal --env staging --var BASE_URL --var REGION staging.env
 $ latem vars list --repo tsedal
 REPO    ENVIRONMENT  NAME      VALUE                        SOURCE
 tsedal  -            LATEM     true                         vault, config.toml (vault answers)
@@ -254,7 +259,7 @@ there is.
 A vault file (OpenVault 0.4 and later), such as a keystore, a `.p8` or a
 service account's JSON, reaches a step as the path of a private copy in the
 job's temporary directory, never as its bytes (A88). A workflow reads it by
-the name `latem-vault run` gives it: the last part of its name, upper-cased,
+the name `pinkvault run` gives it: the last part of its name, upper-cased,
 with everything but A–Z and 0–9 turned into `_`.
 
 | A job of repo `R` reads | It is |
@@ -263,7 +268,7 @@ with everything but A–Z and 0–9 turned into `_`.
 | `secrets.GOOGLE_SERVICES_JSON` | a file `google-services.json` at the top of collection `R` |
 
 ```console
-$ latem-vault import upload.jks --collection app --into production
+$ pinkvault import upload.jks --collection app --into production
 ```
 
 ```yaml
@@ -279,4 +284,4 @@ and goes with the job. A secret or variable of the same name comes first. Only
 a native runner gets files: a docker job that reads one fails with
 `E_MISSING_SECRET`, because a docker job's temporary files can be read by
 every user in its container. A file larger than 16 MiB is refused; read those
-with `latem-vault run`.
+with `pinkvault run`.

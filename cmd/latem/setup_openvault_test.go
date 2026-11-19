@@ -220,7 +220,8 @@ func TestSetupOpenVault_ApplyTakesTheOldIDAndRunsTheInstallItself(t *testing.T) 
 	}
 }
 
-// A104: latem-vault is the command a machine that has both is told to type.
+// A104, A113: the newest name a machine has is the command it is told to
+// type: latem-vault over openvault, and pinkvault over both.
 func TestSetupOpenVault_TheNewCommandBeforeTheOld(t *testing.T) {
 	ov := &fakeOpenVault{device: "Mini", names: map[string][]string{"app": {}}}
 	dir, rec := vaultMachine(t, ov)
@@ -230,6 +231,12 @@ func TestSetupOpenVault_TheNewCommandBeforeTheOld(t *testing.T) {
 	s := itemIn(t, kindIn(t, setupPlanIn(t, dir), "macos"), "secrets-app")
 	if got := strings.Join(s.Yours[0], " "); got != "latem-vault set app/staging/TOKEN --secret" {
 		t.Errorf("fix = %q, want latem-vault's", got)
+	}
+
+	delete(rec.machine.notInstalled, "pinkvault")
+	s = itemIn(t, kindIn(t, setupPlanIn(t, dir), "macos"), "secrets-app")
+	if got := strings.Join(s.Yours[0], " "); got != "pinkvault set app/staging/TOKEN --secret" {
+		t.Errorf("fix = %q, want pinkvault's", got)
 	}
 }
 
@@ -251,8 +258,8 @@ func TestSetupOpenVault_AVaultWantedAndNotInstalledIsInstalledFromTheTap(t *test
 	dir, rec := setupMachine(t, fstest.MapFS{".github/workflows/deploy.yml": {Data: []byte(deployRepo)}})
 	noAgentRunning(t)
 	writeConfig(t, dir, readConfigFile(t, dir)+"\n[secrets]\nvault = true\n")
-	trust := "brew trust --formula " + readiness.VaultFormula
-	install := "brew install " + readiness.VaultFormula
+	trust := "brew trust --formula " + readiness.LatemVaultFormula
+	install := "brew install " + readiness.LatemVaultFormula
 	rec.machine.gives[trust] = [2]string{"trusted", "/"}
 	rec.machine.gives[install] = [2]string{"latem-vault", "/opt/homebrew/bin"}
 	rec.machine.then = map[string]func(){install: func() { delete(rec.machine.notInstalled, "latem-vault") }}

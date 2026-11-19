@@ -42,7 +42,67 @@ func TestVaultHome_TheNewNameFirstThenTheOld(t *testing.T) {
 		}
 	}
 	if _, err := VaultHome([]string{"PATH=/bin"}); err == nil {
-		t.Error("no HOME and neither variable should be an error, not a vault in the working directory")
+		t.Error("no HOME and no variable should be an error, not a vault in the working directory")
+	}
+}
+
+// A113 (LAT-35): PinkVault's directory and variable come before both older
+// names', so a machine reads the vault before, during and after its move to
+// ~/.pinkvault.
+func TestVaultHome_PinkVaultBeforeBothOlderNames(t *testing.T) {
+	both := t.TempDir()
+	for _, d := range []string{".latem-vault", ".openvault"} {
+		if err := os.Mkdir(filepath.Join(both, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	moved := t.TempDir()
+	for _, d := range []string{".pinkvault", ".latem-vault", ".openvault"} {
+		if err := os.Mkdir(filepath.Join(moved, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pinkHome := filepath.Join(t.TempDir(), "pink")
+	all := []string{"OPENVAULT_HOME=/srv/ov", "LATEM_VAULT_HOME=/srv/lv"}
+	for _, tc := range []struct {
+		name    string
+		environ []string
+		want    string
+	}{
+		{"not moved yet", []string{"HOME=" + both}, filepath.Join(both, ".latem-vault")},
+		{"moved", []string{"HOME=" + moved}, filepath.Join(moved, ".pinkvault")},
+		{"moved, over both older variables", append([]string{"HOME=" + moved}, all...), filepath.Join(moved, ".pinkvault")},
+		{"not moved, the latem-vault variable", append([]string{"HOME=" + both}, all...), "/srv/lv"},
+		{"the PinkVault variable over all", append([]string{"HOME=" + moved, "PINKVAULT_HOME=" + pinkHome}, all...), pinkHome},
+		{"the PinkVault variable alone", []string{"PINKVAULT_HOME=" + pinkHome}, pinkHome},
+		{"an empty PinkVault variable is not set", []string{"HOME=" + both, "PINKVAULT_HOME="}, filepath.Join(both, ".latem-vault")},
+	} {
+		got, err := VaultHome(tc.environ)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: VaultHome = %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+// A113 (LAT-35): a vault in a test PINKVAULT_HOME is the one latem reads: it
+// is here, and its socket is the one the provider dials.
+func TestVaultHome_AVaultInATestPinkvaultHomeIsRead(t *testing.T) {
+	home, pinkHome := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, ".latem-vault"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pinkHome, "vault.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	environ := []string{"HOME=" + home, "PINKVAULT_HOME=" + pinkHome}
+	if !OpenVaultHere(environ) {
+		t.Error("the vault in PINKVAULT_HOME is not here")
+	}
+	if socket, err := OpenVaultSocket(environ); err != nil || socket != filepath.Join(pinkHome, OpenVaultSocketName) {
+		t.Errorf("socket = %q, %v", socket, err)
+	}
+	if OpenVaultHere([]string{"HOME=" + home}) {
+		t.Error("an empty ~/.latem-vault is a vault")
 	}
 }
 
@@ -107,16 +167,31 @@ func TestFindVaultCommand_TheNewNameAnywhereThenTheOld(t *testing.T) {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, VaultCommand), nil, 0o644); err != nil { // #nosec G306 -- not executable, on purpose
+	if err := os.WriteFile(filepath.Join(path, LatemVaultCommand), nil, 0o644); err != nil { // #nosec G306 -- not executable, on purpose
 		t.Fatal(err)
 	}
 	if name, _, _ := FindVaultCommand(dirs); name != OldVaultCommand {
 		t.Errorf("found %q: a latem-vault that is not executable is not a command", name)
 	}
 
-	renamed := executable(t, brew, VaultCommand)
-	if name, p, ok := FindVaultCommand(dirs); !ok || name != VaultCommand || p != renamed {
+	renamed := executable(t, brew, LatemVaultCommand)
+	if name, p, ok := FindVaultCommand(dirs); !ok || name != LatemVaultCommand || p != renamed {
 		t.Errorf("FindVaultCommand = %q, %q, %v; want latem-vault, though openvault is in an earlier directory", name, p, ok)
+	}
+
+	// A113: pinkvault before both, in the last directory looked in.
+	pink := executable(t, brew+"-last", VaultCommand)
+	dirs = append(dirs, filepath.Dir(pink))
+	if name, p, ok := FindVaultCommand(dirs); !ok || name != VaultCommand || p != pink {
+		t.Errorf("FindVaultCommand = %q, %q, %v; want pinkvault, though both older names are in earlier directories", name, p, ok)
+	}
+	for _, n := range []string{"pinkvault", "latem-vault", "openvault"} {
+		if !IsVaultCommand(n) {
+			t.Errorf("%s is not the vault's command", n)
+		}
+	}
+	if IsVaultCommand("pink") || IsVaultCommand("lv") {
+		t.Error("a short name is not looked for")
 	}
 }
 
@@ -159,11 +234,12 @@ func TestVaultKeyPassphrase_ReadsTheKeyFilesKind(t *testing.T) {
 }
 
 // A104: what an error tells a person to type names the command this machine
-// has, and is latem-vault when that is not known.
+// has, and is pinkvault when that is not known (A113).
 func TestOpenVaultError_NamesTheCommandFound(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), OpenVaultSocketName)
 	for _, tc := range []struct{ command, want string }{
-		{"", "`latem-vault service install`"},
+		{"", "`pinkvault service install`"},
+		{LatemVaultCommand, "`latem-vault service install`"},
 		{OldVaultCommand, "`openvault service install`"},
 	} {
 		p := NewOpenVaultProvider(socket, 0).WithCommand(tc.command)

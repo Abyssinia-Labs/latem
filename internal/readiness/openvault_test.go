@@ -196,11 +196,12 @@ func TestAdvert_VariablesAreNamed(t *testing.T) {
 	t.Fatalf("no variables item in %+v", r.Kinds)
 }
 
-// A104: the items name the vault's command as it was found here, and
-// latem-vault when it was not.
+// A104, A113: the items name the vault's command as it was found here, and
+// pinkvault when it was not.
 func TestVaultItems_NameTheCommandFound(t *testing.T) {
 	for _, tc := range []struct{ command, want string }{
-		{"", "latem-vault join"},
+		{"", "pinkvault join"},
+		{"pinkvault", "pinkvault join"},
 		{"latem-vault", "latem-vault join"},
 		{"openvault", "openvault join"},
 	} {
@@ -250,20 +251,30 @@ func TestCurrentID_TheVaultsOldIDs(t *testing.T) {
 }
 
 // A110: a vault the machine reads and has no command for is installed from
-// the tap, trusting the formula first, before this device can join it.
+// the tap, trusting the formula first, before this device can join it. A113:
+// the formula is pinkvault once the tap here has it, and latem-vault, which
+// installs PinkVault before 0.7.0 and as its alias after, until then.
 func TestVaultItems_WantedAndNotInstalledIsInstalledFromTheTap(t *testing.T) {
-	k := vaultPlan(t, Vault{On: true, Homebrew: true}, deployJob())
-	if got, want := ids(k), []string{"vault-install", "vault-join"}; !slices.Equal(got, want) {
-		t.Fatalf("items %v, want %v", got, want)
-	}
-	it := item(t, k, "vault-install")
-	want := [][]string{{"brew", "trust", "--formula", "abyssinia-labs/tap/latem-vault"},
-		{"brew", "install", "abyssinia-labs/tap/latem-vault"}}
-	if !slices.EqualFunc(it.Run, want, slices.Equal) || person(it) || it.Soft {
-		t.Errorf("install item = %+v", it)
-	}
-	if k.State != Missing {
-		t.Errorf("state %s, want missing", k.State)
+	for _, tc := range []struct{ formula, want string }{
+		{"", "abyssinia-labs/tap/latem-vault"},
+		{LatemVaultFormula, "abyssinia-labs/tap/latem-vault"},
+		{VaultFormula, "abyssinia-labs/tap/pinkvault"},
+	} {
+		k := vaultPlan(t, Vault{On: true, Homebrew: true, Formula: tc.formula}, deployJob())
+		if got, want := ids(k), []string{"vault-install", "vault-join"}; !slices.Equal(got, want) {
+			t.Fatalf("items %v, want %v", got, want)
+		}
+		it := item(t, k, "vault-install")
+		want := [][]string{{"brew", "trust", "--formula", tc.want}, {"brew", "install", tc.want}}
+		if !slices.EqualFunc(it.Run, want, slices.Equal) || person(it) || it.Soft {
+			t.Errorf("formula %q: install item = %+v", tc.formula, it)
+		}
+		if it.Title != "PinkVault installed" {
+			t.Errorf("title %q", it.Title)
+		}
+		if k.State != Missing {
+			t.Errorf("state %s, want missing", k.State)
+		}
 	}
 }
 

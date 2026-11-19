@@ -20,7 +20,7 @@ type fakeOpenVault struct {
 	// device is this device as the vault names it.
 	device string
 	err    error
-	// command is the vault's command as found; "" is latem-vault.
+	// command is the vault's command as found; "" is pinkvault.
 	command string
 	// passphrase and keyKnown are what the key file says (A104): the zero
 	// value is a key file that could not be read.
@@ -119,7 +119,7 @@ func TestDoctorOpenVault_AStoppedServiceFailsWithTheCommandThatStartsIt(t *testi
 	if c == nil || c.Level != levelFail {
 		t.Fatalf("checks = %+v, want vault.service failing", got)
 	}
-	if !slices.Contains(c.Fix, "latem-vault service install") {
+	if !slices.Contains(c.Fix, "pinkvault service install") {
 		t.Errorf("fix = %q, want the command that starts it", c.Fix)
 	}
 	if !strings.Contains(strings.Join(c.Notes, "\n"), "service.sock") {
@@ -146,7 +146,7 @@ func TestDoctorOpenVault_NamesEachRepositoryThisMachineHasNoCollectionFor(t *tes
 	if !strings.Contains(c.Detail, "no collection app, wake") {
 		t.Errorf("detail = %q, want app and wake named", c.Detail)
 	}
-	if len(c.Fix) == 0 || !strings.Contains(c.Fix[0], "latem-vault scope") {
+	if len(c.Fix) == 0 || !strings.Contains(c.Fix[0], "pinkvault scope") {
 		t.Errorf("fix = %q", c.Fix)
 	}
 }
@@ -190,7 +190,7 @@ func TestSecretsList_AStoppedOpenVaultIsSaidAndTheOtherStoresStillList(t *testin
 	if err != nil {
 		t.Fatalf("secrets list: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "latem-vault service") || !strings.Contains(out, "*\tTOKEN\tkeychain") {
+	if !strings.Contains(out, "pinkvault service") || !strings.Contains(out, "*\tTOKEN\tkeychain") {
 		t.Errorf("secrets list =\n%s\nwant the stopped service said and the Keychain's names listed", out)
 	}
 }
