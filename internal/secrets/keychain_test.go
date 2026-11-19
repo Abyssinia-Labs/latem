@@ -44,6 +44,7 @@ func TestKeychainProvider_Outcomes(t *testing.T) {
 		// A Mac whose keychain will not unlock must say so at admission, not
 		// quietly resolve the secret from somewhere the operator did not mean.
 		{"keychain is locked", exited("security", 51), false},
+		{"keychain is locked over ssh", exited("security", keychainInteractionNotAllowed), false},
 		{"security hung on a prompt", timedOut("security"), false},
 	}
 
@@ -193,5 +194,21 @@ func TestNewKeychainProvider_DefaultsToTheRealRunner(t *testing.T) {
 	}
 	if p.service != KeychainService {
 		t.Errorf("service = %q, want %q", p.service, KeychainService)
+	}
+}
+
+func TestKeychainProvider_NamesALockedKeychain(t *testing.T) {
+	p, err := NewKeychainProvider("", failing(exited("security", keychainInteractionNotAllowed)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Resolve(t.Context(), "A")
+	if err == nil {
+		t.Fatal("a locked keychain was reported as success")
+	}
+	for _, want := range []string{"locked", "ssh", "security unlock-keychain", "A"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not say %q: %v", want, err)
+		}
 	}
 }

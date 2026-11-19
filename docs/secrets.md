@@ -41,6 +41,11 @@ $ latem secrets copy --to mini --repo tsedal --env staging CLOUDFLARE_API_TOKEN 
 
 It reads each value from secrets.env or the Keychain here, under exactly that
 scope, and runs `latem secrets set` on the other machine with the same scope.
+That machine's latem is found in `~/.local/bin`, in Homebrew's bin, or on its
+PATH (A113). On a Mac it keeps the value in the login keychain, which an ssh
+session finds locked unless someone unlocked it there: unlock it on that
+machine with `security unlock-keychain`, or pass `--store file` to keep the
+values in its secrets.env.
 A value with a control character in it — the escape an arrow key types at a
 prompt that does not echo — is refused by `set`, and so by `copy`.
 

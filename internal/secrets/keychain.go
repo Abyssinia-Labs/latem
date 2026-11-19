@@ -20,6 +20,13 @@ const KeychainService = "latem"
 // problem the chain must not paper over by falling through.
 const keychainNotFound = 44
 
+// keychainInteractionNotAllowed is what `security` exits with for
+// errSecInteractionNotAllowed (-25308, whose low byte is 36): the keychain is
+// locked and nothing may ask to unlock it. That is an ssh session's keychain
+// on a Mac nobody unlocked there, and the bare "security exited 36" says
+// none of it.
+const keychainInteractionNotAllowed = 36
+
 // servicePattern bounds the configured service name. It becomes an argv
 // element, so the leading character class matters more than the rest: a
 // service name starting with `-` would be read by `security` as a flag.
@@ -92,6 +99,10 @@ func (p *KeychainProvider) Resolve(ctx context.Context, name string) (Value, err
 		}
 		if exitCodeOf(err) == keychainNotFound {
 			return nil, fmt.Errorf("keychain: no item for %s: %w: %w", name, ErrNotFound, err)
+		}
+		if exitCodeOf(err) == keychainInteractionNotAllowed {
+			return nil, fmt.Errorf("keychain: %s and could not read %s; unlock it (security unlock-keychain) "+
+				"and try again: %w", keychainLockedHere, name, err)
 		}
 		return nil, fmt.Errorf("keychain: %w", err)
 	}

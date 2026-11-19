@@ -293,8 +293,11 @@ func (s *KeychainStore) Set(ctx context.Context, name string, value Value) error
 	if msg := strings.TrimSpace(string(stderr)); msg != "" {
 		// Whatever security says, it says without the value: a run of hex
 		// in its complaint can only be the value echoed back (INV-4).
-		return fmt.Errorf("keychain: security did not add the item: %s",
-			hexRun.ReplaceAllString(firstLine(msg), "<value elided>"))
+		said := hexRun.ReplaceAllString(firstLine(msg), "<value elided>")
+		if strings.Contains(msg, "-25308") {
+			return fmt.Errorf("keychain: %s; %s. security said: %s", keychainLockedHere, keychainLockedFix, said)
+		}
+		return fmt.Errorf("keychain: security did not add the item: %s", said)
 	}
 	return nil
 }
@@ -378,8 +381,19 @@ func keychainWriteError(err error) error {
 		return fmt.Errorf("keychain: security did not answer — a locked keychain asks to be unlocked "+
 			"in a dialog on this Mac's screen; unlock it (security unlock-keychain) and try again: %w", err)
 	}
+	if exitCodeOf(err) == keychainInteractionNotAllowed {
+		return fmt.Errorf("keychain: %s; %s: %w", keychainLockedHere, keychainLockedFix, err)
+	}
 	return fmt.Errorf("keychain: %w", err)
 }
+
+// keychainLockedHere is what security's errSecInteractionNotAllowed means.
+const keychainLockedHere = "the login keychain is locked, as it is in an ssh session on a Mac where nobody " +
+	"unlocked it"
+
+// keychainLockedFix is the way past it when writing.
+const keychainLockedFix = "unlock it (security unlock-keychain) and try again, or keep this value in " +
+	"secrets.env with --store file"
 
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
