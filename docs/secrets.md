@@ -245,6 +245,10 @@ can be retried**, as for a secret. It never runs with the variable empty, or
 with `config.toml`'s older copy. A plan that reads one is refused the same
 way.
 
+A vault moved while the agent runs, as PinkVault 0.7.0 moves `~/.latem-vault`
+to `~/.pinkvault`, needs no restart: when the socket the agent found at start
+is gone, it looks for the vault again and asks the new one (A114).
+
 The heartbeat tells the control plane a digest of each of a repository's own
 variables, so that a job goes only to machines that would answer it alike
 (A68). The agent reads them from the vault once a minute rather than on every

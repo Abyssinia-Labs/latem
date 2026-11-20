@@ -263,7 +263,7 @@ func New(opts Options) (*Chain, error) {
 		if !ok {
 			command = VaultCommand
 		}
-		providers = append(providers, NewOpenVaultProvider(socket, opts.Timeout).WithCommand(command))
+		providers = append(providers, NewOpenVaultProvider(socket, opts.Timeout).WithCommand(command).WithEnviron(environ))
 	}
 
 	if opts.FilePath != "" {
