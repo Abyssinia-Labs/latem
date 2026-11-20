@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -119,8 +120,15 @@ func OpenVaultSocket(environ []string) (string, error) {
 // through would give a workflow job an empty secret, which reads as unset,
 // and a deploy that runs without its token.
 type OpenVaultProvider struct {
-	socket  string
 	timeout time.Duration
+	// environ, when set ([OpenVaultProvider.WithEnviron]), is where the
+	// socket and the command are found again when the socket is gone.
+	environ []string
+
+	// mu guards socket and command, which change when the vault has moved
+	// since they were found (A114).
+	mu     sync.RWMutex
+	socket string
 	// command is the vault's command by name, for what an error tells a
 	// person to type; "" is [VaultCommand].
 	command string
@@ -143,22 +151,71 @@ func NewOpenVaultProvider(socket string, timeout time.Duration) *OpenVaultProvid
 // WithCommand names the vault's command in what this provider's errors say
 // to type: the one this machine has, [VaultCommandHere]. It returns p.
 func (p *OpenVaultProvider) WithCommand(name string) *OpenVaultProvider {
+	p.mu.Lock()
 	p.command = name
+	p.mu.Unlock()
+	return p
+}
+
+// WithEnviron lets p find the vault again from environ, which is
+// os.Environ's form, when its socket is gone (A114). A long-running process,
+// the agent above all, finds the socket once when it starts; a vault that
+// moves later (PinkVault 0.7.0 moves ~/.latem-vault to ~/.pinkvault on its
+// first run) would otherwise read as a service that is not running until the
+// process is restarted. It returns p.
+func (p *OpenVaultProvider) WithEnviron(environ []string) *OpenVaultProvider {
+	p.environ = slices.Clone(environ)
 	return p
 }
 
 // Command is the vault's command by name, as this provider's errors give it.
 func (p *OpenVaultProvider) Command() string {
-	if p.command == "" {
+	_, command := p.where()
+	if command == "" {
 		return VaultCommand
 	}
-	return p.command
+	return command
+}
+
+// where is the socket and the command name, as they stand.
+func (p *OpenVaultProvider) where() (socket, command string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.socket, p.command
+}
+
+// refind looks for the vault again from p's environ after socket, the one
+// last asked, was not there. It reports whether the vault is now somewhere
+// else with a socket in it, and moves p there. It stats a few paths, and runs
+// only when a request finds no socket, so a vault in place costs nothing.
+func (p *OpenVaultProvider) refind(socket string) bool {
+	if p.environ == nil {
+		return false
+	}
+	found, err := OpenVaultSocket(p.environ)
+	if err != nil || found == socket {
+		return false
+	}
+	if _, err := os.Stat(found); err != nil {
+		return false
+	}
+	command, _, ok := FindVaultCommand(VaultSearchDirs(p.environ))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.socket == socket {
+		p.socket = found
+		if ok {
+			p.command = command
+		}
+	}
+	return true
 }
 
 // KeyPassphrase reports whether this device's vault key opens with a
 // passphrase, from the key file beside the socket ([VaultKeyPassphrase]).
 func (p *OpenVaultProvider) KeyPassphrase() (passphrase, known bool) {
-	return VaultKeyPassphrase(filepath.Dir(p.socket))
+	socket, _ := p.where()
+	return VaultKeyPassphrase(filepath.Dir(socket))
 }
 
 // VaultStore is the vault's name as a store, in a run's provenance and in
@@ -169,7 +226,10 @@ const VaultStore = "vault"
 func (p *OpenVaultProvider) Name() string { return VaultStore }
 
 // Socket is the socket this provider reads, for diagnostics.
-func (p *OpenVaultProvider) Socket() string { return p.socket }
+func (p *OpenVaultProvider) Socket() string {
+	socket, _ := p.where()
+	return socket
+}
 
 // Resolve is the machine-wide name, which OpenVault does not hold. It asks the
 // service nothing, so a job that reads only machine-wide names never waits
@@ -629,22 +689,31 @@ func OpenVaultEntry(scope []string, name string) (collection, entry string, err 
 // is the caller's to zero.
 func (p *OpenVaultProvider) request(ctx context.Context, typ byte, fields ...[]byte) (byte, []byte, error) {
 	op := ovOpName(typ)
-	if err := checkOpenVaultSocket(p.socket); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil, &OpenVaultError{Command: p.command, Op: op, NotRunning: true, Socket: p.socket, Err: err}
+	socket, command := p.where()
+	if err := checkOpenVaultSocket(socket); err != nil {
+		// A vault moved since its socket was found leaves no socket at the
+		// old path: look again once, and ask the new one (A114).
+		if !errors.Is(err, fs.ErrNotExist) || !p.refind(socket) {
+			if errors.Is(err, fs.ErrNotExist) {
+				return 0, nil, &OpenVaultError{Command: command, Op: op, NotRunning: true, Socket: socket, Err: err}
+			}
+			return 0, nil, &OpenVaultError{Command: command, Op: op, Socket: socket, Err: err}
 		}
-		return 0, nil, &OpenVaultError{Command: p.command, Op: op, Socket: p.socket, Err: err}
+		socket, command = p.where()
+		if err := checkOpenVaultSocket(socket); err != nil {
+			return 0, nil, &OpenVaultError{Command: command, Op: op, NotRunning: errors.Is(err, fs.ErrNotExist), Socket: socket, Err: err}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", p.socket)
+	conn, err := d.DialContext(ctx, "unix", socket)
 	if err != nil {
 		// A socket with no service behind it is what a crashed service
 		// leaves; the next one to start replaces it.
 		notRunning := errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, fs.ErrNotExist)
-		return 0, nil, &OpenVaultError{Command: p.command, Op: op, NotRunning: notRunning, Socket: p.socket, Err: err}
+		return 0, nil, &OpenVaultError{Command: command, Op: op, NotRunning: notRunning, Socket: socket, Err: err}
 	}
 	defer func() { _ = conn.Close() }()
 	if deadline, ok := ctx.Deadline(); ok {
@@ -690,11 +759,13 @@ func (p *OpenVaultProvider) ioError(ctx context.Context, op string, err error) e
 		// machine it fires before the context's own timer says so.
 		err = context.DeadlineExceeded
 	}
-	return &OpenVaultError{Command: p.command, Op: op, Socket: p.socket, Err: err}
+	socket, command := p.where()
+	return &OpenVaultError{Command: command, Op: op, Socket: socket, Err: err}
 }
 
 func (p *OpenVaultProvider) protocolError(op, what string) error {
-	return &OpenVaultError{Command: p.command, Op: op, Socket: p.socket, Err: fmt.Errorf("the service answered with %s", what)}
+	socket, command := p.where()
+	return &OpenVaultError{Command: command, Op: op, Socket: socket, Err: fmt.Errorf("the service answered with %s", what)}
 }
 
 // serviceError is the service's error response. Its message is kept out of
@@ -706,7 +777,8 @@ func (p *OpenVaultProvider) serviceError(op string, body []byte) error {
 	if r.err != nil {
 		msg = ""
 	}
-	return &OpenVaultError{Command: p.command, Op: op, Refused: true, Code: code, Socket: p.socket, Message: msg}
+	socket, command := p.where()
+	return &OpenVaultError{Command: command, Op: op, Refused: true, Code: code, Socket: socket, Message: msg}
 }
 
 func ovOpName(typ byte) string {

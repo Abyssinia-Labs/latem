@@ -296,7 +296,7 @@ func (a *Agent) buildOrchestrator() error {
 			if err != nil {
 				return wrapStartup("vault", err)
 			}
-			a.vault = secrets.NewOpenVaultProvider(socket, 0).WithCommand(secrets.VaultCommandHere())
+			a.vault = secrets.NewOpenVaultProvider(socket, 0).WithCommand(secrets.VaultCommandHere()).WithEnviron(os.Environ())
 		}
 		a.loadVarDigests()
 	}
